@@ -180,14 +180,32 @@ class SmokeProbeTests(Fixture):
                     "finish": {"summary": "wrong contents"}}):
             with self.assertRaisesRegex(Denied, "did not return the requested evidence"):
                 smoke.live(self.config, role_name="consult")
+        from mizu.smoke_retention import Metadata, read_pair
+        pairs = list((self.config.data / "validation/pairs").iterdir())
+        self.assertEqual(len(pairs), 1)
+        manifest = read_pair(Metadata(self.config.data), pairs[0].name)
+        self.assertEqual(manifest["status"], "fail")
+        self.assertIsNotNone(manifest["project"])
+        self.assertEqual(list((self.config.data / "validation/smoke-runs").iterdir()), [])
+        self.assertEqual(list((self.config.data / "projects").iterdir()), [self.project.root])
 
     def test_new_bundle_preserves_result_and_provider_has_no_retention_lock(self):
         from pathlib import Path
         from mizu.smoke_refs import shared_lock
         from mizu.smoke_retention import Metadata, read_pair
+        seen = {}
         def fake_run(engine, project, role_name):
-            # This would be Busy if paid execution held the global lock.
-            with shared_lock(engine.config.data):
+            scratch = project.root.parent.parent
+            smoke_id = project.name.removeprefix("smoke-")
+            self.assertRegex(scratch.name, "^" + smoke_id + r"-[a-z0-9_]+$")
+            self.assertEqual(scratch.parent, self.config.data / "validation/smoke-runs")
+            self.assertEqual(engine.config.data, self.config.data)
+            self.assertEqual(project.config.data, self.config.data)
+            self.assertEqual(project.root, scratch / "projects" / ("smoke-" + smoke_id))
+            self.assertEqual(list((self.config.data / "projects").iterdir()), [self.project.root])
+            seen["identity"] = {"device": project.root.stat().st_dev, "inode": project.root.stat().st_ino}
+            # The production retention lock does not span execution.
+            with shared_lock(self.config.data):
                 pass
             return {"finish": {"summary": (project.workspace / "probe.txt").read_text()}}
         with unittest.mock.patch.object(Engine, "run", fake_run), \
@@ -197,9 +215,94 @@ class SmokeProbeTests(Fixture):
         pair = Path(result["pair"])
         self.assertEqual(pair, self.config.data / "validation/pairs" / result["smoke_id"])
         self.assertEqual(set(p.name for p in pair.iterdir()), {"manifest.json", "report.json", "project"})
-        self.assertEqual(read_pair(Metadata(self.config.data), result["smoke_id"])["status"], "pass")
+        manifest = read_pair(Metadata(self.config.data), result["smoke_id"])
+        self.assertEqual(manifest["status"], "pass")
+        self.assertEqual(manifest["project"], seen["identity"])
+        from mizu.fs import canonical
+        self.assertEqual((pair / "report.json").read_bytes(), canonical(result))
+        self.assertEqual(list((self.config.data / "validation/smoke-runs").iterdir()), [])
         self.assertTrue(result["result"]["finish"]["summary"])
         self.assertEqual(Path(result["evidence"]), pair / "project")
+
+    def test_publication_failure_rolls_back_and_cleans_isolated_root(self):
+        import os
+        from pathlib import Path
+        from mizu import smoke_retention
+        rename = os.rename
+        moved = []
+        def fail_pair(source, destination):
+            destination = Path(destination)
+            if destination.parent == self.config.data / "validation/pairs":
+                self.assertTrue((Path(source) / "project").is_dir())
+                raise OSError("synthetic pair publication failure")
+            if destination.name == "project":
+                moved.append(Path(source))
+            return rename(source, destination)
+        def fake_run(engine, project, role_name):
+            return {"finish": {"summary": (project.workspace / "probe.txt").read_text()}}
+        with unittest.mock.patch.object(Engine, "run", fake_run), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False), \
+                unittest.mock.patch.object(smoke_retention.os, "rename", side_effect=fail_pair):
+            with self.assertRaisesRegex(OSError, "synthetic pair publication failure"):
+                smoke.live(self.config, role_name="consult")
+        self.assertEqual(len(moved), 1)
+        for directory in ("smoke-runs", "staging", "pairs"):
+            self.assertEqual(list((self.config.data / "validation" / directory).iterdir()), [])
+        self.assertEqual(list((self.config.data / "projects").iterdir()), [self.project.root])
+
+    def test_scratch_ancestors_refuse_links_before_creating_children(self):
+        target = self.config.data / "alias-target"
+        target.mkdir()
+        validation = self.config.data / "validation"
+        for path in (validation, validation / "smoke-runs"):
+            with self.subTest(path=path):
+                try:
+                    path.symlink_to(target, target_is_directory=True)
+                except OSError:
+                    self.skipTest("directory symlinks unavailable")
+                try:
+                    with unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False), \
+                            unittest.mock.patch.object(Engine, "run") as run:
+                        with self.assertRaises(Denied):
+                            smoke.live(self.config, role_name="consult")
+                        run.assert_not_called()
+                    self.assertEqual(list(target.iterdir()), [])
+                finally:
+                    path.unlink()
+                if path == validation:
+                    validation.mkdir()
+
+    def test_cleanup_leaves_replaced_scratch_identity_untouched(self):
+        seen = {}
+        def replace_scratch(config, name, *args, _smoke_root, **kwargs):
+            scratch = _smoke_root.parent.parent
+            original = scratch.with_name(scratch.name + "-original")
+            scratch.rename(original)
+            scratch.mkdir()
+            marker = scratch / "replacement.txt"
+            marker.write_text("not owned by this probe")
+            seen.update(scratch=scratch, original=original, marker=marker)
+            raise Denied("synthetic scratch replacement")
+        with unittest.mock.patch("mizu.smoke.initialize", side_effect=replace_scratch), \
+                unittest.mock.patch("mizu.smoke._platform.is_root", return_value=False):
+            with self.assertRaisesRegex(Denied, "synthetic scratch replacement"):
+                smoke.live(self.config, role_name="consult")
+        self.assertEqual(seen["marker"].read_text(), "not owned by this probe")
+        self.assertTrue(seen["original"].is_dir())
+
+    def test_internal_root_override_refuses_managed_and_unbound_roots(self):
+        from mizu.project import Project, initialize
+        key = "a" * 32
+        name = "smoke-" + key
+        for root in (self.config.data / "projects" / name,
+                     self.config.data / "validation/smoke-runs" / ("b" * 32) / "projects" / name):
+            with self.subTest(root=root):
+                with self.assertRaises(Denied):
+                    initialize(self.config, name, self.project.workspace,
+                               self.project.root / "PROJECT.md", ["consult"], [], _smoke_root=root)
+                with self.assertRaises(Denied):
+                    Project(self.config, name, _smoke_root=root)
+                self.assertFalse(root.exists())
 
     def test_initialization_failure_publishes_complete_report_without_project(self):
         from mizu.smoke_retention import Metadata, read_pair
@@ -212,6 +315,7 @@ class SmokeProbeTests(Fixture):
         manifest = read_pair(Metadata(self.config.data), pairs[0].name)
         self.assertEqual(manifest["status"], "fail")
         self.assertIsNone(manifest["project"])
+        self.assertEqual(list((self.config.data / "validation/smoke-runs").iterdir()), [])
 
 
 if __name__ == "__main__":

@@ -118,9 +118,13 @@ def idle_with_open_work(snapshot: dict) -> dict:
 
 
 class Project:
-    def __init__(self, config: Config, name: str, *, read_only: bool = False):
+    def __init__(self, config: Config, name: str, *, read_only: bool = False,
+                 _smoke_root: Path | None = None):
         self.config, self.name = config, identifier(name)
-        self.root = config.data / "projects" / name
+        self.root = _project_root(config, name, _smoke_root)
+        if _smoke_root is not None:
+            _directory_identity(self.root.parent)
+            _directory_identity(self.root)
         self.workspace = self.root / "workspace"
         try:
             if read_only:
@@ -673,12 +677,23 @@ def _discard_project_stage(stage: Path, identities: dict[Path, tuple[int, int]],
     shutil.rmtree(stage, ignore_errors=ignore_errors)
 
 
-def _project_parents(config: Config) -> tuple[Path, Path, dict[Path, tuple[int, int]]]:
+def _project_root(config: Config, name: str, smoke_root: Path | None) -> Path:
+    if smoke_root is None:
+        return config.data / "projects" / name
+    if name != smoke_root.name:
+        raise Denied("Smoke project name must match its isolated root")
+    from .smoke_retention import scratch_root
+    scratch_root(config.data, name.removeprefix("smoke-"), smoke_root)
+    return smoke_root
+
+
+def _project_parents(config: Config, smoke_root: Path | None = None) -> tuple[Path, Path, dict[Path, tuple[int, int]]]:
     """Prepare and bind isolated staging and active publication directories."""
-    parent = config.data / "projects"
-    staging = config.data / "staging" / "projects"
+    data = smoke_root.parent.parent if smoke_root is not None else config.data
+    parent = data / "projects"
+    staging = data / "staging" / "projects"
     identities = {}
-    for path in (config.data, parent, staging.parent, staging):
+    for path in (data, parent, staging.parent, staging):
         try:
             mkdir(path)
         except OSError as exc:
@@ -691,8 +706,15 @@ def _project_parents(config: Config) -> tuple[Path, Path, dict[Path, tuple[int, 
 
 
 def initialize(config: Config, name: str, source: Path, goal_file: Path,
-               roles: list[str], verification: list[str], *, armed: bool = False) -> Project:
+               roles: list[str], verification: list[str], *, armed: bool = False,
+               _smoke_root: Path | None = None) -> Project:
+    """Initialize normally, or isolate only the internal smoke project's files.
+
+    The smoke override accepts only the ID-bound validation scratch layout;
+    Config.data (including shared spend admission and host state) stays intact.
+    """
     identifier(name)
+    destination = _project_root(config, name, _smoke_root)
     with _import_source(config, source) as (source, exclude_dirs):
         goal_file = goal_file.resolve()
         if not source.is_dir() or not goal_file.is_file():
@@ -701,8 +723,7 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
         if not roles or any(role not in config.roles for role in roles):
             raise ConfigError("Choose existing roles")
         check_verify(verification)
-        parent, staging, identities = _project_parents(config)
-        destination = parent / name
+        parent, staging, identities = _project_parents(config, _smoke_root)
         with lock(config.data / "locks" / f"init-{name}.lock", blocking=False):
             if destination.exists():
                 raise Denied("Project already exists; initialization never overwrites it")
@@ -738,4 +759,4 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
             except BaseException:
                 _discard_project_stage(stage, identities, ignore_errors=True)
                 raise
-        return Project(config, name)
+        return Project(config, name, _smoke_root=_smoke_root)

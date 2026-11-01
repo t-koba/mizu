@@ -1,7 +1,8 @@
 """Data-dir-owned shared smoke bundles: bounded preview, retirement and recovery.
 
-No provider work or project/workspace locks here. All mutators use the same
-nonblocking global lock. Preview is read-only, including quarantine recovery.
+No provider work or workspace locks here. All mutators use the same
+nonblocking global lock. Publication also holds the isolated project record lock
+through movement and rollback. Preview is read-only, including quarantine recovery.
 Unknown or incomplete metadata refuses the entire expiry plan before any rename.
 """
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from .errors import Busy, Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
-from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
+from .smoke_refs import SMOKE_ID, project_record_lock, shared_lock, validate_refs
 
 MAX_PROJECTS = 5000
 MAX_PAIRS = 5000
@@ -40,6 +41,20 @@ def directory(path: Path, *, optional=False) -> bool:
     if not stat.S_ISDIR(info.st_mode) or path.is_symlink() or getattr(info, 'st_reparse_tag', 0):
         raise Denied("Unsafe smoke retention directory")
     return True
+
+
+def scratch_root(data: Path, smoke_id: str, project: Path) -> Path:
+    """Validate the isolated smoke layout and its existing scratch ancestors."""
+    scratch = project.parent.parent
+    if (not SMOKE_ID.fullmatch(smoke_id)
+            or not re.fullmatch(smoke_id + r"(?:-[a-z0-9_]+)?", scratch.name)
+            or scratch.parent != data / "validation" / "smoke-runs"
+            or project != scratch / "projects" / ("smoke-" + smoke_id)):
+        raise Denied("Smoke project must match the isolated smoke scratch layout")
+    identifier(scratch.name)
+    for path in (data, data / "validation", scratch.parent, scratch):
+        directory(path)
+    return scratch
 
 
 def entries(path: Path, maximum: int, *, optional=False):
@@ -291,10 +306,10 @@ def _remove_unpublished_stage(data: Path, stage: Path, staging: Path, project: P
 def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> dict:
     """Stage complete evidence, then publish with exactly one directory rename.
 
-    Provider execution is complete before this call. Staging creation, owner
-    project movement, and pair publication share the global retention lock, so
-    contention cannot leave a partial stage and a reference scan sees either
-    the owner project or the completed bundle.
+    Provider execution is complete before this call. Only the isolated source
+    <data>/validation/smoke-runs/<id>[-<random>]/projects/smoke-<id> is accepted, never a
+    managed project. Staging and pair publication share the retention lock;
+    the isolated project record lock protects its move and any rollback.
     """
     if not SMOKE_ID.fullmatch(smoke_id):
         raise Denied("Invalid smoke pair ID")
@@ -311,7 +326,7 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
     report_bytes = canonical(result)
     if len(report_bytes) > 16 * 1024 * 1024:
         raise LimitExceeded("Smoke report size bound exceeded")
-    with shared_lock(data):
+    with shared_lock(data), contextlib.ExitStack() as locks:
         validation = data / "validation"
         validation.mkdir(exist_ok=True, mode=0o700)
         directory(validation)
@@ -334,10 +349,10 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
             raise Denied("Smoke staging ID already exists")
         project_identity_before = None
         if project is not None:
-            projects = data / "projects"
-            directory(projects)
-            if project.parent != projects:
-                raise Denied("Smoke project must be a direct child of the shared projects directory")
+            scratch_root(data, smoke_id, project)
+            directory(project.parent)
+            directory(project)
+            locks.enter_context(project_record_lock(project, blocking=False))
             project_identity_before = project_identity(project)
         expected_files = {"report.json": report_bytes}
         stage_created = False

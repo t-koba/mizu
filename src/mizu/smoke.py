@@ -1,7 +1,10 @@
 """An opt-in, paid end-to-end engine test. It cannot change a real project.
 
 Schema: ``live(config, profile, role_name)`` runs the named read-only role's
-engine against a temporary project containing only ``probe.txt``.
+engine against a temporary project containing only ``probe.txt``, rooted at
+``<data>/validation/smoke-runs/<128-bit-id>-<random>/projects/smoke-<128-bit-id>``.
+Only the project is isolated; shared budget and host state keep the configured
+data root. Scratch is identity-checked before cleanup on success or failure.
 The role defaults to the configured ``consult_role`` (else the single
 configured role) and is required otherwise.
 Bounds: paid spend is capped at fixed ``SMOKE_REQUESTS/TOOLS/SECONDS``
@@ -26,7 +29,7 @@ from . import platform as _platform
 from .config import Config
 from .errors import ConfigError, Denied
 from .fs import mkdir, now
-from .project import initialize
+from .project import initialize, _directory_identity, _check_project_paths, _discard_project_stage
 from .runtime import Engine
 
 #: Fixed probe budgets (mechanism constants, not knobs): the paid live probe
@@ -69,7 +72,12 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
     check_consult_role(role_name, role)
     if role.selector and not profile:
         raise ConfigError("A selector role requires an explicit --profile for smoke")
-    mkdir(config.data / "validation")
+    runs = config.data / "validation" / "smoke-runs"
+    identities = {}
+    for path in (config.data, runs.parent, runs):
+        mkdir(path)
+        identities[path] = _directory_identity(path)
+    _check_project_paths(identities)
     probe_policy = config.data / "validation" / "smoke-probe-policy.md"
     probe_policy.write_bytes(SMOKE_PROBE_POLICY.encode("utf-8"))
     role = dataclasses.replace(role, profile=profile or role.profile, selector="", workspace="read",
@@ -95,19 +103,22 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
     challenge = "mizu-probe-" + uuid.uuid4().hex[:12]
     smoke_id = uuid.uuid4().hex
     name = "smoke-" + smoke_id
-    mkdir(config.data)
+    data = config.data
+    _check_project_paths(identities)
+    root = Path(tempfile.mkdtemp(prefix=smoke_id + "-", dir=runs))
+    identities[root] = _directory_identity(root)
     project = None
-    with tempfile.TemporaryDirectory(prefix="smoke-source-", dir=config.data) as temporary:
-        root = Path(temporary)
+    try:
         source = root / "source"
         mkdir(source)
         (source / "probe.txt").write_text(challenge)
         goal = root / "goal.md"
         # Test-only probe vector, not operator policy.
         goal.write_text("Read the file probe.txt in the workspace root (exact path probe.txt) with a single read. Do not list files first; the workspace contains only probe.txt. Then call mizu_finish alone with outcome 'wait' and summary exactly the file contents. Do nothing else.")
-        evidence = config.data / "validation" / "pairs" / smoke_id / "project"
+        evidence = data / "validation" / "pairs" / smoke_id / "project"
         try:
-            project = initialize(config, name, source, goal, [role_name], [], armed=True)
+            project = initialize(config, name, source, goal, [role_name], [], armed=True,
+                                 _smoke_root=root / "projects" / name)
             result = Engine(config, ephemeral=True).run(project, role_name)
             if result["finish"]["summary"].strip() != challenge:
                 raise Denied("Engine ran, but the live smoke did not return the requested evidence")
@@ -135,5 +146,7 @@ def live(config: Config, profile: str | None = None, role_name: str | None = Non
             if project:
                 project.set_control(armed=False, paused=True)
             from .smoke_retention import publish
-            report = publish(config.data, smoke_id, report, project.root if project else None)
+            report = publish(data, smoke_id, report, project.root if project else None)
         return report
+    finally:
+        _discard_project_stage(root, identities)

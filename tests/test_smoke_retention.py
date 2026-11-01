@@ -14,7 +14,7 @@ from mizu import smoke_retention as retention
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import atomic_write, digest, read_json, write_json
 from mizu.insights import Insights
-from mizu.smoke_refs import record_lock, shared_lock, validate_refs
+from mizu.smoke_refs import project_record_lock, record_lock, shared_lock, validate_refs
 from mizu.work_items import WorkItems
 from mizu.work_item_waits import normalize_wait, stored_wait
 
@@ -32,12 +32,16 @@ class SmokeRetentionTests(unittest.TestCase):
         key = key or self.a
         tree = None
         if project:
-            tree = self.data / 'projects' / ('source-' + key)
-            tree.mkdir(parents=True)
+            tree = self.scratch_project(key)
             (tree / 'probe.txt').write_text('synthetic')
         report = retention.publish(self.data, key, {'status': status,
             'time': (self.moment - dt.timedelta(days=age)).isoformat(), 'result': {'synthetic': True}}, tree)
         return Path(report['pair'])
+
+    def scratch_project(self, key):
+        root = self.data / 'validation' / 'smoke-runs' / key / 'projects' / ('smoke-' + key)
+        root.mkdir(parents=True)
+        return root
 
     def owner(self, name='one'):
         root = self.data / 'projects' / name
@@ -110,11 +114,11 @@ class SmokeRetentionTests(unittest.TestCase):
             result = future.result(timeout=10)
         self.assertEqual(second.read(result['id'])['title'], 'Other project')
 
-    def test_project_publish_waits_for_active_record_write(self):
-        insights, _ = self.owner('moving')
+    def test_isolated_project_publish_refuses_active_record_write(self):
+        insights = Insights(self.scratch_project(self.b))
         write_entered, release_write = threading.Event(), threading.Event()
         publish_attempted = threading.Event()
-        real_shared_lock = shared_lock
+        real_project_lock = project_record_lock
 
         def paused_atomic_write(path, data, **kwargs):
             if Path(path).parent == insights.root / 'inbox':
@@ -124,15 +128,15 @@ class SmokeRetentionTests(unittest.TestCase):
             return atomic_write(path, data, **kwargs)
 
         @contextmanager
-        def observed_publish_lock(data, *, blocking=False):
+        def observed_publish_lock(root, *, blocking=False):
             publish_attempted.set()
-            with real_shared_lock(data, blocking=blocking):
+            with real_project_lock(root, blocking=blocking):
                 yield
 
         report = {'status': 'pass', 'time': self.moment.isoformat(), 'result': {'synthetic': True}}
         with ThreadPoolExecutor(max_workers=2) as pool:
             with patch('mizu.fs.atomic_write', side_effect=paused_atomic_write), \
-                 patch('mizu.smoke_retention.shared_lock', observed_publish_lock):
+                 patch('mizu.smoke_retention.project_record_lock', observed_publish_lock):
                 writer = pool.submit(insights.submit, source='worker', title='During publish',
                                      body='Complete before move', base_snapshot=None)
                 try:
@@ -230,20 +234,26 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(self.run_retention()['pinned'], [self.a])
 
     def test_atomic_pair_identity_and_project(self):
-        pair = self.pair(project=True)
+        project = self.scratch_project(self.a)
+        (project / 'probe.txt').write_text('synthetic')
+        identity = retention.project_identity(project)
+        report = retention.publish(self.data, self.a, {'status': 'pass',
+            'time': self.moment.isoformat(), 'result': {'synthetic': True}}, project)
+        pair = Path(report['pair'])
         manifest = retention.read_pair(retention.Metadata(self.data), self.a)
+        self.assertEqual(manifest['project'], identity)
+        self.assertEqual((pair / 'report.json').read_bytes(), retention.canonical(report))
         self.assertEqual(set(p.name for p in pair.iterdir()), {'manifest.json', 'report.json', 'project'})
         self.assertEqual(manifest['smoke_id'], self.a)
         self.assertEqual((pair / 'project' / 'probe.txt').read_text(), 'synthetic')
-        self.assertFalse((self.data / 'projects' / ('source-' + self.a)).exists())
+        self.assertFalse(project.exists())
         (pair / 'report.json').write_text('{}')
         with self.assertRaises(Denied):
             self.run_retention(apply=True)
         self.assertTrue(pair.exists())
 
     def test_publish_does_not_stage_on_busy_and_same_id_retry_succeeds(self):
-        project = self.data / 'projects' / 'smoke-owner'
-        project.mkdir(parents=True)
+        project = self.scratch_project(self.a)
         report = {'status': 'pass', 'time': self.moment.isoformat()}
         with shared_lock(self.data):
             with self.assertRaises(Busy):
@@ -254,6 +264,35 @@ class SmokeRetentionTests(unittest.TestCase):
         result = retention.publish(self.data, self.a, report, project)
         self.assertTrue(Path(result['pair']).is_dir())
         self.assertFalse(project.exists())
+
+    def test_publish_refuses_managed_and_mismatched_scratch_roots(self):
+        managed = self.data / 'projects' / ('smoke-' + self.a)
+        managed.mkdir(parents=True)
+        scratch = self.scratch_project(self.b)
+        wrong_name = scratch.parent / ('smoke-' + self.a)
+        wrong_name.mkdir()
+        report = {'status': 'pass', 'time': self.moment.isoformat()}
+        for project in (managed, scratch, wrong_name):
+            with self.subTest(project=project), self.assertRaisesRegex(Denied, 'isolated smoke scratch layout'):
+                retention.publish(self.data, self.a, report, project)
+            self.assertTrue(project.is_dir())
+            self.assertEqual(list(project.iterdir()), [])
+        self.assertFalse((self.data / 'validation/staging' / self.a).exists())
+        self.assertFalse((self.data / 'validation/pairs' / self.a).exists())
+
+    def test_publish_refuses_scratch_alias_to_managed_projects(self):
+        managed = self.data / 'projects'
+        (managed / ('smoke-' + self.a)).mkdir(parents=True)
+        scratch = self.data / 'validation/smoke-runs' / self.a
+        scratch.mkdir(parents=True)
+        try:
+            (scratch / 'projects').symlink_to(managed, target_is_directory=True)
+        except OSError:
+            self.skipTest('directory symlinks unavailable')
+        with self.assertRaisesRegex(Denied, 'Unsafe smoke retention directory'):
+            retention.publish(self.data, self.a, {'status': 'pass',
+                'time': self.moment.isoformat()}, scratch / 'projects' / ('smoke-' + self.a))
+        self.assertTrue((managed / ('smoke-' + self.a)).is_dir())
 
     def test_publish_refuses_preexisting_staging_without_mutation(self):
         stage = self.data / 'validation' / 'staging' / self.a
@@ -276,8 +315,8 @@ class SmokeRetentionTests(unittest.TestCase):
                 self.assertFalse(Path(destination).exists())
             return rename(source, destination)
         with patch.object(retention.os, 'rename', side_effect=observe):
-            self.pair()
-        self.assertEqual(observed, [{'manifest.json', 'report.json'}])
+            self.pair(project=True)
+        self.assertEqual(observed, [{'manifest.json', 'report.json', 'project'}])
         with patch.object(retention.os, 'rename', side_effect=OSError('synthetic interruption')):
             with self.assertRaises(OSError):
                 self.pair(self.b)
@@ -285,8 +324,7 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertFalse((self.data / 'validation/pairs' / self.b).exists())
         self.assertFalse(stage.exists())
 
-        project = self.data / 'projects' / 'smoke-owner'
-        project.mkdir(parents=True)
+        project = self.scratch_project(self.b)
         (project / 'probe.txt').write_text('synthetic')
         report = {'status': 'pass', 'time': self.moment.isoformat()}
         def fail_pair(source, destination):
