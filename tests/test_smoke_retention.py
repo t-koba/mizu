@@ -114,45 +114,20 @@ class SmokeRetentionTests(unittest.TestCase):
             result = future.result(timeout=10)
         self.assertEqual(second.read(result['id'])['title'], 'Other project')
 
-    def test_isolated_project_publish_refuses_active_record_write(self):
-        insights = Insights(self.scratch_project(self.b))
-        write_entered, release_write = threading.Event(), threading.Event()
-        publish_attempted = threading.Event()
-        real_project_lock = project_record_lock
-
-        def paused_atomic_write(path, data, **kwargs):
-            if Path(path).parent == insights.root / 'inbox':
-                write_entered.set()
-                if not release_write.wait(10):
-                    raise AssertionError('record-write coordination timed out')
-            return atomic_write(path, data, **kwargs)
-
-        @contextmanager
-        def observed_publish_lock(root, *, blocking=False):
-            publish_attempted.set()
-            with real_project_lock(root, blocking=blocking):
-                yield
-
+    def test_isolated_project_publish_holds_no_in_tree_lock_handle(self):
+        project = self.scratch_project(self.b)
+        # A real write creates locks/insights.lock inside the moved tree.
+        WorkItems(project, None, Insights(project)).create(
+            idempotency_key='k', title='Synthetic', actor='worker')
+        (project / 'probe.txt').write_text('synthetic')
         report = {'status': 'pass', 'time': self.moment.isoformat(), 'result': {'synthetic': True}}
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            with patch('mizu.fs.atomic_write', side_effect=paused_atomic_write), \
-                 patch('mizu.smoke_retention.project_record_lock', observed_publish_lock):
-                writer = pool.submit(insights.submit, source='worker', title='During publish',
-                                     body='Complete before move', base_snapshot=None)
-                try:
-                    self.assertTrue(write_entered.wait(10))
-                    publisher = pool.submit(retention.publish, self.data, self.b, report, insights.root)
-                    self.assertTrue(publish_attempted.wait(10))
-                    with self.assertRaises(Busy):
-                        publisher.result(timeout=10)
-                    self.assertTrue(insights.root.exists())
-                finally:
-                    release_write.set()
-                record = writer.result(timeout=10)
-        published = retention.publish(self.data, self.b, report, insights.root)
+        published = retention.publish(self.data, self.b, report, project)
+        self.assertFalse(project.exists())
         project_in_pair = Path(published['evidence'])
-        self.assertFalse(insights.root.exists())
-        self.assertTrue((project_in_pair / 'inbox' / f"{record['id']}.json").is_file())
+        self.assertTrue((project_in_pair / 'locks' / 'insights.lock').is_file())
+        self.assertEqual((project_in_pair / 'probe.txt').read_text(), 'synthetic')
+        manifest = retention.read_pair(retention.Metadata(self.data), self.b)
+        self.assertEqual(manifest['project'], retention.project_identity(project_in_pair))
 
     def test_append_temporary_excludes_retention_until_publication(self):
         self.pair()

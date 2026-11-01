@@ -1,9 +1,12 @@
 """Data-dir-owned shared smoke bundles: bounded preview, retirement and recovery.
 
 No provider work or workspace locks here. All mutators use the same
-nonblocking global lock. Publication also holds the isolated project record lock
-through movement and rollback. Preview is read-only, including quarantine recovery.
-Unknown or incomplete metadata refuses the entire expiry plan before any rename.
+nonblocking global lock. Publication validates the isolated scratch layout; the
+scratch project is single-owner, written only by the calling smoke run before
+publication, so no in-tree lock handle is held across the rename (an open handle
+inside a renamed directory is refused on Windows). Preview is read-only,
+including quarantine recovery. Unknown or incomplete metadata refuses the entire
+expiry plan before any rename.
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ from pathlib import Path
 
 from .errors import Busy, Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
-from .smoke_refs import SMOKE_ID, project_record_lock, shared_lock, validate_refs
+from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
 
 MAX_PROJECTS = 5000
 MAX_PAIRS = 5000
@@ -308,8 +311,9 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
 
     Provider execution is complete before this call. Only the isolated source
     <data>/validation/smoke-runs/<id>[-<random>]/projects/smoke-<id> is accepted, never a
-    managed project. Staging and pair publication share the retention lock;
-    the isolated project record lock protects its move and any rollback.
+    managed project. Staging and pair publication share the retention lock; no
+    in-tree lock handle is held across the rename because the scratch project is
+    single-owner, written only by the calling smoke run before publication.
     """
     if not SMOKE_ID.fullmatch(smoke_id):
         raise Denied("Invalid smoke pair ID")
@@ -326,7 +330,7 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
     report_bytes = canonical(result)
     if len(report_bytes) > 16 * 1024 * 1024:
         raise LimitExceeded("Smoke report size bound exceeded")
-    with shared_lock(data), contextlib.ExitStack() as locks:
+    with shared_lock(data):
         validation = data / "validation"
         validation.mkdir(exist_ok=True, mode=0o700)
         directory(validation)
@@ -352,7 +356,6 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
             scratch_root(data, smoke_id, project)
             directory(project.parent)
             directory(project)
-            locks.enter_context(project_record_lock(project, blocking=False))
             project_identity_before = project_identity(project)
         expected_files = {"report.json": report_bytes}
         stage_created = False
