@@ -52,6 +52,122 @@ class WorkItemTests(Fixture):
             store.publish(snapshot)
         return snapshot
 
+    def status_readers(self):
+        return (self.store.count_open, self.store.count_open_readonly,
+                self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
+                self.store.blocked_liveness_readonly, self.store.page_open_for_order)
+
+    def test_status_projections_skip_unused_delivery_snapshots_but_done_write_is_strict(self):
+        self.change("doing")
+        snapshot = self.snapshot("valid")
+        self.bind(snapshot)
+        blocked = self.change("blocked", expected_rev=3,
+                              wait={"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
+        readers = self.status_readers()
+        expected = [reader() for reader in readers]
+        self.assertEqual(expected[:2], [1, 1])
+        for page in (*expected[2:6], expected[6][0]):
+            self.assertEqual(page["total"], 1)
+            row = page["items"][0]
+            self.assertEqual((row["id"], row["rev"]), (self.item_id, blocked["rev"]))
+            self.assertTrue({"delivery", "snapshot_id", "verification"}.isdisjoint(row))
+        self.assertEqual(expected[4]["items"][0]["wait_liveness"]["state"], "due")
+        self.assertEqual(expected[5]["items"][0]["state"], "due")
+        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+            for reader, result in zip(readers, expected):
+                with self.subTest(reader=reader.__name__):
+                    self.assertEqual(reader(), result)
+            get.assert_not_called()
+            with self.assertRaisesRegex(Denied, "snapshot unavailable"):
+                self.change("done", expected_rev=4, snapshot_id=snapshot["id"])
+            get.assert_called_once_with(snapshot["id"])
+        self.assertEqual(self.store.get(self.item_id), blocked)
+        self.assertFalse((self.directory / "5.json").exists())
+
+    def test_status_projections_still_validate_delivery_and_transition_fields(self):
+        self.change("doing")
+        self.bind(self.snapshot("valid"))
+        blocked = self.change("blocked", expected_rev=3,
+                              wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        path = self.directory / "3.json"
+        binding = json.loads(path.read_text())
+        corruptions = [dict(binding, title="Rewritten seed"),
+                       dict(binding, transition={"from": "open", "to": "doing"}),
+                       dict(binding, unexpected=True)]
+        for field, value in (("code_digest", "not-a-digest"), ("code_digest", None),
+                             ("snapshot_id", "invalid"), ("binding_rev", 2),
+                             ("scope_digest", "0" * 64)):
+            corruptions.append({**binding, "delivery": {**binding["delivery"], field: value}})
+        with patch.object(self.store.snapshots, "get", side_effect=AssertionError("unused snapshot")) as get:
+            for index, corrupt in enumerate(corruptions):
+                write_json(path, corrupt)
+                for reader in self.status_readers():
+                    with self.subTest(corruption=index, reader=reader.__name__):
+                        if reader == self.store.blocked_liveness_readonly:
+                            result = reader()
+                            self.assertEqual(result["diagnostic"], "unreadable")
+                            self.assertIsNone(result["total"])
+                            self.assertFalse(result["coverage_complete"])
+                        else:
+                            with self.assertRaises(Denied):
+                                reader()
+            write_json(path, binding)
+            # The newest transition is checked too, not just the binding revision.
+            write_json(self.directory / "4.json", {**blocked, "rev": 5})
+            with self.assertRaises(Denied):
+                self.store.count_open_readonly()
+            get.assert_not_called()
+
+    def test_status_projections_keep_current_done_completion_strict(self):
+        self.change("doing")
+        historical = self.snapshot("valid")
+        self.bind(historical)
+        snapshot = self.snapshot("valid")
+        self.bind(snapshot, expected_rev=3)
+        self.change("done", expected_rev=4, snapshot_id=snapshot["id"])
+        get_snapshot = self.store.snapshots.get
+        def current_only(sid):
+            self.assertEqual(sid, snapshot["id"])
+            return get_snapshot(sid)
+        with patch.object(self.store.snapshots, "get", side_effect=current_only) as get:
+            self.assertEqual(self.store.count_open_readonly(), 0)
+            get.assert_called_once_with(snapshot["id"])
+        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+            for reader in self.status_readers():
+                with self.subTest(reader=reader.__name__):
+                    if reader == self.store.blocked_liveness_readonly:
+                        self.assertEqual(reader()["diagnostic"], "unreadable")
+                    else:
+                        with self.assertRaisesRegex(Denied, "snapshot unavailable"):
+                            reader()
+            self.assertEqual(get.call_count, len(self.status_readers()))
+        # A readable snapshot with tampered copied completion evidence also fails.
+        path = self.directory / "5.json"
+        done = json.loads(path.read_text())
+        done["verification"]["run"] = "tampered"
+        write_json(path, done)
+        with self.assertRaisesRegex(Denied, "Completion evidence"):
+            self.store.count_open_readonly()
+
+    def test_status_snapshot_reads_do_not_grow_with_delivery_history(self):
+        self.change("doing")
+        self.bind(self.snapshot("valid"))
+        current = self.store.get(self.item_id)
+        for revision in (3, 9, 17):
+            while current["rev"] < revision:
+                current = self.change("open" if current["status"] == "doing" else "doing",
+                                      expected_rev=current["rev"])
+            for reader in (self.store.count_open_readonly, self.store.page_open_for_order):
+                with self.subTest(revision=revision, reader=reader.__name__), \
+                        patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get, \
+                        patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as validate:
+                    reader()
+                    get.assert_not_called()
+                    self.assertEqual(validate.call_count, revision - 1)
+            with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+                self.assertEqual(self.store.get(self.item_id), current)
+                self.assertEqual(get.call_count, revision - 2)
+
     def test_entry_stat_uses_full_windows_link_metadata(self):
         entry = Mock(path=r"C:\store\entry", stat=Mock())
         expected = object()

@@ -209,8 +209,9 @@ class WorkItems:
 
         WorkItems stays the only count source: replay committed seeds and
         CAS histories, including legacy open resolutions. No quota/index
-        state. Malformed or unsafe records fail closed; systemic I/O
-        propagates so the caller can hold fail-closed.
+        state. Nonterminal delivery snapshots are not consumed; current done
+        proofs remain strict. Malformed or unsafe records fail closed; systemic
+        I/O propagates so the caller can hold fail-closed.
         """
         current_count = 0
         for event_id, event in self._iter_item_events(recover=True):
@@ -218,7 +219,8 @@ class WorkItems:
             if kind != "seed":
                 continue
             revisions = self._history_revisions(seed["id"], recover=True)
-            item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
+                             verify_snapshots=False)
             if item["status"] in OPEN_STATUS_ORDER:
                 current_count += 1
         return current_count
@@ -237,7 +239,8 @@ class WorkItems:
             if kind != "seed":
                 continue
             revisions = self._history_revisions(seed["id"], recover=False)
-            item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
+                             verify_snapshots=False)
             if item["status"] in OPEN_STATUS_ORDER:
                 current_count += 1
         return current_count
@@ -1132,13 +1135,14 @@ class WorkItems:
     def _scope_digest(scope):
         return digest(canonical(scope)) if scope is not None else None
 
-    def _validate_delivery(self, previous, record):
+    def _validate_delivery(self, previous, record, *, verify_snapshots: bool = True):
         """Replay the explicit binding, without consulting mutable history/config."""
+        snapshot = None
         marked = "delivery_schema" in record
         if "delivery_schema" in previous and not marked:
             raise Denied("A work-item transition cannot remove the delivery schema")
         if not marked:
-            return False
+            return False, None
         if type(record["delivery_schema"]) is not int or record["delivery_schema"] != 1:
             raise Denied("Invalid work-item delivery schema")
         delivery = record["delivery"]
@@ -1155,18 +1159,21 @@ class WorkItems:
                 raise Denied("Invalid work-item delivery binding")
         if delivery is not None:
             if (not isinstance(delivery, dict) or not isinstance(delivery.get("snapshot_id"), str)
-                    or not DIGEST.fullmatch(delivery["snapshot_id"])):
+                    or not DIGEST.fullmatch(delivery["snapshot_id"])
+                    or not isinstance(delivery.get("code_digest"), str)
+                    or not DIGEST.fullmatch(delivery["code_digest"])):
                 raise Denied("Invalid delivery snapshot")
-            snapshot = self.snapshots.get(delivery["snapshot_id"])
-            if (snapshot.get("id") != delivery["snapshot_id"]
-                    or snapshot.get("code_digest") != delivery["code_digest"]):
-                raise Denied("Delivery does not match its immutable snapshot")
+            if verify_snapshots:
+                snapshot = self.snapshots.get(delivery["snapshot_id"])
+                if (snapshot.get("id") != delivery["snapshot_id"]
+                        or snapshot.get("code_digest") != delivery["code_digest"]):
+                    raise Denied("Delivery does not match its immutable snapshot")
         if record["status"] == "done":
             if (delivery is None or delivery != previous.get("delivery")
                     or record["snapshot_id"] != delivery["snapshot_id"]
                     or delivery["scope_digest"] != self._scope_digest(record.get("scope"))):
                 raise Denied("Completion requires a prior exact snapshot and scope delivery binding")
-        return binding
+        return binding, snapshot
 
     def _retained_verification(self, verification, code_digest, scope_digest, snapshot_id):
         from .acceptance import get
@@ -1182,7 +1189,7 @@ class WorkItems:
                 or receipt["schema"] == 2 and receipt["scope"]["ci"]["snapshot_id"] != snapshot_id):
             raise Denied("Completion acceptance receipt code or scope mismatch")
 
-    def _validate_transition(self, previous: dict, record: dict) -> None:
+    def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True) -> None:
         fields = set(record) - {"smoke_refs"}
         if "smoke_refs" in record:
             validate_refs(record["smoke_refs"])
@@ -1208,7 +1215,10 @@ class WorkItems:
         refs_changed = (record.get("smoke_refs", []) != previous.get("smoke_refs", [])
                         or (record.get("wait") or {}).get("smoke_refs", []) !=
                            (previous.get("wait") or {}).get("smoke_refs", []))
-        binding = self._validate_delivery(previous, record)
+        # Done cannot precede another valid transition: its current completion
+        # proof remains strict even in status-only replay.
+        binding, delivery_snapshot = self._validate_delivery(
+            previous, record, verify_snapshots=verify_snapshots or status == "done")
         if (status not in STATUSES or previous["status"] == "done"
                 or (previous["status"] == "dropped" and status != "done")
                 or (status == previous["status"] and not scope_changed and not refs_changed and not binding)):
@@ -1250,7 +1260,7 @@ class WorkItems:
                     or not isinstance(verification.get("code_digest"), str)
                     or not DIGEST.fullmatch(verification["code_digest"])):
                 raise Denied("Completion requires verified snapshot evidence")
-            snapshot = self.snapshots.get(sid)
+            snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.get(sid)
             stored_verification = snapshot.get("verification")
             retained = verification.get("source") == "retained_acceptance"
             if retained and "delivery_schema" in record:
@@ -1275,7 +1285,7 @@ class WorkItems:
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
-                    history_revisions=_HISTORY_UNSET, retirement=None):
+                    history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True):
         """Replay and validate one append-only chain, yielding one record at a time.
 
         The seed and each revision are immutable full-state records. Callers may
@@ -1283,6 +1293,8 @@ class WorkItems:
         materializes the complete history. On exhaustion, validate the terminal
         sidecar separately; never yield it as an invented revision. Optional
         retirement collects that validated record and the full chain hash.
+        Status-only callers may skip delivery snapshot reads, not chain/field
+        validation. Done completion proofs always retain strict verification.
         """
         current = self._seed(item_id, seed_event, history_revisions=history_revisions)
         chain_hash = hashlib.sha256()
@@ -1295,7 +1307,7 @@ class WorkItems:
             raise Denied("Gapped work-item history")
         for revision in range(2, len(revisions) + 2):
             record = self._read(f"work-items/{item_id}/{revision}.json")
-            self._validate_transition(current, record)
+            self._validate_transition(current, record, verify_snapshots=verify_snapshots)
             current = record
             chain_hash.update(canonical(current) + b"\n")
             yield current
@@ -1305,17 +1317,19 @@ class WorkItems:
             retirement.update(chain_sha256=chain_sha256, record=terminal)
 
     def _get(self, item_id: str, *, seed_event: dict | None = None,
-             history_revisions=_HISTORY_UNSET) -> dict:
+             history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True) -> dict:
         return self._current_hold(item_id, seed_event=seed_event,
-                                  history_revisions=history_revisions)[0]
+                                  history_revisions=history_revisions,
+                                  verify_snapshots=verify_snapshots)[0]
 
     def _current_hold(self, item_id: str, *, seed_event=None,
-                      history_revisions=_HISTORY_UNSET) -> tuple:
+                      history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True) -> tuple:
         since = None
         current = None
         retirement = {}
         for current in self._iter_chain(item_id, seed_event=seed_event,
-                                        history_revisions=history_revisions, retirement=retirement):
+                                        history_revisions=history_revisions, retirement=retirement,
+                                        verify_snapshots=verify_snapshots):
             since = (since or current["updated_at"]) if current["status"] == "doing" else None
         terminal = retirement["record"]
         return work_item_retirement.project(current, terminal), None if terminal else since
@@ -1362,10 +1376,12 @@ class WorkItems:
         """Project current origin staleness from the immutable item's origin."""
         return self._origin_projection_impl(item, readonly=False, current_decision=current_decision)
 
-    def _build_projection(self, item_id: str, *, seed_event: dict | None = None, readonly: bool) -> dict:
+    def _build_projection(self, item_id: str, *, seed_event: dict | None = None, readonly: bool,
+                          verify_snapshots: bool = True) -> dict:
         """Build a bounded projection with an explicit recovery mode."""
         history_revisions = self._history_revisions(item_id, recover=not readonly)
-        item, since = self._current_hold(item_id, seed_event=seed_event, history_revisions=history_revisions)
+        item, since = self._current_hold(item_id, seed_event=seed_event, history_revisions=history_revisions,
+                                          verify_snapshots=verify_snapshots)
         view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                 **self._hold_projection(since)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
@@ -1807,7 +1823,8 @@ class WorkItems:
         Callers hold insights.lock when ``readonly`` is False; the read-only
         CLI path calls with ``readonly=True`` and never locks, recovers or
         deletes. Cursor, limit, ordering, overflow and byte bounds match
-        :meth:`page_open`.
+        :meth:`page_open`. These rows do not expose delivery evidence, so
+        replay validates its stored links without reading nonterminal snapshots.
         """
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
@@ -1831,7 +1848,8 @@ class WorkItems:
                 unseeded_decisions += 1
                 continue
             # Reuse this safely read event; _seed still validates its complete contract.
-            view = self._build_projection(seed["id"], seed_event=event, readonly=readonly)
+            view = self._build_projection(seed["id"], seed_event=event, readonly=readonly,
+                                          verify_snapshots=False)
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
