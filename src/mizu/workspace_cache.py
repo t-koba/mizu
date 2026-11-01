@@ -24,12 +24,21 @@ from .process import run
 from .project import git_env
 
 
+class _Refused(Denied):
+    """A fixed, path-free preflight reason safe to retain."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _directory(path):
     info = path.lstat()
     # Windows junctions/reparse points are links for this purpose too.
-    if (not stat.S_ISDIR(info.st_mode)
-            or getattr(info, 'st_file_attributes', 0) & 0x400):
-        raise Denied('Cache path is not a plain directory')
+    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+        raise _Refused('link')
+    if not stat.S_ISDIR(info.st_mode):
+        raise _Refused('not-directory')
 
 
 def _snapshot_protected(snapshots, name):
@@ -62,22 +71,22 @@ def _preflight(project, policy):
     # this exact workspace as the top-level before trusting index paths.
     if (not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
             or getattr(info, 'st_file_attributes', 0) & 0x400):
-        raise Denied('Workspace Git metadata is not local and regular')
+        raise _Refused('git-metadata')
     top = run(['git', '-C', str(workspace), 'rev-parse', '--show-toplevel'],
               timeout=policy.git_timeout_seconds, maximum=4096, env=git_env())
     if top.exit_code != 0 or top.reason != 'exited':
-        raise Denied('Cannot prove workspace Git root')
+        raise _Refused('git-root')
     try:
         git_root = Path(top.stdout.strip()).resolve(strict=True)
         if git_root != workspace.resolve(strict=True):
-            raise Denied('Git root does not match workspace')
+            raise _Refused('git-root')
     except (OSError, RuntimeError, ValueError) as exc:
-        raise Denied('Cannot prove workspace Git root') from exc
+        raise _Refused('git-root') from exc
     indexed = run(['git', '-c', 'core.fsmonitor=false', '-C', str(workspace),
                    'ls-files', '--cached', '-z'], timeout=policy.git_timeout_seconds,
                   maximum=policy.git_output_bytes, env=git_env())
     if indexed.exit_code != 0 or indexed.reason != 'exited':
-        raise Denied('Cannot prove cache paths untracked')
+        raise _Refused('git-index')
     # Conservatively compare aliases on case-insensitive/normalizing hosts.
     def alias(name):
         return unicodedata.normalize('NFC', name).casefold()
@@ -90,11 +99,11 @@ def _preflight(project, policy):
         if (any(part.casefold() == '.git' for part in parts)
                 or not project.snapshots.excluded(root)
                 or _snapshot_protected(project.snapshots, root)):
-            raise Denied('Cache root is not an eligible snapshot-excluded path')
+            raise _Refused('ineligible-root')
         key = alias(root)
         if any(name and (name == key or name.startswith(key + '/') or key.startswith(name + '/'))
                for name in tracked):
-            raise Denied('Cache root intersects tracked paths')
+            raise _Refused('tracked-path')
         path = workspace
         missing = False
         for part in parts:
@@ -110,28 +119,27 @@ def _preflight(project, policy):
         while pending:
             directory, depth = pending.pop()
             if depth > policy.max_depth or time.monotonic() > deadline:
-                raise Denied('Cache scan bound exceeded')
+                raise _Refused('scan-bound')
             with os.scandir(directory) as entries:
                 for entry in entries:
                     count += 1
                     if count > policy.max_entries or time.monotonic() > deadline:
-                        raise Denied('Cache scan bound exceeded')
+                        raise _Refused('scan-bound')
                     relative = (directory.relative_to(workspace) / entry.name).as_posix()
                     if entry.name.casefold() == '.git':
-                        raise Denied('Cache contains a nested repository')
+                        raise _Refused('nested-repository')
                     if _snapshot_protected(project.snapshots, relative):
-                        raise Denied('Cache contains snapshot-protected state')
-                    # DirEntry.stat() omits the hardlink count on Windows.
-                    # lstat supplies it without following symlinks/reparse points.
+                        raise _Refused('protected-path')
+                    # Inspect metadata without following links/reparse points.
                     info = (directory / entry.name).lstat()
-                    if getattr(info, 'st_file_attributes', 0) & 0x400:
-                        raise Denied('Cache contains a reparse point')
+                    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                        raise _Refused('link')
                     if stat.S_ISDIR(info.st_mode):
                         pending.append((directory / entry.name, depth + 1))
-                    elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    elif stat.S_ISREG(info.st_mode):
                         total += info.st_size
                     else:
-                        raise Denied('Cache contains a link or special file')
+                        raise _Refused('nonregular-file')
         candidates.append(path)
     return candidates, total
 
@@ -187,10 +195,12 @@ def maintain(project):
                     for path in candidates:
                         shutil.rmtree(path)
                         result['removed_roots'] += 1
-            except (Denied, OSError):
+            except (Denied, OSError) as exc:
                 # No candidate is removed on a preflight refusal. Deletion
                 # I/O failure can be partial; do not claim full reclamation.
-                result['status'] = 'refused'
+                reason = (exc.reason if isinstance(exc, _Refused) else
+                          'deletion-failed' if result['status'] == 'removed' else 'preflight-failed')
+                result.update(status='refused', reason=reason)
             write_json(state, result)
             return result
     except Busy:

@@ -44,6 +44,14 @@ class WorkspaceCacheTests(Fixture):
         (directory / 'cache.bin').write_bytes(b'x' * size)
         return directory
 
+    def assertRefused(self, reason, *, removed=0, size=0):
+        result = cache.maintain(self.project)
+        # Exact persisted schema and fixed expected codes exclude path/error leakage.
+        self.assertEqual(result, dict(checked_at=result['checked_at'], status='refused',
+                                      bytes=size, removed_roots=removed, reason=reason))
+        self.assertEqual(json.loads(self.state.read_text()), result)
+        return result
+
     def test_disabled_does_not_inspect_or_lock(self):
         self.policy(roots=())
         with mock.patch.object(cache, 'lock', side_effect=AssertionError), \
@@ -77,31 +85,19 @@ class WorkspaceCacheTests(Fixture):
         self.assertFalse(first.exists())
         self.assertFalse(second.exists())
 
-    def test_scan_uses_full_link_metadata_not_cached_directory_metadata(self):
+    def test_reparse_metadata_is_refused_without_following(self):
         directory = self.make()
-        scandir = os.scandir
-        metadata = SimpleNamespace(st_mode=0o100644, st_nlink=0, st_size=10,
-                                   st_file_attributes=0)
-
-        @contextlib.contextmanager
-        def cached_metadata(path):
-            # Windows DirEntry.stat() reports st_nlink=0 even for ordinary
-            # files. It cannot prove the file has exactly one hardlink.
-            with scandir(path) as entries:
-                yield (SimpleNamespace(name=entry.name, stat=lambda **kwargs: metadata)
-                       for entry in entries)
-
-        with mock.patch.object(cache.os, 'scandir', cached_metadata):
-            self.assertEqual(cache._preflight(self.project, self.config.workspace_cache),
-                             ([directory], 10))
-        try:
-            os.link(directory / 'cache.bin', directory / 'linked')
-        except OSError:
-            self.skipTest('Hardlinks unavailable')
-        with mock.patch.object(cache.os, 'scandir', cached_metadata), self.assertRaises(Denied):
-            cache._preflight(self.project, self.config.workspace_cache)
-        self.assertTrue((directory / 'cache.bin').exists())
-        self.assertTrue((directory / 'linked').exists())
+        lstat = Path.lstat
+        for target, reason in ((directory, 'link'), (directory / 'cache.bin', 'link'),
+                               (self.workspace / '.git', 'git-metadata')):
+            def reparse(path):
+                info = lstat(path)
+                return (SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+                        if path == target else info)
+            self.state.unlink(missing_ok=True)
+            with self.subTest(target=target.name), mock.patch.object(Path, 'lstat', reparse):
+                self.assertRefused(reason)
+            self.assertTrue(directory.exists())
 
     def test_tracked_and_nonexcluded_refused_before_any_deletion(self):
         for unsafe in ('source-cache', '.pytest_cache', 'refs/remotes/upstream/cache'):
@@ -111,7 +107,7 @@ class WorkspaceCacheTests(Fixture):
                     self.git('add', '-f', unsafe)
                 self.policy(('__pycache__', unsafe))
                 self.state.unlink(missing_ok=True)
-                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+                self.assertRefused('tracked-path' if unsafe == '.pytest_cache' else 'ineligible-root')
                 self.assertTrue(safe.exists())
                 self.assertTrue(bad.exists())
 
@@ -130,7 +126,7 @@ class WorkspaceCacheTests(Fixture):
                     child.write_text('private')
                 self.policy(('__pycache__',))
                 self.state.unlink(missing_ok=True)
-                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+                self.assertRefused('protected-path')
                 self.assertTrue(root.exists())
                 self.assertTrue(child.exists())
                 shutil.rmtree(root)
@@ -138,7 +134,7 @@ class WorkspaceCacheTests(Fixture):
     def test_nested_repositories_and_tracked_ancestors_are_refused(self):
         directory = self.make()
         (directory / '.git').mkdir()
-        self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+        self.assertRefused('nested-repository')
         self.assertTrue(directory.exists())
         self.state.unlink()
         # A gitlink's indexed path is an ancestor, not a cached file name.
@@ -146,7 +142,7 @@ class WorkspaceCacheTests(Fixture):
                  '160000,' + 'a' * 40 + ',vendor')
         self.make('vendor/__pycache__')
         self.policy(('vendor/__pycache__',))
-        self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+        self.assertRefused('tracked-path')
 
     def test_case_alias_of_tracked_path_is_refused(self):
         self.make('CACHE')
@@ -154,7 +150,7 @@ class WorkspaceCacheTests(Fixture):
         self.make('cache')
         object.__setattr__(self.project.snapshots, 'excludes', (*self.config.exclude, 'cache'))
         self.policy(('cache',))
-        self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+        self.assertRefused('tracked-path')
 
     def test_symlinks_in_root_ancestor_and_descendants_are_refused(self):
         outside = self.root / 'outside'
@@ -178,21 +174,58 @@ class WorkspaceCacheTests(Fixture):
                     self.skipTest('Symlinks unavailable')
                 self.policy((name,))
                 self.state.unlink(missing_ok=True)
-                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+                self.assertRefused('link')
                 self.assertEqual((outside / 'keep').read_bytes(), b'keep')
 
-    def test_hardlinks_and_special_files_are_refused(self):
-        directory = self.make()
+    def test_hardlinks_count_logical_sizes_and_preserve_outside_name(self):
+        directory = self.make(size=6)
+        outside = self.root / 'outside-cache-name'
         try:
-            os.link(directory / 'cache.bin', directory / 'linked')
+            os.link(directory / 'cache.bin', outside)
+            os.link(outside, directory / 'linked')
         except OSError:
             self.skipTest('Hardlinks unavailable')
-        self.assertEqual(cache.maintain(self.project)['status'], 'refused')
-        (directory / 'linked').unlink()
-        if hasattr(os, 'mkfifo'):
-            os.mkfifo(directory / 'pipe')
-            self.state.unlink()
-            self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+        result = cache.maintain(self.project)
+        # Two names for one inode count twice, not allocated disk space.
+        self.assertEqual(result, dict(checked_at=result['checked_at'], status='removed',
+                                      bytes=12, removed_roots=1))
+        self.assertEqual(json.loads(self.state.read_text()), result)
+        self.assertFalse(directory.exists())
+        self.assertEqual(outside.read_bytes(), b'x' * 6)
+        self.assertEqual(outside.stat().st_nlink, 1)
+
+    def test_special_files_are_refused(self):
+        if not hasattr(os, 'mkfifo'):
+            self.skipTest('FIFOs unavailable')
+        directory = self.make()
+        os.mkfifo(directory / 'pipe')
+        self.assertRefused('nonregular-file')
+        self.assertTrue((directory / 'cache.bin').exists())
+
+    def test_nondirectory_root_is_refused(self):
+        (self.workspace / '__pycache__').write_text('not a directory')
+        self.assertRefused('not-directory')
+
+    def test_io_refusals_never_record_exception_details(self):
+        self.policy(('__pycache__', '.pytest_cache'))
+        first, second = self.make(), self.make('.pytest_cache')
+        for error in (PermissionError('/sensitive/path secret'), Denied('private/record secret')):
+            self.state.unlink(missing_ok=True)
+            with mock.patch.object(cache, 'os', SimpleNamespace(
+                    scandir=mock.Mock(side_effect=error))):
+                self.assertRefused('preflight-failed')
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+        remove = shutil.rmtree
+        def partial(path):
+            if path == second:
+                raise PermissionError('/sensitive/path secret')
+            remove(path)
+        self.state.unlink()
+        with mock.patch.object(cache.shutil, 'rmtree', side_effect=partial):
+            self.assertRefused('deletion-failed', removed=1, size=20)
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
 
     def test_linked_worktree_index_is_supported(self):
         self.git('config', 'user.name', 'Cache Fixture')
@@ -217,12 +250,12 @@ class WorkspaceCacheTests(Fixture):
         ):
             self.state.unlink(missing_ok=True)
             with patch:
-                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+                self.assertRefused('git-root')
             self.assertTrue(directory.exists())
         # Rename instead of deleting Git's read-only object files on Windows.
         (self.workspace / '.git').rename(self.workspace / 'unused-git-metadata')
         self.state.unlink()
-        self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+        self.assertRefused('preflight-failed')
 
     def test_configured_entries_across_roots_and_depth_per_root(self):
         roots = ('__pycache__', '.pytest_cache')
@@ -236,7 +269,7 @@ class WorkspaceCacheTests(Fixture):
             self.state.unlink(missing_ok=True)
             if bounds['max_entries'] == 5:
                 (second / 'child' / 'grandchild').mkdir()
-            self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+            self.assertRefused('scan-bound')
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
         (second / 'child' / 'grandchild').rmdir()
@@ -260,7 +293,7 @@ class WorkspaceCacheTests(Fixture):
                 time=cache.time.time, monotonic=lambda: clock[0])), \
                 mock.patch.object(cache, 'run', side_effect=git):
             with mock.patch.object(cache, 'os', SimpleNamespace(scandir=slow_scan)):
-                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+                self.assertRefused('scan-bound')
             self.assertTrue(directory.exists())
             self.state.unlink()
             self.assertEqual(cache.maintain(self.project)['status'], 'removed')
@@ -270,7 +303,7 @@ class WorkspaceCacheTests(Fixture):
         self.policy(git_timeout_seconds=1, git_output_bytes=1)
         with mock.patch.object(cache, 'run', wraps=run) as git, \
                 mock.patch.object(cache, 'os', SimpleNamespace(scandir=mock.Mock(side_effect=AssertionError))):
-            self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+            self.assertRefused('git-index')
         self.assertEqual([call.kwargs['timeout'] for call in git.call_args_list], [1, 1])
         self.assertEqual([call.kwargs['maximum'] for call in git.call_args_list], [4096, 1])
         self.assertTrue(directory.exists())
@@ -284,7 +317,7 @@ class WorkspaceCacheTests(Fixture):
             self.state.unlink()
             with mock.patch.object(cache, 'run', side_effect=timeout), \
                     mock.patch.object(cache, 'os', SimpleNamespace(scandir=mock.Mock(side_effect=AssertionError))):
-                self.assertEqual(cache.maintain(self.project)['status'], 'refused')
+                self.assertRefused('git-root' if command == 'rev-parse' else 'git-index')
             self.assertTrue(directory.exists())
 
     def test_above_default_budgets_reach_preflight(self):

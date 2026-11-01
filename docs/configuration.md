@@ -98,22 +98,48 @@ Git and incomplete Git output skip cleanup rather than infer non-membership.
 Index lookup disables fsmonitor; comparisons refuse case/Unicode aliases of
 tracked paths. Missing roots are harmless; existing roots, their ancestors, and their
 contents must have no symlinks or Windows reparse points. Nested `.git` entries,
-hardlinked files, special files, and any product-private/host-state path omitted
-from snapshots (including private-evidence trees and private-name files) are
-refused too.
+special files, and any product-private/host-state path omitted from snapshots
+(including private-evidence trees and private-name files) are refused too.
+Regular files are eligible regardless of hardlink count: cleanup unlinks only
+names within the cache roots, without following links or changing file contents;
+names outside the removed trees and their contents survive.
 The scan reads metadata, not cache contents. Any unsafe root or incomplete
 scan refuses the **whole** candidate set before any deletion.
 All managed workspace writers must use the harness exclusions; these locks
 are not protection against an unrelated host process mutating the tree.
 
 When the sum of regular-file logical sizes is at least `max_bytes`, all
-validated existing roots are removed; otherwise nothing is removed. This is
-not an allocated-disk quota or an age-based eviction policy. Deletion I/O
-failure can be partial and is recorded as `refused`, never success. The latest
-bounded result is `maintenance/workspace-cache.json` (`checked_at` Unix seconds,
-`status`, `bytes` scanned, `removed_roots`); no file contents or per-file paths
-are recorded. Completed checks and safety refusals consume the interval;
-busy acquisition does not. Missing cadence state is due; malformed, oversized
+validated existing roots are removed with `shutil.rmtree`; otherwise nothing is
+removed. Each file name contributes its logical size, including multiple names
+for the same hardlinked inode. This is not an allocated-disk quota or an age-based
+eviction policy, and the scanned total is not a claim of freed disk space.
+Deletion failure can be partial and is recorded as `refused`, never success.
+
+The latest bounded result is `maintenance/workspace-cache.json`: `checked_at`
+(Unix seconds), `status`, `bytes` (the complete preflight logical-size total,
+or zero if preflight failed), and `removed_roots` (fully removed roots).
+Every newly recorded `refused` result also has one fixed `reason` code; other
+statuses have no `reason`. Codes identify the first refusal, not every unsafe
+entry:
+
+| `reason` | Refusal |
+| --- | --- |
+| `link` | Symlink or Windows reparse point in a root, ancestor or contents |
+| `not-directory` | Workspace, existing root or ancestor is not a directory |
+| `git-metadata` | Workspace Git metadata is not a local directory or regular pointer file |
+| `git-root` | Git cannot prove the workspace is the exact worktree root |
+| `git-index` | Git cannot provide a complete tracked-path listing |
+| `ineligible-root` | Root is not snapshot-excluded or intersects a reserved/protected path |
+| `tracked-path` | Root intersects an indexed path, including aliases or ancestors |
+| `nested-repository` | A `.git` entry occurs within a candidate |
+| `protected-path` | Candidate contains product-private or host-state data |
+| `nonregular-file` | Candidate contains a nonregular, nondirectory entry other than a link |
+| `scan-bound` | Configured entry, depth or scan-time bound exceeded |
+| `preflight-failed` | Other preflight I/O or validation failure, including missing Git metadata |
+| `deletion-failed` | Deletion failed after successful whole-set preflight; removal may be partial |
+
+No paths, exception text, file contents or credentials are recorded. Completed
+checks and safety refusals consume the interval; busy acquisition does not. Missing cadence state is due; malformed, oversized
 (over 4096 bytes), unreadable or future-dated state skips cleanup. There is no
 implicit retry: a later boundary retries when due. Backward clock movement
 therefore delays reclamation, not deletion safety. Maintenance never changes
