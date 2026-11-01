@@ -355,7 +355,8 @@ class WebSeparationTests(Fixture):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         feeds = [f"https://example.org/f{n}" for n in range(40)]
-        web = Web({"hosts": ["example.org"], "feeds": feeds, "cache_seconds": 0,
+        web = Web({"hosts": ["example.org"], "feeds": feeds, "search_feed_item_limit": 200,
+                   "cache_seconds": 0,
                    "timeout_seconds": 1, "max_bytes": 1024, "search_command": [],
                    "intranet": False}, tmp / "cache", tmp / "rcpt")
         seen = []
@@ -375,7 +376,8 @@ class WebSeparationTests(Fixture):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         feeds = [f"https://example.org/f{n}" for n in range(40)]
-        web = Web({"hosts": ["example.org"], "feeds": feeds, "cache_seconds": 0,
+        web = Web({"hosts": ["example.org"], "feeds": feeds, "search_feed_item_limit": 200,
+                   "cache_seconds": 0,
                    "timeout_seconds": 1, "max_bytes": 1024, "search_command": [],
                    "intranet": False}, tmp / "cache", tmp / "rcpt")
         seen = []
@@ -398,7 +400,8 @@ class WebSeparationTests(Fixture):
         from mizu.process import Result
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        web = Web({"hosts": [], "feeds": [], "cache_seconds": 0, "timeout_seconds": 5,
+        web = Web({"hosts": [], "feeds": [], "search_feed_item_limit": 200,
+                   "cache_seconds": 0, "timeout_seconds": 5,
                    "max_bytes": 1048576, "search_command": ["python3", "adapter"],
                    "intranet": False}, tmp / "c", tmp / "r")
         import mizu.web as webmod
@@ -422,7 +425,8 @@ class WebSeparationTests(Fixture):
         from mizu.process import Result
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        web = Web({"hosts": [], "feeds": [], "cache_seconds": 0, "timeout_seconds": 5,
+        web = Web({"hosts": [], "feeds": [], "search_feed_item_limit": 200,
+                   "cache_seconds": 0, "timeout_seconds": 5,
                    "max_bytes": 1048576, "search_command": ["python3", "adapter"],
                    "intranet": False}, tmp / "c", tmp / "r")
         import mizu.web as webmod
@@ -445,7 +449,8 @@ class WebSeparationTests(Fixture):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         feed = "https://example.org/feed"
-        web = Web({"hosts": ["example.org"], "feeds": [feed], "cache_seconds": 0,
+        web = Web({"hosts": ["example.org"], "feeds": [feed], "search_feed_item_limit": 200,
+                   "cache_seconds": 0,
                    "timeout_seconds": 5, "max_bytes": 1048576,
                    "search_command": ["python3", "adapter"], "intranet": False},
                   tmp / "c", tmp / "r")
@@ -472,7 +477,8 @@ class WebSeparationTests(Fixture):
         from mizu.process import Result
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        web = Web({"hosts": [], "feeds": [], "cache_seconds": 0, "timeout_seconds": 5,
+        web = Web({"hosts": [], "feeds": [], "search_feed_item_limit": 200,
+                   "cache_seconds": 0, "timeout_seconds": 5,
                    "max_bytes": 1048576, "search_command": ["python3", "adapter"],
                    "intranet": False}, tmp / "c", tmp / "r")
         import mizu.web as webmod
@@ -494,7 +500,7 @@ class WebSeparationTests(Fixture):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         web = Web({"hosts": ["example.org"], "feeds": ["https://example.org/feed"],
-                   "cache_seconds": 0, "timeout_seconds": 5, "max_bytes": 1048576,
+                   "search_feed_item_limit": 200, "cache_seconds": 0, "timeout_seconds": 5, "max_bytes": 1048576,
                    "search_command": ["python3", "adapter"], "intranet": False},
                   tmp / "c", tmp / "r")
         web.fetch = lambda url: {"id": "r", "text": "<rss><channel><item><title>q</title>"

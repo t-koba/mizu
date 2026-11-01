@@ -610,6 +610,12 @@ class RemainingTests(Fixture):
         with patch("mizu.runtime.bounded", return_value=out):
             response = ctx._op_search({"query": "hi", "limit": 1000})
         self.assertTrue(response["source_truncated"])
+        # The former fixed 200 cutoff is now only the default; 201 retained
+        # feed candidates remain below the independent global cap.
+        web = make_web(feed_xml(item_limit + 1), configured_limit=item_limit + 1)
+        out = web.search("hi")
+        self.assertEqual(len(out["results"]), item_limit + 1)
+        self.assertFalse(out["truncated"])
 
     def test_feed_overflow_forces_truncated_with_room_remaining(self):
         import json

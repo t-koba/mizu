@@ -1594,7 +1594,7 @@ def load(file: Path) -> Config:
     for k in ("cache_seconds", "timeout_seconds", "max_bytes"):
         number(web[k], f"web.{k}", 1, 16777216)
     number(web["diagnostic_bytes"], "web.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
-    number(web["search_feed_item_limit"], "web.search_feed_item_limit", 1, 200)
+    number(web["search_feed_item_limit"], "web.search_feed_item_limit", 1, 1000)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
     keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
