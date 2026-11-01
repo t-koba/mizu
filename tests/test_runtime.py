@@ -286,10 +286,12 @@ class ContextTests(Fixture):
         work_wait = schema["properties"]["wait"]["properties"]
         insight_schema = DEFINITIONS["decide"][1]
         insight_wait = insight_schema["properties"]["wait"]["properties"]
-        self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] + ["ci", "proposal_merged"])
+        self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] +
+                         ["ci", "publication_ci", "proposal_merged"])
         for field in insight_wait.keys() - {"kind"}:
             self.assertEqual(work_wait[field], insight_wait[field])
-        self.assertEqual(work_wait.keys() - insight_wait.keys(), {"publication_id", "proposal_id", "checks"})
+        self.assertEqual(work_wait.keys() - insight_wait.keys(),
+                         {"publication_id", "snapshot_id", "proposal_id", "checks"})
         proposal_wait = {"kind": "proposal_merged", "publication_id": "a" * 64,
                          "proposal_id": "forge:owner/repo#1"}
         validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": proposal_wait}, schema)
