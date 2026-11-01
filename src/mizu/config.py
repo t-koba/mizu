@@ -891,6 +891,7 @@ def role_policy_bytes(role: "Role") -> bytes:
 @dataclasses.dataclass(frozen=True)
 class Usage:
     runs_scanned: int = 5000
+    finish_rate_runs_scanned: int = 512
     recent_entries: int = 200
     cache_affinity_runs: int = 200
     cache_affinity_rows: int = 200
@@ -903,8 +904,9 @@ def usage_policy(raw: dict) -> Usage:
     return Usage(**{
         field.name: number(
             raw.get(field.name, field.default), f"usage.{field.name}",
-            1 if field.name in ("runs_scanned", "recent_entries") else 0,
-            MAX_USAGE_RUNS_SCANNED if field.name == "runs_scanned" else MAX_USAGE_POLICY_COUNT)
+            1 if field.name in ("runs_scanned", "finish_rate_runs_scanned", "recent_entries") else 0,
+            MAX_USAGE_RUNS_SCANNED if field.name in ("runs_scanned", "finish_rate_runs_scanned")
+            else MAX_USAGE_POLICY_COUNT)
         for field in fields
     })
 

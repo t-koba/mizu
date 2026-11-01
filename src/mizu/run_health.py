@@ -117,8 +117,8 @@ def _clear_missing_finish_streak(project, role_name):
         write_json(path, health)
 
 
-# Status reads at most 512 run entries, 64 KiB per record and 8 MiB total.
-MAX_RATE_RUNS = 512
+# The run-entry policy window lives in [usage]. These fixed safety ceilings
+# bound one untrusted record and total status-read content.
 MAX_RATE_FILE_BYTES = 64 * 1024
 MAX_RATE_BYTES = 8 * 1024 * 1024
 
@@ -145,6 +145,7 @@ def finish_only_rates(project, *, as_of=None) -> dict:
     start = end - dt.timedelta(hours=24)
     roles = {role: {"finish_only_units": 0, "completed_units": 0, "reasons": {}}
              for role in project.config.roles}
+    rate_run_limit = project.config.usage.finish_rate_runs_scanned
     scanned = used_bytes = 0
 
     def issue(code, role=None):
@@ -213,7 +214,7 @@ def finish_only_rates(project, *, as_of=None) -> dict:
             raise OSError("unsafe runs directory")
         with os.scandir(runs) as entries:
             for entry in entries:
-                if scanned >= MAX_RATE_RUNS or used_bytes >= MAX_RATE_BYTES:
+                if scanned >= rate_run_limit or used_bytes >= MAX_RATE_BYTES:
                     issue("scan_limit")
                     break
                 scanned += 1

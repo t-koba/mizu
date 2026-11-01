@@ -10,14 +10,17 @@ from mizu.errors import ConfigError
 class UsageConfigTests(Fixture):
     def test_defaults_and_ranges(self):
         self.assertEqual(TOML_INTEGER_MAX, 9223372036854775807)
-        expected = dict(runs_scanned=5000, recent_entries=200, cache_affinity_runs=200,
+        expected = dict(runs_scanned=5000, finish_rate_runs_scanned=512,
+                        recent_entries=200, cache_affinity_runs=200,
                         cache_affinity_rows=200, unknown_keys=20)
         self.assertEqual(dataclasses.asdict(self.config.usage), expected)
         self.assertEqual(dataclasses.asdict(Usage()), expected)
         original = self.file.read_text()
         for field, default in expected.items():
-            minimum = 1 if field in ("runs_scanned", "recent_entries") else 0
-            maximum = MAX_USAGE_RUNS_SCANNED if field == "runs_scanned" else MAX_USAGE_POLICY_COUNT
+            minimum = 1 if field in ("runs_scanned", "finish_rate_runs_scanned", "recent_entries") else 0
+            maximum = (MAX_USAGE_RUNS_SCANNED
+                       if field in ("runs_scanned", "finish_rate_runs_scanned")
+                       else MAX_USAGE_POLICY_COUNT)
             accepted = tuple(map(str, (minimum, default, default + 1, maximum)))
             for value in (*accepted, str(minimum - 1), str(maximum + 1),
                           str(TOML_INTEGER_MAX + 1),

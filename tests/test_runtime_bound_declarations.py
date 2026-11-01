@@ -1,6 +1,6 @@
 """First runtime-bound inventory, not a general numeric-literal linter.
 
-The six files below cover named, direct module-level Assign/AnnAssign bounds
+The eight files below cover named, direct module-level Assign/AnnAssign bounds
 and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
@@ -38,6 +38,10 @@ DECLARATIONS = {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
     },
+    'run_health.py': {
+        'MAX_RATE_FILE_BYTES': ('64 * 1024', 'safety', 'run health / bounded untrusted result-record read'),
+        'MAX_RATE_BYTES': ('8 * 1024 * 1024', 'safety', 'run health / total status-rate content-read ceiling'),
+    },
     'web.py': {
         'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
     },
@@ -66,6 +70,7 @@ CONFIGURED_SETTINGS = {
 CONFIGURED = {
     'Usage': {
         'runs_scanned': ('5000', 'configured policy', 'usage / history scan work budget'),
+        'finish_rate_runs_scanned': ('512', 'configured policy', 'usage / finish-only status history window'),
         'recent_entries': ('200', 'configured policy', 'usage / recent-entry output sample'),
         'unknown_keys': ('20', 'configured policy', 'usage / unknown-key diagnostic sample'),
         'cache_affinity_rows': ('200', 'configured policy', 'usage / affinity output sample'),

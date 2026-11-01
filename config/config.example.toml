@@ -14,11 +14,14 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 
 # Read-only report detail/sample budgets; defaults shown, not hard maxima.
 # Strict integers up to the TOML/Python collection-index range (not resource budgets).
-# runs_scanned leaves one index for its truncation-detection candidate.
+# runs_scanned and finish_rate_runs_scanned leave one index for a truncation candidate.
 # runs_scanned limits detail reads, not enumeration of all run directories/mtimes.
+# finish_rate_runs_scanned limits the 24-hour status-rate scan; fixed 64 KiB/file
+# and 8 MiB total read safety caps remain in force.
 # These settings do not impose a whole-report byte cap.
 # [usage]
 # runs_scanned = 5000        # Minimum 1; newest-first physical-run detail window.
+# finish_rate_runs_scanned = 512 # Minimum 1; run-entry window for finish-only status rate.
 # recent_entries = 200      # Minimum 1; retained summary entries.
 # cache_affinity_runs = 200 # Minimum 0; also limited by runs_scanned; zero disables scan.
 # cache_affinity_rows = 200 # Minimum 0; retained rows; total within dispatch record caps.

@@ -1,4 +1,5 @@
 """Read-only, incomplete-safe finish-only health facts from retained activity."""
+import dataclasses
 import datetime as dt
 import json
 import os
@@ -140,12 +141,20 @@ class FinishOnlyRateTests(Fixture):
         self.record("b")
         one_entry_bytes = ((first / "result.json").stat().st_size
                            + (first / "started.json").stat().st_size)
-        for bound in ({"MAX_RATE_RUNS": 1}, {"MAX_RATE_BYTES": one_entry_bytes}):
-            with self.subTest(bound=bound), patch.multiple("mizu.run_health", **bound):
-                worker = self.worker()
-                self.assertEqual(worker["status"], "incomplete")
-                self.assertEqual(worker["reasons"], {"scan_limit": 1})
-                self.assertIsNone(worker["rate"])
+        limited_usage = dataclasses.replace(
+            self.project.config.usage, finish_rate_runs_scanned=1)
+        with patch.object(self.project, "config", dataclasses.replace(
+                self.project.config, usage=limited_usage)):
+            worker = self.worker()
+        self.assertEqual(worker["status"], "incomplete")
+        self.assertEqual(worker["reasons"], {"scan_limit": 1})
+        self.assertIsNone(worker["rate"])
+
+        with patch("mizu.run_health.MAX_RATE_BYTES", one_entry_bytes):
+            worker = self.worker()
+        self.assertEqual(worker["status"], "incomplete")
+        self.assertEqual(worker["reasons"], {"scan_limit": 1})
+        self.assertIsNone(worker["rate"])
 
     def test_unknown_identity_or_time_and_missing_inventory(self):
         for extra in ({"role": None}, {"role": "bad!"}, {"finished_at": "bad"},

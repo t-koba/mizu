@@ -763,22 +763,27 @@ Day-files (`data/budget/YYYY-MM-DD.json`) keep the date in the configured `timez
 
 ## Usage reports
 
-`[usage]` controls read-only usage summary work, history windows and output
-samples. All fields are strict integers (booleans are rejected); omitted fields
-retain the defaults below. Unknown keys and non-table sections are rejected.
-These are configurable policy budgets, not fixed resource ceilings. Lower values
-can reduce history coverage or displayed samples; reports retain their existing
-shape and flags. The general upper bound is `MAX_USAGE_POLICY_COUNT`, the smaller
-of TOML's signed-64-bit integer maximum (`TOML_INTEGER_MAX`, 9223372036854775807)
-and Python's `sys.maxsize`, because counts flow through collection-index APIs.
-`runs_scanned` is capped one lower at `MAX_USAGE_RUNS_SCANNED` so the extra
-candidate used to detect truncation also fits. These are representation/API
-bounds, not resource budgets. Increasing settings can increase work and memory;
-these settings impose no whole-report byte cap.
+`[usage]` controls read-only usage summary work, history windows, output samples
+and the run-entry window for the finish-only rate shown in project status. All
+fields are strict integers (booleans are rejected); omitted fields retain the
+defaults below. Unknown keys and non-table sections are rejected. These are
+configurable policy budgets, not fixed resource ceilings. Lower values can
+reduce history coverage or displayed samples while preserving the existing
+result shapes and incomplete flags. The general upper bound is
+`MAX_USAGE_POLICY_COUNT`, the smaller of TOML's signed-64-bit integer maximum
+(`TOML_INTEGER_MAX`, 9223372036854775807) and Python's `sys.maxsize`, because
+counts flow through collection-index APIs. `runs_scanned` and
+`finish_rate_runs_scanned` are capped one lower at `MAX_USAGE_RUNS_SCANNED` so
+the extra candidate used to detect truncation also fits. These are
+representation/API bounds, not recommended operating values. Increasing a
+window can increase scan work. The usage summary has no whole-report byte cap;
+the status rate scan separately keeps fixed safety ceilings of 64 KiB per
+record and 8 MiB total read content.
 
 ```toml
 [usage]
 runs_scanned = 5000
+finish_rate_runs_scanned = 512
 recent_entries = 200
 cache_affinity_runs = 200
 cache_affinity_rows = 200
@@ -788,6 +793,7 @@ unknown_keys = 20
 | Key | Default | Range | Meaning |
 |---|---|---|---|
 | `runs_scanned` | 5000 | 1–`MAX_USAGE_RUNS_SCANNED` | Maximum physical runs whose report records are read after selecting newest-first by mtime/name; selecting still enumerates eligible run directories, and one extra candidate detects `truncated` |
+| `finish_rate_runs_scanned` | 512 | 1–`MAX_USAGE_RUNS_SCANNED` | Maximum run-directory entries examined by the read-only 24-hour finish-only status rate; one extra entry detects incomplete coverage, and the separate 64 KiB/8 MiB fixed safety caps bound content reads |
 | `recent_entries` | 200 | 1–`MAX_USAGE_POLICY_COUNT` | Recent summary entries retained by finish time/run identity; `entries_truncated` compares the full selected-entry count |
 | `cache_affinity_runs` | 200 | 0–`MAX_USAGE_POLICY_COUNT` | Dispatch-evidence run window, also bounded by `runs_scanned`; `runs_truncated` compares the candidate list with this window |
 | `cache_affinity_rows` | 200 | 0–`MAX_USAGE_POLICY_COUNT` | Maximum converted/retained newest-first attempt rows; selected records are scanned within `[dispatch_evidence].max_attempts` for eligible-attempt `total`; `truncated` marks omitted rows or attempts |
