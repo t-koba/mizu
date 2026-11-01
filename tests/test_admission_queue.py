@@ -452,17 +452,33 @@ class QueueTests(Fixture):
         self.tune(parallel_runs=2)
         external = (self.config.data / 'validation' / 'smoke-runs' / ('c' * 32)
                     / 'projects' / ('smoke-' + 'd' * 32))
+        # A managed project may carry the same name as the isolated one; the
+        # persisted key cannot distinguish them, so the external marker must
+        # keep the probe out of data/projects entirely.
+        managed = self.config.data / 'projects' / external.name
+        (managed / 'locks').mkdir(parents=True)
         with contextlib.closing(
                 _Queue(self.config, (external / 'locks/run-worker.lock',))) as head:
-            held = head.attempt(enqueue=True)
-            try:
-                with contextlib.closing(_Queue(
-                        self.config, (role_exclusion(self.project.root, 'reporter'),))) as tail:
-                    with tail.attempt(enqueue=True):
-                        pass
-            finally:
-                held.close()
-        self.assertFalse((self.config.data / 'projects' / external.name).exists())
+            with self.raw_slots():
+                with self.assertRaises(Busy):
+                    head.attempt(enqueue=True)
+            self.assertTrue(self.tickets()[0]['external'])
+            with contextlib.closing(_Queue(
+                    self.config, (role_exclusion(self.project.root, 'reporter'),))) as tail:
+                with tail.attempt(enqueue=True):
+                    pass
+        self.assertFalse((managed / 'locks/run-worker.lock').exists())
+
+    def test_external_ticket_marker_is_schema_checked(self):
+        path = self.config.data / 'slots/queue.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, {'version': 1, 'tickets': [{
+            'id': 'a' * 32, 'owner': 0,
+            'resources': ['smoke-' + 'a' * 32 + '/locks/run-worker.lock'],
+            'enqueued_at': '2026-10-24T00:00:00+00:00', 'external': 'yes'}]})
+        with self.assertRaises(Busy):
+            with admission(self.config):
+                pass
 
     @contextlib.contextmanager
     def pending_slot(self, owner):

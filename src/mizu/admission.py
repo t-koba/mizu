@@ -174,8 +174,10 @@ def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
     tickets = state["tickets"]
     owners, identities = set(), set()
     for ticket in tickets:
-        if (not isinstance(ticket, dict) or set(ticket) not in ({"id", "owner", "resources"},
-                                                               {"id", "owner", "resources", "enqueued_at"})
+        if (not isinstance(ticket, dict)
+                or not {"id", "owner", "resources"} <= set(ticket)
+                or not set(ticket) <= {"id", "owner", "resources", "enqueued_at", "external"}
+                or ("external" in ticket and type(ticket["external"]) is not bool)
                 or not isinstance(ticket["id"], str) or len(ticket["id"]) != 32
                 or any(c not in "0123456789abcdef" for c in ticket["id"])
                 or type(ticket["owner"]) is not int or not 0 <= ticket["owner"] < capacity
@@ -248,6 +250,10 @@ class _Queue:
             raise Denied("Execution admission resources are invalid") from None
         self.paths = paths
         self.resources = tuple(keys)
+        # A project outside data/projects cannot be probed by a peer that only
+        # has the persisted key. Mark its tickets so peers treat them as
+        # blocked instead of resolving a same-named managed path.
+        self.external = bool(paths) and project != self.projects / project.name
         if len(self.resources) > 2 or any(not _valid_resource(p) for p in self.resources):
             raise Denied("Execution admission resources are invalid")
         # Version-1 queues previously used parallel_runs for pending owners
@@ -322,8 +328,11 @@ class _Queue:
             except Busy:
                 continue
             self.alive = manager
-            tickets.append({"id": self.identity, "owner": owner,
-                            "resources": list(self.resources), "enqueued_at": now()})
+            ticket = {"id": self.identity, "owner": owner,
+                      "resources": list(self.resources), "enqueued_at": now()}
+            if self.external:
+                ticket["external"] = True
+            tickets.append(ticket)
             self._write(tickets)
             if self.reuse_pending:
                 entry = _PendingAdmission(self.identity, manager)
@@ -379,6 +388,11 @@ class _Queue:
                 for ticket in tickets:
                     if ticket["id"] == self.identity:
                         break
+                    if ticket.get("external"):
+                        # The persisted key names a project outside
+                        # data/projects, so there is no local path to probe.
+                        # Treat the peer as blocked; its owner still runs it.
+                        continue
                     try:
                         with contextlib.ExitStack() as probe:
                             self._resources(probe, ticket["resources"])
@@ -526,7 +540,7 @@ def _state_bytes(capacity: int) -> int:
     longest = f"{'a' * 63}/locks/run-{'a' * 63}.lock"
     return len(canonical({"version": 1, "tickets": []})) + capacity * len(canonical(
         {"id": "f" * 32, "owner": capacity - 1, "resources": [longest, longest],
-         "enqueued_at": "2099-01-01T00:00:00.000000+00:00"}))
+         "enqueued_at": "2099-01-01T00:00:00.000000+00:00", "external": False}))
 
 
 @contextlib.contextmanager
