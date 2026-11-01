@@ -14,13 +14,16 @@ jobs:
     # Native service operation and live inference are not asserted here. Only
     # Ubuntu 24.04/Python 3.13 additionally exercises real rootless OCI isolation.
     runs-on: ${{ matrix.os }}
-    # The suite costs about 923 s on the development host, about 1050 s on a
-    # loaded verification host (the 2026-10-21 run was still running when the
-    # previous 1000-second child bound cut it off) and about 1475 s on a slow
-    # Windows runner (the 2026-10-21 Windows/3.13 run completed 2233 of about
-    # 2265 tests at the previous 1450-second cap with no test failure). One
-    # 1800-second child bound covers the slowest supported host with margin,
-    # so every cell holds the same modelled setup/child/later-phase/cleanup/
+    # The suite costs about 923 s on the development host and about 1050 s on
+    # a loaded verification host (the 2026-10-21 run was still running when the
+    # previous 1000-second child bound cut it off). Measured Windows cells have
+    # since reached the edge: on 2026-11-01 the 3.14 job took 1282 s on one
+    # publication and was cut off at the 1800-second child bound on the next, a
+    # documentation-only change, while 3.11 took 1710 s and an earlier 3.13 job
+    # took 1628 s. The bound therefore no longer carries the margin this
+    # comment previously claimed; whether the child bound or the suite duration
+    # should move is an operator decision. Every cell still holds the same
+    # modelled setup/child/later-phase/cleanup/
     # suffix path (3246 s) inside a 60-minute scope and the gate reports its
     # own bounded outcome instead of being cut off by the job scope. The
     # later phase runs one child per check (nine on Windows, sixteen in a

@@ -497,11 +497,13 @@ def core_cell_scope_seconds(child_timeout: int, staging_timeout: int) -> int:
 
 
 #: The wall-clock bound the gate holds the Python suite child to. The suite
-#: costs about 923 s on the development host, about 1050 s on a loaded
+#: costs about 923 s on the development host and about 1050 s on a loaded
 #: verification host (the 2026-10-21 run was still running when the previous
-#: 1000 s bound cut it off) and about 1475 s on a slow Windows runner. One
-#: bound covers the measured cost of the slowest supported host with margin,
-#: so the modelled path and every enclosing scope are the same everywhere.
+#: 1000 s bound cut it off). On 2026-11-01 a Windows 3.14 child was cut off at
+#: this bound on a documentation-only change after the same cell took 1282 s;
+#: the 3.11 and 3.13 Windows cells have measured 1710 s and 1628 s. The bound
+#: is at its edge, not comfortably above the slowest host; changing it or the
+#: operator-owned job scope is a separate decision.
 SUITE_CHILD_TIMEOUT_SECONDS = 1800
 
 

@@ -324,10 +324,15 @@ authoritative `durable-contract` job publishes its own. Each supported host's
 suite cost is therefore measured where it runs, so the one shared child bound
 rests on measured costs rather than on a sibling host's measurement. It
 records diagnostic evidence; it sets no timeout policy. One 1800 s child cap bounds the suite on every
-platform: the suite costs about 923 s on the development host, about 1050 s
+platform: the suite costs about 923 s on the development host and about 1050 s
 on a loaded verification host (the 2026-10-21 run was still running when the
-previous 1000 s bound cut it off) and about 1475 s on a slow Windows runner,
-so the bound covers the slowest supported host with margin. The modeled
+previous 1000 s bound cut it off). Measured Windows cells have since reached
+that edge: on 2026-11-01 the 3.14 job took 1282 s on one publication and was
+cut off at the 1800 s child bound on the next, a documentation-only change;
+the same run's 3.11 job took 1710 s, and an earlier 3.13 job took 1628 s. The
+bound therefore no longer carries the margin this paragraph previously
+claimed; whether the child bound or the suite duration should move is an
+operator decision, with the retained per-cell artifacts as evidence. The modeled
 setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
 the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
 worst-case runtime claim. The authoritative `durable-contract` scope is 70
