@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 from support import Fixture
+from mizu import fs as fs_module
 from mizu.budget import Budget
 from mizu.config import MAX_USAGE_POLICY_COUNT, Limits, load
 from mizu.errors import ConfigError, Denied, InfraExceeded
@@ -85,6 +86,59 @@ class PerProjectBudgetTests(unittest.TestCase):
                              {"status": "unavailable", "project": "alpha"})
         # Legacy usage still reads a file larger than the selected byte budget.
         self.assertEqual(budget.usage("alpha")["used"], 2)
+
+    def test_peek_at_large_bounds_reads_from_file_size_not_limit(self):
+        class StreamSpy:
+            def __init__(self, stream, sizes):
+                self.stream, self.sizes = stream, sizes
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+            def read(self, size=-1):
+                self.sizes.append(size)
+                return self.stream.read(size)
+
+        maxima = (MAX_USAGE_POLICY_COUNT // 2, MAX_USAGE_POLICY_COUNT)
+        branches = [("portable", False)]
+        if fs_module._platform.HAS_OPENAT and fs_module._platform.HAS_DIR_FD:
+            branches.insert(0, ("openat", True))
+        original_fdopen = fs_module.os.fdopen
+        original_path_open = Path.open
+
+        for maximum in maxima:
+            with self.subTest(maximum=maximum):
+                budget = Budget(self.root, 5, day_file_bytes=maximum)
+                day = budget._today()
+                budget.take("one", day=day, project="alpha")
+                path = self.root / f"{day}.json"
+                expected_read_size = path.stat().st_size + 1
+                self.assertLess(expected_read_size, maximum)
+                for branch, use_openat in branches:
+                    with self.subTest(branch=branch):
+                        sizes = []
+
+                        def tracked_fdopen(fd, *args, **kwargs):
+                            return StreamSpy(original_fdopen(fd, *args, **kwargs), sizes)
+
+                        def tracked_path_open(target, *args, **kwargs):
+                            return StreamSpy(original_path_open(target, *args, **kwargs), sizes)
+
+                        with patch.object(fs_module._platform, "HAS_OPENAT", use_openat), \
+                                patch.object(fs_module._platform, "HAS_DIR_FD", use_openat), \
+                                patch.object(fs_module.os, "fdopen", side_effect=tracked_fdopen), \
+                                patch.object(Path, "open", tracked_path_open):
+                            report = budget.peek("alpha")
+                        self.assertEqual(report["status"], "current")
+                        self.assertEqual(report["used"], 1)
+                        self.assertEqual(sizes, [expected_read_size])
 
     def test_usage_reports_both_and_rejects_bad_names(self):
         budget = Budget(self.root, 5)

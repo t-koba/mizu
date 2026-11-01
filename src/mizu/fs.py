@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -591,9 +592,13 @@ def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: in
                 raise Denied("Only regular, non-hardlinked files are readable")
             if before.st_size > maximum:
                 raise LimitExceeded("File exceeds configured byte limit")
-            data = stream.read(maximum + 1)
+            # Bound by the observed size and Python's read-length ceiling: a
+            # large accepted cap must not request an unrelated allocation or
+            # overflow ssize_t. The post-read stat detects growth beyond the cap.
+            read_size = min(maximum + 1, before.st_size + 1, sys.maxsize)
+            data = stream.read(read_size)
             after = os.fstat(stream.fileno())
-            if len(data) > maximum:
+            if len(data) > maximum or after.st_size > maximum:
                 raise LimitExceeded("File grew past configured byte limit")
             if _file_identity(before) != _file_identity(after):
                 raise Denied("File changed while reading; retry at a stable boundary")
@@ -649,9 +654,13 @@ def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: 
                 raise Denied("Only regular, non-hardlinked files are readable")
             if not _same_file(info, before):
                 raise Denied("File changed before reading")
-            data = stream.read(maximum + 1)
+            # Bound by the observed size and Python's read-length ceiling: a
+            # large accepted cap must not request an unrelated allocation or
+            # overflow ssize_t. The post-read stat detects growth beyond the cap.
+            read_size = min(maximum + 1, before.st_size + 1, sys.maxsize)
+            data = stream.read(read_size)
             after = os.fstat(stream.fileno())
-        if len(data) > maximum:
+        if len(data) > maximum or after.st_size > maximum:
             raise LimitExceeded("File grew past configured byte limit")
         check_components()
         if _file_identity(before) != _file_identity(after) or not _same_file(after, target.stat()):

@@ -458,7 +458,7 @@ class RemainingTests(Fixture):
             return Stream(stream) if path==target and args and args[0]=='rb' else stream
         with patch.object(fs._platform,'HAS_OPENAT',False),patch.object(Path,'open',opening):
             self.assertEqual(fs.safe_read(self.root,'portable',32),b'old')
-            self.assertEqual(calls,[33])
+            self.assertEqual(calls,[4])
             changed=True
             with self.assertRaises(Denied):fs.safe_read(self.root,'portable',32)
 
