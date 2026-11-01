@@ -25,7 +25,7 @@ elif [ "$#" -eq 1 ]; then
 elif [ "$#" -ne 0 ]; then
   usage >&2; exit 2
 fi
-"$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" "${REUSE_ARGS[@]}" > "$TEMP/install.json"
+"$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" "${REUSE_ARGS[@]+"${REUSE_ARGS[@]}"}" > "$TEMP/install.json"
 "$BIN/mizu" --version
 python3 - "$CONFIG" "$TEMP" <<'PY'
 import json, pathlib, sys
@@ -33,7 +33,7 @@ config, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 config.write_text(config.read_text().replace('data_dir = "~/.local/state/mizu"', 'data_dir = ' + json.dumps(str(root / 'state'))))
 (root / 'configuration-before').write_bytes(config.read_bytes())
 PY
-"$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" "${REUSE_ARGS[@]}" > "$TEMP/reinstall.json"
+"$ROOT/scripts/setup.sh" --core-only --prefix "$PREFIX" --bin-dir "$BIN" --config "$CONFIG" "${REUSE_ARGS[@]+"${REUSE_ARGS[@]}"}" > "$TEMP/reinstall.json"
 cmp -- "$CONFIG" "$TEMP/configuration-before"
 "$BIN/mizu" --config "$CONFIG" init demo --source "$ROOT/examples/demo" --goal "$ROOT/examples/PROJECT.md" --roles worker --verify 'python3 -m unittest discover -v' > "$TEMP/init.json"
 "$BIN/mizu" --config "$CONFIG" report demo > "$TEMP/report.json"
