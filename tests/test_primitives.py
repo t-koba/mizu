@@ -790,10 +790,13 @@ class ProcessTests(unittest.TestCase):
         result = run([sys.executable, "-c", "import time; time.sleep(20)"], timeout=5, maximum=100, cancel=lambda: True)
         self.assertEqual(result.reason, "cancelled")
 
-    def test_environment_does_not_leak_keys(self):
-        with patch.dict(os.environ, {"SECRET_API_KEY": "never-forward", "NODE_OPTIONS": "evil"}):
-            self.assertNotIn("SECRET_API_KEY", environment())
-            self.assertNotIn("NODE_OPTIONS", environment())
+    def test_environment_does_not_leak_keys_and_pins_python_pipe_encoding(self):
+        with patch.dict(os.environ, {"SECRET_API_KEY": "never-forward", "NODE_OPTIONS": "evil",
+                                     "PYTHONIOENCODING": "cp1252"}):
+            env = environment(extra={"PYTHONIOENCODING": "latin-1"})
+            self.assertNotIn("SECRET_API_KEY", env)
+            self.assertNotIn("NODE_OPTIONS", env)
+            self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
 
     def test_orphan_pipe_is_bounded(self):
         if not hasattr(os, "fork"):

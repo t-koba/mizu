@@ -84,6 +84,7 @@ def _text(raw: bytearray) -> str:
 
 
 def environment(*, extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a minimal child environment for the product's bounded protocols."""
     allowed = {"PATH", "HOME", "LANG", "LC_ALL", "TERM", "XDG_RUNTIME_DIR",
                "XDG_CONFIG_HOME", "XDG_DATA_HOME", "DBUS_SESSION_BUS_ADDRESS"}
     if _platform.IS_WINDOWS:
@@ -92,7 +93,12 @@ def environment(*, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: os.environ[k] for k in allowed if k in os.environ}
     env.setdefault("PATH", os.defpath)
     env.setdefault("LANG", "C.UTF-8")
-    return {**env, **(extra or {})}
+    # Adapter JSON is UTF-8 on pipes. Python on Windows may ignore LANG for
+    # redirected standard streams, so pin its text encoding independently.
+    # Native children ignore this Python-specific variable.
+    child_env = {**env, **(extra or {})}
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    return child_env
 
 
 def terminate(process: subprocess.Popen, grace: float = 1.0) -> None:
