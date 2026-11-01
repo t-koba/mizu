@@ -1226,6 +1226,18 @@ class WorkItemTests(Fixture):
             self.assertEqual(page["total"], 3)
             self.assertEqual(len(page["items"]), 2)
             self.assertEqual(spy.call_count, 3)
+        snapshot = self.snapshot("valid")
+        self.store.transition(first_id, expected_rev=2, status="doing", actor="worker",
+                              snapshot_id=snapshot["id"])
+        self.store.transition(first_id, expected_rev=3, status="done", actor="worker",
+                              snapshot_id=snapshot["id"])
+        with patch.object(self.store, "_history_revisions",
+                          wraps=self.store._history_revisions) as spy:
+            closed = self.store.page_closed_readonly(limit=10)
+            self.assertEqual(closed["total"], 1)
+            self.assertEqual(len(closed["items"]), 1)
+            self.assertEqual(closed["items"][0]["id"], first_id)
+            self.assertEqual(spy.call_count, 3)
 
     def test_concurrent_same_revision_has_one_winner(self):
         barrier = threading.Barrier(2)

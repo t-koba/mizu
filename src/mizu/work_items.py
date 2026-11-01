@@ -1998,10 +1998,10 @@ class WorkItems:
         """
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
-        events = self._iter_item_events(recover=not readonly)
+        events = self._iter_item_events_with_revisions(recover=not readonly)
         selected = []
         total = 0
-        for event_id, event in events:
+        for event_id, event, scanned in events:
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind != "seed":
                 continue
@@ -2010,8 +2010,9 @@ class WorkItems:
             # are not returned. Keep the full chain replay but skip those
             # unused manifests. _validate_transition still validates the
             # current done snapshot strictly when it reaches the closure.
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=not readonly)
             item = self._get(seed["id"], seed_event=event,
-                             history_revisions=self._history_revisions(seed["id"], recover=not readonly),
+                             history_revisions=revisions,
                              verify_snapshots=False)
             if item["status"] not in ("done", "dropped"):
                 continue
