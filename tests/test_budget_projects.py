@@ -138,7 +138,7 @@ class PerProjectBudgetTests(unittest.TestCase):
                             report = budget.peek("alpha")
                         self.assertEqual(report["status"], "current")
                         self.assertEqual(report["used"], 1)
-                        self.assertEqual(sizes, [expected_read_size])
+                        self.assertEqual(sizes, [expected_read_size, 1])
 
     def test_usage_reports_both_and_rejects_bad_names(self):
         budget = Budget(self.root, 5)

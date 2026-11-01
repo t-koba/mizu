@@ -392,6 +392,39 @@ class FileTests(unittest.TestCase):
         (self.root / "x").write_bytes("unicode\u2028value".encode())
         self.assertEqual(safe_read(self.root, "x", 100), "unicode\u2028value".encode())
 
+    def test_safe_read_continues_when_reported_size_understates_content(self):
+        from types import SimpleNamespace
+        from mizu import fs
+
+        payload = bytes(range(256)) * 40
+        (self.root / "virtual").write_bytes(payload)
+        real_fstat = os.fstat
+
+        def underreported_size(fd):
+            info = real_fstat(fd)
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+                                   st_mode=info.st_mode, st_nlink=info.st_nlink,
+                                   st_size=0, st_mtime_ns=info.st_mtime_ns,
+                                   st_ctime_ns=info.st_ctime_ns)
+
+        # Exercise the portable path on every host. The path stat remains the
+        # actual fixture identity; the handle reports the synthetic virtual-file
+        # size, as procfs does. Cross-API identity is deliberately mocked because
+        # this test isolates read completeness, not platform stat semantics.
+        with patch.object(fs._platform, "HAS_OPENAT", False), \
+             patch.object(fs, "_same_file", return_value=True), \
+             patch.object(fs.os, "fstat", side_effect=underreported_size):
+            self.assertEqual(fs.safe_read(self.root, "virtual", len(payload)), payload)
+            with self.assertRaises(LimitExceeded):
+                fs.safe_read(self.root, "virtual", 1024)
+
+        if fs._platform.HAS_OPENAT and fs._platform.HAS_DIR_FD:
+            with patch.object(fs.os, "fstat", side_effect=underreported_size):
+                self.assertEqual(fs._safe_read_openat(
+                    self.root, "virtual", ("virtual",), len(payload))[0], payload)
+                with self.assertRaises(LimitExceeded):
+                    fs._safe_read_openat(self.root, "virtual", ("virtual",), 1024)
+
     def test_read_size_bound(self):
         (self.root / "x").write_bytes(b"12345")
         with self.assertRaises(LimitExceeded):

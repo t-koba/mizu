@@ -5,11 +5,11 @@ import contextlib
 import datetime as dt
 import errno
 import hashlib
+import io
 import json
 import os
 import re
 import stat
-import sys
 import tempfile
 import threading
 import time
@@ -592,11 +592,7 @@ def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: in
                 raise Denied("Only regular, non-hardlinked files are readable")
             if before.st_size > maximum:
                 raise LimitExceeded("File exceeds configured byte limit")
-            # Bound by the observed size and Python's read-length ceiling: a
-            # large accepted cap must not request an unrelated allocation or
-            # overflow ssize_t. The post-read stat detects growth beyond the cap.
-            read_size = min(maximum + 1, before.st_size + 1, sys.maxsize)
-            data = stream.read(read_size)
+            data = _read_bounded(stream, maximum, before.st_size)
             after = os.fstat(stream.fileno())
             if len(data) > maximum or after.st_size > maximum:
                 raise LimitExceeded("File grew past configured byte limit")
@@ -607,6 +603,33 @@ def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: in
         raise Denied(f"Unsafe or unavailable path: {name}") from exc
     finally:
         os.close(fd)
+
+
+def _read_bounded(stream: BinaryIO, maximum: int, observed_size: int) -> bytes:
+    """Read to EOF or maximum-plus-one without trusting a file's reported size.
+
+    The initial request is sized from the observed file and Python's buffer
+    size, not the configured cap. A short initial read is probed once; any
+    continuation is then read in bounded buffer-sized chunks until EOF. The
+    extra byte makes over-limit content observable without an unbounded read.
+    """
+    limit = maximum + 1
+    first_size = min(limit, observed_size + 1, io.DEFAULT_BUFFER_SIZE)
+    first = stream.read(first_size)
+    if not first:
+        return first
+    data = bytearray(first)
+    if len(first) < first_size:
+        extra = stream.read(1)
+        if not extra:
+            return first
+        data.extend(extra)
+    while len(data) < limit:
+        chunk = stream.read(min(limit - len(data), io.DEFAULT_BUFFER_SIZE))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
 
 
 def _file_identity(info):
@@ -654,11 +677,7 @@ def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: 
                 raise Denied("Only regular, non-hardlinked files are readable")
             if not _same_file(info, before):
                 raise Denied("File changed before reading")
-            # Bound by the observed size and Python's read-length ceiling: a
-            # large accepted cap must not request an unrelated allocation or
-            # overflow ssize_t. The post-read stat detects growth beyond the cap.
-            read_size = min(maximum + 1, before.st_size + 1, sys.maxsize)
-            data = stream.read(read_size)
+            data = _read_bounded(stream, maximum, before.st_size)
             after = os.fstat(stream.fileno())
         if len(data) > maximum or after.st_size > maximum:
             raise LimitExceeded("File grew past configured byte limit")
