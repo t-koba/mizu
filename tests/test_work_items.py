@@ -57,11 +57,13 @@ class WorkItemTests(Fixture):
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
                 self.store.blocked_liveness_readonly, self.store.page_open_for_order)
 
-    def test_status_projections_skip_unused_delivery_snapshots_but_done_write_is_strict(self):
+    def test_status_projections_skip_superseded_snapshots_and_check_current_binding(self):
         self.change("doing")
-        snapshot = self.snapshot("valid")
-        self.bind(snapshot)
-        blocked = self.change("blocked", expected_rev=3,
+        historical = self.snapshot("valid")
+        self.bind(historical)
+        current_snapshot = self.snapshot("valid")
+        self.bind(current_snapshot, expected_rev=3)
+        blocked = self.change("blocked", expected_rev=4,
                               wait={"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
         readers = self.status_readers()
         expected = [reader() for reader in readers]
@@ -73,50 +75,72 @@ class WorkItemTests(Fixture):
             self.assertTrue({"delivery", "snapshot_id", "verification"}.isdisjoint(row))
         self.assertEqual(expected[4]["items"][0]["wait_liveness"]["state"], "due")
         self.assertEqual(expected[5]["items"][0]["state"], "due")
-        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+        get_snapshot = self.store.snapshots.get
+
+        def current_only(snapshot_id):
+            self.assertEqual(snapshot_id, current_snapshot["id"])
+            return get_snapshot(snapshot_id)
+
+        with patch.object(self.store.snapshots, "get", side_effect=current_only) as get:
             for reader, result in zip(readers, expected):
                 with self.subTest(reader=reader.__name__):
                     self.assertEqual(reader(), result)
-            get.assert_not_called()
+            self.assertEqual(get.call_count, len(readers))
+            self.assertTrue(all(call.args == (current_snapshot["id"],)
+                                for call in get.call_args_list))
+
+        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+            for reader in readers:
+                with self.subTest(unavailable_current=reader.__name__):
+                    if reader == self.store.blocked_liveness_readonly:
+                        result = reader()
+                        self.assertEqual(result["diagnostic"], "unreadable")
+                        self.assertFalse(result["coverage_complete"])
+                    else:
+                        with self.assertRaisesRegex(Denied, "snapshot unavailable"):
+                            reader()
+            self.assertGreater(get.call_count, 0)
+
+        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
-                self.change("done", expected_rev=4, snapshot_id=snapshot["id"])
-            get.assert_called_once_with(snapshot["id"])
+                self.change("done", expected_rev=5, snapshot_id=current_snapshot["id"])
+            get.assert_called_once_with(historical["id"])
         self.assertEqual(self.store.get(self.item_id), blocked)
-        self.assertFalse((self.directory / "5.json").exists())
+        self.assertFalse((self.directory / "6.json").exists())
 
     def test_status_projections_still_validate_delivery_and_transition_fields(self):
         self.change("doing")
         self.bind(self.snapshot("valid"))
-        blocked = self.change("blocked", expected_rev=3,
-                              wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
         path = self.directory / "3.json"
         binding = json.loads(path.read_text())
         corruptions = [dict(binding, title="Rewritten seed"),
                        dict(binding, transition={"from": "open", "to": "doing"}),
                        dict(binding, unexpected=True)]
         for field, value in (("code_digest", "not-a-digest"), ("code_digest", None),
-                             ("snapshot_id", "invalid"), ("binding_rev", 2),
-                             ("scope_digest", "0" * 64)):
+                             ("code_digest", "0" * 64), ("snapshot_id", "invalid"),
+                             ("binding_rev", 2), ("scope_digest", "0" * 64)):
             corruptions.append({**binding, "delivery": {**binding["delivery"], field: value}})
-        with patch.object(self.store.snapshots, "get", side_effect=AssertionError("unused snapshot")) as get:
-            for index, corrupt in enumerate(corruptions):
-                write_json(path, corrupt)
-                for reader in self.status_readers():
-                    with self.subTest(corruption=index, reader=reader.__name__):
-                        if reader == self.store.blocked_liveness_readonly:
-                            result = reader()
-                            self.assertEqual(result["diagnostic"], "unreadable")
-                            self.assertIsNone(result["total"])
-                            self.assertFalse(result["coverage_complete"])
-                        else:
-                            with self.assertRaises(Denied):
-                                reader()
-            write_json(path, binding)
-            # The newest transition is checked too, not just the binding revision.
-            write_json(self.directory / "4.json", {**blocked, "rev": 5})
-            with self.assertRaises(Denied):
-                self.store.count_open_readonly()
-            get.assert_not_called()
+        for index, corrupt in enumerate(corruptions):
+            write_json(path, corrupt)
+            for reader in self.status_readers():
+                with self.subTest(corruption=index, reader=reader.__name__):
+                    if reader == self.store.blocked_liveness_readonly:
+                        result = reader()
+                        self.assertEqual(result["diagnostic"], "unreadable")
+                        self.assertIsNone(result["total"])
+                        self.assertFalse(result["coverage_complete"])
+                    else:
+                        with self.assertRaises(Denied):
+                            reader()
+        mismatch = {**binding, "delivery": {**binding["delivery"], "code_digest": "0" * 64}}
+        write_json(path, mismatch)
+        with self.assertRaisesRegex(Denied, "Delivery does not match its immutable snapshot"):
+            self.store.count_open_readonly()
+        write_json(path, binding)
+        # The newest transition is checked too, not just the binding revision.
+        write_json(self.directory / "4.json", {**binding, "rev": 4})
+        with self.assertRaises(Denied):
+            self.store.count_open_readonly()
 
     def test_status_projections_keep_current_done_completion_strict(self):
         self.change("doing")
@@ -153,6 +177,7 @@ class WorkItemTests(Fixture):
         self.change("doing")
         self.bind(self.snapshot("valid"))
         current = self.store.get(self.item_id)
+        snapshot_id = current["delivery"]["snapshot_id"]
         for revision in (3, 9, 17):
             while current["rev"] < revision:
                 current = self.change("open" if current["status"] == "doing" else "doing",
@@ -162,7 +187,7 @@ class WorkItemTests(Fixture):
                         patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get, \
                         patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as validate:
                     reader()
-                    get.assert_not_called()
+                    get.assert_called_once_with(snapshot_id)
                     self.assertEqual(validate.call_count, revision - 1)
             with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
                 self.assertEqual(self.store.get(self.item_id), current)

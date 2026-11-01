@@ -4,9 +4,10 @@ The first observation of each record is authoritative for this request, not
 for later requests. This is a live, non-atomic read (as before); it never takes
 writer locks, recovers files, persists a cache, or changes a writer's store.
 Every snapshot consumed by a selected projection still passes normal full
-manifest validation once in this request. Status-only and closed-page replay
-may skip historical delivery manifests that are not returned or consumed;
-chain validation and the current completion proof remain active.
+manifest validation once in this request. Status and closed-page replay may skip
+snapshot reads the projection does not consume, while full chain validation
+remains active. Status reads validate current active bindings, and current done
+proofs remain strict.
 Exceptions are never cached. Cache eviction only costs another validated read.
 """
 from collections import OrderedDict
@@ -71,23 +72,26 @@ def readonly_view(store):
     item_bytes = 0
 
     def get_item(item_id, *, seed_event=None, history_revisions=_HISTORY_UNSET,
-                 verify_snapshots=True):
+                 verify_snapshots=True, verify_current_delivery=False):
         nonlocal item_bytes
         # Cache only callers supplying an explicit history observation and
         # seed. A changed observation or proof mode must replay the chain.
         if (not isinstance(item_id, str) or not isinstance(seed_event, dict)
                 or not isinstance(history_revisions, (set, type(None)))
-                or type(verify_snapshots) is not bool):
+                or type(verify_snapshots) is not bool
+                or type(verify_current_delivery) is not bool):
             return read_item(item_id, seed_event=seed_event,
                              history_revisions=history_revisions,
-                             verify_snapshots=verify_snapshots)
+                             verify_snapshots=verify_snapshots,
+                             verify_current_delivery=verify_current_delivery)
         key = (item_id, canonical(seed_event),
                None if history_revisions is None else frozenset(history_revisions),
-               verify_snapshots)
+               verify_snapshots, verify_current_delivery)
         if key not in items:
             value = read_item(item_id, seed_event=seed_event,
                               history_revisions=history_revisions,
-                              verify_snapshots=verify_snapshots)
+                              verify_snapshots=verify_snapshots,
+                              verify_current_delivery=verify_current_delivery)
             size = len(canonical(value)) + len(key[1])
             if size > 8 * 1024 * 1024:
                 return value

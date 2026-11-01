@@ -209,9 +209,10 @@ class WorkItems:
 
         WorkItems stays the only count source: replay committed seeds and
         CAS histories, including legacy open resolutions. No quota/index
-        state. Nonterminal delivery snapshots are not consumed; current done
-        proofs remain strict. Malformed or unsafe records fail closed; systemic
-        I/O propagates so the caller can hold fail-closed.
+        state. Superseded delivery snapshots are not consumed; current active
+        bindings and current done proofs remain strict. Malformed or unsafe
+        records fail closed; systemic I/O propagates so the caller can hold
+        fail-closed.
         """
         current_count = 0
         for event_id, event in self._iter_item_events(recover=True):
@@ -220,7 +221,7 @@ class WorkItems:
                 continue
             revisions = self._history_revisions(seed["id"], recover=True)
             item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
-                             verify_snapshots=False)
+                             verify_snapshots=False, verify_current_delivery=True)
             if item["status"] in OPEN_STATUS_ORDER:
                 current_count += 1
         return current_count
@@ -240,7 +241,7 @@ class WorkItems:
                 continue
             revisions = self._history_revisions(seed["id"], recover=False)
             item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
-                             verify_snapshots=False)
+                             verify_snapshots=False, verify_current_delivery=True)
             if item["status"] in OPEN_STATUS_ORDER:
                 current_count += 1
         return current_count
@@ -1293,8 +1294,9 @@ class WorkItems:
         materializes the complete history. On exhaustion, validate the terminal
         sidecar separately; never yield it as an invented revision. Optional
         retirement collects that validated record and the full chain hash.
-        Status-only callers may skip delivery snapshot reads, not chain/field
-        validation. Done completion proofs always retain strict verification.
+        Status-only callers may skip superseded delivery snapshot reads, not
+        chain/field validation or the current active binding. Done completion
+        proofs always retain strict verification.
         """
         current = self._seed(item_id, seed_event, history_revisions=history_revisions)
         chain_hash = hashlib.sha256()
@@ -1317,21 +1319,34 @@ class WorkItems:
             retirement.update(chain_sha256=chain_sha256, record=terminal)
 
     def _get(self, item_id: str, *, seed_event: dict | None = None,
-             history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True) -> dict:
+             history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
+             verify_current_delivery: bool = False) -> dict:
         return self._current_hold(item_id, seed_event=seed_event,
                                   history_revisions=history_revisions,
-                                  verify_snapshots=verify_snapshots)[0]
+                                  verify_snapshots=verify_snapshots,
+                                  verify_current_delivery=verify_current_delivery)[0]
 
     def _current_hold(self, item_id: str, *, seed_event=None,
-                      history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True) -> tuple:
+                      history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
+                      verify_current_delivery: bool = False) -> tuple:
         since = None
         current = None
+        previous = None
+        last_transition = None
         retirement = {}
         for current in self._iter_chain(item_id, seed_event=seed_event,
                                         history_revisions=history_revisions, retirement=retirement,
                                         verify_snapshots=verify_snapshots):
+            if previous is not None:
+                last_transition = (previous, current)
+            previous = current
             since = (since or current["updated_at"]) if current["status"] == "doing" else None
         terminal = retirement["record"]
+        if (verify_current_delivery and not verify_snapshots and terminal is None
+                and current["status"] in OPEN_STATUS_ORDER and current.get("delivery") is not None):
+            if last_transition is None:
+                raise Denied("Current delivery lacks a validated transition")
+            self._validate_delivery(*last_transition, verify_snapshots=True)
         return work_item_retirement.project(current, terminal), None if terminal else since
 
     def get(self, item_id: str) -> dict:
@@ -1377,11 +1392,13 @@ class WorkItems:
         return self._origin_projection_impl(item, readonly=False, current_decision=current_decision)
 
     def _build_projection(self, item_id: str, *, seed_event: dict | None = None, readonly: bool,
-                          verify_snapshots: bool = True) -> dict:
+                          verify_snapshots: bool = True,
+                          verify_current_delivery: bool = False) -> dict:
         """Build a bounded projection with an explicit recovery mode."""
         history_revisions = self._history_revisions(item_id, recover=not readonly)
         item, since = self._current_hold(item_id, seed_event=seed_event, history_revisions=history_revisions,
-                                          verify_snapshots=verify_snapshots)
+                                          verify_snapshots=verify_snapshots,
+                                          verify_current_delivery=verify_current_delivery)
         view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                 **self._hold_projection(since)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
@@ -1823,8 +1840,9 @@ class WorkItems:
         Callers hold insights.lock when ``readonly`` is False; the read-only
         CLI path calls with ``readonly=True`` and never locks, recovers or
         deletes. Cursor, limit, ordering, overflow and byte bounds match
-        :meth:`page_open`. These rows do not expose delivery evidence, so
-        replay validates its stored links without reading nonterminal snapshots.
+        :meth:`page_open`. Superseded historical delivery manifests are skipped,
+        but each current active delivery is checked against its exact snapshot
+        before its status or ordering is used.
         """
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
@@ -1849,7 +1867,7 @@ class WorkItems:
                 continue
             # Reuse this safely read event; _seed still validates its complete contract.
             view = self._build_projection(seed["id"], seed_event=event, readonly=readonly,
-                                          verify_snapshots=False)
+                                          verify_snapshots=False, verify_current_delivery=True)
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
                 continue

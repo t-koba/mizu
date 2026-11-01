@@ -113,6 +113,36 @@ class ReadViewTests(Fixture):
             view._get(seed["id"], seed_event=seed_event,
                       history_revisions=revisions, verify_snapshots=True)
 
+    def test_cached_fast_projection_does_not_satisfy_current_binding_check(self):
+        snapshot = self.prepare()
+        created = self.project.work_items.create(
+            actor="worker", title="Active", idempotency_key="active")
+        seed = created["record"]["work_item"]
+        bind_delivery(self.project, seed["id"], snapshot["id"])
+
+        store = self.project.work_items
+        seed_event = None
+        for event_id, event in store._iter_item_events(recover=False):
+            kind, candidate = store._seed_for_event(event_id, event, readonly=True)
+            if kind == "seed" and candidate["id"] == seed["id"]:
+                seed_event = event
+                break
+        self.assertIsNotNone(seed_event)
+        revisions = store._history_revisions(seed["id"], recover=False)
+        path = self.project.root / "work-items" / seed["id"] / "3.json"
+        record = read_json(path)
+        record["delivery"]["code_digest"] = "0" * 64
+        write_json(path, record)
+
+        view = readonly_view(store)
+        fast = view._get(seed["id"], seed_event=seed_event,
+                         history_revisions=revisions, verify_snapshots=False)
+        self.assertEqual(fast["delivery"]["code_digest"], "0" * 64)
+        with self.assertRaisesRegex(Denied, "Delivery does not match its immutable snapshot"):
+            view._get(seed["id"], seed_event=seed_event,
+                      history_revisions=revisions, verify_snapshots=False,
+                      verify_current_delivery=True)
+
     def test_next_request_sees_corruption(self):
         snapshot = self.prepare()
         self.render(readonly_view(self.project.work_items))
