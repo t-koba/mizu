@@ -21,6 +21,14 @@ kind. These are explicit product policy defaults, not model write grants. The
 complete schema, CLI lifecycle, wake behavior and acknowledgement rules are in
 [shared-record delivery](shared-records.md#operator-answers-and-notices-active-without-decision-cutover).
 
+## Declared host records
+
+`record_kinds` defaults to empty. The data-only declarations bind a host writer,
+route/wake, exact snapshot subject, bounded payload variants, and permanent
+retention with explicit acknowledgements. Only the trusted publisher route is
+implemented; it adds no model writer. See the complete
+[declaration and adapter contract](shared-records.md#declared-host-publisher-outcomes).
+
 ## Regenerable workspace caches
 
 Automatic reclamation is opt-in and separate from operator-invoked `prune`:

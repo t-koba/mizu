@@ -48,6 +48,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `insights.py` | Submission identity, revisable proposals, decision history/legacy receipts, source-current shared-decision projection and page construction, initial work-item seeds | Acceptance or rejection |
 | `insight_tools.py` | Context-bound insight tool adaptation: paged reads, role/run/snapshot provenance, grant checks, and evidence-attachment audit records | Insight persistence/decision semantics or dispatch/schema policy |
 | `shared_records.py` | Bounded canonical records, exact role/record/digest receipts and manifest-scoped paged reads | Source eligibility, route policy, lifecycle, or cutover |
+| `host_records.py` | Declared publisher-outcome validation and host-only exact-snapshot record route | Publisher observation, generic record storage, work-item lifecycle or completion |
 | `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
 | `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
@@ -752,8 +753,9 @@ have `passed is True` and match the snapshot's code digest, or completion pins
 an exact retained acceptance receipt and scope digest. The binding and
 verification reference are copied into the immutable completion event.
 Backup/restore includes these histories; storage audit/reclaim protects every
-historical delivery and completion snapshot manifest. Work-item
-retention/expiration is not implemented, so those citations remain durable.
+historical delivery and completion snapshot manifest and every validated host
+publisher-outcome snapshot citation. Work-item expiration and finite host-record
+retention are not implemented, so these citations remain durable.
 
 Terminal `done`/`dropped` transitions can wake roles explicitly subscribed via
 `work_item_events` (default disabled). The event adapter reuses these same seed

@@ -141,7 +141,7 @@ class ChildAuthorityTests(Fixture):
             with self.subTest(field=field):
                 sandbox = dataclasses.replace(self.config.sandbox, **{field: value})
                 self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, sandbox=sandbox)))
-        for field in ('web', 'vcs', 'materialize', 'insight_decisions', 'operator_records'):
+        for field in ('web', 'vcs', 'materialize', 'insight_decisions', 'operator_records', 'record_kinds'):
             value = {**getattr(self.config, field), 'test-only-policy': True}
             self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, **{field: value})))
         self.assertNotEqual(baseline, self.identity(config=dataclasses.replace(self.config, exclude=('ignored',))))

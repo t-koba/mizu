@@ -7,8 +7,97 @@ attention receipts. Legacy remains the sole delivery/wake/ack authority for
 those kinds until their explicit, parity-verified durable marker; no model tool or
 configuration default can activate that cutover. Operator-written `answer` and
 `operator.notice` records are a separate active SharedRecords slice, enabled
-only by their explicitly declared `operator_records` kind policy. Other source
-families retain their existing authorities.
+only by their explicitly declared `operator_records` kind policy. Declared host
+publisher outcomes use the same store and the existing work-item wait delivery;
+other source families retain their existing authorities.
+
+## Declared host publisher outcomes
+
+`record_kinds` defaults to empty (no authority). It is independent of the existing
+explicit `operator_records.answer` / `operator.notice` policies; those formats,
+routes and authenticated `operator.cli` writer are unchanged. A declaration uses
+this bounded data-only schema, with no executable configuration or callbacks:
+
+```toml
+[record_kinds."publisher.outcome"]
+writer = "publisher.cli"
+route = "publication_wait"
+wake = true
+retention = "permanent"
+acknowledgement = "explicit"
+subject = "snapshot"
+maximum = 8192
+[record_kinds."publisher.outcome".variants.refused.reason]
+type = "text"
+maximum = 1024
+[record_kinds."publisher.outcome".variants.superseded.replacement]
+type = "newer_snapshot"
+```
+
+The declaration names the kind, authenticated writer, supported route, wake
+policy, retention, acknowledgement and exact subject format. Schema-v1 allows at
+most 16 kind/variant/field entries per mapping, exact keys and no optional payload
+fields. Kind/field/tag names follow SharedRecords name grammar; the resulting
+record ID also fits its 256-character bound. Only the implemented publisher
+principal and publication-wait route are supported, with one declared kind for
+that route (never a search among competing authorities). Maximum envelope bytes
+and nonblank text character bounds are explicit, positive integers at most
+`PREVIEW_BYTES` (128 KiB). This source-record ceiling keeps the projected outcome
+comfortably within the existing 1 MiB prompt frame. `newer_snapshot` is an exact
+`{snapshot_id, code_digest}` reference, like the subject, not a head or prefix.
+It proves strict descent from the subject using immutable parent links, bounded
+by the configured `limits.history_index`. An absent or incomplete reference
+refuses the record write; it is never proof of supersession. Only the exact
+`refused`/`reason` and `superseded`/`replacement` variants shown above are
+accepted for this route; unsupported or incomplete variants fail configuration
+validation rather than recording an outcome the waiter cannot consume.
+
+The trusted publisher adapter calls the host CLI, for example:
+
+```sh
+mizu publisher-record PROJECT --kind publisher.outcome \
+  --subject '{"snapshot_id":"<candidate ID>","code_digest":"<candidate digest>"}' \
+  --payload '{"outcome":"refused","reason":"Approval refused"}'
+```
+
+For supersession the payload is
+`{"outcome":"superseded","replacement":{"snapshot_id":"<newer ID>","code_digest":"<newer digest>"}}`.
+Host configuration/data access is the authentication boundary, as for the existing
+operator CLI. The command fixes `publisher.cli`: no writer/timestamp parameter,
+model-writable tool or role capability is added. This is an endpoint for the
+external publisher's authoritative observation, not a new observer; the adapter
+must adopt it. The harness neither infers outcomes nor changes publication,
+promotion or CI dispatch.
+
+Records use the ordinary SharedRecords envelope and canonical create-only ID
+`host/<declared kind>/<candidate snapshot ID>`. New writes hold publication.lock
+and validate each exact retained snapshot and whole-capture digest. The newer
+replacement may be a retained unpublished candidate; it must descend from the
+subject through exact immutable parent links. Current rolling-history membership
+is not rechecked, so an existing blocked wait can still receive an outcome after
+its candidate leaves the rolling index. Same-content retries reuse the original
+timestamp; a conflicting terminal report is refused, not overwritten. Exact
+retries and reads revalidate retained immutable identities.
+Directory-sync failures can be repaired by exact replay. Source records and their
+candidate/replacement manifests are permanently retained by the existing storage
+audit; unknown/corrupt source records prevent reclamation rather than hide roots.
+There is no new index, cursor, source store or cancellation/deletion operation.
+
+A `publication_ci` waiter looks up only its exact candidate ID and digest. The
+existing wait delivery binds the source record ID/digest to the current item,
+revision, holder and wait digest in its existing `ci.wait` envelope. Delivery is
+`kind: publication_outcome`, `trust: host-record`, with the bounded `outcome`
+payload and source identity; positive receipt-bound CI delivery is unchanged.
+The source is revalidated before delivery and explicit acknowledgement. Missing,
+unknown, malformed, mismatched, oversized or conflicting evidence remains
+pending, including a source outcome conflicting with retained terminal CI
+evidence. There is no inference from silence, elapsed time, another snapshot or
+branch head. When the declaration enables wake, writes touch the existing
+`waits` platform-watch hint; admission rechecks exact eligibility. Only the
+current holder wakes. Unselected receipts replay; `finish.ack_events` acknowledges
+only the exact delivered token, never a work-item transition or completion.
+`wake = false` suppresses outcome delivery and the platform hint without deleting
+the permanent source record.
 
 ## Operator answers and notices (active without decision cutover)
 

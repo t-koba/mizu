@@ -407,6 +407,10 @@ bounded checks-array contract. Receipt uniqueness is rechecked before recording
 and when delivering/acknowledging a result. There is no first-match or latest-head
 fallback. No receipt alone releases the wait; missing publication, refusal and
 supersession are not inferred from silence, another snapshot or a changed head.
+An explicitly declared [host publisher outcome](shared-records.md#declared-host-publisher-outcomes)
+can also wake this exact waiter when its route enables wake: `refused` with a bounded reason, or `superseded`
+with the exact newer retained snapshot. These use the existing holder/revision
+delivery and explicit acknowledgement path, never automatic work completion.
 There is no deadline, automatic retry/CI dispatch, promotion, or item transition.
 The existing daemon's configured observation cadence is used, not a writer
 polling deadline. Unrelated work remains schedulable.

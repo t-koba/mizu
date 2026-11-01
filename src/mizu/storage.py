@@ -1025,8 +1025,20 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                         work_item_ids.update(item_references)
     except OSError:
         work_item_events_skipped += 1
+    # Permanent declared host records retain exact candidate/replacement manifests.
+    # A malformed source cannot authorize reclamation by hiding its references.
+    from .host_records import store as host_record_store
+    host_record_ids: set[str] = set()
+    try:
+        for envelope, _ in host_record_store(root, project.snapshots, project.config.record_kinds).records(namespace="host"):
+            host_record_ids.add(envelope["subject"]["snapshot_id"])
+            for value in envelope["payload"].values():
+                if isinstance(value, dict) and "snapshot_id" in value:
+                    host_record_ids.add(value["snapshot_id"])
+    except (Denied, LimitExceeded, OSError, ValueError):
+        skipped_references.add(root / "shared-records" / "host")
     referenced_ids = (set(history_ids) | set(run_ids) | set(artifact_ids)
-                      | set(insight_ids) | set(work_item_ids))
+                      | set(insight_ids) | set(work_item_ids) | host_record_ids)
     reference_roots = referenced_ids.copy()
     ancestors, incomplete = _snapshot_ancestry(
         manifests, reference_roots, project.snapshots.history_index)
@@ -1075,6 +1087,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         "acceptance_receipts": acceptance_receipts,
         "insight_ids": insight_ids,
         "work_item_ids": work_item_ids,
+        "host_record_ids": host_record_ids,
         "work_item_events_skipped": work_item_events_skipped,
         "reference_records_skipped": len(skipped_references),
         "generations": generations,
@@ -1101,7 +1114,7 @@ def audit(project: Project) -> dict:
     objects: {count, bytes, referenced_count, referenced_bytes,
     orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
     references: {history_snapshots, run_snapshots, artifact_snapshots,
-    insight_snapshots, work_item_snapshots}, work_item_events_skipped,
+    insight_snapshots, work_item_snapshots, host_record_snapshots}, work_item_events_skipped,
     reference_records_skipped, preview_only: True}``. Counts and byte totals
     are exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
     truncation flag.
@@ -1180,11 +1193,12 @@ def audit(project: Project) -> dict:
             "artifact_snapshots": len(collected["artifact_ids"]),
             "insight_snapshots": len(collected["insight_ids"]),
             "work_item_snapshots": len(collected["work_item_ids"]),
+            "host_record_snapshots": len(collected["host_record_ids"]),
         },
         "work_item_events_skipped": collected["work_item_events_skipped"],
         "reference_records_skipped": collected["reference_records_skipped"],
         "preview_only": True,
-        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories are retained; this preview removes nothing. "
+        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories are retained; this preview removes nothing. "
                     "Web-cache entries expired past cache_seconds are disposable (see sessions/web_cache); "
                     "sessions are durable audit evidence and are accounted, never reclaimed.",
     }
@@ -1198,7 +1212,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     manifest_skipped, work_item_events_skipped, reference_records_skipped,
     audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
-    outside every durable reference (live/history/run/artifact/insight/work-item)
+    outside every durable reference (live/history/run/artifact/insight/work-item/host-record)
     and its bounded merge ancestry (up to history_index parent edges), and
     objects referenced by no manifest on disk. Full ID lists are returned
     (sorted); use ``audit()`` for the bounded display samples.
@@ -1234,8 +1248,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "unreferenced_bytes": collected["unreferenced_bytes"],
             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
             "manifest_skipped": collected["manifest_skipped"],
-            "retained": "All live/history/run/artifact/insight/work-item-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
+            "retained": "All live/history/run/artifact/insight/work-item/host-record-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "work_item_events_skipped": collected["work_item_events_skipped"],
             "reference_records_skipped": collected["reference_records_skipped"],
@@ -1290,8 +1304,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
         sync_dir(record.parent)
         removed["audit"] = record.relative_to(project.root).as_posix()
     return {"applied": True, **removed,
-            "retained": "All live/history/run/artifact/insight/work-item-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, proposals, insight revisions, and work-item histories. "
+            "retained": "All live/history/run/artifact/insight/work-item/host-record-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "manifest_skipped": 0,
             "work_item_events_skipped": 0,

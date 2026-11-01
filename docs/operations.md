@@ -300,7 +300,8 @@ run retention never prunes it.
 snapshot GC only). At the same due boundary, without pause, GC keeps `current.json`,
 its active bounded history window, continuations/fences and all durable citations
 (runs, artifact evidence, live/revised/archived insights, queued/claimed editor
-submissions, and every historical work-item delivery/done binding). Superseded
+submissions, every historical work-item delivery/done binding, and exact
+snapshot citations in declared host publisher-outcome records). Superseded
 history generations use immutable file mtime; manifests use timezone-aware
 `created_at`. Only strictly older, unreferenced entries expire. Objects are removed
 only if no retained manifest uses them. The manual `storage` preview/apply still
@@ -657,7 +658,11 @@ with a retained published snapshot and a configured nonempty `vcs.ci_branch`.
 The host pins its immutable digest and branch, requires a unique complete
 validated receipt match, then observes only its exact SHA. Missing, ambiguous or
 corrupt receipt evidence, and explicitly partial or mismatched status evidence,
-stays pending; refusal/supersession is not inferred.
+stays pending; refusal/supersession is not inferred. The publisher may instead
+report an exact terminal outcome through the explicitly declared
+[host record route](shared-records.md#declared-host-publisher-outcomes), which
+wakes the holder when that declared route enables wake, using the same explicit
+wait acknowledgement path.
 See [the snapshot-bound contract](scheduling.md#exact-sha-work-item-ci-waits).
 
 Both all-green and terminal red results wake the current holder and deliver

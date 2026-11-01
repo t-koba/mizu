@@ -286,7 +286,7 @@ def _load_merged(top: Path) -> dict:
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                    "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                    "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                   "operator_records", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests"}
+                   "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -1046,6 +1046,7 @@ class Config:
     workspace_cache: WorkspaceCache = dataclasses.field(default_factory=WorkspaceCache)
 
     operator_records: dict = dataclasses.field(default_factory=dict)
+    record_kinds: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
@@ -1092,10 +1093,12 @@ def load(file: Path) -> Config:
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                 "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                 "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                "operator_records", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests"}, "root")
+                "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests"}, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))
+    from .host_records import configuration as kind_configuration
+    kinds = kind_configuration(data.get("record_kinds", {}))
     decisions = data.get("insight_decisions", {})
     keys(decisions, {"work_item_intent_default", "work_item_intent_by_source"}, "insight_decisions")
     decisions = {"work_item_intent_default": "create", "work_item_intent_by_source": {}, **decisions}
@@ -1628,7 +1631,7 @@ def load(file: Path) -> Config:
                   environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
-                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records,
+                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records, record_kinds=kinds,
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),

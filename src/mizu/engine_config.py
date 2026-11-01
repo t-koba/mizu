@@ -170,7 +170,7 @@ def child_authority_digest(config, role, *, spend_role, settings, policy,
             'sandbox': asdict(config.sandbox),
             'tool_policy': {key: getattr(config, key) for key in
                             ('web', 'vcs', 'materialize', 'exclude',
-                             'insight_decisions', 'operator_records')},
+                             'insight_decisions', 'operator_records', 'record_kinds')},
             'workspace_cache': asdict(config.workspace_cache),
         }
         encoded = canonical(identity)

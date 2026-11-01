@@ -82,6 +82,8 @@ vcs = "none"
 # Operator-only records; no model writer. Pending addressed records admit runs.
 # Disable a kind to stop writes/delivery, without deleting its immutable audit.
 # Answers bind an exact insight ID/revision and derive its authenticated source.
+# Optional declared publisher outcomes default closed (record_kinds absent).
+# Schema and host adapter route: docs/shared-records.md#declared-host-publisher-outcomes
 [operator_records.answer]
 enabled = true
 wake = true

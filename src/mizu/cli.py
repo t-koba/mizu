@@ -99,6 +99,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", required=True, help="Explicit consent to a paid, read-only Pi/provider probe")
     p.add_argument("--profile", help="Model profile for the probe")
     p.add_argument("--role", default=None, help="Read-only probe role (default: configured consult_role, else single configured role, else required)")
+    p = sub.add_parser("publisher-record", help="Trusted host publisher terminal record; no model writer")
+    p.add_argument("project")
+    p.add_argument("--kind", required=True)
+    p.add_argument("--subject", required=True, help="Exact snapshot subject as JSON")
+    p.add_argument("--payload", required=True, help="Declared bounded payload as JSON")
     p = sub.add_parser("record", help="Operator-only immutable answers and notices; no Insight decisions")
     p.add_argument("project")
     p.add_argument("action", choices=("publish", "withdraw", "supersede"))
@@ -691,6 +696,14 @@ def execute(args):
             return _cmd_publication_list(config, project, args)
         project = Project(config, args.project)
         return _cmd_publication_record(config, project, args)
+    if args.command == "publisher-record":
+        from .host_records import write_publisher
+        from .fs import loads_finite
+        from .shared_records import RECORD_BYTES
+        if len(args.subject.encode()) + len(args.payload.encode()) > RECORD_BYTES:
+            raise ConfigError("Publisher record input exceeds frame bound")
+        return write_publisher(Project(config, args.project), kind=args.kind,
+                               subject=loads_finite(args.subject), payload=loads_finite(args.payload))
     if args.command == "record":
         from .operator_records import write
         if (args.subject_id is None) != (args.subject_rev is None):

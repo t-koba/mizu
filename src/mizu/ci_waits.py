@@ -232,9 +232,13 @@ def status_diagnostics(store, role, publication, data):
 
 
 def _evidence(store, item, *, sync=True):
+    from .host_records import publication_result
+    outcome = publication_result(store, item, sync=sync)
     record = _read(store, item)
     if record is None:
-        return None
+        return outcome
+    if outcome is not None:
+        raise Denied("Conflicting publication terminal evidence")
     wait = _resolved(store, item["wait"])
     if wait is None:
         raise Denied("CI evidence has no unique matching publication")
@@ -273,14 +277,16 @@ def pending(store, role, *, limit=10):
         return _shared_page(store, role, limit=limit, persist=False)[0]
 
 
-# CI remains the source authority. SharedRecords owns only immutable envelopes,
+# CI and declared host publication outcomes remain source authorities.
+# SharedRecords owns only immutable envelopes,
 # manifests and explicit per-role receipts; legacy auto-acks are never imported.
 
 
 def _validate_record(subject, payload):
     if (set(subject) != {"work_item", "rev", "holder"}
             or any(subject[key] != payload.get(key) for key in subject)
-            or payload.get("kind") != "ci" or payload.get("trust") != "external-untrusted"):
+            or (payload.get("kind"), payload.get("trust")) not in
+                (("ci", "external-untrusted"), ("publication_outcome", "host-record"))):
         raise Denied("Invalid shared CI wait binding")
 
 
@@ -419,7 +425,7 @@ def validate_selection(context, tokens):
 
 
 def complete(context, finished):
-    """Apply only explicitly selected, current CI-wait receipts after success."""
+    """Apply explicitly selected current CI/publication-wait receipts after success."""
     if (not context.ci_wait_manifest or finished.get("wait_for_check")
             or finished.get("outcome") == "bounded" or context.bound_hit):
         return

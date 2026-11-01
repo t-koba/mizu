@@ -148,9 +148,10 @@ def _directory(path: Path) -> bool:
 
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
-                 doing_limit=1, doing_limits=None, stale_seconds=86400):
+                 doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.vcs = vcs or {}
+        self.record_kinds = record_kinds or {}
         self.effective_verification = effective_verification
         self.doing_limit, self.doing_limits = doing_limit, dict(doing_limits or {})
         self.stale_seconds = stale_seconds
