@@ -5,8 +5,8 @@ and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
-inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence and
-WorkspaceCache field defaults in config.py; validation is covered by their
+inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
+CiRequestEvidence and WorkspaceCache field defaults in config.py; validation is covered by their
 focused config tests. Classification records current ownership, not approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
 """
@@ -31,8 +31,6 @@ DECLARATIONS = {
     'workspace_cache.py': {},
     'ci_requests.py': {
         'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded evidence-record read'),
-        'REQUEST_SCAN_LIMIT': ('10000', 'policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
-        'REQUEST_RECORD_LIMIT': ('1000', 'policy', 'CI requests / record validation budget'),
     },
     'publication.py': {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
@@ -64,6 +62,10 @@ CONFIGURED = {
         'unknown_keys': ('20', 'configured policy', 'usage / unknown-key diagnostic sample'),
         'cache_affinity_rows': ('200', 'configured policy', 'usage / affinity output sample'),
         'cache_affinity_runs': ('200', 'configured policy', 'usage / affinity history window'),
+    },
+    'CiRequestEvidence': {
+        'name_processing_limit': ('10000', 'configured policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
+        'record_limit': ('1000', 'configured policy', 'CI requests / candidate-record validation budget'),
     },
     'SchedulerEvidence': {
         'candidate_entries': ('5000', 'configured policy', 'scheduler evidence / diagnostic enumeration budget'),

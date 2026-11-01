@@ -34,6 +34,14 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # unknown_keys = 20    # Minimum 0; independent of [usage].unknown_keys.
 # Text labels keep a fixed 256-character safety ceiling, not a configuration knob.
 
+# Local CI-request evidence read budgets, shared by ci_requests and ci_costs.
+# Strict integers 1..min(9223372036854775807, sys.maxsize); defaults shown.
+# os.listdir still materializes/sorts all names: not a directory-memory bound.
+# [ci_requests]
+# name_processing_limit = 10000  # Names processed after listing, including non-records.
+# record_limit = 1000            # Unique candidates validated; internal offsets < this.
+# Fixed record safety cap (8 KiB) and page/tool schema caps are independent.
+
 # Host-only usage --cache-evidence diagnostic budgets, independent of [usage].
 # Strict positive integers; counts <= min(9223372036854775807, sys.maxsize),
 # seconds <= 9223372036854775807 (representation bounds, not resource budgets).

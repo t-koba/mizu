@@ -1974,25 +1974,39 @@ exact `code_digest`, `branch` or `published_sha` filters and returns one bounded
 `external-untrusted`. Run-local `vcs-read/` and `vcs-publish/` evidence paths
 are named in tool responses.
 
-Local evidence readers have these current hard-coded values; they are policy
-candidates rather than `[vcs]` adapter settings:
+Local CI-request evidence reads have a separate `[ci_requests]` policy owner,
+shared by the `ci_requests` daily listing and `ci_costs` view. Omission uses
+these defaults; unknown keys, booleans and non-integers are rejected.
+
+| Setting | Default | Range | Effect |
+|---|---:|---|---|
+| `name_processing_limit` | 10000 | 1–`MAX_USAGE_POLICY_COUNT` | Names processed after listing/sorting, including non-record names |
+| `record_limit` | 1000 | 1–`MAX_USAGE_POLICY_COUNT` | Unique candidate records validated; internal cost offsets are 0 through `record_limit - 1` |
+
+`MAX_USAGE_POLICY_COUNT` is `min(9223372036854775807, sys.maxsize)`, an integer
+representation bound, not a resource budget. The daily page maximum remains
+100 and the cost page maximum remains 8; public tool schema bounds are
+independent and unchanged. This policy does not affect request writes or CI
+dispatch. The reader still materializes and sorts the complete `os.listdir`
+result before processing the configured prefix, so it does **not** bound
+directory-listing memory. `scan_stopped` flags omitted names or candidates;
+`total` counts validated dispatches, a lower bound when scanning stops.
+
+Other local evidence limits remain hard-coded policy candidates rather than
+`[vcs]` adapter settings:
 
 | Behavior and owner | Current code value | Current configurable range / prospective owner |
 |---|---:|---|
-| CI-request evidence listing (`REQUEST_SCAN_LIMIT`, `REQUEST_RECORD_LIMIT`) | 10,000 names; 1,000 candidate records | None; candidate `[ci_requests]` section |
 | Publication-receipt listing (`RECEIPT_SCAN_LIMIT`, `RECEIPT_RECORD_LIMIT`) | 10,000 names; 1,000 candidate receipts | None; candidate `[publication_evidence]` section |
 | Local Git HEAD command for publication (`source_commit`) | 5-second timeout | None; candidate `[publication]` setting |
 
-The 1,000-record CI limit also bounds `ci_costs` offsets to 0–999 today.
-Both listing readers call `os.listdir` and sort the complete name list before
-applying the caps, so their values bound subsequent record validation but do
-**not** bound directory-listing memory. Any configurable range must retain
-that distinction and be measured before migration. The 8 KiB stored-record
-cap, 4 KiB caller-supplied lineage JSON cap, and 4 KiB local Git HEAD output
-cap are separate defensive read limits. The local Git timeout is publication-
-owned and distinct from the external adapter's `[vcs].timeout_seconds`
-(default 20 seconds; range 1–16,777,216). No new section or validated
-configurable range exists yet for these local limits.
+The publication-receipt reader also lists and sorts all names before applying
+its caps; those caps do **not** bound directory-listing memory. The 8 KiB
+stored-record cap (including CI-request records), 4 KiB caller-supplied lineage
+JSON cap, and 4 KiB local Git HEAD output cap remain separate defensive read
+limits. The local Git timeout is publication-owned and distinct from the
+external adapter's `[vcs].timeout_seconds` (default 20 seconds; range
+1–16,777,216). No configurable range exists yet for these publication limits.
 
 Log reads require `branch` and preserve the existing optional `sha` behavior.
 When `check` is supplied, the request also requires an exact 40/64-hex commit
@@ -2076,8 +2090,11 @@ crash occurred before the adapter started. There is no automatic retry or
 reconciliation operation in this slice; do not delete a marker to retry.
 A `vcs_read` `status` call may bind directly to a retained publication with a 64-lowercase-hex `publication_id` instead of `branch`/`sha`. Mizu validates the durable intent, dispatch marker, and receipt, then asks the adapter for that receipt's branch and exact `published_sha` plus, when that project has `[vcs.lineage_target]` configured, its `lineage_target` descriptor; branch/sha overrides are refused. The adapter may return one fresh `lineage` object alongside ordinary CI checks; the product binds and projects it exactly as in the operations lineage contract (unconfigured stays `unknown`/`unconfigured`, legacy unbound stays `unknown`/`unbound`, changed descriptors stay `unknown`/`descriptor_mismatch` without rewriting). When `sha` is requested, rows for other commits are filtered out, so an empty result stays missing evidence rather than borrowing a later head. The returned publication identity and adapter response are retained in the invoking run as external-untrusted evidence. This read does not infer a complete check predicate or terminal outcome; receipt-pinned terminal predicates are available only through a blocked work-item CI wait with a caller-declared exact check set.
 
-`vcs_read` also accepts `{op: "ci_costs", limit?: 1..8, offset?: 0..999}`
-(default limit 8, offset 0); no other filters. It requires the existing
+`vcs_read` also accepts `{op: "ci_costs", limit?: 1..8, offset?: int}`
+(default limit 8, offset 0); no other filters. Offsets must be nonnegative and
+below `[ci_requests].record_limit` (0–999 with the default policy), subject to
+the independent public tool schema bound. Changing this policy does not change
+that schema. It requires the existing
 `vcs_read` grant and visible workspace, and never publishes or requests CI.
 Unlike `ci_requests` (which remains local/provider-free and accepts only `op`),
 it makes one ordinary exact `status(publication_id)` read per distinct receipt
@@ -2103,12 +2120,11 @@ reported state `running`/`in_progress`/`queued`/`pending` or a start without a
 completion; a missing duration is not estimated from the current time.
 These counters describe observations, not distinct executions.
 
-The existing validated request scan processes at most 10,000 directory names
-and validates at most 1,000 unique candidate records; it is shared with
-`ci_requests`. These are current hard-coded CI-request-reader budgets, not
-configuration values, and no configurable range is selected today. The reader
-materializes and sorts the complete `os.listdir` result before applying them,
-so they bound record-validation work, not directory-listing memory. `total`
+The validated request scan is shared with `ci_requests` and uses
+`[ci_requests].name_processing_limit` and `record_limit` (defaults 10,000 names
+and 1,000 unique candidate records). The reader materializes and sorts the
+complete `os.listdir` result before applying them, so they bound subsequent
+name processing and record-validation work, not directory-listing memory. `total`
 counts validated dispatches and is only a lower bound when `scan_stopped`. Rows
 are ordered by UTC dispatch date then request ID. `next_offset` is null at the
 scanned end; `truncated` also flags omitted earlier rows. Pagination is

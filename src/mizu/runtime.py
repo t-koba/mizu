@@ -1261,7 +1261,7 @@ class Context:
         # evidence, so no adapter call is made. Only the op is accepted.
         if set(args) - {"op"}:
             raise Denied("CI request listing takes no filters")
-        listing = CiRequests(self.project.root).daily(limit=100)
+        listing = CiRequests(self.project.root, self.config.ci_requests).daily(limit=100)
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": "ci_requests", "trust": "recorded-local-untrusted",
                   "evidence_id": evidence_id, "evidence": evidence, "result": listing}
@@ -1273,7 +1273,7 @@ class Context:
         from .ci_costs import observed_costs
         if set(args) - {"op", "limit", "offset"}:
             raise Denied("CI costs take only limit and offset")
-        page = CiRequests(self.project.root).page(
+        page = CiRequests(self.project.root, self.config.ci_requests).page(
             limit=args.get("limit", 8), offset=args.get("offset", 0))
         listing = observed_costs(page, lambda publication: self._op_vcs_read(
             {"op": "status", "publication_id": publication}))

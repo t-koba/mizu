@@ -7,6 +7,7 @@ from support import Fixture
 from mizu import vcs
 from mizu.ci_costs import observed_costs
 from mizu.ci_requests import CiRequests, request_id
+from mizu.config import CiRequestEvidence
 from mizu.distribution import public_source_identity
 from mizu.errors import Denied
 from mizu.fs import read_json
@@ -233,12 +234,40 @@ class CostReadTests(Fixture):
         self.assertTrue(first["truncated"] and second["truncated"])
         first_ids = {r["request_id"] for r in first["days"][0]["requests"]}
         self.assertFalse(first_ids & {r["request_id"] for r in second["days"][0]["requests"]})
-        with patch("mizu.ci_requests.REQUEST_RECORD_LIMIT", 3):
-            out = self.store.page()
-        self.assertTrue(out["scan_stopped"])
-        self.assertEqual(out["total"], 3)
-        with patch("mizu.ci_requests.REQUEST_SCAN_LIMIT", 2):
-            self.assertTrue(self.store.page()["scan_stopped"])
+
+    def test_configured_name_and_record_limits_reach_both_runtime_views(self):
+        identities = sorted(self.dispatch((f"workflow-{i}",)) for i in range(3))
+        # The name prefix includes non-record names and duplicate identities.
+        (self.store.root / "!unrelated").write_text("")
+        for names, records, total in ((1, 100, 0), (3, 100, 1), (100, 1, 1),
+                                       (100, 2, 2), (100, 100, 3)):
+            policy = CiRequestEvidence(name_processing_limit=names, record_limit=records)
+            self.ctx.config = dataclasses.replace(self.config, ci_requests=policy)
+            for op in ("ci_requests", "ci_costs"):
+                with self.subTest(policy=policy, op=op), patch(
+                        "mizu.vcs.invoke", return_value={"checks": [check()]}):
+                    out = self.ctx.handle("vcs_read", {"op": op})
+                    self.assertEqual(out["total"], total)
+                    self.assertEqual(out["scan_stopped"], total < 3)
+                    rows = [row for day in out["days"]
+                            for row in day["items" if op == "ci_requests" else "requests"]]
+                    self.assertEqual([row["request_id"] for row in rows], identities[:total])
+                    self.assertEqual([row["state"] for row in rows], ["resolved"] * total)
+        # Direct consumers still get the original defaults, independent of runtime policy.
+        self.assertEqual(self.store.policy, CiRequestEvidence())
+        self.assertEqual(self.store.daily()["total"], 3)
+
+    def test_configured_offset_range_keeps_fixed_page_caps(self):
+        for record_limit in (1, 1001):
+            store = CiRequests(self.project.root, CiRequestEvidence(record_limit=record_limit))
+            with self.subTest(record_limit=record_limit):
+                self.assertEqual(store.page(offset=record_limit - 1)["items"], [])
+                with self.assertRaises(Denied):
+                    store.page(offset=record_limit)
+                with self.assertRaises(Denied):
+                    store.daily(limit=101)
+                with self.assertRaises(Denied):
+                    store.page(limit=9)
 
     def test_eight_distinct_receipts_never_exceed_eight_status_calls(self):
         for i in range(9):

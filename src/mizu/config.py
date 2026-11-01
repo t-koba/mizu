@@ -286,7 +286,7 @@ def _load_merged(top: Path) -> dict:
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                    "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                    "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                   "operator_records", "usage", "scheduler_evidence", "dispatch_evidence"}
+                   "operator_records", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -938,6 +938,23 @@ def dispatch_evidence_policy(raw: dict) -> DispatchEvidence:
 
 
 @dataclasses.dataclass(frozen=True)
+class CiRequestEvidence:
+    name_processing_limit: int = 10000
+    record_limit: int = 1000
+
+
+def ci_request_evidence_policy(raw: dict) -> CiRequestEvidence:
+    fields = dataclasses.fields(CiRequestEvidence)
+    keys(raw, {field.name for field in fields}, "ci_requests")
+    return CiRequestEvidence(**{
+        field.name: number(
+            raw.get(field.name, field.default), f"ci_requests.{field.name}",
+            1, MAX_USAGE_POLICY_COUNT)
+        for field in fields
+    })
+
+
+@dataclasses.dataclass(frozen=True)
 class SchedulerEvidence:
     candidate_entries: int = 5000
     files: int = 200
@@ -1031,6 +1048,7 @@ class Config:
     operator_records: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
+    ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
 
     def __post_init__(self):
@@ -1074,7 +1092,7 @@ def load(file: Path) -> Config:
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                 "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                 "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                "operator_records", "usage", "scheduler_evidence", "dispatch_evidence"}, "root")
+                "operator_records", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests"}, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))
@@ -1613,4 +1631,5 @@ def load(file: Path) -> Config:
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records,
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
+                  ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})))

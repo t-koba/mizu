@@ -16,15 +16,13 @@ import os
 import re
 from pathlib import Path
 
+from .config import CiRequestEvidence
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
 from .vcs import validate_ci_request, validate_ci_runs
 
 #: Bounded record size (8 KiB), like the other evidence records.
 RECORD_BYTES = 8192
-#: Bounded scan of the recorded CI requests.
-REQUEST_SCAN_LIMIT = 10000
-REQUEST_RECORD_LIMIT = 1000
 REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
 DISPATCH_FILE = re.compile(r"([0-9a-f]{64})\.dispatch\.json\Z")
 
@@ -44,8 +42,9 @@ def request_id(publication_id: str, sha: str, workflows: list[str]) -> str:
 class CiRequests:
     """The project's durable CI request records."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, policy: CiRequestEvidence | None = None):
         self.root = Path(root) / "evidence" / "ci-requests"
+        self.policy = policy if policy is not None else CiRequestEvidence()
 
     def _path(self, identity: str, kind: str) -> Path:
         return self.root / f"{identity}.{kind}.json"
@@ -103,8 +102,9 @@ class CiRequests:
         listed rather than hidden, and an outcome that cannot be read is
         such an unknown outcome, not a reason to hide the request. The rows
         are chronological and the page holds at most ``limit`` requests.
-        Bounds: at most 100 requests per page, at most 10000 directory
-        entries read and at most 1000 candidate records validated.
+        Bounds: at most 100 requests per page; policy bounds post-listing
+        name processing and candidate-record validation (defaults 10000/1000).
+        os.listdir still materializes and sorts all names before these bounds.
         Trust: locally recorded evidence; an unreadable, oversized or
         invalid outcome record is never returned unvalidated and it never
         denies the valid records beside it, and a dispatch whose marker
@@ -139,7 +139,7 @@ class CiRequests:
         is positional, not a snapshot cursor. No provider calls or writes.
         """
         if (type(limit) is not int or not 1 <= limit <= 8
-                or type(offset) is not int or not 0 <= offset < REQUEST_RECORD_LIMIT):
+                or type(offset) is not int or not 0 <= offset < self.policy.record_limit):
             raise Denied("Invalid CI cost page")
         rows, stopped = self._rows()
         page = rows[offset:offset + limit]
@@ -158,13 +158,13 @@ class CiRequests:
             raise Denied("CI request evidence is unavailable") from exc
         rows = []
         seen = set()
-        scan_stopped = len(names) > REQUEST_SCAN_LIMIT
-        for name in names[:REQUEST_SCAN_LIMIT]:
+        scan_stopped = len(names) > self.policy.name_processing_limit
+        for name in names[:self.policy.name_processing_limit]:
             match = REQUEST_FILE.fullmatch(name) or DISPATCH_FILE.fullmatch(name)
             if match is None or match.group(1) in seen:
                 continue
             seen.add(match.group(1))
-            if len(seen) > REQUEST_RECORD_LIMIT:
+            if len(seen) > self.policy.record_limit:
                 scan_stopped = True
                 break
             identity = match.group(1)
