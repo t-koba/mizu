@@ -29,9 +29,6 @@ from .process import (
 #: (`[web] max_bytes`); this count never enlarges a prompt by itself
 #: because `_op_search` pages through it.
 SEARCH_RESULT_LIMIT = 1000
-#: Per-feed shaping bound: one huge feed must not crowd out other sources
-#: before the global cut. Feed order decides which items are kept.
-SEARCH_FEED_ITEM_LIMIT = 200
 #: Policy-bounded protocol observation: at most 16 caller headers per probe.
 PROBE_MAX_HEADERS = 16
 #: Fixed header bounds (mechanism, not knobs): names 128, values 4096.
@@ -521,14 +518,16 @@ class Web:
 
         Schema: ``(results, errors, feeds_total, feeds_consulted, feed_overflow)``.
         Each result carries ``"source"`` naming the feed it came from. Bounds:
-        titles 300, summaries 1500, at most ``SEARCH_FEED_ITEM_LIMIT`` items
-        kept per feed; ``feed_overflow`` is True when any feed held another
-        eligible ``item``/``entry`` with an ``https://`` link beyond that bound
+        titles 300, summaries 1500, and at most the configured
+        ``search_feed_item_limit`` items kept per feed. ``feed_overflow`` is True
+        when any feed held another eligible ``item``/``entry`` with an
+        ``https://`` link beyond that bound
         (non-eligible rows never set it). Trust: external-untrusted. Failure:
         per-feed faults are listed, never raised.
         """
         results, errors = [], []
         feeds = list(self.settings["feeds"])
+        item_limit = self.settings["search_feed_item_limit"]
         feed_overflow = False
         for feed in feeds:
             kept = 0
@@ -551,7 +550,7 @@ class Web:
                     summary = "" if summary_node is None else "".join(summary_node.itertext())
                     if not link.startswith("https://"):
                         continue
-                    if kept >= SEARCH_FEED_ITEM_LIMIT:
+                    if kept >= item_limit:
                         feed_overflow = True
                         break
                     # Fixed discovery shaping: keyword overlap only. Operator

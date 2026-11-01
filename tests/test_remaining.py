@@ -565,37 +565,46 @@ class RemainingTests(Fixture):
 
     def test_feed_search_truncation_flag_at_per_feed_bound(self):
         import tempfile
-        from mizu.web import SEARCH_FEED_ITEM_LIMIT, Web
+        from mizu.web import Web
+        item_limit = self.config.web["search_feed_item_limit"]
         def feed_xml(count, trailing=""):
             items = "".join("<item><title>hi test</title><link>https://example.org/x%d</link>"
                             "<description>d</description></item>" % n for n in range(count))
             return "<rss><channel>%s%s</channel></rss>" % (items, trailing)
-        def make_web(xml):
+        def make_web(xml, configured_limit=None):
             tmp = Path(tempfile.mkdtemp())
             self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
             feed = "https://example.org/feed"
-            web = Web({**self.config.web, "hosts": ["example.org"], "feeds": [feed],
-                       "cache_seconds": 0, "timeout_seconds": 1, "max_bytes": 1048576,
-                       "search_command": [], "intranet": False}, tmp / "c", tmp / "r")
+            settings = {**self.config.web, "hosts": ["example.org"], "feeds": [feed],
+                        "cache_seconds": 0, "timeout_seconds": 1, "max_bytes": 1048576,
+                        "search_command": [], "intranet": False}
+            if configured_limit is not None:
+                settings["search_feed_item_limit"] = configured_limit
+            web = Web(settings, tmp / "c", tmp / "r")
             web.fetch = lambda url: {"id": "r", "text": xml}
             return web
         # Exactly at the bound: no overflow, so not truncated.
-        web = make_web(feed_xml(SEARCH_FEED_ITEM_LIMIT))
+        web = make_web(feed_xml(item_limit))
         out = web.search("hi")
-        self.assertEqual(len(out["results"]), SEARCH_FEED_ITEM_LIMIT)
+        self.assertEqual(len(out["results"]), item_limit)
         self.assertFalse(out["truncated"])
         # Trailing non-eligible rows (wrong tag, non-HTTPS) never set overflow.
         trailing = ("<notanitem><title>hi</title><link>https://example.org/no</link></notanitem>"
                     "<item><title>hi</title><link>http://example.org/plain</link>"
                     "<description>d</description></item>")
-        web = make_web(feed_xml(SEARCH_FEED_ITEM_LIMIT, trailing))
+        web = make_web(feed_xml(item_limit, trailing))
         out = web.search("hi")
-        self.assertEqual(len(out["results"]), SEARCH_FEED_ITEM_LIMIT)
+        self.assertEqual(len(out["results"]), item_limit)
         self.assertFalse(out["truncated"])
         # One more eligible entry overflows the per-feed bound and flags truncation.
-        web = make_web(feed_xml(SEARCH_FEED_ITEM_LIMIT + 1))
+        web = make_web(feed_xml(item_limit + 1))
         out = web.search("hi")
-        self.assertEqual(len(out["results"]), SEARCH_FEED_ITEM_LIMIT)
+        self.assertEqual(len(out["results"]), item_limit)
+        self.assertTrue(out["truncated"])
+        # The operator setting reaches feed shaping without changing result schema.
+        web = make_web(feed_xml(2), configured_limit=1)
+        out = web.search("hi")
+        self.assertEqual(len(out["results"]), 1)
         self.assertTrue(out["truncated"])
         ctx = self.context("searcher")
         with patch("mizu.runtime.bounded", return_value=out):
@@ -606,7 +615,8 @@ class RemainingTests(Fixture):
         import json
         import tempfile
         from mizu.process import Result
-        from mizu.web import SEARCH_FEED_ITEM_LIMIT, Web
+        from mizu.web import Web
+        item_limit = self.config.web["search_feed_item_limit"]
         import mizu.web as webmod
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
@@ -617,14 +627,14 @@ class RemainingTests(Fixture):
                   tmp / "c", tmp / "r")
         items = "".join("<item><title>hi</title><link>https://example.org/x%d</link>"
                         "<description>d</description></item>" % n
-                        for n in range(SEARCH_FEED_ITEM_LIMIT + 1))
+                        for n in range(item_limit + 1))
         web.fetch = lambda url: {"id": "r", "text": "<rss><channel>%s</channel></rss>" % items}
         adapted = [{"title": "t", "url": "https://x/", "summary": "s"}]
         with patch.object(webmod, "run",
                           return_value=Result(0, json.dumps({"results": adapted}), "", "exited", 0.1)):
             out = web.search("hi")
         # Only one adapter result, so room remains, yet the feed overflow still flags truncation.
-        self.assertEqual(len(out["results"]), 1 + SEARCH_FEED_ITEM_LIMIT)
+        self.assertEqual(len(out["results"]), 1 + item_limit)
         self.assertTrue(out["truncated"])
 
     def test_invalid_engine_json_cannot_poison_saved_usage(self):

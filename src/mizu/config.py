@@ -1572,9 +1572,11 @@ def load(file: Path) -> Config:
     timezone = string(data.get("timezone", "UTC"), "timezone")
     web = data.get("web", {})
     keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "diagnostic_bytes",
-               "search_command", "destination_command", "intranet", "probe_hosts", "probe_methods"}, "web")
+               "search_feed_item_limit", "search_command", "destination_command", "intranet",
+               "probe_hosts", "probe_methods"}, "web")
     web = {"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
+           "search_feed_item_limit": 200,
            "search_command": [], "destination_command": [], "intranet": False,
            "probe_hosts": [], "probe_methods": [], **web}
     for k in ("hosts", "feeds", "search_command", "destination_command", "probe_hosts", "probe_methods"):
@@ -1590,6 +1592,7 @@ def load(file: Path) -> Config:
     for k in ("cache_seconds", "timeout_seconds", "max_bytes"):
         number(web[k], f"web.{k}", 1, 16777216)
     number(web["diagnostic_bytes"], "web.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
+    number(web["search_feed_item_limit"], "web.search_feed_item_limit", 1, 200)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
     keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",

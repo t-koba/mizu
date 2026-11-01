@@ -5,9 +5,11 @@ and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
-inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
-CiRequestEvidence, PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults in config.py; validation is covered by their
-focused config tests. Classification records current ownership, not approval to leave policy in code; safety ceilings here are defensive read
+inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
+PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults in
+config.py, plus the explicitly listed raw web setting; validation is covered
+by focused config tests. Classification records current ownership, not
+approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
 """
 import ast
@@ -36,6 +38,9 @@ DECLARATIONS = {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
     },
+    'web.py': {
+        'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
+    },
     'smoke_retention.py': {
         'MAX_PROJECTS': ('5000', 'policy', 'smoke retention / project scan budget'),
         'MAX_PAIRS': ('5000', 'policy', 'smoke retention / pair scan budget'),
@@ -51,8 +56,13 @@ DECLARATIONS = {
 }
 
 
-# Migrated declarations live in the owning config dataclass.
-# This explicit slice does not inventory arbitrary configuration declarations.
+# Migrated declarations live in the owning config dataclass or the explicit
+# raw-settings default table checked below. This is not a full config inventory.
+CONFIGURED_SETTINGS = {
+    'web': {
+        'search_feed_item_limit': ('200', 'configured policy', 'web / per-feed RSS/Atom candidate shaping'),
+    },
+}
 CONFIGURED = {
     'Usage': {
         'runs_scanned': ('5000', 'configured policy', 'usage / history scan work budget'),
@@ -202,6 +212,23 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner)
             self.assertEqual({field.target.id: ast.unparse(field.value) for field in node.body
                               if isinstance(field, ast.AnnAssign)},
+                             {name: entry[0] for name, entry in declarations.items()})
+            for _, category, rationale in declarations.values():
+                self.assertEqual(category, 'configured policy')
+                self.assertTrue(rationale.strip())
+
+    def test_configured_raw_settings_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        for table, declarations in CONFIGURED_SETTINGS.items():
+            node = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == table
+                                for target in node.targets)
+                        and isinstance(node.value, ast.Dict))
+            defaults = {ast.literal_eval(key): ast.unparse(value)
+                        for key, value in zip(node.value.keys, node.value.values)
+                        if isinstance(key, ast.Constant)}
+            self.assertEqual({name: defaults[name] for name in declarations},
                              {name: entry[0] for name, entry in declarations.items()})
             for _, category, rationale in declarations.values():
                 self.assertEqual(category, 'configured policy')
