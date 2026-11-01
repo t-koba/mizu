@@ -1,14 +1,14 @@
 """First runtime-bound inventory, not a general numeric-literal linter.
 
-The eight files below cover named, direct module-level Assign/AnnAssign bounds
+The nine files below cover named, direct module-level Assign/AnnAssign bounds
 and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
-inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
-PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults in
-config.py, the retained-check Limits field and ceiling, plus the explicitly
-listed raw web setting; the decision-history recovery ceiling is checked alone,
+inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
+CiRequestEvidence, PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults,
+VCS polling fallback defaults, the retained-check Limits field and ceiling, and explicitly
+listed raw web and VCS settings; the decision-history recovery ceiling is checked alone,
 not as a full work_items.py inventory. Validation is covered
 by focused config tests. Classification records current ownership, not
 approval to leave policy in code; safety ceilings here are defensive read
@@ -47,6 +47,11 @@ DECLARATIONS = {
     'web.py': {
         'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
     },
+    'vcs_poll_policy.py': {
+        'MAX_CI_BRANCHES': ('4', 'configured policy', 'VCS polling / fail-closed fallback for poll_max_branches'),
+        'POLL_CALL_TIMEOUT_CAP': ('15', 'configured policy', 'VCS polling / fail-closed fallback for poll_status_timeout_seconds'),
+        'POLL_FETCH_TIMEOUT_CAP': ('30', 'configured policy', 'VCS polling / fail-closed fallback for poll_fetch_timeout_seconds'),
+    },
     'smoke_retention.py': {
         'MAX_PROJECTS': ('5000', 'policy', 'smoke retention / project scan budget'),
         'MAX_PAIRS': ('5000', 'policy', 'smoke retention / pair scan budget'),
@@ -67,6 +72,11 @@ DECLARATIONS = {
 CONFIGURED_SETTINGS = {
     'web': {
         'search_feed_item_limit': ('200', 'configured policy', 'web / per-feed RSS/Atom candidate shaping'),
+    },
+    'vcs': {
+        'poll_max_branches': ('4', 'configured policy', 'VCS polling / branches considered per daemon tick'),
+        'poll_fetch_timeout_seconds': ('30', 'configured policy', 'VCS polling / upstream fetch timeout default'),
+        'poll_status_timeout_seconds': ('15', 'configured policy', 'VCS polling / per-branch status timeout default'),
     },
 }
 CONFIGURED = {
@@ -237,6 +247,24 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             for _, category, rationale in declarations.values():
                 self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
+
+    def test_vcs_poll_fallbacks_match_configured_policy_defaults(self):
+        policy = inventory(ast.parse((ROOT / 'vcs_poll_policy.py').read_text(encoding='utf-8')))
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        assignment = next(node for node in ast.walk(tree)
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == 'vcs'
+                                  for target in node.targets)
+                          and isinstance(node.value, ast.Dict))
+        defaults = {ast.literal_eval(key): ast.unparse(value)
+                    for key, value in zip(assignment.value.keys, assignment.value.values)
+                    if isinstance(key, ast.Constant)}
+        self.assertEqual(
+            {name: policy[name] for name in ('MAX_CI_BRANCHES', 'POLL_CALL_TIMEOUT_CAP',
+                                              'POLL_FETCH_TIMEOUT_CAP')},
+            {'MAX_CI_BRANCHES': defaults['poll_max_branches'],
+             'POLL_CALL_TIMEOUT_CAP': defaults['poll_status_timeout_seconds'],
+             'POLL_FETCH_TIMEOUT_CAP': defaults['poll_fetch_timeout_seconds']})
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
