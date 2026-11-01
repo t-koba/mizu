@@ -307,7 +307,16 @@ class InstallCITests(Fixture):
         self.assertEqual(exit.exception.code, 2)
 
 
-@unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'POSIX Bash wrapper')
+def _absolute_bash():
+    """Resolve an absolute shell; a PATH entry can be a shim, not bash."""
+    system = '/bin/bash'
+    if os.path.isfile(system) and os.access(system, os.X_OK):
+        return system
+    found = shutil.which('bash')
+    return os.path.abspath(found) if found else None
+
+
+@unittest.skipUnless(os.name == 'posix' and _absolute_bash(), 'POSIX Bash wrapper')
 class InstallWrapperCITests(unittest.TestCase):
     @staticmethod
     def _hermetic_wrapper_env():
@@ -318,7 +327,7 @@ class InstallWrapperCITests(unittest.TestCase):
         if env is None:
             env = self._hermetic_wrapper_env()
         try:
-            probe = subprocess.run(['bash', '-c', 'printf mizu-control'],
+            probe = subprocess.run([_absolute_bash(), '-c', 'printf mizu-control'],
                 capture_output=True, timeout=10, env=env)
         except (OSError, subprocess.TimeoutExpired):
             return False, False
@@ -480,7 +489,7 @@ class InstallWrapperCITests(unittest.TestCase):
                     trace.unlink(missing_ok=True)
                     (root / 'setup.invoked.json').unlink(missing_ok=True)
                     (root / 'cli.invoked').unlink(missing_ok=True)
-                    result = subprocess.run(['bash', str(scripts / 'test-install.sh'), *selection],
+                    result = subprocess.run([_absolute_bash(), str(scripts / 'test-install.sh'), *selection],
                         capture_output=True, text=True, timeout=30,
                         env=self._hermetic_wrapper_env())
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -515,7 +524,7 @@ class InstallWrapperCITests(unittest.TestCase):
             bash_env.write_text('exit 0\n')
             hostile = dict(os.environ)
             hostile['BASH_ENV'] = str(bash_env)
-            silent = subprocess.run(['bash', str(scripts / 'test-install.sh')],
+            silent = subprocess.run([_absolute_bash(), str(scripts / 'test-install.sh')],
                 capture_output=True, text=True, timeout=30, env=hostile)
             # Ambient BASH_ENV ending in exit 0 makes bash exit before the body.
             self.assertEqual(silent.returncode, 0)
@@ -525,7 +534,7 @@ class InstallWrapperCITests(unittest.TestCase):
             hostile_ok, hostile_stderr_empty = self._bash_control(env=hostile)
             self.assertFalse(hostile_ok)
             with patch.dict(os.environ, {'BASH_ENV': str(bash_env)}):
-                hermetic = subprocess.run(['bash', str(scripts / 'test-install.sh')],
+                hermetic = subprocess.run([_absolute_bash(), str(scripts / 'test-install.sh')],
                     capture_output=True, text=True, timeout=30,
                     env=self._hermetic_wrapper_env())
             self.assertTrue(marker.exists())
