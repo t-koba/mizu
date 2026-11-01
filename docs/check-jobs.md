@@ -331,7 +331,7 @@ and records that new subscription as acknowledged, so a cache hit does not
 manufacture a later wake. The shared result remains readable through
 `action=result`/`action=logs`; queued or running subscriptions remain unread
 until their result is consumed. Consuming a result acknowledges equivalent
-subscriptions only for the consuming role. Evidence is retained while any
+subscriptions only for the consuming role. Evidence is retained while a surviving
 subscription references it; `limits.check_retained` includes subscriptions
 and fails closed when too few records can be safely reaped. Subscriptions consume no compute slot or private source/build tree.
 
