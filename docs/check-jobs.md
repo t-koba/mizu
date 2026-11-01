@@ -218,9 +218,11 @@ does not immediately prune history: the next new record requires enough victims
 to get below the target before insertion. All required victims are preflighted
 under `check-jobs.lock`; if too few are eligible, the existing `Busy` refusal
 leaves every record intact. Unread/unacknowledged evidence, executing jobs,
-pending acceptance evidence, shared-job references and explicitly protected IDs
-remain ineligible. References are protected for the whole preflight, even if a
-subscription is itself selected for eviction. The fixed `MAX_CHECK_RETAINED`
+pending acceptance evidence and explicitly protected IDs remain ineligible.
+Unreferenced acknowledged records are selected before referenced ones; a
+shared-job source becomes eligible only after every subscription that references
+it is already a victim in the same preflight, so a source is not removed while a
+surviving subscription still references it. The fixed `MAX_CHECK_RETAINED`
 ceiling of 1024 preserves the defensive envelope for linear metadata scans and
 request-identity search; it is not an intrinsic format limit. Frozen source obeys
 the existing snapshot size/file/exclusion bounds. Private source/build trees are
