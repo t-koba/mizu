@@ -516,24 +516,41 @@ def _make_room(project, *, protect=frozenset()):
     required = len(records) - project.config.limits.check_retained + 1
     if required <= 0:
         return
-    referenced = {read_json(p, {}).get('shared_job') for p in records}
-    victims = []
-    for old in records:
-        value = read_json(old, {})
+    values = [(path, read_json(path, {})) for path in records]
+    references = {}
+    for _, value in values:
+        if value.get('shared_job'):
+            references.setdefault(value['shared_job'], set()).add(value.get('id'))
+    referenced = set(references)
+    eligible = []
+    for path, value in values:
         # A detached subscription is cancelled immediately; its physical runner
         # may still own the frozen inputs until it observes cancellation.
         executing = not value.get('shared_job') and value.get('status') in ('queued', 'running')
         pending_proof = value.get('acceptance_scope') is not None and not value.get('acceptance_receipt_id')
         if (value.get('acknowledged') and not executing and not pending_proof
-                and value.get('id') not in protect and value.get('id') not in referenced
+                and value.get('id') not in protect
                 and read(project, value['id']).get('status') not in ('queued', 'running')):
-            victims.append(old.parent)
-            if len(victims) == required:
-                break
-    else:
-        raise Busy('Retained check evidence is full; inspect and acknowledge results')
+            eligible.append((path.parent, value['id']))
+
+    # Select unreferenced records first, preserving source evidence when other
+    # acknowledged records can satisfy the target. A source becomes eligible
+    # only after every subscription that references it is already a victim.
+    victims = []
+    victim_ids = set()
+    while len(victims) < required:
+        available = [entry for entry in eligible
+                     if entry[1] not in victim_ids
+                     and not (references.get(entry[1], set()) - victim_ids)]
+        if not available:
+            raise Busy('Retained check evidence is full; inspect and acknowledge results')
+        leaves = [entry for entry in available if entry[1] not in referenced]
+        victim = (leaves or available)[0]
+        victims.append(victim[0])
+        victim_ids.add(victim[1])
     # Preflight the entire reduction under check-jobs.lock: an insufficient
     # eligible set must not partially evict evidence after a target decrease.
+    # Selection order also removes subscriptions before their source records.
     for victim in victims:
         shutil.rmtree(victim)
 

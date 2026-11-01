@@ -373,6 +373,32 @@ class JobTests(Fixture):
         self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 2)
         self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
 
+    def test_retention_prunes_acknowledged_subscription_before_its_source(self):
+        self.retention_target(1)
+        source = self.retention_record(1)
+        subscription = self.retention_record(2, shared_job=source.parent.name)
+        with patch.object(check_jobs.shutil, 'rmtree', wraps=check_jobs.shutil.rmtree) as remove:
+            _, job = self.submit()
+        self.assertEqual([Path(call.args[0]).name for call in remove.call_args_list],
+                         [subscription.parent.name, source.parent.name])
+        self.assertFalse(source.exists())
+        self.assertFalse(subscription.exists())
+        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 1)
+        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
+
+    def test_retention_keeps_source_referenced_by_surviving_subscription(self):
+        source = self.retention_record(1)
+        subscription = self.retention_record(2, shared_job=source.parent.name,
+                                             acknowledged=False)
+        other = [self.retention_record(3), self.retention_record(4)]
+        self.retention_target(3)  # The two unrelated records satisfy the reduction.
+        _, job = self.submit()
+        self.assertTrue(source.exists())
+        self.assertTrue(subscription.exists())
+        self.assertTrue(all(not path.exists() for path in other))
+        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 3)
+        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
+
     def test_lowered_retained_target_refuses_without_partial_eviction(self):
         paths = [self.retention_record(1), self.retention_record(2),
                  self.retention_record(3, acknowledged=False),
@@ -393,8 +419,8 @@ class JobTests(Fixture):
                      self.retention_record(6, acceptance_scope={'bound': 'pending'}),
                      self.retention_record(7)]
         original = self.retention_record(8)
-        # Even when the subscription is evicted, its source stays protected for
-        # this preflight. A subscription of a running job is also ineligible.
+        # Preserve an otherwise eligible source when unrelated evidence can
+        # satisfy the target; a subscription of a running job stays ineligible.
         subscription = self.retention_record(9, shared_job=original.parent.name)
         protected += [original, self.retention_record(10, shared_job=protected[2].parent.name)]
         newest = self.retention_record(11, acceptance_scope={'bound': 'retained'},
