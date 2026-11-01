@@ -819,7 +819,10 @@ cannot establish whether an artifact is still needed. A per-project setting
 cannot safely govern this shared root, and neither free-text parsing nor
 confusing smoke IDs with Mizu/VCS run IDs is not permitted. Legacy flat smoke
 outputs remain unchanged and are never retention candidates; new complete
-bundles implement the shared reference contract below.
+bundles implement the shared reference contract below. The probe's disposable
+project is isolated under `data_dir/validation/smoke-runs/` and never created in
+the managed `data_dir/projects/` tree; publication validates that layout and
+moves the captured directory into the bundle without an in-tree lock handle.
 
 The policy owner is the shared `data_dir`, not any project: a single
 `validation/retention-policy.json` controls the shared smoke lifecycle across

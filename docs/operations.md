@@ -330,8 +330,12 @@ and age semantics.
 4-request / 5-tool / 120-second caps. New outputs are a complete bundle at
 `data_dir/validation/pairs/<32-lowercase-hex smoke_id>/`: `manifest.json`,
 `report.json`, and `project/` when initialization succeeded. The CLI report
-retains the probe result and adds `smoke_id`, `pair`, and `report` paths. A
-failed probe also publishes a terminal fail bundle before raising the probe
+retains the probe result and adds `smoke_id`, `pair`, and `report` paths. The
+probe's disposable project is created under
+`data_dir/validation/smoke-runs/<scratch>/projects/smoke-<smoke_id>/`, never in
+`data_dir/projects/`; the publisher accepts only that isolated layout, binds the
+captured directory identity, and holds no lock inode inside the tree it moves.
+A failed probe also publishes a terminal fail bundle before raising the probe
 error. Publication stages the bundle and renames its directory once; interrupted
 unpublished staging is diagnostic evidence, never an expiry candidate.
 
