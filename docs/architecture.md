@@ -956,12 +956,17 @@ truncation, and coverage state; an incomplete projection is not an exhaustive
 inventory. Rows include current origin staleness/redecision, a structured wait
 for blocked items, and an optional reason preview of at most 1024 UTF-8 bytes. Limits are 1–100 rows,
 8192 canonical bytes per row, and 1 MiB for the complete response; selection
-uses O(limit) row memory plus bounded temporary/alias metadata (at most 64 of
-each). `MAX_HISTORY_TEMPORARIES = 64` is a fixed recovery safety ceiling on
-untrusted crash-leftover temporary/alias metadata, separate from configurable
-history scan and retention policy. It bounds neither the full `os.scandir` name
-enumeration nor normal decision-history length. The temporary-name pass precedes
-the O(decision-history) enumeration under the shared lock, and stats only
+uses O(limit) row memory plus temporary/alias metadata bounded to at most the
+configured `limits.history_temporaries` entries of each type (default 64, range
+1–4096). This is a
+recovery work budget, independent of normal history length and retention.
+`MAX_HISTORY_TEMPORARIES = 4096` is a separate absolute metadata safety ceiling,
+not a format limit. A synthetic validation of 4,096 recognized names used about
+3,421,734 bytes of Python peak allocation and 149 ms on the measured host; this is not a
+native-platform timing claim. The configured threshold fails closed before
+cleanup when exceeded. It bounds neither the full `os.scandir` name enumeration
+nor normal decision-history length. The temporary-name pass precedes the
+O(decision-history) enumeration under the shared lock, and stats only
 recognized temporary files. Event inode
 matching is done only when a post-link alias is found, before any origin
 projection is read. No list index is maintained.

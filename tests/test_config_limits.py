@@ -5,7 +5,8 @@ import re
 import unittest
 
 from support import Fixture
-from mizu.config import MAX_CHECK_RETAINED, Limits, _LIMIT_RANGES, load
+from mizu.config import (MAX_CHECK_RETAINED, MAX_HISTORY_TEMPORARIES, Limits,
+                         _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
 
@@ -54,6 +55,25 @@ class CheckRetainedConfigTests(Fixture):
         limits = load(self.file).limits
         self.assertEqual(limits.check_retained, 2)
         self.assertEqual(limits.check_pending, 32)
+
+
+class HistoryTemporariesConfigTests(Fixture):
+    def test_default_and_absolute_range(self):
+        self.assertEqual(MAX_HISTORY_TEMPORARIES, 4096)
+        self.assertEqual(Limits().history_temporaries, 64)
+        original = re.sub(r'(?m)^history_temporaries = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.history_temporaries, 64)
+        for value in ('1', '64', '65', '4096', '0', '-1', '4097',
+                      'true', 'false', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n', f'\n[limits]\nhistory_temporaries = {value}\n'))
+                if value in ('1', '64', '65', '4096'):
+                    self.assertEqual(load(self.file).limits.history_temporaries, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.history_temporaries'):
+                        load(self.file)
 
 
 if __name__ == "__main__":

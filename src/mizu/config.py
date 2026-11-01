@@ -36,6 +36,11 @@ MAX_USAGE_RUNS_SCANNED = MAX_USAGE_POLICY_COUNT - 1
 #: Defensive retained-check metadata/identity-search envelope. Policy may lower
 #: this existing ceiling; raising it needs evidence for the linear queue scans.
 MAX_CHECK_RETAINED = 1024
+#: Absolute recovery metadata ceiling; the active per-project work budget is
+#: configurable below this value. A synthetic 4,096-entry scan remained below
+#: 3.5 MiB of Python allocations on the measured host.
+MAX_HISTORY_TEMPORARIES = 4096
+DEFAULT_HISTORY_TEMPORARIES = 64
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -348,6 +353,8 @@ class Limits:
     check_pending: int = 32
     #: Retained records including subscriptions; only safe acknowledged jobs evict.
     check_retained: int = 1024
+    #: Crash-leftover decision-history temporary scan budget; default 64.
+    history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.
@@ -464,7 +471,9 @@ class Limits:
 _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
-                 "check_retained": (1, MAX_CHECK_RETAINED), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
+                 "check_retained": (1, MAX_CHECK_RETAINED),
+                 "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
+                 "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
                  "insight_cursor_ttl_seconds": (60, 604800),

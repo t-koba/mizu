@@ -1,6 +1,7 @@
 """Internal work-item seeds, append-only CAS, evidence and fail-closed reads."""
 import concurrent.futures
 import copy
+import dataclasses
 import datetime as dt
 import json
 import os
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from support import Fixture
+from mizu.config import MAX_HISTORY_TEMPORARIES
 from mizu.errors import Denied, LimitExceeded, SnapshotConflict
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
 from mizu.work_items import (
@@ -1093,24 +1095,54 @@ class WorkItemTests(Fixture):
         self.assertEqual(page["unseeded_decisions"], 1)
         self.assertFalse(page["coverage_complete"])
 
-    def test_page_open_decision_history_temporary_safety_ceiling(self):
+    def test_page_open_uses_configured_history_temporary_budget(self):
+        from mizu.project import Project
+
         history = self.project.root / "decision-history"
         committed = {path.name: path.read_bytes() for path in history.iterdir()}
         expected_page = self.store.page_open()
-        for count in (64, 65):
-            with self.subTest(temporaries=count):
-                temporaries = {f".new-{index:08d}": b"uncommitted" for index in range(count)}
-                for name, content in temporaries.items():
-                    (history / name).write_bytes(content)
-                if count == 64:
-                    self.assertEqual(self.store.page_open(), expected_page)
-                    self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
-                                     committed)
-                else:
-                    with self.assertRaisesRegex(Denied, "^Too many decision-history temporaries$"):
-                        self.store.page_open()
-                    self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
-                                     {**committed, **temporaries})
+        self.assertEqual(self.store.history_temporaries,
+                         self.config.limits.history_temporaries)
+        self.assertEqual(self.store.history_temporaries, 64)
+
+        safe = {f".new-{index:08d}": b"uncommitted" for index in range(64)}
+        for name, content in safe.items():
+            (history / name).write_bytes(content)
+        self.assertEqual(self.store.page_open(), expected_page)
+        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()}, committed)
+
+        over_default = {f".new-{index:08d}": b"uncommitted" for index in range(65)}
+        for name, content in over_default.items():
+            (history / name).write_bytes(content)
+        with self.assertRaisesRegex(Denied, "^Too many decision-history temporaries$"):
+            self.store.page_open()
+        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
+                         {**committed, **over_default})
+
+        configured = dataclasses.replace(
+            self.config, limits=dataclasses.replace(self.config.limits, history_temporaries=65))
+        configured_store = Project(configured, self.project.name).work_items
+        self.assertEqual(configured_store.history_temporaries, 65)
+        self.assertEqual(configured_store.page_open(), expected_page)
+        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()}, committed)
+
+    def test_page_open_refuses_over_absolute_history_temporary_ceiling_without_cleanup(self):
+        from mizu.project import Project
+
+        history = self.project.root / "decision-history"
+        committed = {path.name: path.read_bytes() for path in history.iterdir()}
+        configured = dataclasses.replace(
+            self.config, limits=dataclasses.replace(
+                self.config.limits, history_temporaries=MAX_HISTORY_TEMPORARIES))
+        store = Project(configured, self.project.name).work_items
+        temporaries = {f".new-{index:08d}": b"uncommitted"
+                       for index in range(MAX_HISTORY_TEMPORARIES + 1)}
+        for name, content in temporaries.items():
+            (history / name).write_bytes(content)
+        with self.assertRaisesRegex(Denied, "^Too many decision-history temporaries$"):
+            store.page_open()
+        self.assertEqual({path.name: path.read_bytes() for path in history.iterdir()},
+                         {**committed, **temporaries})
 
     def test_page_open_recovers_post_link_decision_history_temporary(self):
         history = self.project.root / "decision-history"

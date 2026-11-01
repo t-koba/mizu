@@ -124,10 +124,15 @@ CHECK_RETENTION = {
 }
 
 
-# This recovery ceiling is name-scoped, not a WorkItems numeric inventory.
-HISTORY_RECOVERY = {
-    'MAX_HISTORY_TEMPORARIES': (
-        '64', 'safety', 'work_items / bounds temporary/alias metadata in crash recovery'),
+# The active recovery budget is policy; its separate absolute ceiling is
+# name-scoped, not a WorkItems numeric inventory.
+HISTORY_TEMPORARIES = {
+    'history_temporaries': ('DEFAULT_HISTORY_TEMPORARIES', 'configured policy',
+                            'Limits / per-project decision-history recovery work budget'),
+    'DEFAULT_HISTORY_TEMPORARIES': ('64', 'configured policy',
+                                    'config / unchanged decision-history recovery default'),
+    'MAX_HISTORY_TEMPORARIES': ('4096', 'safety',
+                                'config / absolute untrusted temporary-metadata ceiling'),
 }
 
 
@@ -276,12 +281,27 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         self.assertEqual([entry[1] for entry in CHECK_RETENTION.values()], ['configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in CHECK_RETENTION.values()))
 
-    def test_decision_history_recovery_safety_declaration(self):
-        tree = ast.parse((ROOT / 'work_items.py').read_text(encoding='utf-8'))
-        expression, category, rationale = HISTORY_RECOVERY['MAX_HISTORY_TEMPORARIES']
-        self.assertEqual(inventory(tree)['MAX_HISTORY_TEMPORARIES'], expression)
-        self.assertEqual(category, 'safety')
-        self.assertTrue(rationale.strip())
+    def test_history_temporary_policy_and_safety_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body
+                     if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'history_temporaries')
+        self.assertEqual(ast.unparse(field.value), HISTORY_TEMPORARIES['history_temporaries'][0])
+        self.assertEqual(inventory(tree)['MAX_HISTORY_TEMPORARIES'],
+                         HISTORY_TEMPORARIES['MAX_HISTORY_TEMPORARIES'][0])
+        default = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name)
+                               and target.id == 'DEFAULT_HISTORY_TEMPORARIES'
+                               for target in node.targets))
+        self.assertEqual(ast.unparse(default.value),
+                         HISTORY_TEMPORARIES['DEFAULT_HISTORY_TEMPORARIES'][0])
+        self.assertEqual([HISTORY_TEMPORARIES[key][1]
+                          for key in ('history_temporaries', 'DEFAULT_HISTORY_TEMPORARIES',
+                                      'MAX_HISTORY_TEMPORARIES')],
+                         ['configured policy', 'configured policy', 'safety'])
+        self.assertTrue(all(entry[2].strip() for entry in HISTORY_TEMPORARIES.values()))
 
     def test_configured_raw_settings_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
