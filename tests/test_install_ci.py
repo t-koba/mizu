@@ -3,6 +3,7 @@ import argparse
 import copy
 import dataclasses
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -313,7 +314,18 @@ class InstallWrapperCITests(unittest.TestCase):
         # Non-interactive bash sources BASH_ENV before the script body.
         return {k: v for k, v in os.environ.items() if k not in ('BASH_ENV', 'ENV')}
 
-    def read_wrapper_trace(self, root, mode_index, returncode):
+    def _bash_control(self, env=None):
+        if env is None:
+            env = self._hermetic_wrapper_env()
+        try:
+            probe = subprocess.run(['bash', '-c', 'printf mizu-control'],
+                capture_output=True, timeout=10, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, False
+        return (probe.returncode == 0 and probe.stdout == b'mizu-control',
+                len(probe.stderr) == 0)
+
+    def read_wrapper_trace(self, root, mode_index, returncode, *, stdout='', stderr=''):
         trace = root / 'trace.jsonl'
         try:
             return trace.read_text()
@@ -325,6 +337,17 @@ class InstallWrapperCITests(unittest.TestCase):
                 observed = json.loads((root / 'setup.invoked.json').read_text())
             except (OSError, ValueError):
                 observed = None
+            wrapper_path = root / 'scripts' / 'test-install.sh'
+            try:
+                wrapper_bytes = wrapper_path.stat().st_size if wrapper_path.is_file() else None
+            except OSError:
+                wrapper_bytes = None
+            try:
+                with open(wrapper_path, 'rb') as handle:
+                    wrapper_sha256 = hashlib.sha256(handle.read(65536)).hexdigest()
+            except OSError:
+                wrapper_sha256 = None
+            control_ok, control_stderr_empty = self._bash_control()
             error.add_note('wrapper trace diagnostic: ' + json.dumps({
                 'mode_index': mode_index, 'wrapper_returncode': returncode,
                 'root_exists': root.exists(), 'trace_exists': trace.exists(),
@@ -335,6 +358,12 @@ class InstallWrapperCITests(unittest.TestCase):
                     'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
                 'stage_paths': stage_paths if observed == stage_paths else None,
                 'errno': error.errno,
+                'wrapper_stdout_empty': stdout == '',
+                'wrapper_stderr_empty': stderr == '',
+                'wrapper_bytes': wrapper_bytes,
+                'wrapper_sha256': wrapper_sha256,
+                'bash_control_ok': control_ok,
+                'bash_control_stderr_empty': control_stderr_empty,
             }, sort_keys=True))
             raise
 
@@ -350,8 +379,10 @@ class InstallWrapperCITests(unittest.TestCase):
             for observed in (stage_paths, {'config': str(root / sentinel)}):
                 with self.subTest(valid_stage_paths=observed == stage_paths):
                     (root / 'setup.invoked.json').write_text(json.dumps(observed))
-                    with self.assertRaises(FileNotFoundError) as caught:
-                        self.read_wrapper_trace(root, 2, 0)
+                    with patch.object(InstallWrapperCITests, '_bash_control',
+                                      return_value=(True, True)):
+                        with self.assertRaises(FileNotFoundError) as caught:
+                            self.read_wrapper_trace(root, 2, 0)
                     error = caught.exception
                     self.assertEqual(error.errno, errno.ENOENT)
                     self.assertEqual(error.filename, str(root / 'trace.jsonl'))
@@ -366,6 +397,12 @@ class InstallWrapperCITests(unittest.TestCase):
                             'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
                         'stage_paths': stage_paths if observed == stage_paths else None,
                         'errno': errno.ENOENT,
+                        'wrapper_stdout_empty': True,
+                        'wrapper_stderr_empty': True,
+                        'wrapper_bytes': None,
+                        'wrapper_sha256': None,
+                        'bash_control_ok': True,
+                        'bash_control_stderr_empty': True,
                     })
                     for private in (temporary, sentinel, str(error)):
                         self.assertNotIn(private, note)
@@ -422,7 +459,8 @@ class InstallWrapperCITests(unittest.TestCase):
                         env=self._hermetic_wrapper_env())
                     self.assertEqual(result.returncode, 0, result.stderr)
                     calls = [json.loads(line) for line in
-                             self.read_wrapper_trace(root, mode_index, result.returncode).splitlines()]
+                             self.read_wrapper_trace(root, mode_index, result.returncode,
+                                stdout=result.stdout, stderr=result.stderr).splitlines()]
                     installs = [row for row in calls if row[0] == 'setup']
                     self.assertEqual(len(installs), 2)
                     forwarded = (['--reuse-source-checks', *selection] if len(selection) == 1 else selection)
@@ -458,9 +496,16 @@ class InstallWrapperCITests(unittest.TestCase):
             self.assertEqual(silent.stdout, '')
             self.assertEqual(silent.stderr, '')
             self.assertFalse(marker.exists())
+            hostile_ok, hostile_stderr_empty = self._bash_control(env=hostile)
+            self.assertFalse(hostile_ok)
             with patch.dict(os.environ, {'BASH_ENV': str(bash_env)}):
                 hermetic = subprocess.run(['bash', str(scripts / 'test-install.sh')],
                     capture_output=True, text=True, timeout=30,
                     env=self._hermetic_wrapper_env())
             self.assertTrue(marker.exists())
             self.assertNotEqual(hermetic.returncode, 0)
+            hermetic_ok, hermetic_stderr_empty = self._bash_control(
+                env=self._hermetic_wrapper_env())
+            self.assertTrue(hermetic_ok)
+            self.assertTrue(hermetic_stderr_empty)
+            self.assertTrue(hostile_stderr_empty)
