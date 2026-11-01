@@ -1,6 +1,6 @@
 """First runtime-bound inventory, not a general numeric-literal linter.
 
-The five files below cover named, direct module-level Assign/AnnAssign bounds
+The six files below cover named, direct module-level Assign/AnnAssign bounds
 and direct numeric literal/arithmetic values at a short resource-call keyword
 set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
@@ -22,17 +22,22 @@ CANDIDATE = re.compile(
 )
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
-    'usage.py': {},
+    'usage.py': {
+        'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
+    },
+    'dispatch_evidence.py': {
+        'MAX_TEXT': ('256', 'safety', 'dispatch evidence / fixed persisted text-label length ceiling'),
+    },
     'workspace_cache.py': {},
     'ci_requests.py': {
         'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded evidence-record read'),
-        'REQUEST_SCAN_LIMIT': ('10000', 'policy', 'CI requests / directory scan work budget'),
+        'REQUEST_SCAN_LIMIT': ('10000', 'policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
         'REQUEST_RECORD_LIMIT': ('1000', 'policy', 'CI requests / record validation budget'),
     },
     'publication.py': {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
-        'RECEIPT_SCAN_LIMIT': ('10000', 'policy', 'publication / directory scan work budget'),
+        'RECEIPT_SCAN_LIMIT': ('10000', 'policy', 'publication / name-processing budget after os.listdir materializes all names'),
         'RECEIPT_RECORD_LIMIT': ('1000', 'policy', 'publication / record validation budget'),
     },
     'smoke_retention.py': {
@@ -85,6 +90,7 @@ CALL_KEYWORDS = frozenset({
 # (enclosing scope, callee, keyword, occurrence): (expression, class, rationale)
 CALLS = {
     'usage.py': {},
+    'dispatch_evidence.py': {},
     'workspace_cache.py': {
         ('_preflight', 'run', 'maximum', 0): (
             '4096', 'safety', 'workspace cache / Git root output read bound'),

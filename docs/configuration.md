@@ -877,18 +877,41 @@ A direct creation that inherits extra refs stores `requested_smoke_refs` (the
 original optional request, null for omission) beside its seed. This provenance
 field is not a pin; it preserves exact retry identity after the origin changes.
 
-The collector scans all project roots and new pair manifests, with fixed caps:
-5,000 roots, 5,000 published-plus-pending pair manifests, and 5,000 quarantine
-entries; 20,000 live reference occurrences; and 64 MiB of shared reference,
-manifest, policy, and audit metadata. Each reference
-record is at most 128 KiB. Enumeration also caps reference-store entries at
-100,000 and each WorkItem directory at 260 entries; existing ledger revision
-bounds still apply. No links are followed; linked metadata, unknown schemas,
-missing live owners/pairs and exhausted bounds refuse the entire new-expiry
-apply. Report payload bytes are validated separately and are not charged to the
-metadata budget. Scans do not take project workspace/role locks. Apply recomputes
-under the shared lock; dry-run is strictly read-only and never performs recovery.
-With 0, only policy, audit and recognized quarantine recovery are examined.
+The shared `data_dir` smoke-retention owner currently has these hard-coded
+operational budgets; they are not configuration keys or format ceilings:
+
+| Behavior | Current code value | Owner and current range |
+|---|---:|---|
+| Project roots (`MAX_PROJECTS`) | 5,000 | Shared smoke retention; no configurable range |
+| Published-plus-pending pairs and quarantine entries (`MAX_PAIRS`, each) | 5,000 | Shared smoke retention; no configurable range |
+| Live reference occurrences (`MAX_REFS`) | 20,000 | Shared smoke retention; no configurable range |
+| Cumulative reference, manifest, policy and audit metadata (`MAX_METADATA`) | 64 MiB | Shared smoke retention; no configurable range |
+| Reference-store metadata entries (`MAX_ENTRIES`) | 100,000 | Shared smoke retention; no configurable range |
+| Retained maintenance-audit events (`AUDIT_LIMIT`) | 128 | Shared smoke retention; no configurable range |
+| Stored expiry age (`MAX_DAYS`) | 31-day default; 0–36,500 days | Data-dir retention policy; 0 keeps indefinitely, and 36,500 is the current hard-coded validation ceiling |
+
+The count/byte ceilings, audit retention, and expiry-age validation ceiling
+are behavior-dependent policy candidates, not intrinsic record limits. Their
+current constants are the only supported values today; a configurable range
+is intentionally not selected
+until the shared owner measures realistic stores and chooses safe validation
+semantics. Do not treat a current default as an eventual maximum. The existing
+`[limits].automatic_smoke_retention_interval_seconds` controls only sweep
+cadence (default 86,400 seconds; range 0–2,678,400), not these global budgets or
+the data-dir `days` policy.
+
+Separate defensive bounds remain fixed: each metadata record is at most 128
+KiB and the automatic due-state read is at most 4 KiB. The pair manifest (4
+KiB), policy file (1 KiB), report payload (16 MiB), and per-WorkItem directory
+(260 entries, derived from the existing 256-revision history bound plus its
+record files) are individual record/history bounds, not scan-budget settings.
+Enumeration is bounded before sorting; no links are followed. Linked metadata,
+unknown schemas, missing live owners/pairs and exhausted budgets refuse the
+entire new-expiry apply. Report payload bytes are validated separately and are
+not charged to the metadata budget. Scans do not take project workspace/role
+locks. Apply recomputes under the shared lock; dry-run is strictly read-only
+and never performs recovery. With 0 days, only policy, audit and recognized
+quarantine recovery are examined.
 
 See [operations](operations.md#shared-smoke-evidence-retention) for commands,
 quarantine recovery, partial-failure results and bounded maintenance audit.
@@ -1951,6 +1974,26 @@ exact `code_digest`, `branch` or `published_sha` filters and returns one bounded
 `external-untrusted`. Run-local `vcs-read/` and `vcs-publish/` evidence paths
 are named in tool responses.
 
+Local evidence readers have these current hard-coded values; they are policy
+candidates rather than `[vcs]` adapter settings:
+
+| Behavior and owner | Current code value | Current configurable range / prospective owner |
+|---|---:|---|
+| CI-request evidence listing (`REQUEST_SCAN_LIMIT`, `REQUEST_RECORD_LIMIT`) | 10,000 names; 1,000 candidate records | None; candidate `[ci_requests]` section |
+| Publication-receipt listing (`RECEIPT_SCAN_LIMIT`, `RECEIPT_RECORD_LIMIT`) | 10,000 names; 1,000 candidate receipts | None; candidate `[publication_evidence]` section |
+| Local Git HEAD command for publication (`source_commit`) | 5-second timeout | None; candidate `[publication]` setting |
+
+The 1,000-record CI limit also bounds `ci_costs` offsets to 0–999 today.
+Both listing readers call `os.listdir` and sort the complete name list before
+applying the caps, so their values bound subsequent record validation but do
+**not** bound directory-listing memory. Any configurable range must retain
+that distinction and be measured before migration. The 8 KiB stored-record
+cap, 4 KiB caller-supplied lineage JSON cap, and 4 KiB local Git HEAD output
+cap are separate defensive read limits. The local Git timeout is publication-
+owned and distinct from the external adapter's `[vcs].timeout_seconds`
+(default 20 seconds; range 1–16,777,216). No new section or validated
+configurable range exists yet for these local limits.
+
 Log reads require `branch` and preserve the existing optional `sha` behavior.
 When `check` is supplied, the request also requires an exact 40/64-hex commit
 SHA and selects one exact CI check name:
@@ -2060,17 +2103,22 @@ reported state `running`/`in_progress`/`queued`/`pending` or a start without a
 completion; a missing duration is not estimated from the current time.
 These counters describe observations, not distinct executions.
 
-The existing validated request scan (10000 directory entries, 1000 candidate
-records) is shared with `ci_requests`; `total` counts validated dispatches and
-is only a lower bound when `scan_stopped`. Rows are ordered by UTC dispatch
-date then request ID. `next_offset` is null at the scanned end; `truncated`
-also flags omitted earlier rows. Pagination is positional, not a stable
-snapshot cursor if new evidence arrives. Deduplication and subtotals are
-page-local: **do not add pages or repeated polls as daily totals**. There is
-no completeness attestation in the adapter contract, so coverage is always
-partial, even on an untruncated page. No timed, attributed execution means
-`observed_wall_seconds: null`; zero requires an observed zero-duration job.
-This is runner wall time, not billable minutes, credits, CPU time or savings.
+The existing validated request scan processes at most 10,000 directory names
+and validates at most 1,000 unique candidate records; it is shared with
+`ci_requests`. These are current hard-coded CI-request-reader budgets, not
+configuration values, and no configurable range is selected today. The reader
+materializes and sorts the complete `os.listdir` result before applying them,
+so they bound record-validation work, not directory-listing memory. `total`
+counts validated dispatches and is only a lower bound when `scan_stopped`. Rows
+are ordered by UTC dispatch date then request ID. `next_offset` is null at the
+scanned end; `truncated` also flags omitted earlier rows. Pagination is
+positional, not a stable snapshot cursor if new evidence arrives. Deduplication
+and subtotals are page-local: **do not add pages or repeated polls as daily
+totals**. There is no completeness attestation in the adapter contract, so
+coverage is always partial, even on an untruncated page. No timed, attributed
+execution means `observed_wall_seconds: null`; zero requires an observed
+zero-duration job. This is runner wall time, not billable minutes, credits, CPU
+time or savings.
 
 
 ### CI artifact text and byte-page reads
