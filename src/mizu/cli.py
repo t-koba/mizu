@@ -679,7 +679,8 @@ def execute(args):
         name = identifier(args.project)
         usage = Budget(config.data / "budget", config.limits.daily_requests,
                        config.limits.retention_days,
-                       config.limits.shared_daily_requests, config.timezone).usage(name)
+                       config.limits.shared_daily_requests, config.timezone,
+                       day_file_bytes=config.limits.budget_day_file_bytes).usage(name)
         return {"project": name, **usage}
     if args.command == "editor":
         # `editor export` needs a project; `editor mcp` handled above.

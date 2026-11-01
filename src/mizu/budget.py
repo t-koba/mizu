@@ -6,20 +6,19 @@ import json
 import stat
 from pathlib import Path
 
+from .config import Limits, resolve_timezone
 from .errors import Denied, InfraExceeded, LimitExceeded
 from .fs import atomic_write, canonical, identifier, lock, read_json, safe_read
-
-#: Day-file byte bound (~160K admissions at ~25 B/entry); count cap binds first.
-BUDGET_DAY_BYTES = 4 * 1024 * 1024
 
 
 class Budget:
     def __init__(self, root: Path, daily: int, retention_days: int = 31,
-                 shared_daily: int = 0, timezone: str = "UTC"):
-        from .config import resolve_timezone
+                 shared_daily: int = 0, timezone: str = "UTC",
+                 day_file_bytes: int = Limits.budget_day_file_bytes):
         self.root, self.daily = root, daily
         self.retention_days = retention_days
         self.shared_daily = shared_daily
+        self.day_file_bytes = day_file_bytes
         self.timezone = timezone
         self._tz = resolve_timezone(timezone)
 
@@ -85,7 +84,8 @@ class Budget:
         ``project`` is the validated project name (``\"\"`` keeps the legacy
         shared-only accounting used by unit callers). Bounds: per-project
         count below ``daily``; shared aggregate below ``shared_daily`` when
-        positive; day-file below ``BUDGET_DAY_BYTES``. Trust: local operator
+        positive; day-file at most ``day_file_bytes``
+        (``limits.budget_day_file_bytes``, default 4 MiB). Trust: local operator
         state under ``budget.lock``. Retry: idempotent per (project,
         request_id); a repeat returns the per-project count without charging.
         Evidence: returns the per-project count (shared count when no project
@@ -125,7 +125,7 @@ class Budget:
             record["requests"] = requests
             record["projects"] = projects
             body = canonical(record)
-            if len(body) > BUDGET_DAY_BYTES:
+            if len(body) > self.day_file_bytes:
                 raise InfraExceeded("Budget day-file exceeds byte bound; inspect data/budget")
             atomic_write(path, body)
             count = len(entries)
@@ -196,7 +196,8 @@ class Budget:
     def peek(self, project: str = "") -> dict:
         """Read today's bounded budget counters without reaping or writing.
 
-        Bounds: one ``YYYY-MM-DD.json`` file up to ``BUDGET_DAY_BYTES``.
+        Bounds: one ``YYYY-MM-DD.json`` file up to ``day_file_bytes``
+        (``limits.budget_day_file_bytes``, default 4 MiB).
         Trust: local ledger only. Missing day files report zero counters;
         unsafe, oversized, malformed, or unreadable files report
         ``status="unavailable"`` with no inferred counters. This method never
@@ -223,10 +224,10 @@ class Budget:
         except OSError:
             return {"status": "unavailable", "project": project}
         if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_nlink != 1 or info.st_size > BUDGET_DAY_BYTES):
+                or info.st_nlink != 1 or info.st_size > self.day_file_bytes):
             return {"status": "unavailable", "project": project}
         try:
-            data = safe_read(self.root, f"{day}.json", BUDGET_DAY_BYTES)
+            data = safe_read(self.root, f"{day}.json", self.day_file_bytes)
             record = json.loads(data, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             if not isinstance(record, dict):
                 raise ValueError

@@ -353,7 +353,8 @@ class Project:
         effective, effective_diagnostic = effective_projection(self, snapshot)
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                         self.config.limits.retention_days,
-                        self.config.limits.shared_daily_requests, self.config.timezone).usage(self.name)
+                        self.config.limits.shared_daily_requests, self.config.timezone,
+                        day_file_bytes=self.config.limits.budget_day_file_bytes).usage(self.name)
         progress = snapshot.get("progress")
         progress_count = progress.get("no_progress_count", 0) if isinstance(progress, dict) else 0
         progress_role = progress.get("role") if isinstance(progress, dict) else None

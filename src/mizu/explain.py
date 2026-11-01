@@ -243,7 +243,8 @@ def _snapshot(project, config=None, role_name: str | None = None) -> dict:
 def _budget(config, project_name) -> dict:
     budget = Budget(config.data / "budget", config.limits.daily_requests,
                     config.limits.retention_days,
-                    config.limits.shared_daily_requests, config.timezone)
+                    config.limits.shared_daily_requests, config.timezone,
+                    day_file_bytes=config.limits.budget_day_file_bytes)
     peek = budget.peek(project_name)
     if peek["status"] == "unavailable":
         return {"status": "unavailable", "scope": "project", "counters": None}

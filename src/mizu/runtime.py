@@ -923,7 +923,8 @@ class Context:
                         try:
                             Budget(self.config.data / "budget", self.config.limits.daily_requests,
                                    self.config.limits.retention_days,
-                                   self.config.limits.shared_daily_requests, self.config.timezone).take(
+                                   self.config.limits.shared_daily_requests, self.config.timezone,
+                                   day_file_bytes=self.config.limits.budget_day_file_bytes).take(
                                        f"{self.run_dir.name}:{self.execution_attempt}:{sequence}",
                                        project=self.project.name)
                         except InfraExceeded:
@@ -2388,7 +2389,8 @@ class Engine:
             raise Busy("Project is draining; no new runs admitted")
         usage = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                        self.config.limits.retention_days,
-                       self.config.limits.shared_daily_requests, self.config.timezone).usage(project.name)
+                       self.config.limits.shared_daily_requests, self.config.timezone,
+                       day_file_bytes=self.config.limits.budget_day_file_bytes).usage(project.name)
         if usage["limit"] <= usage["used"]:
             raise InfraExceeded(f"{self.config.timezone} daily model-request budget unavailable for project '{project.name}'")
         if usage["shared_limit"] > 0 and usage["shared_used"] >= usage["shared_limit"]:

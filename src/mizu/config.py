@@ -317,6 +317,7 @@ class Limits:
     producer_inputs_per_source: int = 20
     daily_requests: int = 0
     shared_daily_requests: int = 0
+    budget_day_file_bytes: int = 4 * 1024 * 1024
     requests_per_run: int = 24
     tools_per_run: int = 64
     #: Total wrap-up allowance granted when a per-run spend bound is hit
@@ -473,6 +474,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                  "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
                  "daily_requests": (0, 100000), "shared_daily_requests": (0, 100000), "max_failures": (0, 1073741824),
+                 "budget_day_file_bytes": (1, MAX_USAGE_POLICY_COUNT),
                  "busy_retry_seconds": (0, 86400),
                  "admission_wait_seconds": (0, 86400),
                  "no_progress_continuations": (0, 100),

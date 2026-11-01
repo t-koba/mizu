@@ -5,8 +5,9 @@ from unittest.mock import patch
 from pathlib import Path
 from support import Fixture
 from mizu.budget import Budget
-from mizu.config import load
-from mizu.errors import Denied, InfraExceeded
+from mizu.config import MAX_USAGE_POLICY_COUNT, Limits, load
+from mizu.errors import ConfigError, Denied, InfraExceeded
+from mizu.fs import canonical, safe_read
 
 
 class PerProjectBudgetTests(unittest.TestCase):
@@ -59,6 +60,32 @@ class PerProjectBudgetTests(unittest.TestCase):
         self.assertEqual(budget.peek("alpha")["status"], "unavailable")
         self.assertNotIn("used", budget.peek("alpha"))
 
+    def test_custom_day_file_bound_controls_write_and_peek_only(self):
+        default = Budget(self.root, 5)
+        self.assertEqual(default.day_file_bytes, 4 * 1024 * 1024)
+        day = default._today()
+        body = canonical({"day": day, "zone": "UTC", "requests": ["one"],
+                          "projects": {"alpha": ["one"]}})
+        budget = Budget(self.root, 5, day_file_bytes=len(body))
+        # Exact-size files fit both the writer and bounded reader.
+        self.assertEqual(budget.take("one", day=day, project="alpha"), 1)
+        path = self.root / f"{day}.json"
+        self.assertEqual(path.read_bytes(), body)
+        with patch("mizu.budget.safe_read", wraps=safe_read) as read:
+            self.assertEqual(budget.peek("alpha")["used"], 1)
+        read.assert_called_once_with(self.root, f"{day}.json", len(body))
+        with self.assertRaisesRegex(InfraExceeded, "Budget day-file exceeds byte bound"):
+            budget.take("two", day=day, project="alpha")
+        self.assertEqual(path.read_bytes(), body)
+        self.assertEqual(budget.take("one", day=day, project="alpha"), 1)
+        # A larger budget admits the next request without changing count caps.
+        self.assertEqual(default.take("two", day=day, project="alpha"), 2)
+        with patch("mizu.budget.safe_read", side_effect=AssertionError("oversize read")):
+            self.assertEqual(budget.peek("alpha"),
+                             {"status": "unavailable", "project": "alpha"})
+        # Legacy usage still reads a file larger than the selected byte budget.
+        self.assertEqual(budget.usage("alpha")["used"], 2)
+
     def test_usage_reports_both_and_rejects_bad_names(self):
         budget = Budget(self.root, 5)
         budget.take("a1", project="alpha")
@@ -75,6 +102,34 @@ class PerProjectBudgetTests(unittest.TestCase):
 
 
 class BudgetConfigTests(Fixture):
+    def test_day_file_default_override_and_ranges(self):
+        self.assertEqual(Limits().budget_day_file_bytes, 4 * 1024 * 1024)
+        self.assertEqual(self.config.limits.budget_day_file_bytes, 4 * 1024 * 1024)
+        original = self.file.read_text()
+        setting = "budget_day_file_bytes = 4194304"
+        self.assertIn(setting, original)
+        self.file.write_text(original.replace(setting, ""))
+        self.assertEqual(load(self.file).limits.budget_day_file_bytes, 4 * 1024 * 1024)
+        accepted = tuple(map(str, (1, 4194304, 8388608, MAX_USAGE_POLICY_COUNT)))
+        for value in (*accepted, "0", "-1", str(MAX_USAGE_POLICY_COUNT + 1),
+                      "true", "false", "1.5", '\"1\"', "[]", "{}"):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(setting, f"budget_day_file_bytes = {value}"))
+                if value in accepted:
+                    self.assertEqual(load(self.file).limits.budget_day_file_bytes, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, "limits.budget_day_file_bytes"):
+                        load(self.file)
+
+    def test_explain_peek_uses_configured_day_file_bound(self):
+        from mizu.explain import _budget
+        Budget(self.config.data / "budget", 5).take("one", project="sample")
+        self.assertEqual(_budget(self.config, "sample")["status"], "current")
+        self.file.write_text(self.file.read_text().replace(
+            "budget_day_file_bytes = 4194304", "budget_day_file_bytes = 1"))
+        report = _budget(load(self.file), "sample")
+        self.assertEqual(report, {"status": "unavailable", "scope": "project", "counters": None})
+
     def test_shared_total_is_optional_and_bounded(self):
         self.assertEqual(self.config.limits.shared_daily_requests, 0)
         self.file.write_text(self.file.read_text().replace(
@@ -82,7 +137,6 @@ class BudgetConfigTests(Fixture):
         self.assertEqual(load(self.file).limits.shared_daily_requests, 50)
         self.file.write_text(self.file.read_text().replace(
             "shared_daily_requests = 50", "shared_daily_requests = 100001"))
-        from mizu.errors import ConfigError
         with self.assertRaises(ConfigError):
             load(self.file)
 

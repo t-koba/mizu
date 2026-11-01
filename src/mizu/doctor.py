@@ -464,7 +464,8 @@ def budget_file(config: Config) -> dict:
     """
     audit = Budget(config.data / "budget", config.limits.daily_requests,
                    config.limits.retention_days,
-                   config.limits.shared_daily_requests, config.timezone).audit()
+                   config.limits.shared_daily_requests, config.timezone,
+                   day_file_bytes=config.limits.budget_day_file_bytes).audit()
     if audit["malformed"]:
         raise ConfigError("Budget file is corrupt; inspect data/budget/<day>.json: "
                           + ", ".join(audit["malformed"]))

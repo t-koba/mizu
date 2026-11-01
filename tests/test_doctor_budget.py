@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mizu.budget import Budget
+from mizu.config import Limits
 from mizu.doctor import budget_file
 from mizu.errors import ConfigError
 
@@ -17,8 +18,7 @@ from mizu.errors import ConfigError
 def make_config(root: Path, daily: int, shared: int = 0):
     return SimpleNamespace(
         data=root,
-        limits=SimpleNamespace(daily_requests=daily, retention_days=31,
-                               shared_daily_requests=shared),
+        limits=Limits(daily_requests=daily, shared_daily_requests=shared),
         timezone="UTC",
     )
 

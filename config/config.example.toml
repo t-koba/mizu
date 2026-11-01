@@ -104,6 +104,7 @@ open_work_items = 100
 producer_inputs_per_source = 20
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
 shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).
+budget_day_file_bytes = 4194304     # Day-file write/peek budget (4 MiB default); positive, up to min(TOML signed-64-bit max, sys.maxsize). Larger values allow proportionally larger resource use.
 requests_per_run = 24
 tools_per_run = 64
 wrap_up_requests = 3          # Total wrap-up requests after a per-run bound is hit (1-1073741824); roles may override per role.

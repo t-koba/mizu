@@ -184,7 +184,8 @@ def _probe_limits(config, role_name):
 def _budget_available(config, project):
     # A preflight only, not a reservation. The real take still arbitrates spend.
     usage = Budget(config.data / 'budget', config.limits.daily_requests, config.limits.retention_days,
-                   config.limits.shared_daily_requests, config.timezone).usage(project.name)
+                   config.limits.shared_daily_requests, config.timezone,
+                   day_file_bytes=config.limits.budget_day_file_bytes).usage(project.name)
     if (usage['used'] >= usage['limit'] or
             usage['shared_limit'] > 0 and usage['shared_used'] >= usage['shared_limit']):
         raise InfraExceeded('Recovery budget unavailable')
