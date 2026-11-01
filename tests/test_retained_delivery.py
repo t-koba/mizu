@@ -174,12 +174,12 @@ class RetainedDeliveryTests(Fixture):
         entered, release, published = threading.Event(), threading.Event(), threading.Event()
         original = self.store._validate_transition
         errors = []
-        def validate(previous, record):
+        def validate(previous, record, **kwargs):
             if (record.get("delivery") or {}).get("binding_rev") == record["rev"]:
                 entered.set()
                 if not release.wait(60):
                     raise AssertionError("test synchronization timed out")
-            return original(previous, record)
+            return original(previous, record, **kwargs)
         def binding():
             try:
                 self.bind(snapshot)
