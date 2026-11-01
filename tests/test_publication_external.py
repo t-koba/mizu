@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from support import Fixture, set_project_target
 from mizu.cli import execute, parser
+from mizu.config import PublicationEvidence
 from mizu.errors import Denied
 from mizu.fs import mkdir
 from mizu.publication import Publication
@@ -169,12 +170,49 @@ class ExternalPublicationTests(Fixture):
         self.assertFalse(exact["truncated"])
         self.assertFalse(exact["scan_stopped"])
 
+    def test_configured_listing_budgets_reach_cli_and_runtime(self):
+        records = [self.record(published_sha="%040x" % i) for i in range(3)]
+        directory = self.root / "evidence" / "publications"
+        # Non-record names count, and sorting precedes processing regardless of
+        # the order returned by listdir. Enumeration itself remains unbounded.
+        (directory / "!not-a-receipt").touch()
+        names = sorted(path.name for path in directory.iterdir())
+        for policy, expected_ids in (
+            (PublicationEvidence(name_processing_limit=1), set()),
+            (PublicationEvidence(name_processing_limit=3),
+             {name.split(".")[0] for name in names[1:3]}),
+            (PublicationEvidence(record_limit=1), {names[1].split(".")[0]}),
+        ):
+            with self.subTest(policy=policy):
+                with patch("mizu.publication.os.listdir", return_value=list(reversed(names))):
+                    direct = Publication.list_receipts(self.root, policy=policy)
+                self.assertEqual({r["publication_id"] for r in direct["publications"]}, expected_ids)
+                self.assertEqual(direct["total"], len(expected_ids))
+                self.assertTrue(direct["scan_stopped"])
+                self.assertFalse(direct["truncated"])
+                config, role = with_caps(self, "worker", ["vcs_read"])
+                config = dataclasses.replace(config, publication_evidence=policy)
+                ctx = make_context(self, config, role)
+                self.assertEqual(ctx.handle("vcs_read", {"op": "publications"})["result"], direct)
+                original = self.file.read_text()
+                try:
+                    self.file.write_text(original + "\n[publication_evidence]\n"
+                        f"name_processing_limit = {policy.name_processing_limit}\n"
+                        f"record_limit = {policy.record_limit}\n")
+                    cli = execute(parser().parse_args([
+                        "--config", str(self.file), "publication", "list", "sample"]))
+                finally:
+                    self.file.write_text(original)
+                self.assertEqual(cli, direct)
+        complete = Publication.list_receipts(self.root,
+            policy=PublicationEvidence(name_processing_limit=len(names), record_limit=len(records)))
+        self.assertEqual(complete["total"], len(records))
+        self.assertFalse(complete["scan_stopped"])
+
     def test_list_receipts_reports_a_stopped_scan_instead_of_an_absent_receipt(self):
-        from mizu import publication as publication_module
         for index in range(3):
             self.record(published_sha="%040x" % index, code_digest="%064x" % index)
-        with patch.object(publication_module, "RECEIPT_RECORD_LIMIT", 1):
-            page = Publication.list_receipts(self.root)
+        page = Publication.list_receipts(self.root, policy=PublicationEvidence(record_limit=1))
         # The scan stopped at its bound, so the count is a lower bound and the
         # page never claims that no receipt exists.
         self.assertTrue(page["scan_stopped"])

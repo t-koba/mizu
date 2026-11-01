@@ -1246,7 +1246,8 @@ class Context:
         # never confused with an omitted one.
         listing = Publication.list_receipts(
             self.project.root, code_digest=args.get("code_digest"),
-            branch=args.get("branch"), published_sha=args.get("published_sha"), limit=100)
+            branch=args.get("branch"), published_sha=args.get("published_sha"), limit=100,
+            policy=self.config.publication_evidence)
         evidence_id, evidence = self._new_invocation_evidence("vcs-read")
         record = {"op": "publications", "branch": args.get("branch"),
                   "trust": "recorded-local-untrusted", "evidence_id": evidence_id,

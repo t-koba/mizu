@@ -146,6 +146,7 @@ class Project:
         # Late acceptance is a separate projection; immutable snapshots stay unchanged.
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
                                     record_kinds=config.record_kinds,
+                                    publication_evidence=config.publication_evidence,
                                     effective_verification=self.effective_verification,
                                     doing_limit=config.limits.work_items_doing,
                                     doing_limits={name: role.work_items_doing for name, role in config.roles.items()

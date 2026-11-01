@@ -6,7 +6,7 @@ set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
-CiRequestEvidence and WorkspaceCache field defaults in config.py; validation is covered by their
+CiRequestEvidence, PublicationEvidence and WorkspaceCache field defaults in config.py; validation is covered by their
 focused config tests. Classification records current ownership, not approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
 """
@@ -35,8 +35,6 @@ DECLARATIONS = {
     'publication.py': {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
-        'RECEIPT_SCAN_LIMIT': ('10000', 'policy', 'publication / name-processing budget after os.listdir materializes all names'),
-        'RECEIPT_RECORD_LIMIT': ('1000', 'policy', 'publication / record validation budget'),
     },
     'smoke_retention.py': {
         'MAX_PROJECTS': ('5000', 'policy', 'smoke retention / project scan budget'),
@@ -66,6 +64,10 @@ CONFIGURED = {
     'CiRequestEvidence': {
         'name_processing_limit': ('10000', 'configured policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
         'record_limit': ('1000', 'configured policy', 'CI requests / candidate-record validation budget'),
+    },
+    'PublicationEvidence': {
+        'name_processing_limit': ('10000', 'configured policy', 'publication / name-processing budget after os.listdir materializes all names'),
+        'record_limit': ('1000', 'configured policy', 'publication / candidate-record validation budget'),
     },
     'SchedulerEvidence': {
         'candidate_entries': ('5000', 'configured policy', 'scheduler evidence / diagnostic enumeration budget'),

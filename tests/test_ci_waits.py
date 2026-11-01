@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver
 from mizu import ci_waits, vcs
+from mizu.config import PublicationEvidence
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, read_json, write_json
 from mizu.project import Project
@@ -750,6 +751,32 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.assertEqual(result["observed"], 0)
         reader.assert_not_called()
         self.assertEqual(self.store.get(item["id"]), item)  # ack never transitions
+
+    def test_configured_receipt_budgets_never_resolve_an_incomplete_scan(self):
+        item = self.block()
+        self.receipt_for()
+        wait = item["wait"]
+        # The fixture also has a nonmatching receipt. Even finding the only
+        # match in a bounded prefix cannot establish exact uniqueness.
+        for policy in (PublicationEvidence(name_processing_limit=1),
+                       PublicationEvidence(record_limit=1)):
+            with self.subTest(policy=policy):
+                config = dataclasses.replace(self.config, publication_evidence=policy)
+                store = Project(config, "sample").work_items
+                self.assertEqual(store.publication_evidence, policy)
+                self.assertIsNone(ci_waits._resolved(store, wait))
+        policy = PublicationEvidence(name_processing_limit=10001, record_limit=1001)
+        store = Project(dataclasses.replace(self.config, publication_evidence=policy), "sample").work_items
+        with patch.object(Publication, "list_receipts", wraps=Publication.list_receipts) as listing:
+            self.assertEqual(ci_waits._resolved(store, wait)["sha"], SHA)
+        self.assertEqual(listing.call_args.kwargs["policy"], policy)
+        self.assertTrue(listing.call_args.kwargs["strict"])
+        self.assertEqual(listing.call_args.kwargs["limit"], 2)
+        # Standalone construction retains safe, independent defaults.
+        from mizu.work_items import WorkItems
+        standalone = WorkItems(store.root, store.snapshots, store.insights)
+        self.assertEqual(standalone.publication_evidence, PublicationEvidence())
+        self.assertEqual(ci_waits._resolved(standalone, wait)["sha"], SHA)
 
     def test_mismatched_receipts_unknown_or_ambiguous_scans_never_query_status(self):
         self.block()

@@ -2026,21 +2026,32 @@ result before processing the configured prefix, so it does **not** bound
 directory-listing memory. `scan_stopped` flags omitted names or candidates;
 `total` counts validated dispatches, a lower bound when scanning stops.
 
-Other local evidence limits remain hard-coded policy candidates rather than
-`[vcs]` adapter settings:
+Local publication-receipt reads have an independent `[publication_evidence]`
+policy owner, shared by the CLI listing, runtime `publications` operation and
+strict publication-CI wait resolution. Omission preserves these defaults;
+unknown keys, booleans and non-integers are rejected.
 
-| Behavior and owner | Current code value | Current configurable range / prospective owner |
-|---|---:|---|
-| Publication-receipt listing (`RECEIPT_SCAN_LIMIT`, `RECEIPT_RECORD_LIMIT`) | 10,000 names; 1,000 candidate receipts | None; candidate `[publication_evidence]` section |
-| Local Git HEAD command for publication (`source_commit`) | 5-second timeout | None; candidate `[publication]` setting |
+| Setting | Default | Range | Effect |
+|---|---:|---|---|
+| `name_processing_limit` | 10000 | 1–`MAX_USAGE_POLICY_COUNT` | Names processed in sorted order after listing/sorting, including non-record names |
+| `record_limit` | 1000 | 1–`MAX_USAGE_POLICY_COUNT` | Unique candidate receipt IDs validated, before applying filters |
 
-The publication-receipt reader also lists and sorts all names before applying
-its caps; those caps do **not** bound directory-listing memory. The 8 KiB
-stored-record cap (including CI-request records), 4 KiB caller-supplied lineage
-JSON cap, and 4 KiB local Git HEAD output cap remain separate defensive read
-limits. The local Git timeout is publication-owned and distinct from the
-external adapter's `[vcs].timeout_seconds` (default 20 seconds; range
-1–16,777,216). No configurable range exists yet for these publication limits.
+This reader still materializes and sorts the complete `os.listdir` result
+before processing the prefix: neither budget bounds initial enumeration or
+directory-listing memory. The response remains one page of at most 100 rows,
+with `total`, `truncated` and `scan_stopped`; `total` is a lower bound when a
+budget stops the search. Ordinary listings skip corrupt records; strict CI-wait
+resolution refuses corrupt or duplicate receipt evidence and never treats an
+incomplete scan as proof of exact uniqueness. Standalone readers and work-item
+stores use the same defaults when no policy is supplied. These settings do not
+affect receipt writes, CI-request evidence budgets, dispatch or provider reads.
+
+The publication-owned local Git HEAD command (`source_commit`) still has a
+hard-coded 5-second timeout, a policy candidate for `[publication]`, distinct
+from the external adapter's `[vcs].timeout_seconds` (default 20 seconds; range
+1–16,777,216). The 8 KiB stored-record cap (including CI-request records), 4 KiB
+caller-supplied lineage JSON cap, and 4 KiB local Git HEAD output cap remain
+separate defensive read limits, not configurable reader budgets.
 
 Log reads require `branch` and preserve the existing optional `sha` behavior.
 When `check` is supplied, the request also requires an exact 40/64-hex commit

@@ -33,6 +33,7 @@ import stat
 from pathlib import Path
 
 from . import lineage, process
+from .config import PublicationEvidence
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
                  lock as kernel_lock, now, safe_read, sync_dir, write_json)
@@ -98,10 +99,6 @@ def _projection_of(record: dict) -> dict | None:
     return None
 #: File names of recorded receipts inside the publications directory.
 RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
-#: Directory entries read by one bounded listing.
-RECEIPT_SCAN_LIMIT = 10000
-#: Candidate records validated by one bounded listing.
-RECEIPT_RECORD_LIMIT = 1000
 #: Maximum characters of an operator approval or run reference.
 REFERENCE_CHARS = 256
 
@@ -536,7 +533,8 @@ class Publication:
     @classmethod
     def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
                       branch: str | None = None, published_sha: str | None = None,
-                      limit: int = 100, strict: bool = False) -> dict:
+                      limit: int = 100, strict: bool = False,
+                      policy: PublicationEvidence | None = None) -> dict:
         """List the recorded publication receipts of one project.
 
         Schema: one bounded page, ``{"publications": [...], "total": int,
@@ -549,8 +547,10 @@ class Publication:
         exist beyond it: an empty page with ``scan_stopped`` means "not found
         within the scanned set", never "no receipt exists". Filters: exact
         code digest, branch and published SHA matches.
-        Bounds: at most 100 entries per page, at most 10000 directory entries
-        read and at most 1000 candidate records validated.
+        Bounds: at most 100 entries per page; publication_evidence policy
+        bounds name processing and candidate validation (defaults 10000/1000).
+        All directory names are materialized and sorted before these bounds
+        apply; they do not bound the initial enumeration or its memory.
         Trust: locally recorded evidence; an unreadable, oversized or
         invalid record is skipped rather than returned unvalidated, and it
         never denies the valid records beside it. Failure: ``Denied`` on
@@ -558,6 +558,7 @@ class Publication:
         Internal ``strict`` consumers refuse any unreadable candidate rather
         than treating skipped corrupt evidence as proof of uniqueness.
         """
+        policy = policy if policy is not None else PublicationEvidence()
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Invalid publication listing limit")
         if code_digest is not None and (not isinstance(code_digest, str)
@@ -582,8 +583,8 @@ class Publication:
             raise Denied("Publication evidence is unavailable") from exc
         records = []
         seen = set()
-        scan_stopped = len(names) > RECEIPT_SCAN_LIMIT
-        for name in names[:RECEIPT_SCAN_LIMIT]:
+        scan_stopped = len(names) > policy.name_processing_limit
+        for name in names[:policy.name_processing_limit]:
             match = RECEIPT_FILE.fullmatch(name)
             if match is None:
                 continue
@@ -593,7 +594,7 @@ class Publication:
                     raise Denied("Multiple publication receipt files for one identity")
                 continue
             seen.add(publication_id)
-            if len(seen) > RECEIPT_RECORD_LIMIT:
+            if len(seen) > policy.record_limit:
                 scan_stopped = True
                 break
             try:

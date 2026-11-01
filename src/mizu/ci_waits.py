@@ -77,7 +77,8 @@ def _resolved(store, wait):
     # The ordinary listing intentionally skips corrupt records. This consumer
     # needs complete evidence of uniqueness, so corruption refuses the scan.
     page = Publication.list_receipts(store.root, code_digest=wait["code_digest"],
-                                     branch=wait["branch"], limit=2, strict=True)
+                                     branch=wait["branch"], limit=2, strict=True,
+                                     policy=store.publication_evidence)
     if (page["truncated"] or page["scan_stopped"] or page["total"] != 1
             or len(page["publications"]) != 1):
         return None

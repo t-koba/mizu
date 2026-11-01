@@ -512,7 +512,7 @@ def _cmd_publication_list(config, project, args):
     from .publication import Publication
     return Publication.list_receipts(
         project.root, code_digest=args.code_digest, branch=args.branch,
-        published_sha=args.published_sha)
+        published_sha=args.published_sha, policy=config.publication_evidence)
 
 
 def _cmd_work_items(config, project, args):

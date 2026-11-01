@@ -26,6 +26,7 @@ from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import insight_archive, work_item_retirement
 from .work_item_waits import stored_wait, liveness
+from .config import PublicationEvidence
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
@@ -148,9 +149,12 @@ def _directory(path: Path) -> bool:
 
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
-                 doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None):
+                 doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
+                 publication_evidence: PublicationEvidence | None = None):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.vcs = vcs or {}
+        self.publication_evidence = (publication_evidence if publication_evidence is not None
+                                     else PublicationEvidence())
         self.record_kinds = record_kinds or {}
         self.effective_verification = effective_verification
         self.doing_limit, self.doing_limits = doing_limit, dict(doing_limits or {})
