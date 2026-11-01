@@ -3,6 +3,7 @@ import dataclasses
 from contextlib import nullcontext
 import io
 import json
+import math
 import os
 import sys
 import threading
@@ -673,7 +674,12 @@ class SyntheticEngineTests(Fixture):
                 # The first protocol response uses the measured 60 s host bound.
                 self.assertEqual(observed[0][0], 60)
                 self.assertGreater(observed[0][1], 0)
-                self.assertLessEqual(observed[0][1], 60)
+                # The deadline and observation are float readings from the
+                # host monotonic clock; allow only its resolution plus one
+                # representational ULP for rounding in `spawned + bound`.
+                clock_margin = (time.get_clock_info('monotonic').resolution
+                                + math.ulp(time.monotonic() + 60))
+                self.assertLessEqual(observed[0][1], 60 + clock_margin)
                 if engine == 'claude':
                     self.assertEqual(len(observed), 1)
                 else:
