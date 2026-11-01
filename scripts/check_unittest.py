@@ -104,6 +104,7 @@ def valid_wrapper_trace_diagnostic(test, error_type, value) -> bool:
                 'trace_exists', 'setup_invoked', 'cli_invoked', 'fixture_paths',
                 'stage_paths', 'errno', 'wrapper_stdout_empty',
                 'wrapper_stderr_empty', 'wrapper_bytes', 'wrapper_sha256',
+                'wrapper_stderr_bytes', 'wrapper_stderr_sha256',
                 'bash_control_ok', 'bash_control_stderr_empty'}):
         return False
     return (type(value['mode_index']) is int and 0 <= value['mode_index'] <= 2
@@ -127,7 +128,10 @@ def valid_wrapper_trace_diagnostic(test, error_type, value) -> bool:
                   and 0 <= value['wrapper_bytes'] <= 2147483647))
             and (value['wrapper_sha256'] is None or
                  (type(value['wrapper_sha256']) is str
-                  and re.fullmatch(r'[0-9a-f]{64}', value['wrapper_sha256'], re.ASCII) is not None)))
+                  and re.fullmatch(r'[0-9a-f]{64}', value['wrapper_sha256'], re.ASCII) is not None))
+            and type(value['wrapper_stderr_bytes']) is int and 0 <= value['wrapper_stderr_bytes'] <= 2147483647
+            and type(value['wrapper_stderr_sha256']) is str
+            and re.fullmatch(r'[0-9a-f]{64}', value['wrapper_stderr_sha256'], re.ASCII) is not None)
 
 
 def failure_record(kind, test, err=None) -> dict:

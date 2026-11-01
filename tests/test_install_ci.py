@@ -351,6 +351,7 @@ class InstallWrapperCITests(unittest.TestCase):
             except OSError:
                 wrapper_sha256 = None
             control_ok, control_stderr_empty = self._bash_control()
+            stderr_bytes = stderr.encode('utf-8')
             error.add_note('wrapper trace diagnostic: ' + json.dumps({
                 'mode_index': mode_index, 'wrapper_returncode': returncode,
                 'root_exists': root.exists(), 'trace_exists': trace.exists(),
@@ -365,6 +366,8 @@ class InstallWrapperCITests(unittest.TestCase):
                 'wrapper_stderr_empty': stderr == '',
                 'wrapper_bytes': wrapper_bytes,
                 'wrapper_sha256': wrapper_sha256,
+                'wrapper_stderr_bytes': len(stderr_bytes),
+                'wrapper_stderr_sha256': hashlib.sha256(stderr_bytes).hexdigest(),
                 'bash_control_ok': control_ok,
                 'bash_control_stderr_empty': control_stderr_empty,
             }, sort_keys=True))
@@ -404,6 +407,8 @@ class InstallWrapperCITests(unittest.TestCase):
                         'wrapper_stderr_empty': True,
                         'wrapper_bytes': None,
                         'wrapper_sha256': None,
+                        'wrapper_stderr_bytes': 0,
+                        'wrapper_stderr_sha256': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
                         'bash_control_ok': True,
                         'bash_control_stderr_empty': True,
                     })
