@@ -261,6 +261,15 @@ def _merge_into(base: dict, fragment: dict, origin: Path, origins: dict[str, Pat
     walk(base, fragment, "")
 
 
+#: Root keys accepted at the document level.
+ROOT_KEYS = frozenset({
+    "data_dir", "engines", "timezone", "limits", "sandbox", "profiles", "roles",
+    "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude",
+    "selectors", "include", "insight_decisions", "workspace_cache",
+    "operator_records", "record_kinds", "usage", "scheduler_evidence",
+    "dispatch_evidence", "ci_requests", "publication_evidence", "publication"})
+
+
 def _load_merged(top: Path) -> dict:
     """Load the top file plus its transitive `include` graph into one dict."""
     budget = [0]
@@ -291,10 +300,7 @@ def _load_merged(top: Path) -> dict:
             visit(target, depth + 1, (*chain, resolved))
         # Unknown root keys still fail here per fragment so the error names
         # the fragment, then the final merged load re-checks the whole.
-        allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                   "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
-                   "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                   "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests", "publication_evidence", "publication"}
+        allowed = ROOT_KEYS
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -1140,10 +1146,7 @@ class Config:
 def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
-    keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
-                "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
-                "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests", "publication_evidence", "publication"}, "root")
+    keys(data, ROOT_KEYS, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))

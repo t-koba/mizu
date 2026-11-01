@@ -10,6 +10,9 @@ timezone = "UTC"
 # Default answering role for consultation when the caller names none.
 # Unset (empty) fails closed: consultation then requires an explicit role.
 consult_role = "consult"
+# Default role for one-shot implementation delegation when the caller names none.
+# Unset (empty) fails closed: delegation then requires an explicit role.
+# delegate_role = ""
 exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]
 
 # Read-only report detail/sample budgets; defaults shown, not hard maxima.
@@ -52,6 +55,23 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # candidate_entries = 5000  # Enumeration includes non-directories.
 # files = 200               # Newest run directories within those candidates.
 # scan_seconds = 2          # Cooperative deadline; cannot preempt stalled OS calls.
+
+# Local publication-receipt read budgets shared by listing and strict wait
+# resolution. Strict integers 1..min(9223372036854775807, sys.maxsize); the
+# directory listing is still materialized and sorted before the prefix is used.
+# [publication_evidence]
+# name_processing_limit = 10000
+# record_limit = 1000
+
+# Local `git rev-parse --verify HEAD^{commit}` timeout for publication source
+# evidence. Integer seconds 1..9223372036854775807 (TOML representation ceiling,
+# not a runtime-performance guarantee); defaults shown.
+# [publication]
+# source_commit_timeout_seconds = 5
+
+# Named dynamic-model selectors (see docs/model-selection.md). Empty by default;
+# a role's selector key replaces its profile with one of these tables.
+# [selectors]
 
 # Optional regenerable workspace caches only. Empty roots disable cleanup.
 # Relative literal directory roots must be untracked and snapshot-excluded;

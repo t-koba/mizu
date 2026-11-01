@@ -5,7 +5,7 @@ import re
 import unittest
 
 from support import Fixture
-from mizu.config import (MAX_CHECK_RETAINED, MAX_HISTORY_TEMPORARIES, Limits,
+from mizu.config import (MAX_CHECK_RETAINED, MAX_HISTORY_TEMPORARIES, Limits, ROOT_KEYS,
                          _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
@@ -27,6 +27,18 @@ class LimitsCoverageTests(unittest.TestCase):
         documented = {key for row in table.splitlines()
                       for key in re.findall(r"`([a-z_]+)`", row.split("|")[1])}
         self.assertEqual({field.name for field in dataclasses.fields(Limits)}, documented)
+
+
+class RootOwnerTemplateTests(unittest.TestCase):
+    def test_template_names_every_accepted_root_owner(self):
+        root = Path(__file__).resolve().parents[1]
+        template = (root / "config/config.example.toml").read_text()
+        tables = set(re.findall(r"(?m)^(?:# ?)?\[([a-z_]+)(?:\.|\])", template))
+        scalars = set(re.findall(r"(?m)^(?:# ?)?([a-z_]+) =", template))
+        # record_kinds is the one deliberate default-closed declaration; the
+        # template explains its absence instead of showing a block.
+        self.assertEqual(ROOT_KEYS - (tables | scalars), {"record_kinds"})
+        self.assertIn("record_kinds absent", template)
 
 
 class CheckRetainedConfigTests(Fixture):
