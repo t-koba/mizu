@@ -341,6 +341,71 @@ class JobTests(Fixture):
         self.assertEqual(check_jobs.pending(self.project, 'worker'), [])
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
 
+    def retention_target(self, target):
+        self.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, check_retained=target))
+        self.project.config = self.config
+
+    def retention_record(self, number, **fields):
+        job_id = f'{number:064x}'
+        path = check_jobs.root(self.project) / job_id / 'job.json'
+        write_json(path, {'id': job_id, 'role': 'worker', 'status': 'completed',
+                          'acknowledged': True, **fields})
+        os.utime(path, (number, number))  # Distinct oldest-first order on every host.
+        return path
+
+    def test_retained_target_exact_cap_evicts_oldest_on_submission(self):
+        self.retention_target(2)
+        oldest = self.retention_record(1)
+        ctx, first = self.submit()
+        self.assertTrue(oldest.exists())  # No eviction below the target.
+        _, second = self.submit()
+        self.assertNotEqual(first['id'], second['id'])
+        self.assertFalse(oldest.exists())
+        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 2)
+        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'queued')
+
+    def test_lowered_retained_target_converges_before_insertion(self):
+        paths = [self.retention_record(n) for n in range(1, 5)]
+        self.retention_target(2)
+        _, job = self.submit()
+        self.assertEqual([p.exists() for p in paths], [False, False, False, True])
+        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 2)
+        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
+
+    def test_lowered_retained_target_refuses_without_partial_eviction(self):
+        paths = [self.retention_record(1), self.retention_record(2),
+                 self.retention_record(3, acknowledged=False),
+                 self.retention_record(4, acknowledged=False)]
+        before = {p: p.read_bytes() for p in paths}
+        self.retention_target(2)  # Needs three victims; only two are eligible.
+        with self.assertRaisesRegex(Busy, 'Retained check evidence is full'):
+            self.submit()
+        self.assertEqual({p: p.read_bytes() for p in paths}, before)
+        self.assertEqual(set(check_jobs.root(self.project).glob('*/job.json')), set(paths))
+
+    def test_retention_preflight_preserves_ineligible_evidence_and_references(self):
+        oldest = self.retention_record(1)
+        protected = [self.retention_record(2, acknowledged=False),
+                     self.retention_record(3, status='queued'),
+                     self.retention_record(4, status='running'),
+                     self.retention_record(5, status='running', detached=True),
+                     self.retention_record(6, acceptance_scope={'bound': 'pending'}),
+                     self.retention_record(7)]
+        original = self.retention_record(8)
+        # Even when the subscription is evicted, its source stays protected for
+        # this preflight. A subscription of a running job is also ineligible.
+        subscription = self.retention_record(9, shared_job=original.parent.name)
+        protected += [original, self.retention_record(10, shared_job=protected[2].parent.name)]
+        newest = self.retention_record(11, acceptance_scope={'bound': 'retained'},
+                                       acceptance_receipt_id='a' * 64)
+        before = {p: p.read_bytes() for p in protected}
+        self.retention_target(len(protected) + 1)  # Three victims, then room for one.
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            check_jobs._make_room(self.project, protect={protected[5].parent.name})
+        self.assertFalse(any(p.exists() for p in (oldest, subscription, newest)))
+        self.assertEqual({p: p.read_bytes() for p in protected}, before)
+
     def test_retention_preserves_released_physical_job_until_runner_finishes(self):
         from mizu.errors import Busy
         ctx, job = self.submit()

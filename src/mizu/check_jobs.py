@@ -513,9 +513,11 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
 
 def _make_room(project, *, protect=frozenset()):
     records = sorted(root(project).glob('*/job.json'), key=lambda p: p.stat().st_mtime)
-    if len(records) < 1024:
+    required = len(records) - project.config.limits.check_retained + 1
+    if required <= 0:
         return
     referenced = {read_json(p, {}).get('shared_job') for p in records}
+    victims = []
     for old in records:
         value = read_json(old, {})
         # A detached subscription is cancelled immediately; its physical runner
@@ -525,9 +527,15 @@ def _make_room(project, *, protect=frozenset()):
         if (value.get('acknowledged') and not executing and not pending_proof
                 and value.get('id') not in protect and value.get('id') not in referenced
                 and read(project, value['id']).get('status') not in ('queued', 'running')):
-            shutil.rmtree(old.parent)
-            return
-    raise Busy('Retained check evidence is full; inspect and acknowledge results')
+            victims.append(old.parent)
+            if len(victims) == required:
+                break
+    else:
+        raise Busy('Retained check evidence is full; inspect and acknowledge results')
+    # Preflight the entire reduction under check-jobs.lock: an insufficient
+    # eligible set must not partially evict evidence after a target decrease.
+    for victim in victims:
+        shutil.rmtree(victim)
 
 
 def submit(context, script=None, *, commands=None, kind="experiment", fresh=False, purpose=None, scratch_paths=None):

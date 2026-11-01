@@ -4,7 +4,9 @@ from pathlib import Path
 import re
 import unittest
 
-from mizu.config import Limits, _LIMIT_RANGES
+from support import Fixture
+from mizu.config import MAX_CHECK_RETAINED, Limits, _LIMIT_RANGES, load
+from mizu.errors import ConfigError
 
 
 class LimitsCoverageTests(unittest.TestCase):
@@ -24,6 +26,34 @@ class LimitsCoverageTests(unittest.TestCase):
         documented = {key for row in table.splitlines()
                       for key in re.findall(r"`([a-z_]+)`", row.split("|")[1])}
         self.assertEqual({field.name for field in dataclasses.fields(Limits)}, documented)
+
+
+class CheckRetainedConfigTests(Fixture):
+    def test_default_and_strict_range(self):
+        self.assertEqual(MAX_CHECK_RETAINED, 1024)
+        self.assertEqual(Limits().check_retained, 1024)
+        original = re.sub(r'(?m)^check_retained = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.check_retained, 1024)
+        for value in ('1', '7', '1024', '0', '-1', '1025',
+                      'true', 'false', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace('\n[limits]\n', f'\n[limits]\ncheck_retained = {value}\n'))
+                if value in ('1', '7', '1024'):
+                    limits = load(self.file).limits
+                    self.assertEqual(limits.check_retained, int(value))
+                    self.assertEqual(limits.check_pending, 32)
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.check_retained'):
+                        load(self.file)
+
+    def test_include_can_lower_retained_target_independently(self):
+        original = re.sub(r'(?m)^check_retained = .*\n', '', self.file.read_text())
+        (self.file.parent / 'retention.toml').write_text('[limits]\ncheck_retained = 2\n')
+        self.file.write_text('include = ["retention.toml"]\n' + original)
+        limits = load(self.file).limits
+        self.assertEqual(limits.check_retained, 2)
+        self.assertEqual(limits.check_pending, 32)
 
 
 if __name__ == "__main__":

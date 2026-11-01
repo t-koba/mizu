@@ -33,6 +33,9 @@ TOML_INTEGER_MAX = (1 << 63) - 1
 #: reserve one index for the extra candidate that detects a truncated window.
 MAX_USAGE_POLICY_COUNT = min(TOML_INTEGER_MAX, sys.maxsize)
 MAX_USAGE_RUNS_SCANNED = MAX_USAGE_POLICY_COUNT - 1
+#: Defensive retained-check metadata/identity-search envelope. Policy may lower
+#: this existing ceiling; raising it needs evidence for the linear queue scans.
+MAX_CHECK_RETAINED = 1024
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -343,6 +346,8 @@ class Limits:
     max_failures: int = 3
     parallel_checks: int = 2
     check_pending: int = 32
+    #: Retained records including subscriptions; only safe acknowledged jobs evict.
+    check_retained: int = 1024
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.
@@ -458,7 +463,8 @@ class Limits:
 # auto-pause brake only (budgets/deadlines still bound spend and time).
 _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
-                 "parallel_checks": (1, 64), "check_pending": (1, 1024), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
+                 "parallel_checks": (1, 64), "check_pending": (1, 1024),
+                 "check_retained": (1, MAX_CHECK_RETAINED), "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
                  "insight_cursor_ttl_seconds": (60, 604800),

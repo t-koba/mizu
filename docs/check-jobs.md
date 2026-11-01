@@ -211,8 +211,18 @@ design, so there is nothing for the doctor to verify.
 `limits.parallel_checks` (default 2, range 1–64) is a shared compute semaphore,
 separate from model admission. `limits.check_pending` (default 32, range 1–1024)
 bounds unfinished jobs per project. At most 32 acceptance commands belong to one
-job. At 1024 retained records, an acknowledged job is evicted before accepting
-another; if none can be evicted the submission is refused. Frozen source obeys
+job. `limits.check_retained` (default 1024, range 1–1024) separately targets total
+retained records, including subscriptions. Before adding a record at the target,
+the oldest safely evictable acknowledged record is removed. Lowering the target
+does not immediately prune history: the next new record requires enough victims
+to get below the target before insertion. All required victims are preflighted
+under `check-jobs.lock`; if too few are eligible, the existing `Busy` refusal
+leaves every record intact. Unread/unacknowledged evidence, executing jobs,
+pending acceptance evidence, shared-job references and explicitly protected IDs
+remain ineligible. References are protected for the whole preflight, even if a
+subscription is itself selected for eviction. The fixed `MAX_CHECK_RETAINED`
+ceiling of 1024 preserves the defensive envelope for linear metadata scans and
+request-identity search; it is not an intrinsic format limit. Frozen source obeys
 the existing snapshot size/file/exclusion bounds. Private source/build trees are
 removed after terminal execution; only bounded evidence is retained. Cleanup
 failures retain the tree until operator recovery confirms container removal. Operators may configure `sandbox.check_cache_paths = ["target"]` to preserve
@@ -320,9 +330,8 @@ manufacture a later wake. The shared result remains readable through
 `action=result`/`action=logs`; queued or running subscriptions remain unread
 until their result is consumed. Consuming a result acknowledges equivalent
 subscriptions only for the consuming role. Evidence is retained while any
-subscription references it; the existing 1024
-record bound includes subscriptions and fails closed when nothing can be
-reaped. Subscriptions consume no compute slot or private source/build tree.
+subscription references it; `limits.check_retained` includes subscriptions
+and fails closed when too few records can be safely reaped. Subscriptions consume no compute slot or private source/build tree.
 
 Reuse requires a digest-pinned image and disabled container networking. Read-only
 mounts are fingerprinted by content and filesystem identity at submission,

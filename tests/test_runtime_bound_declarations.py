@@ -7,7 +7,8 @@ arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
 PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults in
-config.py, plus the explicitly listed raw web setting; validation is covered
+config.py, the retained-check Limits field and ceiling, plus the explicitly
+listed raw web setting; validation is covered
 by focused config tests. Classification records current ownership, not
 approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
@@ -102,6 +103,13 @@ CONFIGURED = {
         'git_timeout_seconds': ('10', 'configured policy', 'workspace cache / per-command Git timeout'),
         'git_output_bytes': ('8388608', 'configured policy', 'workspace cache / index listing output budget'),
     },
+}
+
+
+# The Limits migration is field-scoped, not an inventory of every Limits field.
+CHECK_RETENTION = {
+    'check_retained': ('1024', 'configured policy', 'Limits / per-project retained check records including subscriptions'),
+    'MAX_CHECK_RETAINED': ('1024', 'safety', 'config / existing defensive linear metadata-scan and identity-search envelope'),
 }
 
 
@@ -221,6 +229,16 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             for _, category, rationale in declarations.values():
                 self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
+
+    def test_check_retention_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'check_retained')
+        self.assertEqual(ast.unparse(field.value), CHECK_RETENTION['check_retained'][0])
+        self.assertEqual(inventory(tree)['MAX_CHECK_RETAINED'], CHECK_RETENTION['MAX_CHECK_RETAINED'][0])
+        self.assertEqual([entry[1] for entry in CHECK_RETENTION.values()], ['configured policy', 'safety'])
+        self.assertTrue(all(entry[2].strip() for entry in CHECK_RETENTION.values()))
 
     def test_configured_raw_settings_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
