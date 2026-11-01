@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, bind_delivery
 from mizu.errors import Denied
-from mizu.fs import write_json
+from mizu.fs import read_json, write_json
 from mizu.runtime import Engine
 from mizu.snapshot import Snapshots
 from mizu.work_item_events import closed_page, progress
@@ -68,6 +68,50 @@ class ReadViewTests(Fixture):
         self.assertEqual(len(result["closed"]["items"]), 3)
         self.assertEqual(len(calls), 1)
         self.assertIs(type(self.project.snapshots), Snapshots)
+
+    def test_fast_closed_item_cache_does_not_satisfy_strict_history_read(self):
+        proposal = self.project.insights.submit(
+            source="reviewer", title="Two deliveries", body="Check proof modes", base_snapshot=None)
+        seed = self.project.insights.decide(
+            proposal["id"], "accept", "reviewed", "", "run", expected_rev=1)["work_item"]
+
+        def snapshot(label):
+            captured = self.project.snapshots.capture_files(self.project.workspace)
+            verification = {"passed": True, "code_digest": captured["code_digest"], "run": label}
+            value = self.project.snapshots.create(
+                captured, goal="Goal", state=label, run=label, outcome="done",
+                summary=label, verification=verification)
+            self.project.snapshots.publish(value)
+            return value
+
+        historical = snapshot("historical")
+        bind_delivery(self.project, seed["id"], historical["id"])
+        current = snapshot("current")
+        self.project.work_items.transition(seed["id"], expected_rev=3, status="doing", actor="worker",
+                                           snapshot_id=current["id"])
+        self.project.work_items.transition(seed["id"], expected_rev=4, status="done", actor="worker",
+                                           reason="Verified", snapshot_id=current["id"])
+
+        store = self.project.work_items
+        seed_event = None
+        for event_id, event in store._iter_item_events(recover=False):
+            kind, candidate = store._seed_for_event(event_id, event, readonly=True)
+            if kind == "seed" and candidate["id"] == seed["id"]:
+                seed_event = event
+                break
+        self.assertIsNotNone(seed_event)
+        revisions = store._history_revisions(seed["id"], recover=False)
+        view = readonly_view(store)
+        closed = closed_page(view, {}, limit=10)
+        self.assertEqual(closed["items"][0]["id"], seed["id"])
+
+        path = self.project.root / "snapshots" / f"{historical['id']}.json"
+        old = read_json(path)
+        old["summary"] = "tampered after the fast closure projection"
+        write_json(path, old)
+        with self.assertRaises(Denied):
+            view._get(seed["id"], seed_event=seed_event,
+                      history_revisions=revisions, verify_snapshots=True)
 
     def test_next_request_sees_corruption(self):
         snapshot = self.prepare()

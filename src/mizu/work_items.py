@@ -1942,8 +1942,14 @@ class WorkItems:
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind != "seed":
                 continue
+            # Closed rows/events consume the current terminal state and, for
+            # done, its exact completion proof; earlier delivery snapshots
+            # are not returned. Keep the full chain replay but skip those
+            # unused manifests. _validate_transition still validates the
+            # current done snapshot strictly when it reaches the closure.
             item = self._get(seed["id"], seed_event=event,
-                             history_revisions=self._history_revisions(seed["id"], recover=not readonly))
+                             history_revisions=self._history_revisions(seed["id"], recover=not readonly),
+                             verify_snapshots=False)
             if item["status"] not in ("done", "dropped"):
                 continue
             total += 1
