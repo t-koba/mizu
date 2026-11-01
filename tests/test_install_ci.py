@@ -344,7 +344,10 @@ class InstallWrapperCITests(unittest.TestCase):
                 wrapper_bytes = None
             try:
                 with open(wrapper_path, 'rb') as handle:
-                    wrapper_sha256 = hashlib.sha256(handle.read(65536)).hexdigest()
+                    file_digest = hashlib.sha256()
+                    for chunk in iter(lambda: handle.read(1048576), b''):
+                        file_digest.update(chunk)
+                    wrapper_sha256 = file_digest.hexdigest()
             except OSError:
                 wrapper_sha256 = None
             control_ok, control_stderr_empty = self._bash_control()
@@ -406,6 +409,24 @@ class InstallWrapperCITests(unittest.TestCase):
                     })
                     for private in (temporary, sentinel, str(error)):
                         self.assertNotIn(private, note)
+
+    def test_wrapper_sha256_covers_whole_file_beyond_single_chunk(self):
+        with tempfile.TemporaryDirectory(prefix='mizu-wrapper-hash-') as temporary:
+            root = Path(temporary)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            payload = bytes(range(256)) * 5000
+            self.assertGreater(len(payload), 1048576)
+            (scripts / 'test-install.sh').write_bytes(payload)
+            expected = hashlib.sha256(payload).hexdigest()
+            with patch.object(InstallWrapperCITests, '_bash_control',
+                              return_value=(True, True)):
+                with self.assertRaises(FileNotFoundError) as caught:
+                    self.read_wrapper_trace(root, 0, 0)
+            note, = caught.exception.__notes__
+            details = json.loads(note.removeprefix('wrapper trace diagnostic: '))
+            self.assertEqual(details['wrapper_bytes'], len(payload))
+            self.assertEqual(details['wrapper_sha256'], expected)
 
     def test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli(self):
         # This proves wrapper control flow, not real installation or live Pi.

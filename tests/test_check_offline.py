@@ -689,7 +689,9 @@ class UnittestFailureSummaryTests(unittest.TestCase):
             for observed in (stage, {'config': str(root / sentinel)}):
                 with self.subTest(normalized=observed == stage):
                     (root / 'setup.invoked.json').write_text(json.dumps(observed))
-                    result, output, data, summary = self.run_case(MissingTrace)
+                    with mock.patch.object(fixture.InstallWrapperCITests, '_bash_control',
+                                            return_value=(True, True)):
+                        result, output, data, summary = self.run_case(MissingTrace)
                     self.assertEqual(len(result.errors), 1)
                     self.assertEqual(json.loads(data)['wrapper_trace_diagnostic'], {
                         'mode_index': 2, 'wrapper_returncode': 0,
@@ -699,6 +701,9 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                             'wrapper': 'scripts/test-install.sh',
                             'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
                         'stage_paths': stage if observed == stage else None, 'errno': 2,
+                        'wrapper_stdout_empty': True, 'wrapper_stderr_empty': True,
+                        'wrapper_bytes': None, 'wrapper_sha256': None,
+                        'bash_control_ok': True, 'bash_control_stderr_empty': True,
                     })
                     self.assertIn(identifier, summary)
                     self.assertIn('[FileNotFoundError]', summary)
@@ -706,7 +711,8 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                               'setup=1 cli=1 fixture_paths=.:trace.jsonl:scripts/test-install.sh:'
                               'scripts/fake-setup.py:scripts/fake-cli.py stage_paths=' +
                               ('prefix with spaces|bin with spaces|private configuration/config.toml'
-                               if observed == stage else 'null') + ' errno=2')
+                               if observed == stage else 'null') + ' errno=2' +
+                              ' ctl=1 ctl_err=1 out_empty=1 err_empty=1 bytes=null sha=null')
                     self.assertIn(detail, summary)
                     self.assertLessEqual(len(summary), 500)
                     retained = '\n'.join(CHECK.failure_summary_lines([{
@@ -724,7 +730,10 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                  'setup_invoked': False, 'cli_invoked': False,
                  'fixture_paths': {'root': '.', 'trace': 'trace.jsonl',
                      'wrapper': 'scripts/test-install.sh', 'setup': 'scripts/fake-setup.py',
-                     'cli': 'scripts/fake-cli.py'}, 'stage_paths': None, 'errno': None}
+                     'cli': 'scripts/fake-cli.py'}, 'stage_paths': None, 'errno': None,
+                 'wrapper_stdout_empty': True, 'wrapper_stderr_empty': True,
+                 'wrapper_bytes': 3038, 'wrapper_sha256': '0123456789abcdef' * 4,
+                 'bash_control_ok': True, 'bash_control_stderr_empty': True}
         private = '/synthetic-private-host/SYNTHETIC-CREDENTIAL-DO-NOT-EMIT'
         cases = [(identifier, FileNotFoundError, valid, True)]
         for field, values in (
@@ -734,7 +743,15 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 ('setup_invoked', (1,)), ('cli_invoked', ('true',)),
                 ('fixture_paths', (None, {**valid['fixture_paths'], 'root': private})),
                 ('stage_paths', ({'config': private},)),
-                ('errno', (True, -1, 0, 2**31, 2.0, private)), ('extra', (private,))):
+                ('errno', (True, -1, 0, 2**31, 2.0, private)),
+                ('wrapper_stdout_empty', (0, 1, None, 'true')),
+                ('wrapper_stderr_empty', (0, 1, None, 'true')),
+                ('bash_control_ok', (0, 1, None, 'true')),
+                ('bash_control_stderr_empty', (0, 1, None, 'true')),
+                ('wrapper_bytes', (-1, 2**31, True, 1.0, '3038')),
+                ('wrapper_sha256', (0, True, '', 'abc', '0' * 63, '0' * 65,
+                    'X' * 64, 'A' * 64, 'g' * 64, 'z' * 64)),
+                ('extra', (private,))):
             cases.extend((identifier, FileNotFoundError, {**valid, field: value}, False)
                          for value in values)
         cases.extend((identifier, FileNotFoundError, value, False)

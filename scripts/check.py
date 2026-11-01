@@ -525,7 +525,9 @@ def valid_wrapper_trace_diagnostic(test, error_type, value) -> bool:
             or error_type != 'FileNotFoundError' or not isinstance(value, dict)
             or set(value) != {'mode_index', 'wrapper_returncode', 'root_exists',
                 'trace_exists', 'setup_invoked', 'cli_invoked', 'fixture_paths',
-                'stage_paths', 'errno'}):
+                'stage_paths', 'errno', 'wrapper_stdout_empty',
+                'wrapper_stderr_empty', 'wrapper_bytes', 'wrapper_sha256',
+                'bash_control_ok', 'bash_control_stderr_empty'}):
         return False
     return (type(value['mode_index']) is int and 0 <= value['mode_index'] <= 2
             and type(value['wrapper_returncode']) is int and value['wrapper_returncode'] == 0
@@ -539,7 +541,16 @@ def valid_wrapper_trace_diagnostic(test, error_type, value) -> bool:
                 'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
                 'config': 'private configuration/config.toml'})
             and (value['errno'] is None or
-                 (type(value['errno']) is int and 0 < value['errno'] <= 2147483647)))
+                 (type(value['errno']) is int and 0 < value['errno'] <= 2147483647))
+            and all(type(value[key]) is bool for key in
+                    ('wrapper_stdout_empty', 'wrapper_stderr_empty',
+                     'bash_control_ok', 'bash_control_stderr_empty'))
+            and (value['wrapper_bytes'] is None or
+                 (type(value['wrapper_bytes']) is int
+                  and 0 <= value['wrapper_bytes'] <= 2147483647))
+            and (value['wrapper_sha256'] is None or
+                 (type(value['wrapper_sha256']) is str
+                  and re.fullmatch(r'[0-9a-f]{64}', value['wrapper_sha256'], re.ASCII) is not None)))
 
 
 def unittest_failure_summary(sidecar: Path) -> str:
@@ -605,12 +616,21 @@ def unittest_failure_summary(sidecar: Path) -> str:
                     stages[key] for key in ('prefix', 'bin', 'config')))
                 error_number = ('null' if diagnostic['errno'] is None
                                 else str(diagnostic['errno']))
+                wrapper_bytes_text = ('null' if diagnostic['wrapper_bytes'] is None
+                                      else str(diagnostic['wrapper_bytes']))
+                wrapper_sha_text = ('null' if diagnostic['wrapper_sha256'] is None
+                                    else diagnostic['wrapper_sha256'])
                 detail = (' wrapper trace diagnostic: '
                           f"mode={diagnostic['mode_index']} rc={diagnostic['wrapper_returncode']} "
                           f"root={int(diagnostic['root_exists'])} trace={int(diagnostic['trace_exists'])} "
                           f"setup={int(diagnostic['setup_invoked'])} cli={int(diagnostic['cli_invoked'])} "
                           f'fixture_paths={fixture_paths} stage_paths={stage_paths} '
-                          f'errno={error_number}')
+                          f'errno={error_number} '
+                          f"ctl={int(diagnostic['bash_control_ok'])} "
+                          f"ctl_err={int(diagnostic['bash_control_stderr_empty'])} "
+                          f"out_empty={int(diagnostic['wrapper_stdout_empty'])} "
+                          f"err_empty={int(diagnostic['wrapper_stderr_empty'])} "
+                          f'bytes={wrapper_bytes_text} sha={wrapper_sha_text}')
             summaries.append(f'{kind} {test}{location}{exception}{detail}'[:500])
         return '; '.join(summaries)[:1500] or unavailable
     except (OSError, ValueError, TypeError, RuntimeError):
