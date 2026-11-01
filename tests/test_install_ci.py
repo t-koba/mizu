@@ -308,6 +308,11 @@ class InstallCITests(Fixture):
 
 @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'POSIX Bash wrapper')
 class InstallWrapperCITests(unittest.TestCase):
+    @staticmethod
+    def _hermetic_wrapper_env():
+        # Non-interactive bash sources BASH_ENV before the script body.
+        return {k: v for k, v in os.environ.items() if k not in ('BASH_ENV', 'ENV')}
+
     def read_wrapper_trace(self, root, mode_index, returncode):
         trace = root / 'trace.jsonl'
         try:
@@ -413,7 +418,8 @@ class InstallWrapperCITests(unittest.TestCase):
                     (root / 'setup.invoked.json').unlink(missing_ok=True)
                     (root / 'cli.invoked').unlink(missing_ok=True)
                     result = subprocess.run(['bash', str(scripts / 'test-install.sh'), *selection],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=30,
+                        env=self._hermetic_wrapper_env())
                     self.assertEqual(result.returncode, 0, result.stderr)
                     calls = [json.loads(line) for line in
                              self.read_wrapper_trace(root, mode_index, result.returncode).splitlines()]
@@ -430,3 +436,31 @@ class InstallWrapperCITests(unittest.TestCase):
                                 for row in calls if row[0] == 'cli']
                     self.assertEqual(commands, ['--version', 'init', 'report', 'editor', 'backup', 'restore', 'status'])
                     self.assertIn('PASS: offline installation', result.stdout)
+
+    def test_wrapper_ignores_hostile_bash_env_when_hermetic(self):
+        with tempfile.TemporaryDirectory(prefix='mizu-wrapper-bash-env-') as temporary:
+            root = Path(temporary)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            shutil.copy2(ROOT / 'scripts/test-install.sh', scripts / 'test-install.sh')
+            marker = root / 'setup.invoked'
+            setup = scripts / 'setup.sh'
+            setup.write_text('#!/usr/bin/env bash\ntouch ' + shlex.quote(str(marker)) + '\nexit 0\n')
+            setup.chmod(0o755)
+            bash_env = root / 'bash_env'
+            bash_env.write_text('exit 0\n')
+            hostile = dict(os.environ)
+            hostile['BASH_ENV'] = str(bash_env)
+            silent = subprocess.run(['bash', str(scripts / 'test-install.sh')],
+                capture_output=True, text=True, timeout=30, env=hostile)
+            # Ambient BASH_ENV ending in exit 0 makes bash exit before the body.
+            self.assertEqual(silent.returncode, 0)
+            self.assertEqual(silent.stdout, '')
+            self.assertEqual(silent.stderr, '')
+            self.assertFalse(marker.exists())
+            with patch.dict(os.environ, {'BASH_ENV': str(bash_env)}):
+                hermetic = subprocess.run(['bash', str(scripts / 'test-install.sh')],
+                    capture_output=True, text=True, timeout=30,
+                    env=self._hermetic_wrapper_env())
+            self.assertTrue(marker.exists())
+            self.assertNotEqual(hermetic.returncode, 0)
