@@ -223,12 +223,33 @@ class _Queue:
         self.capacity = config.limits.admission_queue_capacity
         self.slots = config.limits.parallel_runs
         self.projects = config.data / "projects"
+        # A project root need not sit under data/projects: the live smoke
+        # probe's isolated root does not. Its lock paths still key the queue
+        # by the project's directory name, so version-1 tickets keep their
+        # shape and this queue can map its own resources back to real paths.
+        keys, paths, project = [], {}, None
         try:
-            self.resources = tuple(Path(p).relative_to(self.projects).as_posix() for p in resources)
+            for value in resources:
+                path = Path(value)
+                root = path.parent.parent
+                if (not path.is_absolute() or path.parent.name != "locks"
+                        or root.parent == root):
+                    raise ValueError
+                if project is None:
+                    project = root
+                elif root != project:
+                    raise ValueError
+                key = f"{root.name}/locks/{path.name}"
+                if paths.get(key, path) != path:
+                    raise ValueError
+                paths[key] = path
+                keys.append(key)
         except (TypeError, ValueError):
-            raise Busy("Execution admission resources are invalid") from None
+            raise Denied("Execution admission resources are invalid") from None
+        self.paths = paths
+        self.resources = tuple(keys)
         if len(self.resources) > 2 or any(not _valid_resource(p) for p in self.resources):
-            raise Busy("Execution admission resources are invalid")
+            raise Denied("Execution admission resources are invalid")
         # Version-1 queues previously used parallel_runs for pending owners
         # and count. Read those still-configured places so live tickets drain;
         # only new enqueues use the independently configured capacity.
@@ -313,8 +334,17 @@ class _Queue:
         raise _Full("Execution admission queue is full")
 
     def _resources(self, stack, resources):
-        for path in resources:
-            stack.enter_context(lock(self.projects / path, blocking=False))
+        for resource in resources:
+            path = self.paths.get(resource)
+            if path is None:
+                path = self.projects / resource
+                # A peer's ticket may name a project outside data/projects
+                # (the live smoke probe's isolated root). There is no local
+                # mapping for it, so treat it as blocked instead of creating
+                # a stray lock under the managed root.
+                if not path.parent.is_dir():
+                    raise Busy("Older execution admission resource is unavailable")
+            stack.enter_context(lock(path, blocking=False))
 
     def _slots(self, stack):
         for index in range(self.slots):
@@ -507,7 +537,8 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     New-enqueue capacity is admission_queue_capacity, independent of
     parallel_runs. Reads accept up to max(admission_queue_capacity, parallel_runs)
     pending owners/tickets so prior version-1 queues can drain. Overflow and
-    invalid state are immediate Busy. The operator selects the
+    unreadable or invalid queue state are immediate Busy; caller-supplied
+    resources that do not name a project lock path are Denied. The operator selects the
     admission_wait_seconds bound on the wait for capacity (0 means none);
     the bound starts when the wait starts, so a caller that is admitted
     without waiting is never refused as an expired wait, and an admitted

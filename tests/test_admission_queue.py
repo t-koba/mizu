@@ -21,7 +21,7 @@ from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, Cancelled, Denied, InfraExceeded
 from mizu.fs import canonical, lock, read_json, write_json
-from mizu.project import Project
+from mizu.project import Project, initialize
 from mizu.runtime import Engine, slot
 
 
@@ -409,6 +409,60 @@ class QueueTests(Fixture):
     def resources(self, role):
         """The dispatch locks one role's admission holds."""
         return [role_exclusion(self.project.root, role)]
+
+    def test_project_root_outside_managed_parent_admits_with_its_own_locks(self):
+        # The live smoke probe's isolated root is a project root with the
+        # same locks/ layout; admission keys it by its directory name and
+        # holds the real lock inodes, not paths under data/projects.
+        root = (self.config.data / 'validation' / 'smoke-runs' / ('a' * 32)
+                / 'projects' / ('smoke-' + 'b' * 32))
+        role_lock = root / 'locks/run-worker.lock'
+        workspace_lock = root / 'locks/workspace.lock'
+        with contextlib.closing(_Queue(self.config, (role_lock, workspace_lock))) as queue_obj:
+            self.assertEqual(queue_obj.resources, (
+                root.name + '/locks/run-worker.lock',
+                root.name + '/locks/workspace.lock'))
+        with admission(self.config, (role_lock, workspace_lock)) as elapsed:
+            self.assertIsInstance(elapsed, float)
+            self.assertEqual(self.tickets(), [])
+            with self.assertRaises(Busy), lock(role_lock, blocking=False):
+                pass
+            with self.assertRaises(Busy), lock(workspace_lock, blocking=False):
+                pass
+        self.assertFalse((self.config.data / 'projects' / root.name).exists())
+
+    def test_isolated_smoke_project_is_admitted_by_the_engine(self):
+        # The live probe initializes this exact layout and then admits its
+        # read-only role; admission must accept the isolated project root.
+        smoke_id = 'e' * 32
+        run = self.config.data / 'validation' / 'smoke-runs' / (smoke_id + '-probe')
+        run.mkdir(parents=True)
+        name = 'smoke-' + smoke_id
+        project = initialize(self.config, name, self.root / 'source', self.goal,
+                             ['reporter'], [], armed=True,
+                             _smoke_root=run / 'projects' / name)
+        with contextlib.ExitStack() as stack:
+            elapsed = Engine(self.config)._admit(
+                project, 'reporter', self.config.roles['reporter'], stack, wait=False)
+            self.assertIsInstance(elapsed, float)
+            self.assertTrue((project.root / 'locks/run-reporter.lock').is_file())
+        self.assertFalse((self.config.data / 'projects' / name).exists())
+
+    def test_unmapped_external_ticket_is_blocked_without_stray_managed_path(self):
+        self.tune(parallel_runs=2)
+        external = (self.config.data / 'validation' / 'smoke-runs' / ('c' * 32)
+                    / 'projects' / ('smoke-' + 'd' * 32))
+        with contextlib.closing(
+                _Queue(self.config, (external / 'locks/run-worker.lock',))) as head:
+            held = head.attempt(enqueue=True)
+            try:
+                with contextlib.closing(_Queue(
+                        self.config, (role_exclusion(self.project.root, 'reporter'),))) as tail:
+                    with tail.attempt(enqueue=True):
+                        pass
+            finally:
+                held.close()
+        self.assertFalse((self.config.data / 'projects' / external.name).exists())
 
     @contextlib.contextmanager
     def pending_slot(self, owner):
