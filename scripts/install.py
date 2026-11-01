@@ -186,7 +186,7 @@ def validate_ci_source_checks(project, snapshot_id, manifest):
     if public_projection(capture['files']) != manifest:
         raise Denied("CI source projection does not match the distribution manifest")
     publication = Publication.read_receipt(project.root, receipt['publication_id'])
-    if source_commit(ROOT) != publication['source_commit']:
+    if source_commit(ROOT, timeout=project.config.publication.source_commit_timeout_seconds) != publication['source_commit']:
         raise Denied("CI publication source commit does not match current Git HEAD")
     if any(key in publication for key in PROJECTION_KEYS):
         projection = public_source_identity(capture['files'])

@@ -213,14 +213,14 @@ def _summary(record: dict) -> dict:
     return summary
 
 
-def source_commit(workspace: Path, *, cancel=lambda: False) -> str:
+def source_commit(workspace: Path, *, timeout: int, cancel=lambda: False) -> str:
     """Read only this workspace's Git HEAD commit, never a remote/parent ref."""
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     result = process.run(
         ["git", "--git-dir=.git", "rev-parse", "--verify", "HEAD^{commit}"],
-        cwd=workspace, env=env, timeout=5, maximum=4096, cancel=cancel)
+        cwd=workspace, env=env, timeout=timeout, maximum=4096, cancel=cancel)
     sha = result.stdout.strip()
     if result.reason != "exited" or result.exit_code != 0 or not SHA.fullmatch(sha):
         raise Denied("Publication requires a valid local workspace Git HEAD commit")

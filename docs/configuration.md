@@ -2046,12 +2046,26 @@ incomplete scan as proof of exact uniqueness. Standalone readers and work-item
 stores use the same defaults when no policy is supplied. These settings do not
 affect receipt writes, CI-request evidence budgets, dispatch or provider reads.
 
-The publication-owned local Git HEAD command (`source_commit`) still has a
-hard-coded 5-second timeout, a policy candidate for `[publication]`, distinct
-from the external adapter's `[vcs].timeout_seconds` (default 20 seconds; range
-1–16,777,216). The 8 KiB stored-record cap (including CI-request records), 4 KiB
-caller-supplied lineage JSON cap, and 4 KiB local Git HEAD output cap remain
-separate defensive read limits, not configurable reader budgets.
+The top-level `[publication]` section owns the local Git HEAD command timeout:
+
+```toml
+[publication]
+source_commit_timeout_seconds = 5
+```
+
+`source_commit_timeout_seconds` is an integer from 1 to `TOML_INTEGER_MAX`
+(9223372036854775807), default 5 seconds. Omission preserves that default;
+unknown keys, booleans and non-integers are rejected. The upper bound is TOML's
+signed-64-bit representation ceiling, not a runtime-performance guarantee.
+The value is passed only to the local `git rev-parse --verify HEAD^{commit}`
+invocation in `source_commit`, including the installer's CI-evidence source
+check. Cancellation, commit validation and the 4 KiB output cap are unchanged.
+This setting does not affect the external adapter's `[vcs].timeout_seconds`
+(default 20 seconds; range 1–16,777,216), CI timeouts, receipt-reader budgets,
+or publication dispatch behavior. The 8 KiB stored-record cap (including
+CI-request records), 4 KiB caller-supplied lineage JSON cap, and 4 KiB local Git
+HEAD output cap remain separate defensive read limits, not configurable reader
+budgets.
 
 Log reads require `branch` and preserve the existing optional `sha` behavior.
 When `check` is supplied, the request also requires an exact 40/64-hex commit

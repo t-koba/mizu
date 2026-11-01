@@ -13,7 +13,7 @@ from mizu import vcs
 from mizu.errors import ConfigError, Denied
 from mizu.fs import canonical, digest, lock, mkdir, write_json
 from mizu.project import git_env
-from mizu.publication import Publication
+from mizu.publication import Publication, source_commit
 from mizu.distribution import public_source_identity
 from mizu.process import Result
 from mizu.runtime import Context, check_consult_role
@@ -141,6 +141,26 @@ class VcsPublishTests(PublishFixture):
         self.assertEqual(evidence["approval"], rec["id"])
         # Uniform binding: the file always equals the returned response.
         self.assertEqual(evidence, out)
+
+    def test_configured_source_commit_timeout_is_local_only(self):
+        config, role = with_caps(self, "worker", ["vcs_publish"])
+        config = dataclasses.replace(config, vcs=adapter_settings(PUSH_OK, timeout=17),
+            publication=dataclasses.replace(config.publication, source_commit_timeout_seconds=13))
+        approve(self, "main", current_digest(self))
+        ctx = make_context(self, config, role)
+        with patch("mizu.runtime.source_commit", wraps=source_commit) as local_head, \
+                patch("mizu.publication.process.run",
+                      return_value=Result(0, self.source_commit, "", "exited", 0)) as git:
+            out = ctx.handle("vcs_publish", {"op": "push", "branch": "main"})
+        self.assertTrue(out["published"])
+        local_head.assert_called_once_with(ctx.workspace, timeout=13, cancel=ctx.tools_cancelled)
+        git.assert_called_once()
+        argv = git.call_args.args[0]
+        self.assertEqual(argv, ["git", "--git-dir=.git", "rev-parse", "--verify", "HEAD^{commit}"])
+        self.assertEqual(git.call_args.kwargs["timeout"], 13)
+        self.assertEqual(git.call_args.kwargs["maximum"], 4096)
+        self.assertEqual(git.call_args.kwargs["cancel"], ctx.tools_cancelled)
+        self.assertEqual(config.vcs["timeout_seconds"], 17)
 
     def test_branch_mismatch_refused(self):
         config, role = with_caps(self, "worker", ["vcs_publish"])

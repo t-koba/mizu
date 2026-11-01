@@ -6,7 +6,7 @@ set. Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
-CiRequestEvidence, PublicationEvidence and WorkspaceCache field defaults in config.py; validation is covered by their
+CiRequestEvidence, PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults in config.py; validation is covered by their
 focused config tests. Classification records current ownership, not approval to leave policy in code; safety ceilings here are defensive read
 bounds, not intrinsic format limits.
 """
@@ -65,6 +65,9 @@ CONFIGURED = {
         'name_processing_limit': ('10000', 'configured policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
         'record_limit': ('1000', 'configured policy', 'CI requests / candidate-record validation budget'),
     },
+    'PublicationPolicy': {
+        'source_commit_timeout_seconds': ('5', 'configured policy', 'publication / local Git HEAD command wall-time budget'),
+    },
     'PublicationEvidence': {
         'name_processing_limit': ('10000', 'configured policy', 'publication / name-processing budget after os.listdir materializes all names'),
         'record_limit': ('1000', 'configured policy', 'publication / candidate-record validation budget'),
@@ -103,8 +106,6 @@ CALLS = {
     },
     'ci_requests.py': {},
     'publication.py': {
-        ('source_commit', 'process.run', 'timeout', 0): (
-            '5', 'policy', 'publication / local Git HEAD command wall-time budget'),
         ('source_commit', 'process.run', 'maximum', 0): (
             '4096', 'safety', 'publication / local Git HEAD output read bound'),
     },

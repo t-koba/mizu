@@ -46,7 +46,7 @@ class InstallCITests(Fixture):
                       'commit', '-qm', 'Create synthetic source']):
             subprocess.run(['git', *args], cwd=self.source, check=True,
                            capture_output=True, timeout=15)
-        self.commit = source_commit(self.source)
+        self.commit = source_commit(self.source, timeout=self.config.publication.source_commit_timeout_seconds)
         self.capture = self.project.snapshots.capture_files(self.source)
         self.snapshot = self.project.snapshots.create(self.capture, goal=self.project.goal,
             state='', run=None, outcome='wait', summary='Synthetic source')
@@ -232,9 +232,12 @@ class InstallCITests(Fixture):
                     self.stage()
 
     def test_source_digest_head_and_public_manifest_are_independent_bindings(self):
-        with patch('mizu.publication.source_commit', return_value='f' * 40):
+        self.project.config = dataclasses.replace(self.project.config,
+            publication=dataclasses.replace(self.config.publication, source_commit_timeout_seconds=13))
+        with patch('mizu.publication.source_commit', return_value='f' * 40) as local_head:
             with self.assertRaisesRegex(Denied, 'Git HEAD'):
                 self.stage()
+        local_head.assert_called_once_with(self.source, timeout=13)
         for field, value in [('code_digest', 'f' * 64), ('skipped', ['large-file']),
                              ('reserved', ['refs/remotes/upstream/main'])]:
             with self.subTest(field=field), patch.object(self.project.snapshots, 'capture_files',

@@ -1413,7 +1413,9 @@ class Context:
             raise Denied(f"Publication requires a projectable snapshot: {exc}") from exc
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
         try:
-            source = source_commit(self.workspace, cancel=self.tools_cancelled)
+            source = source_commit(
+                self.workspace, timeout=self.config.publication.source_commit_timeout_seconds,
+                cancel=self.tools_cancelled)
             publication = Publication(self.project.root, source, code_digest,
                                       args["branch"], args["op"], projection=projection)
             with lock(publication.lock):

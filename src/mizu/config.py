@@ -286,7 +286,7 @@ def _load_merged(top: Path) -> dict:
         allowed = {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                    "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                    "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                   "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests", "publication_evidence"}
+                   "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests", "publication_evidence", "publication"}
         unknown = set(data) - allowed
         if unknown:
             raise ConfigError(f"Unknown keys in {resolved}: {', '.join(sorted(unknown))}")
@@ -955,6 +955,18 @@ def ci_request_evidence_policy(raw: dict) -> CiRequestEvidence:
 
 
 @dataclasses.dataclass(frozen=True)
+class PublicationPolicy:
+    source_commit_timeout_seconds: int = 5
+
+
+def publication_policy(raw: dict) -> PublicationPolicy:
+    keys(raw, {"source_commit_timeout_seconds"}, "publication")
+    return PublicationPolicy(source_commit_timeout_seconds=number(
+        raw.get("source_commit_timeout_seconds", PublicationPolicy.source_commit_timeout_seconds),
+        "publication.source_commit_timeout_seconds", 1, TOML_INTEGER_MAX))
+
+
+@dataclasses.dataclass(frozen=True)
 class PublicationEvidence:
     name_processing_limit: int = 10000
     record_limit: int = 1000
@@ -1067,6 +1079,7 @@ class Config:
     usage: Usage = dataclasses.field(default_factory=Usage)
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
+    publication: PublicationPolicy = dataclasses.field(default_factory=PublicationPolicy)
     publication_evidence: PublicationEvidence = dataclasses.field(default_factory=PublicationEvidence)
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
 
@@ -1111,7 +1124,7 @@ def load(file: Path) -> Config:
     keys(data, {"data_dir", "engines", "timezone", "limits", "sandbox", "profiles",
                 "roles", "consult_role", "delegate_role", "web", "vcs", "materialize",
                 "exclude", "selectors", "include", "insight_decisions", "workspace_cache",
-                "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests", "publication_evidence"}, "root")
+                "operator_records", "record_kinds", "usage", "scheduler_evidence", "dispatch_evidence", "ci_requests", "publication_evidence", "publication"}, "root")
     data.pop("include", None)
     from .operator_records import configuration as record_configuration
     records = record_configuration(data.get("operator_records", {}))
@@ -1653,5 +1666,6 @@ def load(file: Path) -> Config:
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),
+                  publication=publication_policy(data.get("publication", {})),
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})))
