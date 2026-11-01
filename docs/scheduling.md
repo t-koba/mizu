@@ -355,7 +355,7 @@ snapshot validator; it cannot produce an active diagnostic.
 
 ### Exact-SHA work-item CI waits
 
-Only `work_items_transition` to `blocked` accepts this additional wait:
+Only `work_items_transition` to `blocked` accepts these CI waits:
 
 ```json
 {"kind":"ci","publication_id":"<64 lowercase hex receipt ID>","checks":["Offline checks / unit","Offline checks / lint"]}
@@ -372,7 +372,45 @@ wait, and revalidates that binding on stored reads. The receipt is either the
 product's own publish receipt or one recorded afterwards by an operator-run
 publisher; both validate through the same path, and neither is inferred from a
 branch head. Insight `decide`/defer waits
-do **not** accept `ci`; the existing work-item wait types remain unchanged.
+do **not** accept either CI wait.
+
+Before a publication receipt exists, register the independent snapshot-bound form:
+
+```json
+{"kind":"publication_ci","snapshot_id":"<64 lowercase hex retained published snapshot ID>","checks":["Offline checks / unit","Offline checks / lint"]}
+```
+
+It has the same exact-check bounds. Registration validates the immutable snapshot,
+requires membership in retained published history, derives its whole-capture
+`code_digest`, and pins the nonempty configured `vcs.ci_branch`. It holds the
+existing publication lock through the work-item append. Caller-supplied digest,
+branch, SHA or publication ID overrides are refused. Stored reads revalidate the
+immutable snapshot/digest and pinned branch, not current configuration or rolling
+history membership. A later snapshot or branch-head change never rebases the wait.
+
+The existing host CI-wait poll searches local completed publication receipts for
+that exact code digest and branch, using the bounded receipt listing in strict
+mode. Exactly one validated match is required: none, multiple matches (even at
+the same SHA), truncated/scan-stopped enumeration, unsafe or corrupt candidate
+records remain pending. Ordinary publication listings still skip invalid records;
+this uniqueness consumer cannot use a skipped record as proof of absence. Both
+product and operator-recorded external receipts use their existing validation.
+The receipt records the whole capture identity; any public-source projection
+retains its separate identity and is not treated as the whole snapshot.
+
+Only after this match does the host query the receipt's exact published SHA.
+The declared terminal predicate below is unchanged. Explicit partial/unknown
+status metadata (`complete` other than true, `truncated`/`scan_stopped` other than
+false, a non-null `cursor`) or supplied branch/SHA mismatches leave this wait
+pending. Status without those optional metadata fields follows the existing
+bounded checks-array contract. Receipt uniqueness is rechecked before recording
+and when delivering/acknowledging a result. There is no first-match or latest-head
+fallback. No receipt alone releases the wait; missing publication, refusal and
+supersession are not inferred from silence, another snapshot or a changed head.
+There is no deadline, automatic retry/CI dispatch, promotion, or item transition.
+The existing daemon's configured observation cadence is used, not a writer
+polling deadline. Unrelated work remains schedulable.
+
 The recorded requests are visible per day. `vcs_read` with the `ci_requests` op
 lists the project's recorded CI requests from local durable evidence, grouped
 by UTC day: each day row counts the requests made on that day and names the
@@ -466,7 +504,9 @@ Before any wake, the host rechecks the current blocked revision and writes a
 create-only record under `evidence/ci-waits/<item>.<rev>.result.json` (128 KiB,
 bounded no-follow reads). It binds the item ID, blocked revision, holder,
 publication ID, branch, SHA, normalized wait digest, declared check states and
-available run IDs, conclusion and observation time. When the provider reports
+available run IDs; `publication_ci` results also bind the snapshot ID and code
+digest. The result retains `kind:"ci"` and the same shared event/ack route. It
+includes conclusion and observation time. When the provider reports
 them, each declared check also keeps its start, its completion and the derived
 job time: the product recomputes that job time from the two instants and never
 takes it from the provider, and the stored record fails closed on the same

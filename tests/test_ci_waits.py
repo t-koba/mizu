@@ -650,3 +650,206 @@ class CiWaitTests(CiWaitFixture):
                 self.assertFalse(result["ok"])
                 self.assertIn("error", result)
                 reader.assert_not_called()
+
+
+class PublicationCiWaitTests(CiWaitFixture):
+    def setUp(self):
+        super().setUp()
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_branch": "published"})
+        self.project = Project(self.config, "sample")
+        self.store = self.project.work_items
+        self.snapshot = self.project.snapshots.get()
+        self.wait = {"kind": "publication_ci", "snapshot_id": self.snapshot["id"],
+                     "checks": ["unit", "lint"]}
+
+    def receipt_for(self, *, code_digest=None, branch="published", source="d" * 40, sha=SHA):
+        publication = Publication(self.project.root, source,
+                                  self.snapshot["code_digest"] if code_digest is None else code_digest,
+                                  branch, "push", projection=public_source_identity(self.snapshot["files"]))
+        intent, _ = publication.prepare("approval", "run")
+        publication.mark_dispatch()
+        return publication.complete(intent, sha)
+
+    def test_pre_receipt_wait_pins_snapshot_digest_and_config_without_polling_or_releasing(self):
+        args = {"id": "wi_" + "a" * 32, "expected_rev": 1, "status": "blocked", "wait": self.wait}
+        validate(args, DEFINITIONS["work_items_transition"][1])
+        with self.assertRaises(Denied):
+            validate({"id": "a" * 32, "action": "defer", "reason": "CI", "wait": self.wait},
+                     DEFINITIONS["decide"][1])
+        with self.assertRaises(Denied):
+            self.project.insights._normalize_wait(self.wait, "defer")
+        item = self.block()
+        self.assertEqual(item["wait"], {**self.wait, "checks": ["lint", "unit"],
+                                        "code_digest": self.snapshot["code_digest"], "branch": "published"})
+        # Stored identities never rebase to config or a moving branch head.
+        self.store.vcs = {**self.store.vcs, "ci_branch": "moved"}
+        self.assertEqual(self.store.get(item["id"]), item)
+        result, reader = self.poll()
+        self.assertEqual(result["observed"], 0)
+        reader.assert_not_called()
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "receipt_bound")
+        self.assertEqual(self.store.page_ready()["total"], 0)
+        unrelated = self.store.create(actor="worker", idempotency_key="unrelated", title="Other work")
+        self.assertEqual(self.store.page_ready()["items"][0]["id"], unrelated["record"]["work_item"]["id"])
+
+    def test_registration_refuses_overrides_unpublished_unknown_and_invalid_bindings(self):
+        invalid = [dict(self.wait, snapshot_id="f" * 64), dict(self.wait, code_digest="c" * 64),
+                   dict(self.wait, branch="published"), dict(self.wait, publication_id=self.publication.id),
+                   dict(self.wait, sha=SHA), dict(self.wait, checks=[]),
+                   dict(self.wait, checks=["unit", "unit"]), dict(self.wait, checks=["x"] * 65),
+                   dict(self.wait, checks=["x" * 257]), dict(self.wait, checks=["bad\nname"]),
+                   dict(self.wait, checks=[str(i) + "x" * 100 for i in range(30)])]
+        for index, wait in enumerate(invalid):
+            with self.subTest(wait=wait), self.assertRaises(Denied):
+                self.block(str(index), wait=wait)
+        for settings in ({"ci_branch": ""}, {"poll_enabled": False}, {"command": []}):
+            with self.subTest(settings=settings), self.assertRaises(Denied):
+                with patch.object(self.store, "vcs", {**self.store.vcs, **settings}):
+                    self.block(str(settings))
+        with patch.object(self.project.snapshots, "_history_ids", return_value=[]):
+            with self.assertRaisesRegex(Denied, "retained published"):
+                self.block("unpublished")
+        item = self.block("valid")
+        for key, value in (("code_digest", "c" * 64), ("snapshot_id", "f" * 64)):
+            with self.assertRaises(Denied):
+                self.store._stored_wait({**item["wait"], key: value})
+
+    def test_matching_receipt_terminal_result_uses_host_poll_and_explicit_replay_ack(self):
+        item = self.block()
+        snap = {**self.snapshot, "outcome": "done",
+                "wake_generation": self.project.control()["wake_generation"]}
+        self.assertFalse(should_run(self.project, snap, role_name="worker"))
+        receipt = Publication.record_external(
+            self.project.root, branch="published", published_sha=SHA,
+            code_digest=self.snapshot["code_digest"], approval="approval", run="external-run",
+            projection=public_source_identity(self.snapshot["files"]))
+        # Receipt alone is not a wake; no branch-head fallback or auto dispatch.
+        self.assertFalse(should_run(self.project, snap, role_name="worker"))
+        with patch("mizu.runtime.poll_upstream", return_value=None), \
+                patch("mizu.runtime.poll_ci", return_value=None), \
+                patch("mizu.runtime.poll_proposals", return_value=None), \
+                patch("mizu.vcs.invoke", return_value={"checks": self.rows("failure")}) as adapter:
+            events = poll_project_vcs(self.config, self.project, {}, now=1000, interval=15)
+        self.assertEqual(events[0]["observed"], 1)
+        self.assertEqual(adapter.call_args.args[1], {"op": "status", "branch": "published", "sha": SHA})
+        self.assertTrue(should_run(self.project, snap, role_name="worker"))
+        self.assertEqual(ci_waits.pending(self.store, "searcher"), [])
+        context = self.delivery_context()
+        event = context.wait_events[0]
+        self.assertEqual({key: event[key] for key in ("snapshot_id", "code_digest", "publication_id", "sha")},
+                         {"snapshot_id": self.snapshot["id"], "code_digest": self.snapshot["code_digest"],
+                          "publication_id": receipt["publication_id"], "sha": SHA})
+        self.assertEqual(event["conclusion"], "failure")
+        ci_waits.complete(context, {"outcome": "wait", "summary": "Not handled"})
+        self.assertEqual(self.delivery_context().wait_events, context.wait_events)
+        self.acknowledge_delivery(context)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        self.assertFalse(should_run(self.project, snap, role_name="worker"))
+        result, reader = self.poll()
+        self.assertEqual(result["observed"], 0)
+        reader.assert_not_called()
+        self.assertEqual(self.store.get(item["id"]), item)  # ack never transitions
+
+    def test_mismatched_receipts_unknown_or_ambiguous_scans_never_query_status(self):
+        self.block()
+        self.receipt_for(code_digest="e" * 64)
+        self.receipt_for(branch="other")
+        result, reader = self.poll()
+        self.assertEqual(result["observed"], 0)
+        reader.assert_not_called()
+        receipt = self.receipt_for()
+        for page in (
+            {"publications": [receipt], "total": 1, "truncated": True, "scan_stopped": False},
+            {"publications": [receipt], "total": 1, "truncated": False, "scan_stopped": True},
+        ):
+            with patch.object(Publication, "list_receipts", return_value=page):
+                result, reader = self.poll()
+            self.assertEqual(result["observed"], 0)
+            reader.assert_not_called()
+        # One corrupt candidate can conceal a second match; ordinary listings
+        # still skip it, but this strict uniqueness consumer stays pending.
+        path = self.project.root / "evidence" / "publications" / ("f" * 64 + ".external.json")
+        path.write_bytes(b"[]")
+        self.assertEqual(Publication.list_receipts(self.project.root)["total"], 4)
+        result, reader = self.poll()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["observed"], 0)
+        reader.assert_not_called()
+        path.unlink()
+        self.receipt_for(source="e" * 40, sha="e" * 40)
+        result, reader = self.poll()
+        self.assertEqual(result["observed"], 0)
+        reader.assert_not_called()
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+    def test_unknown_status_is_pending_even_when_required_rows_appear_green(self):
+        item = self.block()
+        self.receipt_for()
+        invalid_rows = [[], self.rows()[:1], self.rows() + self.rows()[:1],
+                        self.rows(sha="e" * 40), self.rows("running"),
+                        [{**row, "check": row["check"].upper()} for row in self.rows()],
+                        [{**row, "state": None} for row in self.rows()]]
+        for rows in invalid_rows:
+            with self.subTest(rows=rows):
+                result, _ = self.poll(rows=rows)
+                self.assertEqual(result["observed"], 0)
+        # Exercise the actual host adapter projection, not just an injected reader.
+        for metadata in ({"branch": "other"}, {"sha": "e" * 40}, {"complete": False},
+                         {"truncated": True}, {"scan_stopped": True}, {"cursor": "more"},
+                         {"complete": None}, {"truncated": "false"}):
+            with self.subTest(metadata=metadata), patch("mizu.vcs.invoke", return_value={
+                    "checks": self.rows(), **metadata}):
+                self.clock += 30
+                result = ci_waits.poll(self.config, self.project, self.state,
+                                       now=self.clock, interval=15)
+                self.assertEqual(result["observed"], 0)
+        result, _ = self.poll(reader=Mock(return_value=None))
+        self.assertEqual(result["observed"], 0)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        self.assertEqual(self.store.get(item["id"]), item)
+        result, _ = self.poll()
+        self.assertEqual(result["observed"], 1)
+        self.assertEqual(ci_waits.pending(self.store, "worker")[0]["conclusion"], "success")
+
+    def test_evidence_revalidates_unique_receipt_and_stale_waiter_tokens(self):
+        item = self.block()
+        self.receipt_for()
+        self.poll()
+        context = self.delivery_context()
+        # Later ambiguity refuses delivery and acknowledgement rather than
+        # trusting the previously stored terminal payload in isolation.
+        self.receipt_for(source="e" * 40)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        with self.assertRaises(Denied):
+            self.acknowledge_delivery(context)
+        opened = self.store.transition(item["id"], expected_rev=2, status="open", actor="worker")
+        with self.assertRaises(Denied):
+            self.acknowledge_delivery(context)
+        self.assertEqual(self.store.get(item["id"]), opened)
+
+
+    def test_receipt_ambiguity_during_status_read_cannot_publish_result(self):
+        item = self.block()
+        self.receipt_for()
+        def reader(*_):
+            self.receipt_for(source="e" * 40)
+            return {"checks": self.rows()}
+        result, _ = self.poll(reader=reader)
+        self.assertEqual(result["observed"], 0)
+        self.assertIsNone(ci_waits._read(self.store, item))
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+    def test_unknown_publication_does_not_hide_existing_receipt_pinned_ci_result(self):
+        self.block()
+        old = self.block("receipt-pinned", wait={"kind": "ci", "publication_id": self.publication.id,
+                                                "checks": ["unit", "lint"]})
+        self.receipt_for()
+        path = self.project.root / "evidence" / "publications" / ("f" * 64 + ".external.json")
+        path.write_bytes(b"[]")
+        result, reader = self.poll()
+        self.assertEqual(result["observed"], 1)
+        self.assertFalse(result["ok"])
+        reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
+        self.assertEqual([event["work_item"] for event in ci_waits.pending(self.store, "worker")],
+                         [old["id"]])

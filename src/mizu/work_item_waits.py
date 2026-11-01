@@ -131,7 +131,7 @@ def liveness(store, wait, snapshot) -> dict:
             return result("absent", "no_wait")
         wait = store._stored_wait(wait)
         kind = wait["kind"]
-        if kind in ("ci", "proposal_merged"):
+        if kind in ("ci", "publication_ci", "proposal_merged"):
             return result("receipt_bound", f"{kind}_receipt_route")
         if kind == "deadline":
             due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])

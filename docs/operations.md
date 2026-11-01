@@ -652,6 +652,13 @@ receipt; do not guess a SHA from the current branch head. Supply 1–64 unique
 exact check names (1–256 characters each; the serialized set is at most 2048 UTF-8 bytes). This is not an insight deferral wait.
 Automatic VCS polling and its trusted adapter must be enabled before
 registration; run the polling daemon to observe results.
+Before the receipt exists, use `{kind:"publication_ci", snapshot_id, checks}`
+with a retained published snapshot and a configured nonempty `vcs.ci_branch`.
+The host pins its immutable digest and branch, requires a unique complete
+validated receipt match, then observes only its exact SHA. Missing, ambiguous or
+corrupt receipt evidence, and explicitly partial or mismatched status evidence,
+stays pending; refusal/supersession is not inferred.
+See [the snapshot-bound contract](scheduling.md#exact-sha-work-item-ci-waits).
 
 Both all-green and terminal red results wake the current holder and deliver
 bounded `wait_events` evidence with the exact receipt/SHA, check states/run IDs
@@ -659,13 +666,14 @@ and conclusion. When the provider reports them, the evidence keeps each
 declared check's start, its completion and the derived job time, so the
 wall time of the wait is readable from the durable record; the times stay
 external-untrusted and the product recomputes the job time itself. Neither changes work-item status. Missing/pending/ambiguous
-checks remain unresolved even if the branch has moved. After a successful run
-the exact evidence is acknowledged once; for a new CI attempt or changed
+checks remain unresolved even if the branch has moved. Select the delivered
+exact `ack_token` in `finish.ack_events` to acknowledge handling at successful
+finish; omitted tokens replay. Acknowledgement never transitions the item; for a new CI attempt or changed
 predicate, use the normal CAS transitions to leave `blocked` and block again.
 
 For a read-only explanation, call `vcs_read` with `op:"status"` and the exact
 `publication_id`. With both `vcs_read` and `work_items_read` grants, `result.ci_waits`
-explains only the caller's current blocked waits for that receipt (up to 10,
+explains only the caller's current blocked `ci` waits for that receipt (up to 10,
 by item ID). Each declared check reports `absent`, `duplicate`, `wrong_sha`,
 `nonterminal` or `terminal`, plus exact-name and wrong-SHA counts. A supplied
 branch mismatch reports `branch_mismatch`; the default adapter wrapper echoes

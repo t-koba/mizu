@@ -1108,13 +1108,18 @@ class WorkItems:
         if not isinstance(value, dict):
             raise Denied("Blocked work items require a structured wait")
         kind = value.get("kind")
-        if kind in ("ci", "proposal_merged"):
+        if kind in ("ci", "publication_ci", "proposal_merged"):
             if kind == "ci":
                 from .ci_waits import normalize
-            else:
+            elif kind == "proposal_merged":
                 from .proposal_waits import normalize
             refs = validate_refs(value.get("smoke_refs", []))
-            result = normalize(self.root, {k: v for k, v in value.items() if k != "smoke_refs"}, stored=True)
+            raw = {k: v for k, v in value.items() if k != "smoke_refs"}
+            if kind == "publication_ci":
+                from .ci_waits import normalize_publication
+                result = normalize_publication(raw, snapshots=self.snapshots, stored=True)
+            else:
+                result = normalize(self.root, raw, stored=True)
             return {**result, "smoke_refs": refs} if "smoke_refs" in value else result
         return stored_wait(value)
 
@@ -2017,8 +2022,10 @@ class WorkItems:
         # and smoke-bundle publishers take only their own lock, so neither
         # acquires the other's lock. Keep membership validation and append together.
         binding_request = (status == "doing" and snapshot_id is not None)
+        publication_wait = (status == "blocked" and isinstance(wait, dict)
+                            and wait.get("kind") == "publication_ci")
         publication = (lock(self.snapshots.root / "locks" / "publication.lock")
-                       if binding_request else contextlib.nullcontext())
+                       if binding_request or publication_wait else contextlib.nullcontext())
         with publication, record_lock(self.root):
             history_revisions = self._recover_temporary_writes(item_id)
             if expected_rev == MAX_REVISIONS:
@@ -2035,18 +2042,23 @@ class WorkItems:
             if wait is not None:
                 if status != "blocked":
                     raise Denied("Only blocked work items carry waits")
-                if isinstance(wait, dict) and wait.get("kind") in ("ci", "proposal_merged"):
+                if isinstance(wait, dict) and wait.get("kind") in ("ci", "publication_ci", "proposal_merged"):
                     if wait["kind"] == "ci":
                         from .ci_waits import normalize
-                    else:
+                    elif wait["kind"] == "proposal_merged":
                         from .proposal_waits import normalize
                         if not self.vcs.get("poll_proposals_enabled"):
                             raise Denied("Proposal waits require automatic proposal polling")
                     if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
-                        raise Denied(f"{'CI' if wait['kind'] == 'ci' else 'Proposal'} waits require automatic VCS polling and an adapter")
+                        raise Denied(f"{'Proposal' if wait['kind'] == 'proposal_merged' else 'CI'} waits require automatic VCS polling and an adapter")
                     raw_wait = {k: v for k, v in wait.items() if k != "smoke_refs"}
-                    registered = (normalize(self.root, raw_wait, insights=self.insights)
-                                  if wait["kind"] == "proposal_merged" else normalize(self.root, raw_wait))
+                    if wait["kind"] == "publication_ci":
+                        from .ci_waits import normalize_publication
+                        registered = normalize_publication(raw_wait, snapshots=self.snapshots,
+                                                           branch=self.vcs.get("ci_branch"))
+                    else:
+                        registered = (normalize(self.root, raw_wait, insights=self.insights)
+                                      if wait["kind"] == "proposal_merged" else normalize(self.root, raw_wait))
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
                 else:

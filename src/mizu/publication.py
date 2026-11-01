@@ -536,7 +536,7 @@ class Publication:
     @classmethod
     def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
                       branch: str | None = None, published_sha: str | None = None,
-                      limit: int = 100) -> dict:
+                      limit: int = 100, strict: bool = False) -> dict:
         """List the recorded publication receipts of one project.
 
         Schema: one bounded page, ``{"publications": [...], "total": int,
@@ -555,6 +555,8 @@ class Publication:
         invalid record is skipped rather than returned unvalidated, and it
         never denies the valid records beside it. Failure: ``Denied`` on
         invalid arguments; a missing publications directory lists nothing.
+        Internal ``strict`` consumers refuse any unreadable candidate rather
+        than treating skipped corrupt evidence as proof of uniqueness.
         """
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Invalid publication listing limit")
@@ -587,6 +589,8 @@ class Publication:
                 continue
             publication_id = match.group(1)
             if publication_id in seen:
+                if strict:
+                    raise Denied("Multiple publication receipt files for one identity")
                 continue
             seen.add(publication_id)
             if len(seen) > RECEIPT_RECORD_LIMIT:
@@ -595,6 +599,8 @@ class Publication:
             try:
                 record = cls.read_receipt(project_root, publication_id)
             except (Denied, LimitExceeded, OSError):
+                if strict:
+                    raise
                 # An unreadable, oversized or invalid record is never listed
                 # unvalidated, and it never denies the records beside it.
                 continue

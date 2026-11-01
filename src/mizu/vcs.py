@@ -774,7 +774,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     these transport bindings are validated and stripped before returning.
     Omitting ``check`` retains the existing full-log request and response.
     Host-only ``preserve_status_rows`` keeps
-    mismatched rows for strict declared-set wait evaluation (not a tool argument).
+    mismatched rows and supplied branch/SHA/completeness metadata for strict
+    declared-set wait evaluation (not a tool argument).
     ``proposals`` enumerates
     with an optional ``branch`` filter. ``acquire`` takes ``id``
     (proposal id), the exact head ``sha``, and the explicit content
@@ -930,6 +931,12 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
             checks = [row for row in checks if row["sha"] == sha]
         result = {"op": op, "branch": branch, "checks": checks,
                   "trust": "external-untrusted"}
+        if preserve_status_rows:
+            # Host CI wait consumers can refuse partial or mismatched evidence;
+            # ordinary VCS reads retain their existing public response shape.
+            result.update({key: data[key] for key in
+                           ("branch", "sha", "complete", "truncated", "scan_stopped", "cursor")
+                           if key in data})
         if "publication_id" in params:
             raw = data.get("lineage")
             result["lineage_observation"] = lineage.observe(raw, sha, started, ended, expected)

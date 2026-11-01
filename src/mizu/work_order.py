@@ -575,7 +575,7 @@ def _is_actionable_locked(project, role_name: str, item_id: str, published_snaps
         if holder is not None and holder != role_name:
             return False
         wait = item.get("wait")
-        if not wait or not isinstance(wait, dict) or wait.get("kind") in ("ci", "proposal_merged"):
+        if not wait or not isinstance(wait, dict) or wait.get("kind") in ("ci", "publication_ci", "proposal_merged"):
             return False
         try:
             if not project.insights._wait_due(wait, published_snapshot):

@@ -1,4 +1,4 @@
-"""Receipt-pinned work-item CI waits; host-only observation, never publication.
+"""Snapshot- or receipt-pinned work-item CI waits; host-only observation, never publication.
 
 At most poll_max_branches adapter calls per due tick, rotating by item ID.
 Ledger scans stream with O(limit) retained rows. Evidence is create-only, bounded
@@ -43,6 +43,61 @@ def normalize(root, value, *, stored=False):
     return result
 
 
+def normalize_publication(value, *, snapshots, branch=None, stored=False):
+    """Pin a published snapshot before a publication receipt exists.
+
+    Registration holds publication.lock through the ledger append. Replay
+    checks immutable content, not membership in the rolling history or current
+    configuration. Receipt selection belongs only to the host poll/evidence path.
+    """
+    fields = {"kind", "snapshot_id", "checks"}
+    if stored:
+        fields |= {"code_digest", "branch"}
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("kind") != "publication_ci"):
+        raise Denied("Invalid work-item publication CI wait fields")
+    _check_names(value["checks"])
+    snapshot = snapshots.get(value["snapshot_id"])
+    if not stored and snapshot["id"] not in snapshots._history_ids():
+        raise Denied("Publication CI wait requires retained published history")
+    from .vcs import check_branch
+    pinned_branch = value["branch"] if stored else branch
+    check_branch(pinned_branch)
+    result = {"kind": "publication_ci", "snapshot_id": snapshot["id"],
+              "code_digest": snapshot["code_digest"], "branch": pinned_branch,
+              "checks": sorted(value["checks"])}
+    if stored and result != value:
+        raise Denied("Publication CI wait differs from its immutable snapshot")
+    return result
+
+
+def _resolved(store, wait):
+    if wait["kind"] == "ci":
+        return wait
+    # The ordinary listing intentionally skips corrupt records. This consumer
+    # needs complete evidence of uniqueness, so corruption refuses the scan.
+    page = Publication.list_receipts(store.root, code_digest=wait["code_digest"],
+                                     branch=wait["branch"], limit=2, strict=True)
+    if (page["truncated"] or page["scan_stopped"] or page["total"] != 1
+            or len(page["publications"]) != 1):
+        return None
+    receipt = Publication.read_receipt(store.root, page["publications"][0]["publication_id"])
+    if receipt["code_digest"] != wait["code_digest"] or receipt["branch"] != wait["branch"]:
+        return None
+    return {**wait, "publication_id": receipt["publication_id"], "sha": receipt["published_sha"]}
+
+
+def _complete_status(wait, data):
+    """No partial/unknown observation can resolve a pre-publication wait."""
+    return (isinstance(data, dict)
+            and data.get("branch", wait["branch"]) == wait["branch"]
+            and data.get("sha", wait["sha"]) == wait["sha"]
+            and data.get("complete", True) is True
+            and data.get("truncated", False) is False
+            and data.get("scan_stopped", False) is False
+            and data.get("cursor") is None)
+
+
 def _check_names(checks):
     if (not isinstance(checks, list) or not 1 <= len(checks) <= 64
             or any(not isinstance(c, str) or not c or len(c) > 256
@@ -66,7 +121,7 @@ def _items(store):
         if kind == "seed":
             item = store._get(seed["id"], seed_event=event,
                               history_revisions=store._history_revisions(seed["id"], recover=False))
-            if item["status"] == "blocked" and (item.get("wait") or {}).get("kind") == "ci":
+            if item["status"] == "blocked" and (item.get("wait") or {}).get("kind") in ("ci", "publication_ci"):
                 yield item
 
 
@@ -157,7 +212,7 @@ def status_diagnostics(store, role, publication, data):
     are explicit; unsafe or unreadable evidence refuses the projection.
     """
     waits = (item for item in _items(store)
-             if item["holder"] == role
+             if item["holder"] == role and item["wait"]["kind"] == "ci"
              and all(item["wait"][key] == publication[receipt_key]
                      for key, receipt_key in (("publication_id", "publication_id"),
                                               ("branch", "branch"), ("sha", "published_sha"))))
@@ -180,17 +235,25 @@ def _evidence(store, item, *, sync=True):
     record = _read(store, item)
     if record is None:
         return None
+    wait = _resolved(store, item["wait"])
+    if wait is None:
+        raise Denied("CI evidence has no unique matching publication")
+    binding = ("publication_id", "branch", "sha")
+    if wait["kind"] == "publication_ci":
+        binding += ("snapshot_id", "code_digest")
     fields = {"kind", "trust", "work_item", "rev", "holder", "publication_id", "branch", "sha",
               "wait_digest", "checks", "conclusion", "observed_at"}
+    if wait["kind"] == "publication_ci":
+        fields |= {"snapshot_id", "code_digest"}
     if (set(record) != fields or record["kind"] != "ci"
             or record["trust"] != "external-untrusted"
             or record["work_item"] != item["id"] or record["rev"] != item["rev"]
             or type(record["rev"]) is not int or record["holder"] != item["holder"]
             or record["wait_digest"] != digest(canonical(item["wait"]))
-            or any(record[k] != item["wait"][k] for k in ("publication_id", "branch", "sha"))
+            or any(record[k] != wait[k] for k in binding)
             or not _timestamp(record["observed_at"])):
         raise Denied("CI evidence differs from blocked waiter")
-    rows = terminal(item["wait"], {"checks": record["checks"]})
+    rows = terminal(wait, {"checks": record["checks"]})
     if (rows != record["checks"] or rows is None
             or record["conclusion"] != _conclusion(rows)):
         raise Denied("Invalid terminal CI evidence")
@@ -341,7 +404,7 @@ def _selected(context, tokens):
         item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
         if (item["status"] != "blocked" or item["holder"] != context.role.name
                 or item["rev"] != envelope["subject"]["rev"]
-                or (item.get("wait") or {}).get("kind") != "ci"):
+                or (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci")):
             raise Denied("CI waiter revision or holder changed")
         event = _evidence(store, item)
         if event is None or digest(canonical(_envelope(item, event))) != entry.record_digest:
@@ -410,12 +473,16 @@ def poll(config, project, state, *, now, interval, reader=None):
         for item in targets:
             state["ci_wait_cursor"] = item["id"]  # advance even if the adapter fails
             try:
-                wait = item["wait"]
+                wait = _resolved(project.work_items, item["wait"])
+                if wait is None:
+                    continue
                 # Preserve mismatched rows for fail-closed declared-set evaluation.
                 params = {"branch": wait["branch"], "sha": wait["sha"]}
                 data = (reader(config.vcs, "status", params) if reader else read_via(
                     capped_vcs_settings(config.vcs, vcs_poll_status_timeout(config)),
                     "status", params, preserve_status_rows=True))
+                if wait["kind"] == "publication_ci" and not _complete_status(wait, data):
+                    continue
                 if data.get("branch", wait["branch"]) != wait["branch"]:
                     continue
                 rows = terminal(wait, data)
@@ -426,11 +493,16 @@ def poll(config, project, state, *, now, interval, reader=None):
                         project.work_items._history_revisions(item["id"], recover=False))
                     if current != item or _evidence(project.work_items, current) is not None:
                         continue
+                    if _resolved(project.work_items, current["wait"]) != wait:
+                        continue
+                    binding = ("publication_id", "branch", "sha")
+                    if wait["kind"] == "publication_ci":
+                        binding += ("snapshot_id", "code_digest")
                     record = {"kind": "ci", "trust": "external-untrusted",
                               "work_item": item["id"], "rev": item["rev"],
                               "holder": item["holder"],
-                              **{k: wait[k] for k in ("publication_id", "branch", "sha")},
-                              "wait_digest": digest(canonical(wait)), "checks": rows,
+                              **{k: wait[k] for k in binding},
+                              "wait_digest": digest(canonical(item["wait"])), "checks": rows,
                               "conclusion": _conclusion(rows), "observed_at": observed_now()}
                     if len(canonical(record)) > PREVIEW_BYTES:
                         raise Denied("CI wait evidence exceeds byte bound")

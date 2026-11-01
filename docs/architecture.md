@@ -352,8 +352,9 @@ admitted dispatch after two empty writer snapshots; it does not admit
 or schedule a run. `mizu status` exposes whether that recovery threshold is due
 and the count, so parked empty work is visible while awaiting its next trigger.
 Writer-daemon readiness checks goal and operator generations, role-eligible
-ready work, and retained exact-SHA work-item CI wait evidence for the current
-blocked holder before the saved outcome; inbox generations, routed
+ready work, and retained work-item CI wait evidence (including
+snapshot-bound waits resolved to an exact receipt/SHA) for the current blocked
+holder before the saved outcome; inbox generations, routed
 decision/terminal work-item events, due CI, waits, and wait expiry then precede
 progress self-admission. Ready work is role-scoped: a named role needs
 `work_items_transition` and may claim an unheld `open` item or continue its own
@@ -838,12 +839,17 @@ on a doing-to-doing transition with unchanged scope (the binding event stores
 acceptance proof. The live workspace may have advanced independently.
 `dropped` requires a reason, and new `blocked` transitions require the same
 structured wait schema and normalization semantics as `decide`, or a
-work-item-only `{kind:"ci", publication_id, checks}` wait. Historical blocked
-records without waits remain readable and are not rewritten. Existing wait kinds
-remain stored on the item only, without scheduler effects. CI waits validate a
-completed immutable publication receipt at registration and on stored reads,
+work-item-only CI wait (`{kind:"ci", publication_id, checks}` or
+`{kind:"publication_ci", snapshot_id, checks}`). Historical blocked
+records without waits remain readable and are not rewritten. CI wait results use
+the host event path only to wake the holder; they never change item status.
+Receipt-ID CI waits
+validate a completed immutable publication receipt at registration and on stored reads,
 binding the recorded branch and published SHA; absent or uncertain receipts
-are refused. See [exact-SHA CI waits](scheduling.md#exact-sha-work-item-ci-waits)
+are refused. The snapshot-bound form instead derives the immutable digest and
+pins `vcs.ci_branch` before a receipt exists; the host requires a unique validated
+matching receipt before querying its exact SHA. Unknown or ambiguous evidence
+remains pending, never a refusal/supersession inference. See [exact-SHA CI waits](scheduling.md#exact-sha-work-item-ci-waits)
 for terminal evidence, holder wake and acknowledgement semantics. This mutating operation is not observational
 and receives no exception to the existing per-run or wrap-up spend bounds.
 
