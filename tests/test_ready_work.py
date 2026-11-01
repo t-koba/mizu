@@ -466,8 +466,8 @@ class ReadySetChangeTests(Fixture):
 
         def scan(count, reverse=False, limit=1):
             indices = range(count - 1, -1, -1) if reverse else range(count)
-            events = ((f'{i:032x}', {'id': f'wi_{i:032x}'}) for i in indices)
-            with patch.object(store, '_iter_item_events', return_value=events), \
+            events = ((f'{i:032x}', {'id': f'wi_{i:032x}'}, None) for i in indices)
+            with patch.object(store, '_iter_item_events_with_revisions', return_value=events), \
                  patch.object(store, '_seed_for_event', new=lambda _, event, **kw: ('seed', event)), \
                  patch.object(store, '_build_projection', new=lambda item_id, **kw: {
                      **view, 'item': {**seed, 'id': item_id}}):
