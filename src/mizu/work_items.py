@@ -174,11 +174,11 @@ class WorkItems:
         """Count validated holder state under insights.lock, never a page/index."""
         limit = self.doing_limits.get(actor, self.doing_limit)
         count = 0
-        for event_id, event in self._iter_item_events(recover=True):
+        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=True):
             kind, seed = self._seed_for_event(event_id, event, readonly=False)
             if kind != "seed":
                 continue
-            revisions = self._history_revisions(seed["id"], recover=True)
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=True)
             item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
             if item["status"] == "doing" and item["holder"] == actor:
                 count += 1
@@ -220,11 +220,11 @@ class WorkItems:
         fail-closed.
         """
         current_count = 0
-        for event_id, event in self._iter_item_events(recover=True):
+        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=True):
             kind, seed = self._seed_for_event(event_id, event, readonly=False)
             if kind != "seed":
                 continue
-            revisions = self._history_revisions(seed["id"], recover=True)
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=True)
             item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
                              verify_snapshots=False, verify_current_delivery=True)
             if item["status"] in OPEN_STATUS_ORDER:
@@ -240,11 +240,11 @@ class WorkItems:
         a held dispatch never mutates the ledger it is measuring.
         """
         current_count = 0
-        for event_id, event in self._iter_item_events(recover=False):
+        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=False):
             kind, seed = self._seed_for_event(event_id, event, readonly=True)
             if kind != "seed":
                 continue
-            revisions = self._history_revisions(seed["id"], recover=False)
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=False)
             item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
                              verify_snapshots=False, verify_current_delivery=True)
             if item["status"] in OPEN_STATUS_ORDER:
@@ -455,7 +455,7 @@ class WorkItems:
             write_json(directory / "create.json", record, exclusive=True)
             return {"record": record, "created": True}
 
-    def _iter_item_events(self, *, recover: bool):
+    def _iter_item_events_with_revisions(self, *, recover: bool):
         task_sources = set()
         ambiguous_task_sources = set()
         for event_id, event in self._iter_decision_events(recover=recover):
@@ -465,9 +465,9 @@ class WorkItems:
                         ambiguous_task_sources.add(seed["id"])
                     else:
                         task_sources.add(seed["id"])
-                    yield seed["id"][3:], event
+                    yield seed["id"][3:], event, None
             else:
-                yield event_id, event
+                yield event_id, event, None
         directory = self.root / "work-items"
         if not _directory(directory):
             return
@@ -494,9 +494,13 @@ class WorkItems:
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")
                     continue
-                self._history_revisions(entry.name, recover=recover)
+                revisions = self._history_revisions(entry.name, recover=recover)
                 record = self._direct_record(entry.name)
-                yield entry.name[3:], record
+                yield entry.name[3:], record, revisions
+
+    def _iter_item_events(self, *, recover: bool):
+        for event_id, event, _ in self._iter_item_events_with_revisions(recover=recover):
+            yield event_id, event
 
     @staticmethod
     def _legacy_source(event: dict) -> dict:
@@ -1398,9 +1402,11 @@ class WorkItems:
 
     def _build_projection(self, item_id: str, *, seed_event: dict | None = None, readonly: bool,
                           verify_snapshots: bool = True,
-                          verify_current_delivery: bool = False) -> dict:
+                          verify_current_delivery: bool = False,
+                          history_revisions=_HISTORY_UNSET) -> dict:
         """Build a bounded projection with an explicit recovery mode."""
-        history_revisions = self._history_revisions(item_id, recover=not readonly)
+        if history_revisions is _HISTORY_UNSET:
+            history_revisions = self._history_revisions(item_id, recover=not readonly)
         item, since = self._current_hold(item_id, seed_event=seed_event, history_revisions=history_revisions,
                                           verify_snapshots=verify_snapshots,
                                           verify_current_delivery=verify_current_delivery)
@@ -1884,7 +1890,7 @@ class WorkItems:
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
-        events = self._iter_item_events(recover=not readonly)
+        events = self._iter_item_events_with_revisions(recover=not readonly)
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -1895,7 +1901,7 @@ class WorkItems:
         unknown_blocked = 0
         ready_sum = 0
         order_sum = 0
-        for event_id, event in events:
+        for event_id, event, scanned in events:
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind == "skip":
                 continue
@@ -1903,8 +1909,10 @@ class WorkItems:
                 unseeded_decisions += 1
                 continue
             # Reuse this safely read event; _seed still validates its complete contract.
+            reuse = {} if scanned is None else {"history_revisions": scanned}
             view = self._build_projection(seed["id"], seed_event=event, readonly=readonly,
-                                          verify_snapshots=False, verify_current_delivery=True)
+                                          verify_snapshots=False, verify_current_delivery=True,
+                                          **reuse)
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
                 continue

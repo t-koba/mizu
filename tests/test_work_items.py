@@ -1208,6 +1208,25 @@ class WorkItemTests(Fixture):
         self.assertTrue(temporary.exists())
         self.assertEqual(outside.read_bytes(), b"not a committed event")
 
+    def test_readonly_readers_scan_history_once_per_item(self):
+        first = self.store.create(idempotency_key="scan-a", title="Scan A", actor="worker")
+        second = self.store.create(idempotency_key="scan-b", title="Scan B", actor="worker")
+        first_id = first["record"]["work_item"]["id"]
+        second_id = second["record"]["work_item"]["id"]
+        self.store.transition(first_id, expected_rev=1, status="doing", actor="worker")
+        self.store.transition(second_id, expected_rev=1, status="doing", actor="reviewer")
+        self.assertEqual(self.store.count_open_readonly(), 3)
+        with patch.object(self.store, "_history_revisions",
+                          wraps=self.store._history_revisions) as spy:
+            self.assertEqual(self.store.count_open_readonly(), 3)
+            self.assertEqual(spy.call_count, 3)
+        with patch.object(self.store, "_history_revisions",
+                          wraps=self.store._history_revisions) as spy:
+            page = self.store.page_open_readonly(limit=2)
+            self.assertEqual(page["total"], 3)
+            self.assertEqual(len(page["items"]), 2)
+            self.assertEqual(spy.call_count, 3)
+
     def test_concurrent_same_revision_has_one_winner(self):
         barrier = threading.Barrier(2)
 
