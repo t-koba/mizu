@@ -40,6 +40,13 @@ class RootOwnerTemplateTests(unittest.TestCase):
         self.assertEqual(ROOT_KEYS - (tables | scalars), {"record_kinds"})
         self.assertIn("record_kinds absent", template)
 
+    def test_limits_template_names_every_field(self):
+        root = Path(__file__).resolve().parents[1]
+        template = (root / "config/config.example.toml").read_text()
+        section = template.split("\n[limits]\n", 1)[1].split("\n[", 1)[0]
+        keys = set(re.findall(r"(?m)^(?:# ?)?([a-z_]+) =", section))
+        self.assertEqual(sorted({field.name for field in dataclasses.fields(Limits)} - keys), [])
+
 
 class CheckRetainedConfigTests(Fixture):
     def test_default_and_strict_range(self):

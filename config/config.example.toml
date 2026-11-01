@@ -159,6 +159,9 @@ drain_yield = true             # Persistent, non-ephemeral units wrap up at a sa
 safe_point_yield_quantum = 0   # Completed Claude queries/Codex turns between optional handoff opportunities; 0 disables preemption.
 missing_finish_followups = 1   # Extra bounded turns after a normal terminal return without mizu_finish (0-3).
 missing_finish_counts_as_failure = true # Exhaustion increments the failure brake by default.
+# Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for
+# scheduled units); no collection or extra output when disabled.
+lock_diagnostics = false
 missing_finish_recovery_after = 2 # Consecutive missing-finish failures before a persistent session is rotated (1-100; default 2, below max_failures).
 role_state_bytes = 4096        # Maximum canonical JSON bytes for a new replacement record (1024-65536; default 4096).
 # Existing records remain readable up to the supported 65536-byte ceiling.
