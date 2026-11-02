@@ -122,8 +122,10 @@ may leave a prepared result with or without publication; inspect the pointer
 rather than treating a prepared record as completed. The last published state
 remains readable while a writer is active. No rollback of uncommitted files happens automatically.
 
-Atomic replace plus fsync and locks provide local filesystem durability under
-standard local filesystem semantics. Use a local filesystem, not NFS/object-store/FUSE mounts
+Atomic replace, staged-data fsync and locks provide local filesystem durability
+on POSIX, where the containing directory is also fsynced. Windows gets atomic
+replacement and staged-data fsync but no containing-directory fsync or
+power-loss guarantee. Use a local filesystem, not NFS/object-store/FUSE mounts
 with weaker locking/rename guarantees. Disk/host failure recovery is not a
 substitute for independent backups. Snapshots have hashes, not digital signatures.
 

@@ -128,6 +128,13 @@ def mkdir(path: Path) -> None:
 
 
 def sync_dir(path: Path) -> None:
+    """Flush a containing directory where the platform supports it.
+
+    POSIX directory fsync is used. Windows has no portable directory fsync in
+    this implementation, so it returns without one; callers must not claim
+    Windows crash durability for the directory entry beyond the atomic
+    replacement and staged-data flush.
+    """
     # Unsupported directory sync is distinct from a real durability failure.
     if not _platform.IS_POSIX:
         return
@@ -150,8 +157,11 @@ def sync_dir(path: Path) -> None:
 
 def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
                  mode: int = 0o600) -> None:
-    """Publish only complete files; fsync data and containing directory.
+    """Publish only complete files.
 
+    Staged data is fsynced on every host and replacement is atomic. On POSIX
+    the containing directory is fsynced; Windows has no directory fsync here
+    and therefore makes no power-loss guarantee for the new directory entry.
     Readers opened by _open_read (including read_json) retain a complete old
     generation across replacement; subsequent opens see the complete new one.
     Other Windows readers must also allow delete sharing. Sharing/permission
@@ -746,7 +756,8 @@ def safe_write(root: Path, name: str, data: bytes) -> None:
     hardlinked or special existing destinations, and hardlinked results
     are refused. The write stages a temporary sibling and renames it, so
     a failed validation or write never partially replaces the destination;
-    only complete bytes are published, followed by a directory fsync.
+    only complete bytes are published, followed by the platform directory sync
+    where supported (POSIX; Windows adds no directory-flush guarantee).
 
     On POSIX the parent chain is pinned with ``openat``/``O_NOFOLLOW`` so
     a swapped component fails instead of following it. Where the OS lacks

@@ -872,8 +872,9 @@ than truncating them into false identities; unknown usage keys use the fixed
 summary sampling, not these stored samples. This per-run
 measurement log is compressed/dropped by `mizu prune` according to
 `event_log_compress_days` and `event_log_retention_days` (defaults 7/31 days;
-0 disables each stage). Atomic fsynced
-replacement writes a start before calling the driver, updates local session
+0 disables each stage). Atomic replacement with staged-data fsync
+(and a POSIX containing-directory sync; no Windows directory-flush guarantee)
+writes a start before calling the driver, updates local session
 selection when observed, and settles timing/attempt-only facts in `finally`.
 A crash can leave `started` without an end; later observations may still exist in
 `runtime-usage.json`, joined by attempt. Write/measurement failures are swallowed
