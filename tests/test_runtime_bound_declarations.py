@@ -33,6 +33,9 @@ module-level candidates are closed over the existing policy/default
 dictionaries and `CONFIG_MODULE_BOUNDS`: the include, role-policy, resource,
 CI-wake-branch and workspace-depth ceilings are fixed mechanism or safety
 bounds, and the wait-seconds value is the protocol format bound.
+The `work_items.py` module-level page, cursor, row and revision bounds are
+fixed mechanism or safety contracts; its page-byte aliases reuse those
+declared bases rather than introducing separate literals.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -152,6 +155,21 @@ DECLARATIONS = {
             '2048', 'safety', 'runtime / bounded serialized CI-request covered-item set'),
         '_DECISION_IDLE_CACHE_LIMIT': (
             '256', 'safety', 'runtime / bounded in-process empty-decision cache entries'),
+    },
+    'work_items.py': {
+        'MAX_REVISIONS': (
+            '256', 'mechanism',
+            'work items / revision-chain format bound including the immutable seed'),
+        'MAX_OPEN_PAGE_ROWS': (
+            '100', 'mechanism', 'work items / public open-page row contract'),
+        'MAX_OPEN_CURSOR_CHARS': (
+            '128', 'mechanism', 'work items / opaque cursor format bound'),
+        'MAX_OPEN_ROW_BYTES': (
+            '8192', 'safety', 'work items / bounded one-row response projection'),
+        'MAX_OPEN_PAGE_BYTES': (
+            '1024 * 1024', 'safety', 'work items / bounded page response'),
+        'MAX_CLOSED_PAGE_ROWS': (
+            '100', 'mechanism', 'work items / public closed-page row contract'),
     },
     'vcs.py': {
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
