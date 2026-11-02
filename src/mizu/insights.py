@@ -1775,16 +1775,11 @@ replacement insight without implying rejected substance.
                             store.put(pending[record_id], writer="host.insights"))
                 for record_id in sorted(pending)}
 
-    def _decision_projection_envelopes_locked(self, *, limit: int) -> dict:
-        """Select/validate without writes.
-
-        The page calls this full-history scan outside the record lock; callers
-        that write the returned projections serialize those writes separately.
-        """
+    def _current_decision_envelopes_locked(self):
+        """Yield validated current decision envelopes and their exact record IDs."""
         history = self.root / "decision-history"
         if not insight_archive._directory(history):
-            return {}
-        pending = {}
+            return
         current_sources = set()
         for path in history.glob("*.json"):
             try:
@@ -1806,10 +1801,53 @@ replacement insight without implying rejected substance.
                         "subject": subject, "payload": payload}
             if len(canonical(envelope)) > INSIGHT_DECISION_POLICY.maximum:
                 raise LimitExceeded("Decision projection envelope exceeds byte bound")
+            yield record_id, envelope
+
+    @staticmethod
+    def _decision_key(record_id: str, envelope: dict) -> tuple:
+        return (dt.datetime.fromisoformat(envelope["created_at"]).astimezone(dt.timezone.utc),
+                record_id)
+
+    @classmethod
+    def _retain_oldest(cls, retained: dict, record_id: str, envelope: dict,
+                       limit: int) -> None:
+        """Keep the oldest ``limit`` rows without retaining the full history."""
+        if len(retained) < limit:
+            retained[record_id] = envelope
+            return
+        newest_id = max(retained, key=lambda rid: cls._decision_key(rid, retained[rid]))
+        if cls._decision_key(record_id, envelope) < cls._decision_key(newest_id,
+                                                                       retained[newest_id]):
+            del retained[newest_id]
+            retained[record_id] = envelope
+
+    def _decision_projection_envelopes_locked(self, *, limit: int | None = None) -> dict:
+        """Select/validate without writes.
+
+        The explicit projector calls this full-history scan outside the record
+        lock; callers that write the returned projections serialize those writes
+        separately. A ``None`` limit is the host-only complete preflight path.
+        """
+        pending = {}
+        for record_id, envelope in self._current_decision_envelopes_locked():
             pending[record_id] = envelope
-            if len(pending) > limit:
+            if limit is not None and len(pending) > limit:
                 raise LimitExceeded("Decision projection exceeds record count bound")
         return pending
+
+    def _decision_page_envelopes_locked(self, *, validate, keep) -> tuple[dict, int]:
+        """Retain the oldest configured bound of role-relevant decisions."""
+        retained = {}
+        total = 0
+        for record_id, envelope in self._current_decision_envelopes_locked():
+            computed = digest(canonical(envelope))
+            validate(record_id, envelope, computed)
+            if not keep(record_id, envelope, computed):
+                continue
+            total += 1
+            self._retain_oldest(retained, record_id, envelope,
+                                self.decision_projection_records)
+        return retained, total
 
     def _pending_insight_envelopes_locked(self, configured_roles, role_name, *, paths=None):
         """Stream exact current-source candidates for one configured recipient.
@@ -2100,9 +2138,11 @@ replacement insight without implying rejected substance.
 
         max_bytes covers canonical(page) by default, or actual prompt decision
         fields/framing with prompt=True. Both include metadata/tokens/references.
-        Source projection is bounded by the configured projection records; overflow
-        refuses before writing. The full-history scan runs without the exclusive
-        record lock; the short locked phase validates every new candidate before
+        Source projection retains the oldest configured number of routed,
+        unacknowledged rows and advances after acknowledgements; it does not refuse
+        an over-bound history and writes projections only for retained rows. The
+        full-history scan runs without the exclusive record lock; the short locked
+        phase validates every new candidate before
         writing any immutable projection, then revalidates only the rows being
         selected and freezes their manifest, so a decision or revision committed
         during the scan can neither be delivered stale nor leave an orphan projection.
@@ -2139,11 +2179,53 @@ replacement insight without implying rejected substance.
             return empty, ()
         with lock_diagnostics.operation("page"):
             store = SharedRecords(self.root, INSIGHT_DELIVERY_POLICIES)
+
+            def validate_decision(record_id, envelope, computed):
+                # Validate every existing decision projection, including rows
+                # filtered from this role, without retaining the full history.
+                if any(store._read(name, RECORD_BYTES) is not None
+                       for name in store._record_names(record_id)):
+                    existing, current = store.get(record_id, expected_digest=computed)
+                    if existing != envelope:
+                        raise Denied("Shared decision projection identity conflict")
+
+            def keep_decision(record_id, envelope, computed):
+                payload = envelope["payload"]
+                if payload["action"] not in wanted:
+                    return False
+                if sources == "own" and payload["source"] != role_name:
+                    return False
+                if any(store._read(name, RECORD_BYTES) is not None
+                       for name in store._record_names(record_id)):
+                    return not store.received(role_name, record_id, computed)
+                if store._read(store._receipt_name(role_name, record_id),
+                               RECEIPT_BYTES) is not None:
+                    raise Denied("Shared decision receipt has no immutable record")
+                return True
+
             # The full-history source scan runs without the exclusive lock.
-            decision_candidates = self._decision_projection_envelopes_locked(
-                limit=self.decision_projection_records)
-            pending_candidates = (list(self._pending_insight_envelopes_locked(
-                configured_roles, role_name)) if configured_roles is not None else [])
+            decision_candidates, decision_total = self._decision_page_envelopes_locked(
+                validate=validate_decision, keep=keep_decision)
+            pending_candidates = {}
+            pending_total = 0
+            if configured_roles is not None:
+                for record_id, envelope in self._pending_insight_envelopes_locked(
+                        configured_roles, role_name):
+                    computed = digest(canonical(envelope))
+                    if any(store._read(name, RECORD_BYTES) is not None
+                           for name in store._record_names(record_id)):
+                        existing, current = store.get(record_id, expected_digest=computed)
+                        if existing != envelope:
+                            raise Denied("Shared insight projection identity conflict")
+                        if store.received(role_name, record_id, computed):
+                            continue
+                    else:
+                        if store._read(store._receipt_name(role_name, record_id),
+                                       RECEIPT_BYTES) is not None:
+                            raise Denied("Shared insight receipt has no immutable record")
+                    pending_total += 1
+                    self._retain_oldest(pending_candidates, record_id, envelope,
+                                        self.decision_projection_records)
             projected = {}
             new_decisions = {}
             for record_id, envelope in decision_candidates.items():
@@ -2156,26 +2238,15 @@ replacement insight without implying rejected substance.
                 else:
                     new_decisions[record_id] = envelope
             new_pending = {}
-            for record_id, envelope in pending_candidates:
-                computed = digest(canonical(envelope))
+            for record_id, envelope in pending_candidates.items():
                 if any(store._read(name, RECORD_BYTES) is not None
                        for name in store._record_names(record_id)):
-                    existing, current = store.get(record_id, expected_digest=computed)
+                    existing, current = store.get(record_id)
                     if existing != envelope:
                         raise Denied("Shared insight projection identity conflict")
-                    # Acknowledged retained history is validated above but does
-                    # not consume the live projection bound.
-                    if store.received(role_name, record_id, computed):
-                        continue
                     projected[record_id] = (envelope, current)
                 else:
-                    if store._read(store._receipt_name(role_name, record_id),
-                                   RECEIPT_BYTES) is not None:
-                        raise Denied("Shared insight receipt has no immutable record")
                     new_pending[record_id] = envelope
-                if (len(projected) + len(new_decisions) + len(new_pending)
-                        > self.decision_projection_records):
-                    raise LimitExceeded("Insight delivery projection exceeds record count bound")
             all_projected = dict(projected)
             new_ids = set(new_decisions) | set(new_pending)
             for record_id, envelope in new_decisions.items():
@@ -2184,17 +2255,6 @@ replacement insight without implying rejected substance.
                 all_projected[record_id] = (envelope, digest(canonical(envelope)))
             eligible = []
             for record_id, (envelope, computed) in all_projected.items():
-                payload = envelope["payload"]
-                routed = (payload["target"] == role_name if payload.get("kind") == "insight.pending"
-                          else payload["action"] in wanted
-                          and (sources != "own" or payload["source"] == role_name))
-                if not routed:
-                    # Filtered rows still need an integrity/path check. New
-                    # rows are validated by put below; existing immutable rows
-                    # can be checked without the lock.
-                    if record_id not in new_ids:
-                        store.get(record_id, expected_digest=computed)
-                    continue
                 if record_id not in new_ids and store.received(role_name, record_id, computed):
                     continue
                 if not self._delivery_candidate_current(
@@ -2203,7 +2263,7 @@ replacement insight without implying rejected substance.
                 stamp = dt.datetime.fromisoformat(envelope["created_at"]).astimezone(dt.timezone.utc)
                 eligible.append((stamp, record_id, computed, envelope))
             eligible.sort(key=lambda row: (row[0], row[1]))
-            pending_count = len(eligible)
+            pending_count = decision_total + pending_total
 
             def page(events):
                 return {"events": events, "pending_count": pending_count,

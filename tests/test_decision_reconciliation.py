@@ -349,7 +349,7 @@ class DecisionReconciliationTests(unittest.TestCase):
         put = SharedRecords.put
         acknowledge = SharedRecords.acknowledge
 
-        def scanning(*, limit):
+        def scanning(*, limit=None):
             check()
             return scan(limit=limit)
 
@@ -423,7 +423,7 @@ class DecisionReconciliationTests(unittest.TestCase):
         self.assertEqual(self.shared_receipts(), {})
         self.assertFalse((self.root / "shared-records").exists())
 
-    def test_count_and_serialized_report_overflow_refuse_before_writes(self):
+    def test_serialized_report_overflow_and_513_source_preflight(self):
         self.decide()
         self.ack("reviewer", self.rows())
         plan = self.preflight()
@@ -433,7 +433,7 @@ class DecisionReconciliationTests(unittest.TestCase):
             with self.assertRaises(LimitExceeded):
                 self.apply(plan)
         envelopes = self.insights._decision_projection_envelopes_locked(limit=512)
-        # Exercise the real 512-row selector with a cheap controlled source.
+        # Exercise the complete host-only preflight with a cheap controlled source.
         history = self.root / "decision-history"
         sample = next(iter(envelopes.values()))["payload"]
         for i in range(513):
@@ -443,8 +443,12 @@ class DecisionReconciliationTests(unittest.TestCase):
             payload = dict(sample, event=path.stem, insight=path.stem)
             return None, payload
 
-        with patch.object(self.insights, "_current_decision_event", selected), self.assertRaises(LimitExceeded):
-            self.preflight()
+        with patch.object(self.insights, "_current_decision_event", selected), \
+                patch.object(self.insights, "read", return_value=sample), \
+                patch.object(self.insights, "_decision_token", return_value="0" * 64), \
+                patch("mizu.decision_reconciliation.safe_read", return_value=b"source"):
+            large = self.preflight()
+        self.assertEqual(len(large["boundary"]["sources"]), 514)
         self.assertEqual(self.shared_receipts(), {})
         self.assertFalse((self.root / "shared-records").exists())
 
@@ -681,7 +685,7 @@ class DecisionReconciliationTests(unittest.TestCase):
             self.apply(plan2)
         self.assertEqual(self.shared_receipts(), {})
 
-    def test_pending_post_map_and_count_bounds_checked_before_writes(self):
+    def test_pending_post_map_report_bounds_checked_before_writes(self):
         self.submit_pending(addressee="reviewer")
         self.pending_ack("reviewer", self.pending_rows())
         plan = self.preflight()
@@ -698,20 +702,5 @@ class DecisionReconciliationTests(unittest.TestCase):
                 self.preflight()
             with self.assertRaises(LimitExceeded):
                 self.apply(plan)
-        self.assertEqual(self.shared_receipts(), {})
-        self.assertFalse((self.root / "shared-records").exists())
-
-        # The runtime page shares one 512-row projection ceiling across decision
-        # projections and unacknowledged addressed-insight events. Refuse an
-        # activation plan that would publish a page the runtime cannot serve.
-        self.submit_pending(1, addressee="reviewer")
-        self.decide(2, action="reject", source="reviewer")
-        decision_rows = self.insights._decision_projection_envelopes_locked(limit=512)
-        envelope = next(iter(decision_rows.values()))
-        padded = {f"insight.decision/synthetic-{index:04d}": envelope
-                  for index in range(512)}
-        with patch.object(self.insights, "_decision_projection_envelopes_locked", return_value=padded):
-            with self.assertRaisesRegex(LimitExceeded, "Insight delivery projection"):
-                self.preflight()
         self.assertEqual(self.shared_receipts(), {})
         self.assertFalse((self.root / "shared-records").exists())

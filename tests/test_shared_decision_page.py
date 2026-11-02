@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import MAX_FRAME, READ_PAGE_CHARS, canonical, digest
-from mizu.insights import Insights, INSIGHT_DECISION_POLICY
+from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY
 import mizu.insights as insights_module
 from mizu.shared_records import SharedRecords
 from mizu.smoke_refs import record_lock
@@ -205,39 +205,58 @@ class SharedDecisionPageTests(unittest.TestCase):
     def test_post_put_corruption_denied_for_eligible_and_filtered_rows(self):
         self.decide(action="reject", source="reviewer")
         put = SharedRecords.put
-        # Exercise eligible, action-filtered and source-filtered rows.
-        for role, actions, sources in (("reviewer", ("reject",), "own"),
-                                      ("reviewer", ("accept",), "any"),
-                                      ("worker", ("reject",), "own")):
+        # Eligible page projection is validated after put.
+        for malformed in (True, False):
+            with self.subTest(role="reviewer", actions=("reject",), sources="own",
+                              malformed=malformed):
+                shutil.rmtree(self.root / "shared-records", ignore_errors=True)
+                corrupted = []
+
+                def corrupt(store, envelope, *, writer):
+                    computed = put(store, envelope, writer=writer)
+                    path = self.root / store._record_name(envelope["id"])
+                    original = path.read_bytes()
+                    changed = json.loads(original)
+                    changed["payload"]["title"] = "Changed after put"
+                    raw = b"not json" if malformed else canonical(changed)
+                    path.write_bytes(raw)
+                    corrupted.append((path, original, raw))
+                    return computed
+
+                try:
+                    with patch.object(SharedRecords, "put", corrupt), \
+                            self.assertRaises(Denied):
+                        self.page()
+                    self.assertEqual(len(corrupted), 1)
+                    path, _, raw = corrupted[0]
+                    self.assertEqual(path.read_bytes(), raw)
+                    self.assertFalse((self.root / "shared-record-receipts").exists())
+                finally:
+                    for path, original, _ in corrupted:
+                        path.write_bytes(original)
+        # A filtered existing projection is still validated, even though this
+        # page does not select or rewrite it.
+        for role, actions, sources in (("reviewer", ("accept",), "any"),
+                                       ("worker", ("reject",), "own")):
             for malformed in (True, False):
-                with self.subTest(role=role, actions=actions, malformed=malformed):
-                    # The first page projects the record; later pages reuse the
-                    # unchanged record. Start each subtest from an absent record
-                    # so the patched put publishes the row under test.
+                with self.subTest(role=role, actions=actions, sources=sources,
+                                  malformed=malformed):
                     shutil.rmtree(self.root / "shared-records", ignore_errors=True)
-                    corrupted = []
-
-                    def corrupt(store, envelope, *, writer):
-                        computed = put(store, envelope, writer=writer)
-                        path = self.root / store._record_name(envelope["id"])
-                        original = path.read_bytes()
-                        changed = json.loads(original)
-                        changed["payload"]["title"] = "Changed after put"
-                        raw = b"not json" if malformed else canonical(changed)
-                        path.write_bytes(raw)
-                        corrupted.append((path, original, raw))
-                        return computed
-
+                    projected = self.insights.project_decision_records()
+                    self.assertEqual(len(projected), 1)
+                    record_id = next(iter(projected))
+                    path = self.root / self.store._record_name(record_id)
+                    original = path.read_bytes()
+                    changed = json.loads(original)
+                    changed["payload"]["title"] = "Changed after put"
+                    raw = b"not json" if malformed else canonical(changed)
+                    path.write_bytes(raw)
                     try:
-                        with patch.object(SharedRecords, "put", corrupt), self.assertRaises(Denied):
+                        with self.assertRaises(Denied):
                             self.page(role, actions, sources=sources)
-                        self.assertEqual(len(corrupted), 1)
-                        path, _, raw = corrupted[0]
                         self.assertEqual(path.read_bytes(), raw)
-                        self.assertFalse((self.root / "shared-record-receipts").exists())
                     finally:
-                        for path, original, _ in corrupted:
-                            path.write_bytes(original)
+                        path.write_bytes(original)
 
     def test_corrupt_shared_receipt_fails_closed_but_legacy_receipt_is_ignored(self):
         self.decide()
@@ -303,22 +322,84 @@ class SharedDecisionPageTests(unittest.TestCase):
             return dt.datetime.now(dt.timezone.utc), dict(payload, event=path.stem, insight=path.stem)
 
         with patch.object(Path, "glob", return_value=paths), \
-                patch.object(Insights, "_current_decision_event", selected), self.assertRaises(LimitExceeded):
-            self.page()
-        self.assertFalse((self.root / "shared-records").exists())
+                patch.object(Insights, "_current_decision_event", selected), \
+                patch.object(Insights, "_delivery_candidate_current", return_value=True):
+            page, manifest = self.page()
+        self.assertEqual(len(page["events"]), 100)
+        self.assertEqual(page["pending_count"], 513)
+        self.assertTrue(page["truncated"])
+        self.assertTrue(page["count_truncated"])
+        self.assertEqual(len(manifest), 100)
         self.assertEqual(self.page()[0]["pending_count"], 1)
 
     def test_configured_projection_records_own_the_page_scan(self):
         self.decide(0)
         self.decide(1)
-        with self.assertRaises(LimitExceeded):
-            Insights(self.root, decision_projection_records=1).shared_decision_page(
+        page, manifest = Insights(
+            self.root, decision_projection_records=1).shared_decision_page(
                 "reviewer", ACTIONS, max_bytes=MAX_FRAME)
+        self.assertEqual(len(page["events"]), 1)
+        self.assertEqual(page["pending_count"], 2)
+        self.assertTrue(page["truncated"])
+        self.assertEqual(len(manifest), 1)
         page, manifest = Insights(
             self.root, decision_projection_records=2).shared_decision_page(
                 "reviewer", ACTIONS, max_bytes=MAX_FRAME)
         self.assertEqual(len(page["events"]), 2)
         self.assertEqual(len(manifest), 2)
+
+    def test_513_current_decisions_page_all_events_after_acknowledgement(self):
+        self.decide()
+        legacy = self.insights.decision_events("reviewer", ACTIONS)[0]
+        payload = {k: v for k, v in legacy.items() if k != "ack_token"}
+        paths = [Path(f"{i:032x}.json") for i in range(513)]
+
+        def selected(insights, path, *args, **kwargs):
+            return dt.datetime.now(dt.timezone.utc), dict(
+                payload, event=path.stem, insight=path.stem)
+
+        delivered = 0
+        with patch.object(Path, "glob", return_value=paths), \
+                patch.object(Insights, "_current_decision_event", selected), \
+                patch.object(Insights, "_delivery_candidate_current", return_value=True):
+            while True:
+                page, manifest = self.page()
+                delivered += len(page["events"])
+                if not page["events"]:
+                    self.assertEqual(page["pending_count"], 0)
+                    break
+                self.store.acknowledge(
+                    "reviewer", [asdict(entry) for entry in manifest], manifest=manifest)
+        self.assertEqual(delivered, 513)
+
+    def test_pending_attention_past_configured_bound_delivers_after_ack(self):
+        for index in range(2):
+            self.insights.submit(source="reviewer", title=f"Pending {index}",
+                                 body=f"Body {index}", base_snapshot=None,
+                                 addressee="reviewer")
+        limited = Insights(self.root, decision_projection_records=1)
+        pending_store = SharedRecords(self.root, {
+            "insight.decision": INSIGHT_DECISION_POLICY,
+            "insight.pending": INSIGHT_PENDING_POLICY})
+        page, manifest = limited.shared_decision_page(
+            "reviewer", (), max_bytes=MAX_FRAME, configured_roles={"reviewer"})
+        self.assertEqual(len(page["events"]), 1)
+        self.assertEqual(page["pending_count"], 2)
+        self.assertTrue(page["truncated"])
+        pending_store.acknowledge(
+            "reviewer", [asdict(entry) for entry in manifest], manifest=manifest)
+        page, manifest = limited.shared_decision_page(
+            "reviewer", (), max_bytes=MAX_FRAME, configured_roles={"reviewer"})
+        self.assertEqual(len(page["events"]), 1)
+        self.assertEqual(page["pending_count"], 1)
+        self.assertFalse(page["truncated"])
+        pending_store.acknowledge(
+            "reviewer", [asdict(entry) for entry in manifest], manifest=manifest)
+        page, manifest = limited.shared_decision_page(
+            "reviewer", (), max_bytes=MAX_FRAME, configured_roles={"reviewer"})
+        self.assertEqual(page["events"], [])
+        self.assertEqual(page["pending_count"], 0)
+        self.assertEqual(manifest, ())
 
     def test_lock_covers_selection_projection_receipt_reads_and_freeze(self):
         self.decide()
@@ -381,19 +462,19 @@ class SharedDecisionPageTests(unittest.TestCase):
 
     def test_unlocked_scan_does_not_exclude_a_concurrent_source_write(self):
         self.decide()
-        original = Insights._decision_projection_envelopes_locked
+        original = Insights._decision_page_envelopes_locked
         started = threading.Event()
         release = threading.Event()
         failures = []
 
-        def blocking(insights, limit):
+        def blocking(insights, *, validate, keep):
             started.set()
             self.assertTrue(release.wait(5))
-            return original(insights, limit=limit)
+            return original(insights, validate=validate, keep=keep)
 
         def page():
             try:
-                with patch.object(Insights, "_decision_projection_envelopes_locked", blocking):
+                with patch.object(Insights, "_decision_page_envelopes_locked", blocking):
                     self.page()
             except BaseException as exc:  # surfaced in the main thread
                 failures.append(exc)
@@ -424,16 +505,16 @@ class SharedDecisionPageTests(unittest.TestCase):
 
     def test_unlocked_scan_row_must_still_be_current_at_selection(self):
         self.decide()
-        original = Insights._decision_projection_envelopes_locked
+        original = Insights._decision_page_envelopes_locked
 
-        def stale(insights, limit):
-            candidates = original(insights, limit=limit)
+        def stale(insights, *, validate, keep):
+            candidates, total = original(insights, validate=validate, keep=keep)
             for key in candidates:
                 event = key.rsplit("/", 1)[-1]
                 (self.root / "decision-history" / f"{event}.json").unlink()
-            return candidates
+            return candidates, total
 
-        with patch.object(Insights, "_decision_projection_envelopes_locked", stale):
+        with patch.object(Insights, "_decision_page_envelopes_locked", stale):
             page, manifest = self.page()
         self.assertEqual(page["events"], [])
         self.assertEqual(page["pending_count"], 0)
@@ -479,16 +560,16 @@ class SharedDecisionPageTests(unittest.TestCase):
 
     def test_unlocked_scan_source_becoming_malformed_fails_closed(self):
         self.decide()
-        original = Insights._decision_projection_envelopes_locked
+        original = Insights._decision_page_envelopes_locked
 
-        def broken(insights, *, limit):
-            candidates = original(insights, limit=limit)
+        def broken(insights, *, validate, keep):
+            candidates, total = original(insights, validate=validate, keep=keep)
             for key in candidates:
                 event = key.rsplit("/", 1)[-1]
                 (self.root / "decision-history" / f"{event}.json").write_bytes(b"not json")
-            return candidates
+            return candidates, total
 
-        with patch.object(Insights, "_decision_projection_envelopes_locked", broken), \
+        with patch.object(Insights, "_decision_page_envelopes_locked", broken), \
                 self.assertRaises(Denied):
             self.page()
         # Malformed source fails closed before any new projection is written.

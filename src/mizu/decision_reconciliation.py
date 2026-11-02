@@ -71,8 +71,9 @@ def _boundary(insights, routes):
 
 
 def _scan(insights, routes):
-    envelopes = insights._decision_projection_envelopes_locked(
-        limit=insights.decision_projection_records)
+    # Host-only preflight maps the complete current set so activation cannot
+    # hide receipts beyond the runtime page bound.
+    envelopes = insights._decision_projection_envelopes_locked()
     store = SharedRecords(insights.root, {"insight.decision": INSIGHT_DECISION_POLICY,
                                           "insight.pending": INSIGHT_PENDING_POLICY})
     sources = {}
@@ -134,8 +135,6 @@ def _scan(insights, routes):
                 "decision_digest": decision_digest,
                 "target": payload["target"],
             }
-            if len(pending_sources) > insights.decision_projection_records:
-                raise LimitExceeded("Pending insight projection exceeds record count bound")
 
     legacy = {}
     roles = {}
@@ -202,9 +201,6 @@ def _scan(insights, routes):
         if not set(shared) <= set(received):
             raise Denied("Shared pending receipts exceed exact legacy receipts")
         pending_ids = sorted(set(current) - set(received))
-        if (len(envelopes) + len(pending_ids)
-                > insights.decision_projection_records):
-            raise LimitExceeded("Insight delivery projection exceeds record count bound")
         roles[role]["pending_insights"] = {
             "current_ids": current, "legacy_received_ids": received,
             "legacy_pending_ids": pending_ids, "shared_received_ids": shared,
@@ -213,6 +209,7 @@ def _scan(insights, routes):
             "post_map_pending_ids": pending_ids, "post_map_parity": True,
         }
     boundary = {"routes": routes, "route_digest": digest(canonical(routes)),
+                "page_bound": insights.decision_projection_records,
                 "sources": sources, "legacy_receipts": legacy,
                 "pending_sources": pending_sources,
                 "pending_legacy_receipts": pending_legacy}

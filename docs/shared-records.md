@@ -657,11 +657,16 @@ or unsafe sources fail closed before any new write. It then revalidates only the
 rows about to be selected against their exact current source and shared receipt
 and freezes their manifest. A decision or revision committed during the scan
 therefore cannot be delivered from the stale page. `pending_count` is the
-scan-time eligible set minus new candidates rejected before projection; it may
-overcount a row that moves after the scan, but such a row is never delivered. The
-projector's configured `[limits].decision_projection_records` ceiling (default
-512) applies before routing/receipts; overflow refuses before any projection
-writes. The public
+scan-time count of routed unacknowledged decisions plus addressed pending
+attention. It includes rows beyond the retained window and may overcount a row
+that moves after the scan, but such a row is never delivered. The page retains at
+most the configured `[limits].decision_projection_records`
+(default 512) oldest routed and unacknowledged rows, while it validates every
+current existing projection; it does not refuse because more rows exist, and
+acknowledgements advance the next oldest window. It writes new projections only
+for the rows retained for that role. The explicit public projector applies the
+same bound before writes and refuses overflow instead of returning an incomplete
+reconciliation. The public
 projector still returns only ID-to-digest bindings. Exact current decision and
 source revision/action must match; retained stale or withdrawn projections
 cannot become new page rows. Shared exact receipts are filtered before
@@ -879,8 +884,9 @@ and effective decision digests pin exact safely read file bytes. The insight
 digest pins exact live inbox bytes, or canonical retained archive content when
 there is no live inbox record. Thus non-payload source movement also invalidates
 the boundary. `sources` contains the complete strict source-current decision
-set, before routes, bounded by **`[limits].decision_projection_records`**
-(default **512**). `legacy_receipts` contains every routed
+set before routes. The host-only preflight scans this complete set, then bounds
+the serialized plan by `MAX_FRAME`; the plan binds the configured runtime page
+bound, which is not a cutover refusal. `legacy_receipts` contains every routed
 role/record pair, recomputed with `Insights._decision_token`; `receipt_digest`
 is the exact receipt-file byte digest, or **null for absence**. Only receipts
 validated by `_decision_received` count: exact role, event, full payload token
@@ -895,9 +901,9 @@ distinct pending-insight token domain (`Insights._pending_insight_envelopes_lock
 for each explicit enabled role, `INSIGHT_PENDING_POLICY` alongside
 `INSIGHT_DECISION_POLICY`). `pending_sources` binds each current
 `insight.pending/<event>` record digest, route target, exact inbox byte digest
-and decision-pointer byte digest (or explicit null absence), bounded at
-the configured current pending projection bound (default **512**);
-`pending_legacy_receipts` binds every
+and decision-pointer byte digest (or explicit null absence); the host-only
+preflight scans the complete current pending set, with the serialized plan
+bounded by `MAX_FRAME`. `pending_legacy_receipts` binds every
 addressed role/record token and receipt digest (null for absence). Only exact
 current events already acknowledged in legacy map; unacknowledged attention
 never gains a shared receipt, and legacy receipts are never modified.
@@ -907,9 +913,10 @@ receipts must be a valid exact subset of legacy-received identities, separately
 for decisions and for the nested `pending_insights` report. Anything
 else refuses preflight/apply, because it would hide a legacy-pending event.
 Every predicted post-map pending set equals its legacy pending set, for both
-decisions and pending attention. The plan also refuses a per-role combined
-shared-page projection where decision records plus still-unacknowledged
-addressed attention exceed the configured projection-record ceiling. The
+decisions and pending attention. The runtime page retains at most the configured
+projection-record bound of oldest routed unacknowledged rows and advances after
+acknowledgements; preflight does not refuse solely because that bound is
+exceeded. The
 `plan_digest` deliberately excludes output progress: a new preflight after an
 interrupted apply has the **same identity** while its shared-received report
 can advance. The plan is host-retained evidence, not a model authorization
