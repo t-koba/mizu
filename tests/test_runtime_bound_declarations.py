@@ -16,6 +16,8 @@ defaults are named config defaults already inventoried or are supplied by
 `runtime.py` literals are fixed run-local memory, one-row probe and public page
 bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
+`evidence_records.py` declares the started.json authorization-read ceiling that
+also trims that sample; runtime re-exports it only as an alias.
 The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
@@ -44,6 +46,11 @@ CANDIDATE = re.compile(
 )
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'evidence_records.py': {
+        'MAX_STARTED_EVIDENCE_BYTES': (
+            '65536', 'safety',
+            'evidence records / fixed started.json authorization-read ceiling; file_bytes may lower it'),
+    },
     'usage.py': {
         'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
     },
@@ -477,6 +484,12 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 self.assertEqual(inventory(tree), {
                     name: entry[0] for name, entry in declarations.items()
                 })
+
+    def test_started_evidence_alias_is_not_a_second_declaration(self):
+        evidence = ast.parse((ROOT / 'evidence_records.py').read_text(encoding='utf-8'))
+        runtime = ast.parse((ROOT / 'runtime.py').read_text(encoding='utf-8'))
+        self.assertEqual(inventory(evidence), {'MAX_STARTED_EVIDENCE_BYTES': '65536'})
+        self.assertNotIn('MAX_STARTED_EVIDENCE_BYTES', inventory(runtime))
 
     def test_gate_declared_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}

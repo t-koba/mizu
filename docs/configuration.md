@@ -971,7 +971,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 |---|---|---|---|
 | **Framing & Preview** | `PREVIEW_BYTES` (`fs.py`) | 128 KiB | Diff/insight/editor preview and canonical list bounds; CLI stdin framing |
 | | `READ_PAGE_CHARS` (`fs.py`) | 8,192 characters | Per-response workspace/evidence read text bound, separate from the whole-file `file_bytes` cap |
-| | `MAX_STARTED_EVIDENCE_BYTES` (`runtime.py`) | 64 KiB | Hard ceiling for run metadata used only to authorize retained-evidence reads; `file_bytes` may lower it |
+| | `MAX_STARTED_EVIDENCE_BYTES` (`evidence_records.py`) | 64 KiB | Hard ceiling for run metadata used only to authorize retained-evidence reads and to trim the configured queue-observation sample; `file_bytes` may lower it |
 | | `MAX_FRAME` (`fs.py`) | 1 MiB | Maximum JSON-RPC message size across bridge and MCP servers |
 | | `MAX_JSON_DEPTH` (`fs.py`) | 64 | Maximum JSON nesting depth `loads_finite` accepts; a deeper document is refused before it is parsed, so the refusal does not follow a runtime's recursion limit |
 | **Tool inputs** | `exec` / `experiment` script | 64 KiB | Sandbox command size (`SCRIPT_MAX`) |
