@@ -6,6 +6,7 @@ from threading import Event
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
+from mizu import work_items as work_items_module
 from mizu.errors import Denied
 from mizu.fs import now, read_json, write_json
 from mizu.runtime import (Engine, MAX_READY_WORK_AGE_SECONDS, _ready_work_age,
@@ -464,8 +465,12 @@ class ReadySetChangeTests(Fixture):
 
         def scan(count, reverse=False, limit=1):
             indices = range(count - 1, -1, -1) if reverse else range(count)
-            events = ((f'{i:032x}', {'id': f'wi_{i:032x}'}, frozenset(), None)
-                      for i in indices)
+
+            def rows():
+                for i in indices:
+                    row = (f'{i:032x}', {'id': f'wi_{i:032x}'}, frozenset())
+                    yield row if work_items_module.IS_WINDOWS else row + (None,)
+            events = rows()
             with patch.object(store, '_iter_item_events_with_revisions', return_value=events), \
                  patch.object(store, '_seed_for_event', new=lambda _, event, **kw: ('seed', event)), \
                  patch.object(store, '_history_revisions_readonly', return_value=(None, None)), \

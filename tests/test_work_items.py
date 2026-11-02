@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from support import Fixture
+from mizu import work_items as work_items_module
 from mizu.config import MAX_HISTORY_TEMPORARIES
 from mizu.errors import Denied, LimitExceeded, SnapshotConflict
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
@@ -60,6 +61,10 @@ class WorkItemTests(Fixture):
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
                 self.store.blocked_liveness_readonly, self.store.page_open_for_order)
 
+    def require_posix_read_cache(self):
+        if work_items_module.IS_WINDOWS:
+            self.skipTest("POSIX-only current-state sidecar cache")
+
     def test_direct_record_cache_reuses_unchanged_seed_and_invalidates_tamper(self):
         created = self.store.create(idempotency_key="direct-cache", title="Cache",
                                     actor="worker")["record"]["work_item"]
@@ -74,13 +79,18 @@ class WorkItemTests(Fixture):
             first = self.store._direct_record(created["id"])
             second = self.store._direct_record(created["id"])
         self.assertEqual(first, second)
-        self.assertEqual(sum(name.endswith("/create.json") for name in reads), 1)
+        # Windows deliberately bypasses the metadata-keyed direct cache, so a
+        # second unchanged lookup must re-read and validate create.json there.
+        expected_create_reads = 2 if work_items_module.IS_WINDOWS else 1
+        self.assertEqual(sum(name.endswith("/create.json") for name in reads),
+                         expected_create_reads)
         create = self.project.root / "work-items" / created["id"] / "create.json"
         create.write_text("{")
         with self.assertRaises(Denied):
             self.store._direct_record(created["id"])
 
     def test_readonly_page_reuses_unchanged_projection_and_recomputes_origin(self):
+        self.require_posix_read_cache()
         first = self.store.page_open_readonly(limit=100)
         with patch.object(self.store, "_current_hold",
                           side_effect=AssertionError("unchanged projection replayed")):
@@ -162,8 +172,7 @@ class WorkItemTests(Fixture):
 
     def test_windows_writes_no_current_state_sidecar_or_backfill(self):
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
-        self.assertTrue(sidecar.exists())
-        sidecar.unlink()
+        sidecar.unlink(missing_ok=True)
         with patch("mizu.work_items.IS_WINDOWS", True):
             created = self.store.create(idempotency_key="windows-sidecar",
                                         title="Windows", actor="worker")["record"]["work_item"]
@@ -1397,9 +1406,10 @@ class WorkItemTests(Fixture):
             self.assertEqual(closed["total"], 1)
             self.assertEqual(len(closed["items"]), 1)
             self.assertEqual(closed["items"][0]["id"], first_id)
-            # Terminal/open sidecars avoid replaying full histories; the exact
-            # fallback is used only for an item without a reusable sidecar.
-            self.assertLessEqual(spy.call_count, 2)
+            # POSIX terminal/open sidecars avoid replaying full histories;
+            # Windows intentionally takes the exact fallback for every item.
+            self.assertLessEqual(spy.call_count,
+                                 3 if work_items_module.IS_WINDOWS else 2)
 
     def test_concurrent_same_revision_has_one_winner(self):
         barrier = threading.Barrier(2)
@@ -1421,6 +1431,7 @@ class WorkItemTests(Fixture):
 
 
     def test_sidecar_fresh_read_is_source_backed_and_bounded(self):
+        self.require_posix_read_cache()
         # Source-backed sidecar: at most current+previous revision files are
         # read per item, never the full history. Build a 4-rev chain so a full
         # replay (3 files) is distinguishable from the bounded hit (<=2).
@@ -1452,6 +1463,7 @@ class WorkItemTests(Fixture):
         self.assertIn(f"work-items/{self.item_id}/4.json", rev_reads)
 
     def test_sidecar_fabricated_current_falls_back_to_exact_source(self):
+        self.require_posix_read_cache()
         # A fabricated but structurally valid sidecar must not return false
         # state: the stored current is compared byte-for-structure with the
         # exact source revision file before use.
@@ -1483,6 +1495,7 @@ class WorkItemTests(Fixture):
         self.assertEqual((row["status"], row["rev"]), ("doing", 2))
 
     def test_sidecar_changed_source_is_not_masked_by_sidecar(self):
+        self.require_posix_read_cache()
         # A changed source revision must be observed instead of returning stale
         # sidecar data, even when the directory identity is updated to match.
         self.change("doing")
@@ -1510,6 +1523,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(row["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
 
     def test_backfill_current_states_is_bounded_and_warms_legacy_items(self):
+        self.require_posix_read_cache()
         created = self.store.create(idempotency_key="backfill-direct", title="Backfill",
                                     actor="worker")["record"]["work_item"]
         sidecars = [self.project.root / "work-item-state" / f"{item_id}.json"
@@ -1544,6 +1558,7 @@ class WorkItemTests(Fixture):
         self.assertFalse(row["doing_stale"])
 
     def test_terminal_sidecar_skips_closed_history_for_both_pages(self):
+        self.require_posix_read_cache()
         created = self.store.create(idempotency_key="terminal-scan", title="Terminal",
                                     actor="worker")["record"]["work_item"]
         item_id = created["id"]
@@ -1563,6 +1578,7 @@ class WorkItemTests(Fixture):
         self.assertIn(item_id, [row["id"] for row in closed["items"]])
 
     def test_terminal_sidecar_fabricated_current_falls_back_to_exact(self):
+        self.require_posix_read_cache()
         created = self.store.create(idempotency_key="terminal-tamper", title="Tamper",
                                     actor="worker")["record"]["work_item"]
         item_id = created["id"]
@@ -1632,6 +1648,7 @@ class WorkItemTests(Fixture):
             WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
 
     def test_sidecar_unsafe_falls_back_to_exact_replay(self):
+        self.require_posix_read_cache()
         self.change("doing")
         expected = self.store.page_open_readonly(limit=100)
         expected_row = next(row for row in expected["items"] if row["id"] == self.item_id)
@@ -1671,6 +1688,7 @@ class WorkItemTests(Fixture):
                 sidecar.unlink()
 
     def test_sidecar_terminal_is_retained_and_serves_both_pages(self):
+        self.require_posix_read_cache()
         self.change("doing")
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
         self.assertTrue(sidecar.exists())
@@ -1686,8 +1704,7 @@ class WorkItemTests(Fixture):
     def test_sidecar_absent_legacy_item_reads_exactly(self):
         self.change("doing")
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
-        self.assertTrue(sidecar.exists())
-        sidecar.unlink()
+        sidecar.unlink(missing_ok=True)
         fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
         page = fresh.page_open_readonly(limit=100)
         row = next(row for row in page["items"] if row["id"] == self.item_id)
