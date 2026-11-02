@@ -1477,8 +1477,10 @@ def main():
     # publication after taking 1282 s on the preceding one, while 3.11 took
     # 1710 s and an earlier 3.13 took 1628 s. A loaded POSIX host has also
     # reached the previous 1000 s cap (2026-10-21), so the bound is 1800 s on
-    # every platform inside a 60-minute job. The
-    # opt-in per-test timing artifact retains partial progress on timeout for
+    # every platform inside a 60-minute job. These hosted-CI durations are
+    # single samples on unguaranteed hardware and disk layout; same-revision
+    # variance can dominate a cell, so they are not a cell cost or test ranking.
+    # The opt-in per-test timing artifact retains partial progress on timeout for
     # diagnosis. Samples remain diagnostic, not bounds.
     # The child owns structured exception metadata. Its failure sidecar is private
     # and deleted even on timeout; no failure/timeout details parse raw output.
