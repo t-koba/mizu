@@ -581,13 +581,15 @@ creation directories to build its inventory with O(limit) retained rows. The eve
 subsequently revisable insight.
 A read-only open page may reuse a validated current projection while the
 canonical seed digest and every entry's metadata in that item's directory are
-unchanged. Origin staleness is recomputed on every call; an item with a current
-delivery binding, any new or changed revision, a changed seed, a non-regular
-entry or any unexpected directory shape bypasses the reuse and runs the complete
-chain validation. The locked recovery path never uses this read-only cache.
-Direct-seed reuse likewise rechecks the legacy sidecar and the decision-history
-ID collision on every lookup, so a conflicting source added after a cache warm
-still fails closed.
+unchanged, on local POSIX where ctime is a metadata-change witness. On Windows
+the work-item metadata caches are bypassed and every read validates the exact
+seed and chain. Origin staleness is recomputed on every call; an item with a
+current delivery binding, any new or changed revision, a changed seed, a
+non-regular entry or any unexpected directory shape bypasses the reuse and runs
+the complete chain validation. The locked recovery path never uses this
+read-only cache. Direct-seed reuse likewise rechecks the legacy sidecar and the
+decision-history ID collision on every lookup, so a conflicting source added
+after a cache warm still fails closed.
 Both direct creation and decision seeding call the same lock-held
 `WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
 binding, safe empty item slot, and exact current origin revision. New seeds

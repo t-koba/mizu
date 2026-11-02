@@ -306,7 +306,8 @@ class WorkItems:
                 pass
             else:
                 raise Denied("Direct work-item ID collides with a decision event")
-        cached = self._direct_cache.get(item_id)
+        cached = (self._direct_cache.get(item_id)
+                  if not IS_WINDOWS else None)
         if cached is not None and cached[0] == key:
             return cached[1]
         record = self._read(f"work-items/{item_id}/create.json")
@@ -322,7 +323,8 @@ class WorkItems:
                 or seed["id"] != item_id
                 or seed["origin"] is not None and seed["origin"].get("work_item_id") == item_id):
             raise Denied("Invalid direct work-item binding")
-        self._direct_cache[item_id] = (key, record)
+        if not IS_WINDOWS:
+            self._direct_cache[item_id] = (key, record)
         return record
 
     def _history_identity(self, item_id: str):
@@ -366,6 +368,8 @@ class WorkItems:
 
     def _history_revisions_readonly(self, item_id: str):
         """Reuse the validated revision set while its directory is unchanged."""
+        if IS_WINDOWS:
+            return self._history_revisions(item_id, recover=False)
         key = self._history_identity(item_id)
         if key is not None:
             cached = self._history_cache.get(item_id)
@@ -1964,7 +1968,9 @@ class WorkItems:
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
-        events = self._iter_item_events_with_revisions(recover=not readonly, cache=readonly)
+        cacheable = readonly and not IS_WINDOWS
+        events = self._iter_item_events_with_revisions(recover=not readonly,
+                                                        cache=cacheable)
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -1989,7 +1995,7 @@ class WorkItems:
                 history_revisions = (self._history_revisions_readonly(seed["id"])
                                      if readonly else
                                      self._history_revisions(seed["id"], recover=True))
-            history_key = self._history_identity(seed["id"]) if readonly else None
+            history_key = self._history_identity(seed["id"]) if cacheable else None
             cache_key = (digest(canonical(seed)), history_key)
             cached = self._projection_cache.get(seed["id"]) if history_key is not None else None
             if cached is not None and cached[0] == cache_key:
@@ -2001,7 +2007,7 @@ class WorkItems:
                     verify_snapshots=False, verify_current_delivery=True)
                 stable = (history_key is not None
                           and self._history_identity(seed["id"]) == history_key)
-                if stable and item.get("delivery") is None:
+                if stable and cacheable and item.get("delivery") is None:
                     self._projection_cache[seed["id"]] = (cache_key, item, since)
                 else:
                     self._projection_cache.pop(seed["id"], None)

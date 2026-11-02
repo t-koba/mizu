@@ -3994,12 +3994,14 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
         return False
 
 
-#: Process-local idle fast path. An empty decision/attention page is reused only
-#: while every source the exact scan reads is unchanged: the role's inbox,
-#: decision-history, decisions and decision receipts; the authority/report
-#: marker; the shared `shared-records/insight` record partition; and the
-#: hashed shared receipt store for the role. A non-empty result is never cached
-#: as empty. This is a delivery
+#: Process-local idle fast path, used on local POSIX where ctime is a
+#: metadata-change witness; Windows always runs the exact scan. An empty
+#: decision/attention page is reused only while every source the exact scan
+#: reads is unchanged: the role's inbox, decision-history, decisions and
+#: decision receipts; the authority/report marker; the shared
+#: `shared-records/insight` record partition; and the hashed shared receipt
+#: store for the role. File entry metadata is included. A non-empty result is
+#: never cached as empty. This is a delivery
 #: precondition, not a delivery authority: a real unit may bind the empty page
 #: and manifest only while the same complete fingerprint is unchanged.
 _DECISION_IDLE_CACHE: dict = {}
@@ -4015,7 +4017,13 @@ def _empty_decision_state(shared: bool) -> dict:
 
 
 def _decision_source_fingerprint(project, role_name):
-    """Cheap, path-free metadata token for every decision/attention source."""
+    """Cheap, path-free metadata token for every decision/attention source.
+
+    Each sampled directory includes the metadata of its entries, not only the
+    directory identity, so a local POSIX in-place rewrite is observable through
+    the file ctime. On Windows ctime is creation time, so callers disable the
+    empty-page reuse instead of treating this token as a change witness.
+    """
     root = project.insights.root
     parts = []
 
@@ -4024,12 +4032,35 @@ def _decision_source_fingerprint(project, role_name):
         try:
             info = path.lstat()
         except FileNotFoundError:
-            return (name, 0, 0, 0)
+            return (name, None, ())
         except OSError:
             return None
         if not stat.S_ISDIR(info.st_mode):
             return None
-        return (name, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+        entries = []
+        try:
+            with os.scandir(path) as scanned:
+                for entry in scanned:
+                    try:
+                        entry_info = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        return None
+                    except OSError:
+                        return None
+                    entries.append((entry.name, entry_info.st_dev,
+                                    entry_info.st_ino, entry_info.st_mode,
+                                    entry_info.st_nlink,
+                                    entry_info.st_mtime_ns,
+                                    entry_info.st_ctime_ns,
+                                    entry_info.st_size))
+        except FileNotFoundError:
+            return (name, None, ())
+        except OSError:
+            return None
+        entries.sort()
+        return (name, (info.st_dev, info.st_ino, info.st_mode,
+                       info.st_nlink, info.st_mtime_ns, info.st_ctime_ns,
+                       info.st_size), tuple(entries))
 
     names = ["inbox", "decision-history", "decisions", "decision-receipts",
              f"decision-receipts/{role_name}", "shared-records",
@@ -4045,7 +4076,7 @@ def _decision_source_fingerprint(project, role_name):
         try:
             info = path.lstat()
         except FileNotFoundError:
-            parts.append((name, 0, 0, 0))
+            parts.append((name, None))
             continue
         except OSError:
             return None
@@ -4072,6 +4103,8 @@ def _decision_delivery_state(project, role_name, role):
     any event/diagnostic, is never reused. Errors reading the source metadata
     simply disable the fast path for that evaluation.
     """
+    if _platform.IS_WINDOWS:
+        return decision_delivery.pending(project, role)
     key = (project.insights.root, role_name, _decision_policy_signature(project, role))
     before = _decision_source_fingerprint(project, role_name)
     cached = _DECISION_IDLE_CACHE.get(key)

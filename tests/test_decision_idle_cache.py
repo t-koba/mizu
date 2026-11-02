@@ -98,6 +98,32 @@ class DecisionIdleCacheTests(Fixture):
             self.assertEqual(self.state()["events"], [{"event": "a" * 32}])
             self.assertEqual(pending.call_count, 2)
 
+    def test_windows_does_not_reuse_the_empty_page(self):
+        with patch.object(runtime._platform, "IS_WINDOWS", True):
+            with patch.object(runtime.decision_delivery, "pending",
+                              wraps=runtime.decision_delivery.pending) as pending:
+                self.state()
+                self.state()
+        self.assertEqual(pending.call_count, 2)
+
+    def test_entry_metadata_change_invalidates_the_cached_empty_page(self):
+        partition = self.project.insights.root / "shared-records" / "insight"
+        partition.mkdir(parents=True)
+        record = partition / "existing.json"
+        record.write_text("{}")
+        empty = runtime._empty_decision_state(False)
+        row = {"event": "b" * 32, "action": "reject"}
+        non_empty = {"shared": False, "events": [row], "diagnostics": [],
+                     "page": {"events": [row], "pending_count": 1,
+                              "truncated": False, "count_truncated": False,
+                              "byte_truncated": False}, "manifest": ()}
+        with patch.object(runtime.decision_delivery, "pending",
+                          side_effect=[empty, non_empty]) as pending:
+            self.assertEqual(self.state()["events"], [])
+            record.chmod(0o600)
+            self.assertEqual(self.state()["events"], [row])
+        self.assertEqual(pending.call_count, 2)
+
     def test_non_empty_result_is_never_reused_as_empty(self):
         non_empty = {"shared": False, "events": [{"event": "x"}], "diagnostics": [],
                      "page": {"events": [{"event": "x"}], "pending_count": 1,

@@ -123,6 +123,42 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store._direct_record(created["id"])
 
+    def test_weak_platform_bypasses_direct_and_projection_caches(self):
+        created = self.store.create(idempotency_key="weak-platform", title="Weak",
+                                    actor="worker")["record"]["work_item"]
+        self.store._direct_cache.clear()
+        self.store._history_cache.clear()
+        self.store._projection_cache.clear()
+        with patch("mizu.work_items.IS_WINDOWS", True):
+            self.store._direct_record(created["id"])
+            self.store.page_open_readonly(limit=100)
+        self.assertEqual(self.store._direct_cache, {})
+        self.assertEqual(self.store._history_cache, {})
+        self.assertEqual(self.store._projection_cache, {})
+
+    def test_weak_platform_same_size_create_rewrite_fails_closed(self):
+        created = self.store.create(idempotency_key="weak-rewrite", title="Rewrite",
+                                    actor="worker")["record"]["work_item"]
+        self.store._direct_record(created["id"])
+        path = self.project.root / "work-items" / created["id"] / "create.json"
+        original = path.read_bytes()
+        stat = path.stat()
+        path.write_bytes(b"{" + b" " * (len(original) - 1))
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        with patch("mizu.work_items.IS_WINDOWS", True), self.assertRaises(Denied):
+            self.store._direct_record(created["id"])
+
+    def test_weak_platform_same_size_revision_rewrite_fails_closed(self):
+        self.change("doing")
+        self.store.page_open_readonly(limit=100)
+        path = self.directory / "2.json"
+        original = path.read_bytes()
+        stat = path.stat()
+        path.write_bytes(b"{" + b" " * (len(original) - 1))
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        with patch("mizu.work_items.IS_WINDOWS", True), self.assertRaises(Denied):
+            self.store.page_open_readonly(limit=100)
+
     def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
         calls = []
         original = self.store._page_open_impl

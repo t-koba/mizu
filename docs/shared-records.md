@@ -797,7 +797,11 @@ decision authority/report marker; the shared `shared-records/insight`
 partition (which holds both `insight.decision` and `insight.pending` records);
 the `decision-receipts` and `shared-record-receipts` parent directories;
 and the role's hashed
-`shared-record-receipts/<sha256(role)>` store. When the last exact scan returned no
+`shared-record-receipts/<sha256(role)>` store. The fingerprint includes each
+source directory's entry metadata, so on a local POSIX filesystem an in-place
+file rewrite is visible through its ctime. On Windows ctime is creation time,
+so empty-page reuse is disabled and every evaluation runs the exact scan.
+When the last exact scan returned no
 decision or attention events and that complete fingerprint is unchanged, the
 check uses an empty page and empty manifest: it reads no decision-history file
 and takes no record lock. Any source change, any non-empty result, and any
