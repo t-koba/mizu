@@ -1487,6 +1487,22 @@ class WorkItemTests(Fixture):
         self.assertEqual((row["status"], row["rev"]), ("blocked", 2))
         self.assertEqual(row["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
 
+    def test_backfill_current_states_is_bounded_and_warms_legacy_items(self):
+        created = self.store.create(idempotency_key="backfill-direct", title="Backfill",
+                                    actor="worker")["record"]["work_item"]
+        sidecars = [self.project.root / "work-item-state" / f"{item_id}.json"
+                    for item_id in (self.item_id, created["id"])]
+        for path in sidecars:
+            path.unlink(missing_ok=True)
+        first = self.store.backfill_current_states(limit=1)
+        self.assertEqual(first["backfilled"], 1)
+        self.assertEqual(sum(path.exists() for path in sidecars), 1)
+        second = self.store.backfill_current_states(limit=1)
+        self.assertEqual(second["backfilled"], 1)
+        self.assertTrue(all(path.exists() for path in sidecars))
+        with self.assertRaises(Denied):
+            self.store.backfill_current_states(limit=0)
+
     def test_sidecar_blocked_wait_replays_exactly(self):
         self.change("doing")
         self.store.transition(self.item_id, expected_rev=2, status="blocked", actor="worker",

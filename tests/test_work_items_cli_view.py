@@ -43,11 +43,15 @@ class WorkItemsCliViewTests(Fixture):
         self.assertEqual(args.limit, 25)
         self.assertIsNone(args.cursor)
         self.assertEqual(args.closed, 10)
+        self.assertIsNone(args.backfill)
 
     def test_parser_custom_values(self):
         args = parser().parse_args(
             ["work-items", "sample", "--limit", "2", "--cursor", "tok", "--closed", "3"])
         self.assertEqual((args.limit, args.cursor, args.closed), (2, "tok", 3))
+        self.assertIsNone(args.backfill)
+        backfill = parser().parse_args(["work-items", "sample", "--backfill", "5"])
+        self.assertEqual(backfill.backfill, 5)
 
     def test_execute_uses_read_only_project(self):
         self.make_open("First item")
@@ -69,6 +73,27 @@ class WorkItemsCliViewTests(Fixture):
         self.assertEqual(seen.get("name"), "sample")
         self.assertIn("open", result)
         self.assertIn("closed", result)
+
+    def test_execute_backfill_is_an_explicit_writable_maintenance_variant(self):
+        _, _, item_id = self.make_open("Backfill item")
+        sidecar = self.project.root / "work-item-state" / f"{item_id}.json"
+        sidecar.unlink(missing_ok=True)
+        seen = {}
+        import mizu.project as proj
+        real_project = proj.Project
+
+        def spy(config, name, *, read_only=False):
+            seen["read_only"] = read_only
+            return real_project(config, name, read_only=read_only)
+
+        with patch("mizu.project.Project", side_effect=spy):
+            args = parser().parse_args(
+                ["--config", str(self.file), "work-items", "sample", "--backfill", "1"])
+            result = execute(args)
+        self.assertTrue(seen.get("read_only") is False)
+        self.assertEqual(result["backfill"], {"checked": 1, "backfilled": 1})
+        self.assertTrue(sidecar.exists())
+        self.assertEqual(result["open"]["total"], 1)
 
     def test_execute_schema_open_matches_page_open(self):
         _, _, item_id = self.make_open("Open item")

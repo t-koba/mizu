@@ -557,12 +557,18 @@ mizu work-items demo --limit 2 --closed 0
 `mizu work-items PROJECT [--limit N] [--cursor TOKEN] [--closed N]` prints one JSON
 document with `open`, `closed`, and `event_delivery` fields and never
 writes, locks, recovers or deletes. The project is opened with
-`Project(..., read_only=True)`.
+`Project(..., read_only=True)`. Adding `--backfill N` is an explicit writable
+maintenance variant: before reading, it takes the record lock and builds up to
+N missing nonterminal current-state sidecars from their exact source records;
+the response then also has a `backfill` object with `checked` and `backfilled`
+counts. It is bounded to 1-100 items and does not scan or recover a source
+without the existing validation.
 
 - Options and defaults: `--limit` is the open page size (default 25, exact int
   1–100); `--cursor` is the opaque open-page continuation (default none);
   `--closed` is the number of newest closed items to include (default 10, exact
-  int 0–100, where 0 reports the closed `total` with no rows). Invalid
+  int 0–100, where 0 reports the closed `total` with no rows); `--backfill` is
+  the optional writable maintenance count (exact int 1–100). Invalid
   limits/cursors fail closed with no partial page.
 - `open` is the exact `page_open` shape: items ordered by status
   (doing, blocked, open), then oldest `created_at` and ID; the exclusive input

@@ -603,7 +603,10 @@ entry or any unexpected directory shape bypasses the reuse and runs the
 complete chain validation. The locked recovery path never uses this read-only
 sidecar. Direct-seed reuse likewise rechecks the legacy sidecar and the
 decision-history ID collision on every lookup, so a conflicting source added
-after a cache warm still fails closed.
+after a cache warm still fails closed. Legacy items without a sidecar keep
+using exact replay; the read-only CLI default never writes, while the explicit
+`mizu work-items --backfill N` maintenance variant takes the record lock and
+builds at most N missing nonterminal sidecars from their exact source records.
 Both direct creation and decision seeding call the same lock-held
 `WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
 binding, safe empty item slot, and exact current origin revision. New seeds

@@ -396,7 +396,7 @@ class WorkItems:
     def _sidecar_path(self, item_id: str) -> Path:
         return self.root / _SIDECAR_DIR / f"{item_id}.json"
 
-    def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since) -> None:
+    def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since) -> bool:
         """Best-effort write of exact source records; never fails a commit.
 
         Cache boundary: any failure here falls back to exact replay and never
@@ -424,11 +424,24 @@ class WorkItems:
                        "previous": previous, "current": current,
                        "doing_since": since}
             if len(canonical(payload)) > _SIDECAR_MAX_BYTES:
-                return
-            write_json(self._sidecar_path(item_id), payload, exclusive=False)
+                return False
+            path = self._sidecar_path(item_id)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            else:
+                if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400
+                        or info.st_nlink != 1):
+                    return False
+            write_json(path, payload, exclusive=False)
+            return True
         except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
                 AttributeError):
-            return
+            return False
 
     def _sidecar_remove(self, item_id: str) -> None:
         """Best-effort removal of a terminal item's sidecar; never fails a commit.
@@ -689,6 +702,56 @@ class WorkItems:
             # Cache boundary: any sidecar/source failure falls back to exact
             # replay, never fails the read.
             return None
+
+    def backfill_current_states(self, *, limit=MAX_OPEN_PAGE_ROWS) -> dict:
+        """Build at most ``limit`` missing nonterminal current-state sidecars.
+
+        The caller must be a writable project operation: this method holds the
+        record lock, validates each selected item's exact source chain, and
+        writes only the disposable sidecar cache. A valid sidecar costs at most
+        its source-identity and current/previous revision reads; an item that
+        still lacks one pays the existing exact replay once. Terminal items and
+        unsafe or ambiguous sources are left alone. The return value reports
+        how many seeded items were checked and how many sidecars were written.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item state backfill limit must be an integer in [1, 100]")
+        checked = 0
+        backfilled = 0
+        with lock(self.root / "locks" / "insights.lock"):
+            for event_id, event, scanned in self._iter_item_events_with_revisions(recover=True):
+                kind, seed = self._seed_for_event(event_id, event, readonly=False)
+                if kind != "seed":
+                    continue
+                checked += 1
+                revisions = (scanned if scanned is not None else
+                             self._history_revisions(seed["id"], recover=True))
+                identity = self._history_identity(seed["id"])
+                if identity is None:
+                    continue
+                if self._sidecar_load(seed["id"], seed, identity) is not None:
+                    continue
+                item, since = self._current_hold(
+                    seed["id"], seed_event=event, history_revisions=revisions,
+                    verify_snapshots=False, verify_current_delivery=True)
+                if item["status"] in ("done", "dropped"):
+                    self._sidecar_remove(seed["id"])
+                    continue
+                revision = item["rev"]
+                if revision == 1:
+                    previous, current = None, seed
+                elif revision == 2:
+                    previous = seed
+                    current = self._read(f"work-items/{seed['id']}/{revision}.json")
+                else:
+                    previous = self._read(f"work-items/{seed['id']}/{revision - 1}.json")
+                    current = self._read(f"work-items/{seed['id']}/{revision}.json")
+                if self._sidecar_store(seed["id"], seed, self._history_identity(seed["id"]),
+                                       previous, current, since):
+                    backfilled += 1
+                if backfilled >= limit:
+                    break
+        return {"checked": checked, "backfilled": backfilled}
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
