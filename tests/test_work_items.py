@@ -109,6 +109,20 @@ class WorkItemTests(Fixture):
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         self.assertEqual((row["status"], row["rev"]), ("doing", changed["rev"]))
 
+    def test_direct_record_cache_rechecks_conflicting_sources(self):
+        created = self.store.create(idempotency_key="direct-conflict", title="Conflict",
+                                    actor="worker")["record"]["work_item"]
+        self.store._direct_record(created["id"])
+        collision = (self.project.root / "decision-history" /
+                     f"{created['id'][3:]}.json")
+        collision.write_text("{}")
+        with self.assertRaises(Denied):
+            self.store._direct_record(created["id"])
+        collision.unlink()
+        (self.project.root / "work-items" / created["id"] / "legacy.json").write_text("{}")
+        with self.assertRaises(Denied):
+            self.store._direct_record(created["id"])
+
     def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
         calls = []
         original = self.store._page_open_impl

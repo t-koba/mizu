@@ -290,15 +290,25 @@ class WorkItems:
                directory_info.st_size, create_info.st_dev, create_info.st_ino,
                create_info.st_mode, create_info.st_nlink, create_info.st_mtime_ns,
                create_info.st_ctime_ns, create_info.st_size)
-        cached = self._direct_cache.get(item_id)
-        if cached is not None and cached[0] == key:
-            return cached[1]
+        # Both conflicting sources live outside the create.json key, so check
+        # them on every lookup, including a cache hit.
         try:
             (directory / "legacy.json").lstat()
         except FileNotFoundError:
             pass
         else:
             raise Denied("Direct work item carries legacy reconciliation")
+        decision = self.root / "decision-history" / f"{item_id[3:]}.json"
+        if _directory(decision.parent):
+            try:
+                decision.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise Denied("Direct work-item ID collides with a decision event")
+        cached = self._direct_cache.get(item_id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
         record = self._read(f"work-items/{item_id}/create.json")
         if set(record) - {"requested_smoke_refs"} != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
             raise Denied("Invalid direct work-item creation record")
@@ -312,15 +322,6 @@ class WorkItems:
                 or seed["id"] != item_id
                 or seed["origin"] is not None and seed["origin"].get("work_item_id") == item_id):
             raise Denied("Invalid direct work-item binding")
-        # Direct seeds and immutable decision events must never share an ID.
-        path = self.root / "decision-history" / f"{item_id[3:]}.json"
-        if _directory(path.parent):
-            try:
-                path.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                raise Denied("Direct work-item ID collides with a decision event")
         self._direct_cache[item_id] = (key, record)
         return record
 
