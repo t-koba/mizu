@@ -7,7 +7,10 @@ and artifact bounds; its two host-cost choices are configured policy defaults.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
 ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
-remaining output caps are fixed safety ceilings.
+remaining output caps are fixed safety ceilings. The `insights.py` module
+constants are fixed record, evidence and diagnostic safety bounds; its
+constructor policy defaults are `Limits` fields already inventoried and are
+supplied by `Project`.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -59,6 +62,18 @@ DECLARATIONS = {
         'MAX_RECORDED_BATCHES': ('32', 'safety', 'project / bounded named batch definitions'),
         'MAX_RECORDED_BATCH_COMMANDS': (
             '32', 'safety', 'project / bounded commands per named batch'),
+    },
+    'insights.py': {
+        'MAX_DECISION_EVENT_BYTES': (
+            '1024 * 1024', 'safety', 'insights / fixed decision-event record read and write ceiling'),
+        'DECISION_RECEIPT_BYTES': (
+            '1024', 'safety', 'insights / fixed-shape per-token decision receipt read bound'),
+        'DECISION_RECEIPT_DIAGNOSTIC_LIMIT': (
+            '10', 'safety', 'insights / bounded receipt-diagnostic output sample'),
+        'MAX_EVIDENCE_ENTRIES': (
+            '16', 'safety', 'insights / fixed append-only evidence entries per insight'),
+        'MAX_EVIDENCE_CHARS': (
+            '8192', 'safety', 'insights / fixed evidence text bound per entry'),
     },
     'vcs.py': {
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
@@ -251,6 +266,11 @@ CALLS = {
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },
     'ci_requests.py': {},
+    'insights.py': {
+        ('Insights.shared_decision_page', 'self._decision_projection_envelopes_locked', 'limit', 0): (
+            '512', 'safety',
+            'insights / current-decision projection scan bound; overflow refuses before writing'),
+    },
     'project.py': {
         ('config_managed_repo', 'run', 'maximum', 0): (
             '8192', 'safety', 'project import / local git config output read bound'),
