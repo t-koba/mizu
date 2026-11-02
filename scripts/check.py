@@ -544,14 +544,15 @@ def core_cell_scope_seconds(child_timeout: int, staging_timeout: int,
 
 
 #: The wall-clock bound the gate holds the Python suite child to. The
-#: 2026-11-02 retained status rows report green Windows job walls of 1540 s
-#: (3.11), 1494 s (3.14) and 1437 s (3.13); the two 3.12 shards took 923/911 s.
+#: 2026-11-02 retained status rows for publication af5af555 at sha 0810d022
+#: report green Windows job walls of 1609 s (3.11), 1768 s (3.14) and 1719 s
+#: (3.13); the two 3.12 shards took 1184/801 s.
 #: On 2026-11-01 a Windows 3.14 child was cut off at this bound on a
 #: documentation-only change after the same cell took 1282 s; the 3.11 job
 #: took 1710 s and an earlier 3.13 job took 1628 s. On 2026-11-02 the 3.13
 #: cell was cut off at this bound with a 1821 s job wall. The bound covers the
-#: slowest green cell but is at its edge, not comfortably above it. This value
-#: is the default for --suite-child-timeout; changing it or the operator-owned
+#: slowest green cell with only 32 s of observed margin. This value is the
+#: default for --suite-child-timeout; changing it or the operator-owned
 #: job scope is a separate decision.
 SUITE_CHILD_TIMEOUT_SECONDS = 1800
 

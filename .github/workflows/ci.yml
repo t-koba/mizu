@@ -14,9 +14,10 @@ jobs:
     # Native service operation and live inference are not asserted here. Only
     # Ubuntu 24.04/Python 3.13 additionally exercises real rootless OCI isolation.
     runs-on: ${{ matrix.os }}
-    # The 2026-11-02 retained status rows report green Windows job walls of
-    # 1540 s (3.11), 1494 s (3.14) and 1437 s (3.13); the two 3.12 shards, each
-    # a partial suite, took 923/911 s. On 2026-11-01 the 3.14 job took 1282 s
+    # The 2026-11-02 retained status rows for publication af5af555 at sha
+    # 0810d022 report green Windows job walls of 1609 s (3.11), 1768 s (3.14)
+    # and 1719 s (3.13); the two 3.12 shards, each a partial suite, took
+    # 1184/801 s. On 2026-11-01 the 3.14 job took 1282 s
     # on one publication and was cut off at the 1800-second child bound on the
     # next, a documentation-only change, while 3.11 took 1710 s and an earlier
     # 3.13 job took 1628 s. On 2026-11-02 the 3.13 cell was also cut off at
@@ -24,10 +25,10 @@ jobs:
     # unguaranteed hosted hardware and disk layout; same-revision hosted runs
     # can vary enough that one cell is neither a cell cost nor a test ranking.
     # Repeat or interleave observations with host/volume identity before
-    # deciding the shape. The bound therefore covers the slowest green cell but
-    # carries no growth margin; whether the child bound or the suite duration
-    # should move is an operator decision. Every cell still holds the same
-    # modelled setup/child/later-phase/cleanup/
+    # deciding the shape. The bound therefore covers the slowest green cell
+    # with only 32 s of observed margin; whether the child bound or the suite
+    # duration should move is an operator decision. Every cell still holds the
+    # same modelled setup/child/later-phase/cleanup/
     # suffix path (3246 s) inside a 60-minute scope and the gate reports its
     # own bounded outcome instead of being cut off by the job scope. The
     # later phase runs one child per check (ten on Windows, seventeen in a

@@ -443,16 +443,17 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertGreaterEqual(int(match.group(1)), required)
 
     def test_child_bound_covers_the_measured_suite_cost(self):
-        # The 2026-11-02 retained status rows (vcs-read/27eb0828bca74cb282791859c3944da3)
-        # report green Windows job walls of 1540 s (3.11), 1494 s (3.14) and
-        # 1437 s (3.13); the two 3.12 shards took 923/911 s. On 2026-11-01 the
-        # 3.14 cell was cut off at the 1800 s child bound with an 1818 s job
-        # wall, and on 2026-11-02 the 3.13 cell was cut off at the same bound
-        # with a 1821 s wall. The bound covers the slowest green cell but has
-        # no growth margin; the edge and the operator decision are stated in
+        # The 2026-11-02 retained status rows for publication af5af555 at sha
+        # 0810d022 (vcs-read/d34efebefb214903b94cc411946edc68) report green
+        # Windows job walls of 1609 s (3.11), 1768 s (3.14) and 1719 s (3.13);
+        # the two 3.12 shards took 1184/801 s. On 2026-11-01 the 3.14 cell was
+        # cut off at the 1800 s child bound with an 1818 s job wall, and on
+        # 2026-11-02 the 3.13 cell was cut off at the same bound with a 1821 s
+        # wall. The bound covers the slowest green cell with only 32 s of
+        # observed margin; the edge and the operator decision are stated in
         # docs/testing.md. Do not turn these observed job walls into a claimed
         # headroom.
-        self.assertGreaterEqual(CHECK._unittest_timeout_seconds(), 1540)
+        self.assertGreaterEqual(CHECK._unittest_timeout_seconds(), 1768)
 
     def test_installer_staging_gate_outlives_the_suite_child_bound(self):
         # The staged gate runs the same child; a staging timeout that does not
