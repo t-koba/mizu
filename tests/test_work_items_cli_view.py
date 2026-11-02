@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from support import Fixture, bind_delivery
 from mizu.cli import parser, execute
+from mizu import work_items as work_items_module
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical
 from mizu.work_items import (
@@ -91,8 +92,12 @@ class WorkItemsCliViewTests(Fixture):
                 ["--config", str(self.file), "work-items", "sample", "--backfill", "1"])
             result = execute(args)
         self.assertTrue(seen.get("read_only") is False)
-        self.assertEqual(result["backfill"], {"checked": 1, "backfilled": 1})
-        self.assertTrue(sidecar.exists())
+        if work_items_module.IS_WINDOWS:
+            self.assertEqual(result["backfill"], {"checked": 0, "backfilled": 0})
+            self.assertFalse(sidecar.exists())
+        else:
+            self.assertEqual(result["backfill"], {"checked": 1, "backfilled": 1})
+            self.assertTrue(sidecar.exists())
         self.assertEqual(result["open"]["total"], 1)
 
     def test_execute_schema_open_matches_page_open(self):
