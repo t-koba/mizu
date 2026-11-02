@@ -812,9 +812,11 @@ Bounds and failure behavior: each id list normally has at most
 reads allow up to `max(admission_queue_capacity, parallel_runs)` entries; this
 does not increase new-enqueue capacity. Each id is 32 hex characters, and all
 other fields are fixed-schema bounded scalars or fixed reasons. A run retains
-its configured `[limits].queue_observations` observed contended admissions
-(including later successful selection-retry re-admissions)
-and counts further omissions instead of growing a log. Uncontended admissions
+up to its configured `[limits].queue_observations` observed contended
+admissions (including later successful selection-retry re-admissions), but
+trims the sample to the `started.json` retained-evidence read cap (64 KiB, or
+lower `file_bytes`); every observation not retained increments `omitted`
+instead of growing the record. Uncontended admissions
 with no live tickets, unsuccessful/cancelled admissions and failed dispatch
 revalidations emit nothing. A successful unqueued bypass does emit evidence,
 with no queue position. Capture/sink failures do not refuse admission; missing

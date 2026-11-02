@@ -298,7 +298,8 @@ DIAGNOSTIC_SAMPLES = {
     'DEFAULT_QUEUE_OBSERVATIONS': (
         '8', 'configured policy', 'config / unchanged queue-observation sample default'),
     'MAX_QUEUE_OBSERVATIONS': (
-        '100', 'safety', 'config / fixed run-local evidence-record sample ceiling'),
+        '100', 'safety',
+        'config / count ceiling; runtime also fits the sample to the 64 KiB started.json read cap'),
 }
 
 

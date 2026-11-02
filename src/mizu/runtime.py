@@ -147,6 +147,41 @@ EVIDENCE_UUID = evidence_records.EVIDENCE_UUID
 MAX_STARTED_EVIDENCE_BYTES = evidence_records.MAX_STARTED_EVIDENCE_BYTES
 _reject_nonfinite_json = evidence_records._reject_nonfinite_json
 
+
+def _bound_started_evidence(record, queue, maximum=MAX_STARTED_EVIDENCE_BYTES):
+    """Trim the optional queue sample to the retained-evidence byte cap.
+
+    Keep the oldest observations and count every dropped row in
+    ``queue["omitted"]``. This is called before every started.json write,
+    including after the continuation identity is added. If the base record
+    alone exceeds the cap, leave it unchanged: this owner only controls the
+    optional sample, not the rest of the run record.
+    """
+    observations = queue["observations"]
+    while True:
+        candidate = dict(record)
+        if observations or queue["omitted"]:
+            candidate["queue_observations"] = {
+                "version": 1,
+                "observations": list(observations),
+                "omitted": queue["omitted"],
+            }
+        else:
+            candidate.pop("queue_observations", None)
+        if len(canonical(candidate)) <= maximum:
+            record.clear()
+            record.update(candidate)
+            return record
+        if observations:
+            observations.pop()
+            queue["omitted"] += 1
+            continue
+        candidate.pop("queue_observations", None)
+        record.clear()
+        record.update(candidate)
+        return record
+
+
 #: Default wrap-up allowance granted when a per-run spend bound is reached:
 #: extra model requests and extra wrap-up tool calls the unit may still spend
 #: to seal a clean `bounded` end instead of failing. Policy defaults kept here
@@ -2666,10 +2701,12 @@ class Engine:
                                  "open_count": held.get("open_count"),
                                  "limits": dict(held.get("limits", {}))}}
             # Bounded run-local evidence, not a scheduling input. Keep the
-            # configured number of contended admissions and count any further
-            # omissions instead of growing the run record.
+            # configured number of contended admissions, then trim the sample to
+            # the started.json retained-read cap; count every dropped row.
             queue_observations = {"version": 1, "observations": [], "omitted": 0}
             queue_observation_limit = self.config.limits.queue_observations
+            started_evidence_cap = min(self.config.limits.file_bytes,
+                                       MAX_STARTED_EVIDENCE_BYTES)
             started = None
             def record_admission(row):
                 if len(queue_observations["observations"]) < queue_observation_limit:
@@ -2677,7 +2714,8 @@ class Engine:
                 else:
                     queue_observations["omitted"] += 1
                 if started is not None:
-                    started["queue_observations"] = queue_observations
+                    _bound_started_evidence(started, queue_observations,
+                                             started_evidence_cap)
                     write_json(run_dir / "started.json", started)
             continuation = None
             lock_diagnostics.phase("admission")
@@ -2802,11 +2840,14 @@ class Engine:
                             "ci_failures": len(ci_present),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))}
-                if queue_observations["observations"] or queue_observations["omitted"]:
-                    started["queue_observations"] = queue_observations
+                continuation_identity = (continuations.identity(continuation)
+                                         if continuation is not None else None)
+                if continuation_identity is not None:
+                    started["continuation"] = continuation_identity
+                _bound_started_evidence(started, queue_observations, started_evidence_cap)
                 if continuation is not None:
                     continuations.start(project.snapshots, continuation, started)
-                    started["continuation"] = continuations.identity(continuation)
+                    started["continuation"] = continuation_identity
                 else:
                     write_json(run_dir / "started.json", started)
                 if continuation is not None:

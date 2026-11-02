@@ -58,8 +58,9 @@ DEFAULT_DECISION_PROJECTION_RECORDS = 512
 DEFAULT_DECISION_RECEIPT_DIAGNOSTICS = 10
 MAX_DECISION_RECEIPT_DIAGNOSTICS = 100
 #: Run-local contended-admission observations are an operator-selected
-#: evidence sample. The ceiling keeps one started.json record bounded; further
-#: admissions are counted in `omitted` instead of growing the record.
+#: evidence sample. The row ceiling is an upper bound; runtime also trims the
+#: sample to the started.json retained-read cap (64 KiB or lower `file_bytes`),
+#: counting every dropped row in `omitted` instead of growing the record.
 DEFAULT_QUEUE_OBSERVATIONS = 8
 MAX_QUEUE_OBSERVATIONS = 100
 #: Host-only activation plans/reports are local evidence, not transport
@@ -395,7 +396,8 @@ class Limits:
     #: Malformed-receipt diagnostics retained per decision page; 0 hides the
     #: diagnostic sample without hiding the corresponding decision events.
     decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS
-    #: Contended-admission observations retained in started.json; further
+    #: Contended-admission observations retained in started.json, additionally
+    #: trimmed to its retained-read cap (64 KiB or lower `file_bytes`); discarded
     #: observations increment `omitted` without changing scheduling.
     queue_observations: int = DEFAULT_QUEUE_OBSERVATIONS
     #: Host-only activation plan/report serialized-byte bound. This is history

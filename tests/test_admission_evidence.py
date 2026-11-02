@@ -1,13 +1,16 @@
 """Run-local shadow evidence with real host locks and a fake model driver."""
 import contextlib
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu.admission import _Queue, role_exclusion
 from mizu.errors import Busy
-from mizu.fs import canonical, lock, read_json
-from mizu.runtime import Engine
+from mizu.evidence_records import read_retained
+from mizu.fs import canonical, lock, read_json, write_json
+from mizu.runtime import (Engine, MAX_STARTED_EVIDENCE_BYTES,
+                         _bound_started_evidence)
 
 
 class AdmissionEvidenceTests(Fixture):
@@ -143,6 +146,58 @@ class AdmissionEvidenceTests(Fixture):
         view = started['queue_observations']
         self.assertEqual(len(view['observations']), 2)
         self.assertEqual(view['omitted'], 9)
+
+    def test_queue_sample_is_trimmed_to_started_evidence_read_cap(self):
+        rows = [{"admission_id": f"{i:032x}", "queued": True, "fifo_position": i + 1,
+                 "live_ticket_ids": [f"{i:032x}" for _ in range(16)],
+                 "bypassed_busy_ticket_ids": [f"{i:032x}" for _ in range(15)],
+                 "later_tickets_unexamined": 1, "affinity": None,
+                 "affinity_reason": "not_available_before_dispatch"}
+                for i in range(100)]
+        queue = {"version": 1, "observations": rows, "omitted": 0}
+        started = {"run": "a" * 32, "role": "reporter", "snapshot": "b" * 64,
+                   "started_at": "2026-01-01T00:00:00+00:00"}
+        _bound_started_evidence(started, queue)
+        self.assertLessEqual(len(canonical(started)), MAX_STARTED_EVIDENCE_BYTES)
+        self.assertGreater(queue["omitted"], 0)
+        self.assertLess(len(queue["observations"]), 100)
+        kept = [row["admission_id"] for row in queue["observations"]]
+        self.assertEqual(kept, [row["admission_id"] for row in rows[:len(kept)]])
+
+    def test_configured_queue_sample_never_exceeds_started_evidence_read(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, queue_observations=100))
+        engine = Engine(config)
+        held_stack = []
+        original = engine._admit
+        def admit(*args, **kwargs):
+            held_stack[:] = [args[3]]
+            return original(*args, **kwargs)
+        def callback(ctx, *_):
+            role = dataclasses.replace(ctx.role, selector='not-executed')
+            for _ in range(100):
+                engine._selection_retry_wait(ctx, self.project, held_stack[0],
+                                             role, 'reporter', 0.0)
+                self.assertTrue(ctx._slot_lease)
+        engine.driver = ScriptDriver(callback)
+        with self.blocked_head(), patch.object(engine, '_admit', side_effect=admit):
+            result = engine.run(self.project, 'reporter')
+        self.assertEqual(result['status'], 'completed')
+        path = self.project.root / 'runs' / result['run'] / 'started.json'
+        self.assertLessEqual(path.stat().st_size, MAX_STARTED_EVIDENCE_BYTES)
+        started = read_json(path, max_bytes=MAX_STARTED_EVIDENCE_BYTES)
+        view = started['queue_observations']
+        self.assertGreater(view['omitted'], 0)
+        self.assertLessEqual(len(view['observations']), 100)
+        evidence_id = 'c' * 32
+        write_json(self.project.root / 'runs' / result['run'] / 'commands' /
+                   f'{evidence_id}.json',
+                   {'id': evidence_id, 'kind': 'command', 'role': 'reporter'})
+        context = SimpleNamespace(project=self.project, config=config,
+                                  role=SimpleNamespace(name='reporter'))
+        self.assertEqual(read_retained(context, 'commands', {
+            'run': result['run'], 'evidence_id': evidence_id})['run'], result['run'])
 
     def test_first_contended_readmission_attaches_to_uncontended_start(self):
         engine = Engine(self.config)
