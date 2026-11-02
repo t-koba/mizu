@@ -390,7 +390,8 @@ with wide margin -- about 4 s for the earlier sixteen-child POSIX cell, and
 about 103 s for the earlier nineteen-child durable job, whose three SDK
 contract suites measured 5.6 s, 75.5 s and 18.1 s on the development host.
 Those measurements predate the current seventeen- and twenty-child phases, so
-they are lower bounds. Without an install it holds two children's full bounds;
+they are lower bounds. Without an install it is sized for two children's
+full bounds, so one hung child still leaves the next child a positive bound;
 an install is charged to the same budget, so the phase stays inside its
 modeled path and the receipt records the install count and time. A child the
 phase can no longer afford is recorded as a failure with the reason

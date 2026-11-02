@@ -82,11 +82,12 @@ def _allow_list(value: str) -> frozenset:
     return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
-#: Per-check ceiling inside the later phase. The default phase budget holds
-#: two full child bounds, so one hung child still leaves every remaining child
-#: its own run. This default is exposed as --check-timeout; the suite child
-#: bound and the phase budget are --suite-child-timeout and
-#: --later-phase-budget.
+#: Per-check ceiling inside the later phase. The default phase budget is
+#: sized for two full child bounds, so one hung child still leaves a run for
+#: the next child when no install is charged. Pinned-adapter installs draw
+#: from the same budget and reduce those bounds. This default is exposed as
+#: --check-timeout; the suite child bound and the phase budget are
+#: --suite-child-timeout and --later-phase-budget.
 DEFAULT_CHECK_TIMEOUT_SECONDS = 600
 GATE_TIMEOUT_MIN_SECONDS = 1
 GATE_TIMEOUT_MAX_SECONDS = 86400
@@ -140,9 +141,10 @@ SDK_GATE_NAMES = tuple(SDK_GATE_ADAPTERS)
 #: nineteen-child durable job (its three SDK contract suites measured 5.6 s,
 #: 75.5 s and 18.1 s on the development host). Those measurements predate the
 #: current seventeen- and twenty-child phases, so they are lower bounds. The
-#: budget also holds two children's full bounds, so one hung child still leaves
-#: every remaining child its own run. This value is the default for
-#: --later-phase-budget.
+#: budget is sized for two children's full bounds, so one hung child still
+#: leaves a run for the next child when no install is charged; a
+#: pinned-adapter install draws from the same budget and reduces the next
+#: child's bound. This value is the default for --later-phase-budget.
 LATER_PHASE_BUDGET_SECONDS = 1200
 
 

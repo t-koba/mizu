@@ -240,10 +240,40 @@ class CheckTimeoutTests(unittest.TestCase):
                      + CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
                      + CHECK.CLEANUP_RESERVE_SECONDS + CHECK.RECEIPT_RESERVE_SECONDS)
         self.assertNotEqual(CHECK.modelled_gate_seconds(1000), per_child)
-        # The budget holds two children's full bounds, so one hung child
-        # still leaves every remaining child its own run.
+        # The budget is sized for two full child bounds: with no install the
+        # first child gets its cap, and one hung child still leaves the next
+        # child a positive run. Installs draw from the same budget.
         self.assertGreaterEqual(CHECK.LATER_PHASE_BUDGET_SECONDS,
                                  2 * CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        phase = CHECK.LaterPhase()
+        self.assertEqual(phase.timeout_for(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS),
+                         CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        phase.consume(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        self.assertEqual(phase.timeout_for(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS),
+                         CHECK.LATER_PHASE_BUDGET_SECONDS
+                         - CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
+                         - CHECK.CLEANUP_RESERVE_SECONDS)
+        # A maximum install plus a hung child leaves 234 s, not the full cap.
+        phase = CHECK.LaterPhase()
+        phase.consume_install(CHECK.NPM_PROVISION_TIMEOUT_SECONDS)
+        phase.consume(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        self.assertEqual(phase.timeout_for(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS),
+                         CHECK.LATER_PHASE_BUDGET_SECONDS
+                         - CHECK.NPM_PROVISION_TIMEOUT_SECONDS
+                         - CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS
+                         - CHECK.CLEANUP_RESERVE_SECONDS)
+        # Two maximum installs also reduce the next child below its cap; when
+        # that child uses its bound the phase is spent and refuses the next.
+        phase = CHECK.LaterPhase()
+        phase.consume_install(CHECK.NPM_PROVISION_TIMEOUT_SECONDS)
+        phase.consume_install(CHECK.NPM_PROVISION_TIMEOUT_SECONDS)
+        bound = phase.timeout_for(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        self.assertEqual(bound, CHECK.LATER_PHASE_BUDGET_SECONDS
+                         - 2 * CHECK.NPM_PROVISION_TIMEOUT_SECONDS
+                         - CHECK.CLEANUP_RESERVE_SECONDS)
+        self.assertLess(bound, CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        phase.consume(bound)
+        self.assertIsNone(phase.timeout_for(CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS))
 
     def test_later_phase_charges_installs_to_the_same_budget(self):
         phase = CHECK.LaterPhase(budget=1000)
