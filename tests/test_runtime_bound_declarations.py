@@ -283,6 +283,16 @@ HISTORY_TEMPORARIES = {
 }
 
 
+# The current-decision projection is history policy; its separate absolute
+# in-process row ceiling is name-scoped, not a full config.py inventory.
+DECISION_PROJECTION = {
+    'decision_projection_records': ('512', 'configured policy',
+                                    'Limits / current-decision projection and preflight scan rows'),
+    'MAX_DECISION_PROJECTION_RECORDS': ('1000000', 'safety',
+                                        'config / absolute in-process projection-row ceiling'),
+}
+
+
 CALL_KEYWORDS = frozenset({
     'timeout', 'timeout_seconds', 'maximum', 'max_bytes', 'max_files',
     'max_entries', 'max_depth', 'limit',
@@ -298,11 +308,7 @@ CALLS = {
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },
     'ci_requests.py': {},
-    'insights.py': {
-        ('Insights.shared_decision_page', 'self._decision_projection_envelopes_locked', 'limit', 0): (
-            '512', 'safety',
-            'insights / current-decision projection scan bound; overflow refuses before writing'),
-    },
+    'insights.py': {},
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
@@ -505,6 +511,22 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                                       'MAX_HISTORY_TEMPORARIES')],
                          ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in HISTORY_TEMPORARIES.values()))
+
+    def test_decision_projection_policy_and_safety_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body
+                     if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'decision_projection_records')
+        self.assertEqual(ast.unparse(field.value), DECISION_PROJECTION['decision_projection_records'][0])
+        self.assertEqual(inventory(tree)['MAX_DECISION_PROJECTION_RECORDS'],
+                         DECISION_PROJECTION['MAX_DECISION_PROJECTION_RECORDS'][0])
+        self.assertEqual([DECISION_PROJECTION[key][1]
+                          for key in ('decision_projection_records',
+                                      'MAX_DECISION_PROJECTION_RECORDS')],
+                         ['configured policy', 'safety'])
+        self.assertTrue(all(entry[2].strip() for entry in DECISION_PROJECTION.values()))
 
     def test_configured_raw_settings_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

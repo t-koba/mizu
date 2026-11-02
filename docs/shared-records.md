@@ -520,7 +520,7 @@ other prompt sections and validate large-body/evidence tails separately.
 
 ## Persistence-only decision-source adapter
 
-`Insights.project_decision_records(limit=512)` is an explicit host-only migration/
+`Insights.project_decision_records()` is an explicit host-only migration/
 shadow call, not a runtime hook or model tool. It returns a deterministic mapping
 of exact record IDs to recomputed canonical envelope SHA-256 digests, without
 payloads. The project-local store scopes `insight.decision/<event UUID>` IDs;
@@ -546,8 +546,9 @@ projected history remains immutable when its source later becomes ineligible;
 the returned mapping describes only the **current** set, not all retained records.
 
 This is a bounded full reconciliation, not a delivery page: `limit` is an integer
-in 1..512 (default 512); eligible-count overflow fails before writing rather than
-returning an incomplete reconciliation. It scans history with per-source reads
+in 1..the configured `[limits].decision_projection_records` (default 512);
+eligible-count overflow fails before writing rather than returning an incomplete
+reconciliation. It scans history with per-source reads
 bounded at 1 MiB. Malformed/unsafe source or store data and conflicting identities
 fail closed, with no repair/deletion. A failure during writes may leave a committed
 prefix: retry the same call after addressing the failure; exact replay does not
@@ -658,8 +659,9 @@ and freezes their manifest. A decision or revision committed during the scan
 therefore cannot be delivered from the stale page. `pending_count` is the
 scan-time eligible set minus new candidates rejected before projection; it may
 overcount a row that moves after the scan, but such a row is never delivered. The
-projector's existing ceiling of 512 current source records applies before
-routing/receipts; overflow refuses before any projection writes. The public
+projector's configured `[limits].decision_projection_records` ceiling (default
+512) applies before routing/receipts; overflow refuses before any projection
+writes. The public
 projector still returns only ID-to-digest bindings. Exact current decision and
 source revision/action must match; retained stale or withdrawn projections
 cannot become new page rows. Shared exact receipts are filtered before
@@ -877,7 +879,8 @@ and effective decision digests pin exact safely read file bytes. The insight
 digest pins exact live inbox bytes, or canonical retained archive content when
 there is no live inbox record. Thus non-payload source movement also invalidates
 the boundary. `sources` contains the complete strict source-current decision
-set, before routes, bounded at **512**. `legacy_receipts` contains every routed
+set, before routes, bounded by **`[limits].decision_projection_records`**
+(default **512**). `legacy_receipts` contains every routed
 role/record pair, recomputed with `Insights._decision_token`; `receipt_digest`
 is the exact receipt-file byte digest, or **null for absence**. Only receipts
 validated by `_decision_received` count: exact role, event, full payload token
@@ -893,7 +896,8 @@ for each explicit enabled role, `INSIGHT_PENDING_POLICY` alongside
 `INSIGHT_DECISION_POLICY`). `pending_sources` binds each current
 `insight.pending/<event>` record digest, route target, exact inbox byte digest
 and decision-pointer byte digest (or explicit null absence), bounded at
-**512** current pending projections; `pending_legacy_receipts` binds every
+the configured current pending projection bound (default **512**);
+`pending_legacy_receipts` binds every
 addressed role/record token and receipt digest (null for absence). Only exact
 current events already acknowledged in legacy map; unacknowledged attention
 never gains a shared receipt, and legacy receipts are never modified.
@@ -905,7 +909,7 @@ else refuses preflight/apply, because it would hide a legacy-pending event.
 Every predicted post-map pending set equals its legacy pending set, for both
 decisions and pending attention. The plan also refuses a per-role combined
 shared-page projection where decision records plus still-unacknowledged
-addressed attention exceed the existing 512-row ceiling. The
+addressed attention exceed the configured projection-record ceiling. The
 `plan_digest` deliberately excludes output progress: a new preflight after an
 interrupted apply has the **same identity** while its shared-received report
 can advance. The plan is host-retained evidence, not a model authorization

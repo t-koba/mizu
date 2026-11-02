@@ -431,12 +431,16 @@ class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
                  cursor_ttl_seconds: int = 86400, open_work_items: int = 100,
-                 producer_inputs_per_source: int = 20):
+                 producer_inputs_per_source: int = 20,
+                 decision_projection_records: int = 512):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
         self.open_work_items = open_work_items
         self.producer_inputs_per_source = producer_inputs_per_source
         self.cursor_ttl_seconds = cursor_ttl_seconds
+        if type(decision_projection_records) is not int or decision_projection_records < 1:
+            raise Denied("Decision projection records must be a positive integer")
+        self.decision_projection_records = decision_projection_records
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.
@@ -1743,18 +1747,22 @@ replacement insight without implying rejected substance.
             return None
         return created, payload
 
-    def project_decision_records(self, *, limit: int = 512) -> dict[str, str]:
+    def project_decision_records(self, *, limit: int | None = None) -> dict[str, str]:
         """Reconcile current decisions into project-local immutable shadow records.
 
         Host-only, persistence-only: no routes, receipts, admission or delivery.
         Return exact record ID -> canonical envelope digest, never payloads.
         Scan history under the source record lock; at most ``limit`` eligible
-        records (1..512) are written. Count overflow fails before any writes.
+        records are written, bounded by the configured projection records. Count
+        overflow fails before any writes.
         Failure may commit a prefix; exact retry is safe.
         Retained stale/withdrawn projections are never deleted or rewritten.
         """
-        if type(limit) is not int or not 1 <= limit <= 512:
-            raise Denied("Decision projection limit must be an integer in [1, 512]")
+        if limit is None:
+            limit = self.decision_projection_records
+        if type(limit) is not int or not 1 <= limit <= self.decision_projection_records:
+            raise Denied("Decision projection limit must be an integer in "
+                         f"[1, {self.decision_projection_records}]")
         with lock_diagnostics.operation("write"), record_lock(self.root):
             return {record_id: computed for record_id, (_, computed) in
                     self._project_decision_records_locked(limit=limit).items()}
@@ -2092,12 +2100,12 @@ replacement insight without implying rejected substance.
 
         max_bytes covers canonical(page) by default, or actual prompt decision
         fields/framing with prompt=True. Both include metadata/tokens/references.
-        Source projection is bounded to 512 current rows; overflow refuses before
-        writing. The full-history scan runs without the exclusive record lock;
-        the short locked phase validates every new candidate before writing any
-        immutable projection, then revalidates only the rows being selected and
-        freezes their manifest, so a decision or revision committed during the
-        scan can neither be delivered stale nor leave an orphan projection.
+        Source projection is bounded by the configured projection records; overflow
+        refuses before writing. The full-history scan runs without the exclusive
+        record lock; the short locked phase validates every new candidate before
+        writing any immutable projection, then revalidates only the rows being
+        selected and freezes their manifest, so a decision or revision committed
+        during the scan can neither be delivered stale nor leave an orphan projection.
         Retain the manifest only for this role/unit, never from model input. The
         caller must honor the durable delivery authority marker; this method
         alone never activates shared delivery. See docs/shared-records.md.
@@ -2132,7 +2140,8 @@ replacement insight without implying rejected substance.
         with lock_diagnostics.operation("page"):
             store = SharedRecords(self.root, INSIGHT_DELIVERY_POLICIES)
             # The full-history source scan runs without the exclusive lock.
-            decision_candidates = self._decision_projection_envelopes_locked(limit=512)
+            decision_candidates = self._decision_projection_envelopes_locked(
+                limit=self.decision_projection_records)
             pending_candidates = (list(self._pending_insight_envelopes_locked(
                 configured_roles, role_name)) if configured_roles is not None else [])
             projected = {}
@@ -2164,7 +2173,8 @@ replacement insight without implying rejected substance.
                                    RECEIPT_BYTES) is not None:
                         raise Denied("Shared insight receipt has no immutable record")
                     new_pending[record_id] = envelope
-                if len(projected) + len(new_decisions) + len(new_pending) > 512:
+                if (len(projected) + len(new_decisions) + len(new_pending)
+                        > self.decision_projection_records):
                     raise LimitExceeded("Insight delivery projection exceeds record count bound")
             all_projected = dict(projected)
             new_ids = set(new_decisions) | set(new_pending)

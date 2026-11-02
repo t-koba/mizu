@@ -308,6 +308,18 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertFalse((self.root / "shared-records").exists())
         self.assertEqual(self.page()[0]["pending_count"], 1)
 
+    def test_configured_projection_records_own_the_page_scan(self):
+        self.decide(0)
+        self.decide(1)
+        with self.assertRaises(LimitExceeded):
+            Insights(self.root, decision_projection_records=1).shared_decision_page(
+                "reviewer", ACTIONS, max_bytes=MAX_FRAME)
+        page, manifest = Insights(
+            self.root, decision_projection_records=2).shared_decision_page(
+                "reviewer", ACTIONS, max_bytes=MAX_FRAME)
+        self.assertEqual(len(page["events"]), 2)
+        self.assertEqual(len(manifest), 2)
+
     def test_lock_covers_selection_projection_receipt_reads_and_freeze(self):
         self.decide()
         held = False

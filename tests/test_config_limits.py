@@ -5,8 +5,8 @@ import re
 import unittest
 
 from support import Fixture
-from mizu.config import (MAX_CHECK_RETAINED, MAX_HISTORY_TEMPORARIES, Limits, ROOT_KEYS,
-                         _LIMIT_RANGES, load)
+from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
+                         MAX_HISTORY_TEMPORARIES, Limits, ROOT_KEYS, _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
 
@@ -92,6 +92,28 @@ class HistoryTemporariesConfigTests(Fixture):
                     self.assertEqual(load(self.file).limits.history_temporaries, int(value))
                 else:
                     with self.assertRaisesRegex(ConfigError, 'limits.history_temporaries'):
+                        load(self.file)
+
+
+class DecisionProjectionConfigTests(Fixture):
+    def test_default_and_absolute_range(self):
+        self.assertEqual(MAX_DECISION_PROJECTION_RECORDS, 1_000_000)
+        self.assertEqual(Limits().decision_projection_records, 512)
+        original = re.sub(r'(?m)^decision_projection_records = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.decision_projection_records, 512)
+        for value in ('1', '512', '1000000', '0', '-1', '1000001',
+                      'true', 'false', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n',
+                    f'\n[limits]\ndecision_projection_records = {value}\n'))
+                if value in ('1', '512', '1000000'):
+                    self.assertEqual(load(self.file).limits.decision_projection_records,
+                                     int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError,
+                                                'limits.decision_projection_records'):
                         load(self.file)
 
 

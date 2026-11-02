@@ -221,6 +221,19 @@ class DecisionProjectionTests(unittest.TestCase):
             self.insights.project_decision_records()
         self.assertEqual(path.read_bytes(), original)
 
+    def test_configured_projection_records_own_the_scan_and_explicit_limit(self):
+        self.decide(0)
+        self.decide(1)
+        self.assertEqual(len(Insights(
+            self.root, decision_projection_records=2).project_decision_records()), 2)
+        with self.assertRaises(LimitExceeded):
+            Insights(self.root, decision_projection_records=1).project_decision_records()
+        for limit in (0, True, 513):
+            with self.assertRaises(Denied):
+                self.insights.project_decision_records(limit=limit)
+        with self.assertRaises(LimitExceeded):
+            self.insights.project_decision_records(limit=1)
+
     def test_bound_before_writes_and_retry_after_partial_store_failure(self):
         self.decide(0)
         self.decide(1)

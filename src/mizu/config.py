@@ -41,6 +41,9 @@ MAX_CHECK_RETAINED = 1024
 #: 3.5 MiB of Python allocations on the measured host.
 MAX_HISTORY_TEMPORARIES = 4096
 DEFAULT_HISTORY_TEMPORARIES = 64
+#: Absolute in-process ceiling for configured current-decision projection rows.
+#: The 512-row default is history policy; this ceiling keeps one scan bounded.
+MAX_DECISION_PROJECTION_RECORDS = 1_000_000
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -362,6 +365,7 @@ class Limits:
     check_retained: int = 1024
     #: Crash-leftover decision-history temporary scan budget; default 64.
     history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES
+    decision_projection_records: int = 512
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.
@@ -480,6 +484,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
                  "check_retained": (1, MAX_CHECK_RETAINED),
                  "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
+                 "decision_projection_records": (1, MAX_DECISION_PROJECTION_RECORDS),
                  "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
