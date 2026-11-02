@@ -125,7 +125,13 @@ class PortablePrimitiveTests(unittest.TestCase):
         def replace_then_read(stream, maximum, observed_size):
             replacement = self.root / "replacement.json"
             replacement.write_bytes(b"new")
-            os.replace(replacement, path)
+            # MoveFileExW (os.replace) refuses a destination with existing
+            # opens even when they share delete. The product's Windows writer
+            # uses FileRenameInfoEx with POSIX semantics; exercise that path.
+            if os.name == "nt":
+                fs._replace_windows(str(replacement), path)
+            else:
+                os.replace(replacement, path)
             return original(stream, maximum, observed_size)
 
         with unittest.mock.patch.object(fs._platform, "HAS_OPENAT", False), \
