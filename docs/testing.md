@@ -329,10 +329,11 @@ on a loaded verification host (the 2026-10-21 run was still running when the
 previous 1000 s bound cut it off). Measured Windows cells have since reached
 that edge: on 2026-11-01 the 3.14 job took 1282 s on one publication and was
 cut off at the 1800 s child bound on the next, a documentation-only change;
-the same run's 3.11 job took 1710 s, and an earlier 3.13 job took 1628 s. The
-bound therefore no longer carries the margin this paragraph previously
-claimed; whether the child bound or the suite duration should move is an
-operator decision, with the retained per-cell artifacts as evidence. The modeled
+the same run's 3.11 job took 1710 s, and an earlier 3.13 job took 1628 s. On
+2026-11-02 the 3.11 cell was cut off at the same 1800 s child bound (job wall
+1821 s). The bound therefore no longer carries the margin this paragraph
+previously claimed; whether the child bound or the suite duration should move
+is an operator decision, with the retained per-cell artifacts as evidence. The modeled
 setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
 the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
 worst-case runtime claim. The authoritative `durable-contract` scope is 70

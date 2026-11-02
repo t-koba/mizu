@@ -1471,12 +1471,13 @@ def main():
                 'skipped': int(skipped.group(1)) if skipped else 0}
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
-    # The suite costs about 1475 s on a slow Windows runner (the 2026-10-21
-    # Windows/Python 3.13 run completed 2233 of about 2265 tests in 1447 s
-    # and reached the previous 1450 s child cap with no reported test
-    # failure) and about 1050 s on a loaded POSIX host (the 2026-10-21 run
-    # reached the previous 1000 s child cap with the suite still running), so
-    # the bound is 1800 s on every platform inside a 60-minute job. The
+    # The suite has reached the 1800 s Windows child bound: on 2026-11-02 the
+    # Windows/Python 3.11 cell was cut off at 1800 s (job wall 1821 s); on
+    # 2026-11-01 the 3.14 cell was cut off at 1800 s on a documentation-only
+    # publication after taking 1282 s on the preceding one, while 3.11 took
+    # 1710 s and an earlier 3.13 took 1628 s. A loaded POSIX host has also
+    # reached the previous 1000 s cap (2026-10-21), so the bound is 1800 s on
+    # every platform inside a 60-minute job. The
     # opt-in per-test timing artifact retains partial progress on timeout for
     # diagnosis. Samples remain diagnostic, not bounds.
     # The child owns structured exception metadata. Its failure sidecar is private
