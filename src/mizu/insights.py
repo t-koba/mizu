@@ -1885,9 +1885,10 @@ replacement insight without implying rejected substance.
         """Revalidate one projection against its current source.
 
         The page uses this bounded check once outside the record lock to build
-        its scan-time eligible set, then again under the lock for only the rows
-        it is about to select. A decision or revision committed during the scan
-        is therefore never delivered from the stale page.
+        its scan-time eligible set, then again under the lock for every new
+        candidate before projecting it and for the rows it is about to select.
+        A decision or revision committed during the scan is therefore never
+        delivered stale and cannot leave an orphan projection.
         """
         payload = envelope["payload"]
         if payload.get("kind") == "insight.pending":
@@ -1937,9 +1938,10 @@ replacement insight without implying rejected substance.
         fields/framing with prompt=True. Both include metadata/tokens/references.
         Source projection is bounded to 512 current rows; overflow refuses before
         writing. The full-history scan runs without the exclusive record lock;
-        the short locked phase writes missing immutable projections, revalidates
-        only the rows being selected, and freezes their manifest, so a decision
-        or revision committed during the scan cannot be delivered stale.
+        the short locked phase validates every new candidate before writing any
+        immutable projection, then revalidates only the rows being selected and
+        freezes their manifest, so a decision or revision committed during the
+        scan can neither be delivered stale nor leave an orphan projection.
         Retain the manifest only for this role/unit, never from model input. The
         caller must honor the durable delivery authority marker; this method
         alone never activates shared delivery. See docs/shared-records.md.
@@ -2044,15 +2046,36 @@ replacement insight without implying rejected substance.
                         "byte_truncated": len(events) < min(pending_count, limit)}
 
             with record_lock(self.root):
+                # Validate every new candidate before writing any projection.
+                # A source deleted or changed during the unlocked scan must not
+                # leave an immutable orphan that future pages can never select;
+                # a malformed/unsafe source fails closed before any put.
+                validated_new = {}
+                for record_id in new_ids:
+                    envelope, _ = all_projected[record_id]
+                    if not self._delivery_candidate_current(
+                            envelope, configured_roles, role_name):
+                        all_projected.pop(record_id, None)
+                        continue
+                    validated_new[record_id] = envelope
                 for record_id, envelope in new_decisions.items():
-                    all_projected[record_id] = (envelope,
-                                                 store.put(envelope, writer="host.insights"))
+                    if record_id in validated_new:
+                        all_projected[record_id] = (
+                            envelope, store.put(envelope, writer="host.insights"))
                 for record_id, envelope in new_pending.items():
+                    if record_id not in validated_new:
+                        continue
                     if store._read(store._receipt_name(role_name, record_id),
                                    RECEIPT_BYTES) is not None:
                         raise Denied("Shared insight receipt has no immutable record")
-                    all_projected[record_id] = (envelope,
-                                                 store.put(envelope, writer="host.insights"))
+                    all_projected[record_id] = (
+                        envelope, store.put(envelope, writer="host.insights"))
+                if len(validated_new) != len(new_ids):
+                    # The scan-time list may contain a new row that moved
+                    # before validation; it is no longer pending.
+                    eligible = [row for row in eligible
+                                if row[1] not in new_ids or row[1] in validated_new]
+                    pending_count = len(eligible)
                 events = []
                 record_ids = []
                 if size(page(events)) > max_bytes:
@@ -2099,7 +2122,7 @@ replacement insight without implying rejected substance.
             # New immutable projections were written under the lock. Validate
             # them here, outside the lock, including rows filtered from this
             # role, so a corrupt post-put record cannot be reported as a page.
-            for record_id in new_ids:
+            for record_id in validated_new:
                 store.get(record_id, expected_digest=all_projected[record_id][1])
             return result, manifest
 

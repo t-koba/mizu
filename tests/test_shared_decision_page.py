@@ -405,6 +405,44 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertEqual(page["events"], [])
         self.assertEqual(page["pending_count"], 0)
         self.assertEqual(manifest, ())
+        # A source that moved before validation leaves no immutable orphan.
+        self.assertFalse((self.root / "shared-records").exists())
+
+    def test_new_candidate_moves_before_projection_write(self):
+        self.decide()
+        real = record_lock
+
+        @contextlib.contextmanager
+        def remove_on_lock(root):
+            for path in (self.root / "decision-history").glob("*.json"):
+                path.unlink()
+            with real(root):
+                yield
+
+        with patch("mizu.insights.record_lock", remove_on_lock):
+            page, manifest = self.page()
+        self.assertEqual(page["events"], [])
+        self.assertEqual(page["pending_count"], 0)
+        self.assertEqual(manifest, ())
+        # The source was current during the unlocked scan; the locked
+        # revalidation must prevent the now-stale projection from being written.
+        self.assertFalse((self.root / "shared-records").exists())
+
+    def test_new_candidate_malformed_before_projection_write_fails_closed(self):
+        self.decide()
+        real = record_lock
+
+        @contextlib.contextmanager
+        def corrupt_on_lock(root):
+            for path in (self.root / "decision-history").glob("*.json"):
+                path.write_bytes(b"not json")
+            with real(root):
+                yield
+
+        with patch("mizu.insights.record_lock", corrupt_on_lock), \
+                self.assertRaises(Denied):
+            self.page()
+        self.assertFalse((self.root / "shared-records").exists())
 
     def test_unlocked_scan_source_becoming_malformed_fails_closed(self):
         self.decide()
@@ -420,6 +458,8 @@ class SharedDecisionPageTests(unittest.TestCase):
         with patch.object(Insights, "_decision_projection_envelopes_locked", broken), \
                 self.assertRaises(Denied):
             self.page()
+        # Malformed source fails closed before any new projection is written.
+        self.assertFalse((self.root / "shared-records").exists())
 
     def test_unlocked_scan_pending_revision_is_revalidated(self):
         item = self.insights.submit(source="reviewer", title="Pending", body="v1",
@@ -441,6 +481,7 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertEqual(page["events"], [])
         self.assertEqual(page["pending_count"], 0)
         self.assertEqual(manifest, ())
+        self.assertFalse((self.root / "shared-records").exists())
 
     def test_partial_projection_failure_retry_and_only_selected_rows_frozen(self):
         for i in range(3):

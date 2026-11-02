@@ -637,20 +637,27 @@ The page is exactly:
  count_truncated: boolean, byte_truncated: boolean}
 ```
 
-`pending_count` counts all source-current, routed, not-exactly-shared-received
-records before page selection. `truncated` means fewer rows are represented
-than pending; `count_truncated` means pending exceeds `limit`;
+`pending_count` counts the scan-time eligible rows before page selection:
+source-current, routed, not-exactly-shared-received, minus new candidates
+rejected before projection. A row that moves after the scan may remain counted
+as an upper-bound entry, but selection revalidates it and never delivers it.
+`truncated` means fewer rows are represented than pending; `count_truncated`
+means pending exceeds `limit`;
 `byte_truncated` means fewer than `min(pending_count, limit)` rows fit the byte
 budget. A reference represents one row; replacing an oversized full row with a
 reference does not itself count as an omitted row. There is no timestamp cursor.
 
 The full-history scan and routing/receipt filtering run without the existing
 insight record lock, so concurrent readers do not exclude each other and a page
-never holds the lock for the scan. The short locked phase writes any missing
-immutable projections, revalidates only the rows about to be selected against
-their exact current source and shared receipt, and freezes their manifest. A
-decision or revision committed during the scan therefore cannot be delivered
-from the stale page; `pending_count` is the scan-time eligible set. The
+never holds the lock for the scan. The short locked phase validates every new
+candidate against its exact current source before writing any immutable
+projection, so a source that moved during the scan leaves no orphan; malformed
+or unsafe sources fail closed before any new write. It then revalidates only the
+rows about to be selected against their exact current source and shared receipt
+and freezes their manifest. A decision or revision committed during the scan
+therefore cannot be delivered from the stale page. `pending_count` is the
+scan-time eligible set minus new candidates rejected before projection; it may
+overcount a row that moves after the scan, but such a row is never delivered. The
 projector's existing ceiling of 512 current source records applies before
 routing/receipts; overflow refuses before any projection writes. The public
 projector still returns only ID-to-digest bindings. Exact current decision and
