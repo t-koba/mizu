@@ -1797,7 +1797,16 @@ replacement insight without implying rejected substance.
         for path in (inbox.iterdir() if paths is None else paths):
             if path.suffix != ".json":
                 continue
-            item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
+            try:
+                raw = safe_read(self.root, f"inbox/{path.name}", self.maximum)
+            except Denied:
+                # A retention sweep may archive a decided inbox copy between
+                # the directory listing and this read. That source is gone,
+                # not unsafe; skip it and keep the remaining candidates.
+                if self._source_missing(path):
+                    continue
+                raise
+            item = json.loads(raw)
             if type(item) is not dict or item.get("id") != path.stem:
                 raise Denied("Malformed pending insight source")
             identifier(item["id"])
