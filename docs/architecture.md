@@ -579,6 +579,12 @@ the inbox or wider decision history. Origin staleness separately checks current 
 legacy decision binding; `page_open()` enumerates decision history and direct
 creation directories to build its inventory with O(limit) retained rows. The event's title is the immutable title authority, not the
 subsequently revisable insight.
+A read-only open page may reuse a validated current projection while the
+canonical seed digest and every entry's metadata in that item's directory are
+unchanged. Origin staleness is recomputed on every call; an item with a current
+delivery binding, any new or changed revision, a changed seed, a non-regular
+entry or any unexpected directory shape bypasses the reuse and runs the complete
+chain validation. The locked recovery path never uses this read-only cache.
 Both direct creation and decision seeding call the same lock-held
 `WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
 binding, safe empty item slot, and exact current origin revision. New seeds

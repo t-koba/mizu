@@ -5,7 +5,11 @@ hash-bound legacy sidecars. Reads and transitions share insights.lock; each succ
 Read-only views (`page_open_readonly`, `page_closed_readonly`) never acquire
 insights.lock and never recover or delete temporary files; they validate the
 same committed records and fail closed on unsafe or malformed state.
-Unknown/unsafe records, incomplete chains and bounds fail closed. Retrying a
+A read-only page may reuse a current projection only while the seed digest
+and every entry's metadata in the item directory are unchanged; origin
+staleness is recomputed each call, and a current delivery binding or any
+unexpected shape bypasses the fast path. Unknown/unsafe records, incomplete
+chains and bounds fail closed. Retrying a
 committed CAS requires a re-read. Same-status events require a scope change or
 explicit delivery binding; only a proven forward dropped-to-done correction
 may follow a terminal event.
@@ -165,6 +169,8 @@ class WorkItems:
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
         self.history_temporaries = history_temporaries
         self._direct_cache: dict[str, tuple] = {}
+        self._history_cache: dict[str, tuple] = {}
+        self._projection_cache: dict[str, tuple] = {}
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
                for value in (doing_limit, *self.doing_limits.values())):
             raise Denied("Work-item doing limit must be an integer in [1, 100]")
@@ -318,6 +324,57 @@ class WorkItems:
         self._direct_cache[item_id] = (key, record)
         return record
 
+    def _history_identity(self, item_id: str):
+        """Return the metadata identity of one item's history directory.
+
+        Additions, removals, renames and in-place metadata changes are
+        reflected in the directory and entry stats. Like the direct-seed
+        cache, this is a cheap invalidator, not a content digest; an expected
+        regular file whose bytes change while its metadata is preserved still
+        falls outside the metadata fast path, and an unexpected directory
+        shape falls back to the complete validating scan.
+        """
+        directory = self.root / "work-items" / item_id
+        try:
+            dir_info = directory.lstat()
+        except FileNotFoundError:
+            return ("missing",)
+        except OSError:
+            return None
+        if not stat.S_ISDIR(dir_info.st_mode) or stat.S_ISLNK(dir_info.st_mode):
+            return None
+        entries = []
+        try:
+            with os.scandir(directory) as scanned:
+                for entry in scanned:
+                    info = _entry_stat(entry)
+                    if not stat.S_ISREG(info.st_mode):
+                        return None
+                    entries.append((entry.name, info.st_dev, info.st_ino,
+                                    info.st_mode, info.st_nlink,
+                                    info.st_mtime_ns, info.st_ctime_ns,
+                                    info.st_size))
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        entries.sort()
+        return ((dir_info.st_dev, dir_info.st_ino, dir_info.st_mode,
+                 dir_info.st_nlink, dir_info.st_mtime_ns,
+                 dir_info.st_ctime_ns, dir_info.st_size), tuple(entries))
+
+    def _history_revisions_readonly(self, item_id: str):
+        """Reuse the validated revision set while its directory is unchanged."""
+        key = self._history_identity(item_id)
+        if key is not None:
+            cached = self._history_cache.get(item_id)
+            if cached is not None and cached[0] == key:
+                return cached[1]
+        revisions = self._history_revisions(item_id, recover=False)
+        if key is not None:
+            self._history_cache[item_id] = (key, revisions)
+        return revisions
+
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
                     task_specs=None, task_index=None, wait=None,
@@ -467,7 +524,7 @@ class WorkItems:
             write_json(directory / "create.json", record, exclusive=True)
             return {"record": record, "created": True}
 
-    def _iter_item_events_with_revisions(self, *, recover: bool):
+    def _iter_item_events_with_revisions(self, *, recover: bool, cache: bool = False):
         task_sources = set()
         ambiguous_task_sources = set()
         for event_id, event in self._iter_decision_events(recover=recover):
@@ -500,13 +557,17 @@ class WorkItems:
                         if entry.name in ambiguous_task_sources:
                             raise Denied("Ambiguous task seed sources")
                         group = entry.name in task_sources
-                        revisions = self._history_revisions(entry.name, recover=recover)
+                        revisions = (self._history_revisions_readonly(entry.name)
+                                     if cache else
+                                     self._history_revisions(entry.name, recover=recover))
                         if group:
                             continue
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")
                     continue
-                revisions = self._history_revisions(entry.name, recover=recover)
+                revisions = (self._history_revisions_readonly(entry.name)
+                             if cache else
+                             self._history_revisions(entry.name, recover=recover))
                 record = self._direct_record(entry.name)
                 yield entry.name[3:], record, revisions
 
@@ -1902,7 +1963,7 @@ class WorkItems:
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
-        events = self._iter_item_events_with_revisions(recover=not readonly)
+        events = self._iter_item_events_with_revisions(recover=not readonly, cache=readonly)
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -1922,11 +1983,31 @@ class WorkItems:
                 unseeded_decisions += 1
                 continue
             # Reuse this safely read event; _seed still validates its complete contract.
-            reuse = {} if scanned is None else {"history_revisions": scanned}
-            view = self._build_projection(seed["id"], seed_event=event, readonly=readonly,
-                                          verify_snapshots=False, verify_current_delivery=True,
-                                          **reuse)
-            item = view["item"]
+            history_revisions = scanned
+            if history_revisions is None:
+                history_revisions = (self._history_revisions_readonly(seed["id"])
+                                     if readonly else
+                                     self._history_revisions(seed["id"], recover=True))
+            history_key = self._history_identity(seed["id"]) if readonly else None
+            cache_key = (digest(canonical(seed)), history_key)
+            cached = self._projection_cache.get(seed["id"]) if history_key is not None else None
+            if cached is not None and cached[0] == cache_key:
+                item, since = cached[1], cached[2]
+            else:
+                item, since = self._current_hold(
+                    seed["id"], seed_event=event,
+                    history_revisions=history_revisions,
+                    verify_snapshots=False, verify_current_delivery=True)
+                stable = (history_key is not None
+                          and self._history_identity(seed["id"]) == history_key)
+                if stable and item.get("delivery") is None:
+                    self._projection_cache[seed["id"]] = (cache_key, item, since)
+                else:
+                    self._projection_cache.pop(seed["id"], None)
+            view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
+                    **self._hold_projection(since)}
+            if len(canonical(view)) > MAX_PROJECTION_BYTES:
+                raise LimitExceeded("Work-item projection exceeds byte bound")
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
             open_count += 1

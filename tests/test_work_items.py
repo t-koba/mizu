@@ -79,6 +79,36 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store._direct_record(created["id"])
 
+    def test_readonly_page_reuses_unchanged_projection_and_recomputes_origin(self):
+        first = self.store.page_open_readonly(limit=100)
+        with patch.object(self.store, "_current_hold",
+                          side_effect=AssertionError("unchanged projection replayed")):
+            second = self.store.page_open_readonly(limit=100)
+        self.assertEqual({row["id"]: (row["status"], row["rev"]) for row in second["items"]},
+                         {row["id"]: (row["status"], row["rev"]) for row in first["items"]})
+        self.project.insights.revise(self.proposal["id"], source="worker",
+                                     title="Revised cache scope", body="Changed claims",
+                                     base_snapshot=None, expected_rev=1)
+        third = self.store.page_open_readonly(limit=100)
+        row = next(row for row in third["items"] if row["id"] == self.item_id)
+        self.assertEqual(row["current_origin_rev"], 2)
+        self.assertTrue(row["stale"])
+        self.assertIsNone(row["redecision"])
+
+    def test_readonly_page_detects_changed_revision_file(self):
+        self.change("doing")
+        self.store.page_open_readonly(limit=100)
+        (self.directory / "2.json").write_text("{")
+        with self.assertRaises(Denied):
+            self.store.page_open_readonly(limit=100)
+
+    def test_readonly_page_invalidates_projection_on_new_revision(self):
+        self.store.page_open_readonly(limit=100)
+        changed = self.change("doing")
+        page = self.store.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("doing", changed["rev"]))
+
     def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
         calls = []
         original = self.store._page_open_impl
