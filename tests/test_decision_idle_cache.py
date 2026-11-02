@@ -42,6 +42,45 @@ class DecisionIdleCacheTests(Fixture):
             self.state()
             self.assertEqual(pending.call_count, 2)
 
+    def test_shared_store_change_invalidates_the_cached_empty_page(self):
+        empty = runtime._empty_decision_state(False)
+        row = {"event": "e" * 32, "action": "reject"}
+        non_empty = {"shared": False, "events": [row], "diagnostics": [],
+                     "page": {"events": [row], "pending_count": 1,
+                              "truncated": False, "count_truncated": False,
+                              "byte_truncated": False}, "manifest": ()}
+        with patch.object(runtime.decision_delivery, "pending",
+                          side_effect=[empty, non_empty]) as pending:
+            self.assertEqual(self.state()["events"], [])
+            self.assertEqual(pending.call_count, 1)
+            partition = self.project.insights.root / "shared-records" / "insight.pending"
+            partition.mkdir(parents=True)
+            (partition / "change.json").write_text("{}")
+            second = self.state()
+            self.assertEqual(pending.call_count, 2)
+            self.assertEqual(second["events"], [row])
+
+    def test_dispatch_observes_a_shared_store_row_after_cache_warm(self):
+        engine = runtime.Engine(self.config)
+        empty = runtime._empty_decision_state(False)
+        row = {"event": "f" * 32, "action": "reject"}
+        non_empty = {"shared": False, "events": [row], "diagnostics": [],
+                     "page": {"events": [row], "pending_count": 1,
+                              "truncated": False, "count_truncated": False,
+                              "byte_truncated": False}, "manifest": ()}
+        with patch.object(runtime.decision_delivery, "pending",
+                          side_effect=[empty, non_empty]) as pending:
+            engine._dispatch_state(self.project, "worker", self.role,
+                                   event_trigger=True)
+            self.assertEqual(pending.call_count, 1)
+            partition = self.project.insights.root / "shared-records" / "insight.decision"
+            partition.mkdir(parents=True)
+            (partition / "change.json").write_text("{}")
+            state = engine._dispatch_state(self.project, "worker", self.role,
+                                           event_trigger=True)
+            self.assertEqual(pending.call_count, 2)
+            self.assertEqual(state["decision_events"], [row])
+
     def test_non_empty_result_is_never_reused_as_empty(self):
         non_empty = {"shared": False, "events": [{"event": "x"}], "diagnostics": [],
                      "page": {"events": [{"event": "x"}], "pending_count": 1,

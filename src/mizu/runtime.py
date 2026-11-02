@@ -3995,9 +3995,12 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
 
 
 #: Process-local idle fast path. An empty decision/attention page is reused only
-#: while every source directory and the role's receipts are unchanged; a
-#: non-empty result is never cached as empty. This is a readiness cache, not a
-#: delivery authority: any real dispatch recomputes the exact page and manifest.
+#: while every source the exact scan reads is unchanged: the role's inbox,
+#: decision-history, decisions and decision receipts; the authority/report
+#: marker; the shared insight record partitions; and the role's shared receipt
+#: store. A non-empty result is never cached as empty. This is a delivery
+#: precondition, not a delivery authority: a real unit may bind the empty page
+#: and manifest only while the same complete fingerprint is unchanged.
 _DECISION_IDLE_CACHE: dict = {}
 _DECISION_IDLE_CACHE_LIMIT = 256
 
@@ -4011,22 +4014,31 @@ def _empty_decision_state(shared: bool) -> dict:
 
 
 def _decision_source_fingerprint(project, role_name):
-    """Cheap, path-free metadata token for decision/attention sources."""
+    """Cheap, path-free metadata token for every decision/attention source."""
     root = project.insights.root
     parts = []
-    for name in ("inbox", "decision-history", "decisions",
-                 f"decision-receipts/{role_name}"):
+
+    def directory(name):
         path = root / name
         try:
             info = path.lstat()
         except FileNotFoundError:
-            parts.append((name, 0, 0, 0))
-            continue
+            return (name, 0, 0, 0)
         except OSError:
             return None
         if not stat.S_ISDIR(info.st_mode):
             return None
-        parts.append((name, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+        return (name, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+
+    names = ["inbox", "decision-history", "decisions",
+             f"decision-receipts/{role_name}", "shared-records",
+             "shared-records/insight.decision", "shared-records/insight.pending",
+             f"shared-record-receipts/{digest(role_name.encode())}"]
+    for name in names:
+        part = directory(name)
+        if part is None:
+            return None
+        parts.append(part)
     for name in (decision_delivery.AUTHORITY_FILE, decision_delivery.REPORT_FILE):
         path = root / name
         try:

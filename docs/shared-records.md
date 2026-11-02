@@ -791,16 +791,22 @@ acknowledgement remain the only active runtime authority for decisions.
 ### Idle re-evaluation
 
 An idle dispatch or readiness check first samples a cheap metadata fingerprint
-of the role's `inbox`, `decision-history`, `decisions` and receipt directories.
-When the last exact scan returned no decision or attention events and the
-fingerprint is unchanged, the check uses an empty readiness page: it reads no
-decision-history file and takes no record lock. Any source change, any
-non-empty result, and any metadata error run the existing exact scan; a real
-dispatch still recomputes its page and manifest, so the fingerprint is never a
-delivery cache. This bounds an unchanged idle tick. A real page scans without
-the exclusive record lock and revalidates only the rows it selects under that
-lock; the remaining end state is a delta reader instead of a full re-scan on
-change.
+of every source the exact decision/attention scan reads: the role's `inbox`,
+`decision-history`, `decisions` and `decision-receipts/<role>` directory; the
+decision authority/report marker; the shared `insight.decision` and
+`insight.pending` record partitions; and the role's shared
+`shared-record-receipts/<role>` store. When the last exact scan returned no
+decision or attention events and that complete fingerprint is unchanged, the
+check uses an empty page and empty manifest: it reads no decision-history file
+and takes no record lock. Any source change, any non-empty result, and any
+metadata error run the existing exact scan; a non-empty page is never reused as
+empty. The fingerprint is therefore a delivery precondition, not merely a
+readiness hint: a real unit may bind the cached empty input only while the same
+complete fingerprint is unchanged, and any row created through a sampled source
+forces the exact scan. This bounds an unchanged idle tick. A real page scans
+without the exclusive record lock and revalidates only the rows it selects
+under that lock; the remaining end state is a delta reader instead of a full
+re-scan on change.
 
 ### Exact schema and identity
 
