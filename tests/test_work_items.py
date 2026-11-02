@@ -1,5 +1,6 @@
 """Internal work-item seeds, append-only CAS, evidence and fail-closed reads."""
 import concurrent.futures
+import contextlib
 import copy
 import dataclasses
 import datetime as dt
@@ -1396,6 +1397,218 @@ class WorkItemTests(Fixture):
         self.assertEqual(self.store.get(self.item_id), winners[0])
         self.assertEqual([p.name for p in self.directory.iterdir()], ["2.json"])
 
+
+    def test_sidecar_fresh_read_is_source_backed_and_bounded(self):
+        # Source-backed sidecar: at most current+previous revision files are
+        # read per item, never the full history. Build a 4-rev chain so a full
+        # replay (3 files) is distinguishable from the bounded hit (<=2).
+        self.change("doing")
+        self.store.transition(self.item_id, expected_rev=2, status="open", actor="worker",
+                              reason="pause")
+        self.change("doing", expected_rev=3)
+        self.store.page_open_readonly(limit=100)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        original = fresh._read
+        reads = []
+
+        def counted(name):
+            reads.append(name)
+            return original(name)
+
+        with patch.object(fresh, "_read", side_effect=counted):
+            page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("doing", 4))
+        rev_reads = [name for name in reads
+                     if name.startswith(f"work-items/{self.item_id}/")
+                     and name.split("/")[-1][:-5].isdigit()]
+        # Bounded hit: current (4.json) and previous (3.json) at most; a full
+        # replay would read 2.json, 3.json and 4.json.
+        self.assertLessEqual(len(rev_reads), 2)
+        self.assertTrue(set(rev_reads) <= {
+            f"work-items/{self.item_id}/4.json", f"work-items/{self.item_id}/3.json"})
+        self.assertIn(f"work-items/{self.item_id}/4.json", rev_reads)
+
+    def test_sidecar_fabricated_current_falls_back_to_exact_source(self):
+        # A fabricated but structurally valid sidecar must not return false
+        # state: the stored current is compared byte-for-structure with the
+        # exact source revision file before use.
+        self.change("doing")
+        expected = self.store.page_open_readonly(limit=100)
+        expected_row = next(row for row in expected["items"] if row["id"] == self.item_id)
+        self.assertEqual((expected_row["status"], expected_row["rev"]), ("doing", 2))
+        sidecar_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        payload = json.loads(sidecar_path.read_bytes())
+        # Preserve file metadata/source identity (history_identity, seed digest)
+        # and change only the stored current to a plausible but wrong valid
+        # transition (doing -> blocked with a deadline wait, same rev).
+        fabricated = dict(payload["current"])
+        fabricated["status"] = "blocked"
+        fabricated["holder"] = fabricated["actor"]
+        fabricated["transition"] = {"from": payload["previous"]["status"] if payload["previous"] else "open",
+                                    "to": "blocked"}
+        fabricated["wait"] = {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"}
+        fabricated["reason"] = "fabricated wait"
+        payload["current"] = fabricated
+        payload["doing_since"] = None
+        write_json(sidecar_path, payload, exclusive=False)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        # Falls back to the exact source and returns the true row, not the
+        # fabricated blocked data.
+        self.assertEqual(row, expected_row)
+        self.assertEqual((row["status"], row["rev"]), ("doing", 2))
+
+    def test_sidecar_changed_source_is_not_masked_by_sidecar(self):
+        # A changed source revision must be observed instead of returning stale
+        # sidecar data, even when the directory identity is updated to match.
+        self.change("doing")
+        self.store.page_open_readonly(limit=100)
+        rev_path = self.directory / "2.json"
+        exact = json.loads(rev_path.read_bytes())
+        changed = dict(exact)
+        changed["status"] = "blocked"
+        changed["holder"] = changed["actor"]
+        changed["transition"] = {"from": "open", "to": "blocked"}
+        changed["wait"] = {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"}
+        changed["reason"] = "changed source"
+        write_json(rev_path, changed, exclusive=False)
+        # Update the sidecar witness to the new directory identity so only the
+        # source-backed content comparison can catch the change.
+        sidecar_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        payload = json.loads(sidecar_path.read_bytes())
+        fresh_identity = self.store._history_identity(self.item_id)
+        payload["history_identity"] = json.loads(canonical(fresh_identity))
+        write_json(sidecar_path, payload, exclusive=False)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("blocked", 2))
+        self.assertEqual(row["wait"], {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
+
+    def test_sidecar_blocked_wait_replays_exactly(self):
+        self.change("doing")
+        self.store.transition(self.item_id, expected_rev=2, status="blocked", actor="worker",
+                              reason="Wait for evidence",
+                              wait={"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
+        expected = self.store.get(self.item_id)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("blocked", 3))
+        self.assertEqual(row["wait"], expected["wait"])
+        self.assertIsNone(row["doing_since"])
+        self.assertIsNone(row["doing_age_seconds"])
+        self.assertFalse(row["doing_stale"])
+
+    def test_sidecar_invalidated_by_new_transition(self):
+        self.change("doing")
+        first = self.store.page_open_readonly(limit=100)
+        self.assertEqual(next(row for row in first["items"] if row["id"] == self.item_id)["status"], "doing")
+        self.store.transition(self.item_id, expected_rev=2, status="open", actor="worker", reason="pause")
+        second = self.store.page_open_readonly(limit=100)
+        row = next(row for row in second["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("open", 3))
+
+    def test_sidecar_same_size_rewrite_falls_back_to_exact(self):
+        self.change("doing")
+        self.store.page_open_readonly(limit=100)
+        path = self.directory / "2.json"
+        original = path.read_bytes()
+        tampered = bytearray(original)
+        tampered[10:20] = b"X" * 10
+        self.assertEqual(len(tampered), len(original))
+        path.write_bytes(bytes(tampered))
+        with self.assertRaises(Denied):
+            self.store.page_open_readonly(limit=100)
+        path.write_bytes(original)
+        # A same-size create rewrite is also not hidden behind the sidecar.
+        created = self.store.create(idempotency_key="sidecar-rewrite", title="Rewrite",
+                                    actor="worker")["record"]["work_item"]
+        WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        create_path = self.project.root / "work-items" / created["id"] / "create.json"
+        orig_create = create_path.read_bytes()
+        bad = bytearray(orig_create)
+        bad[10:20] = b"Y" * 10
+        self.assertEqual(len(bad), len(orig_create))
+        create_path.write_bytes(bytes(bad))
+        with self.assertRaises(Denied):
+            WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+
+    def test_sidecar_unsafe_falls_back_to_exact_replay(self):
+        self.change("doing")
+        expected = self.store.page_open_readonly(limit=100)
+        expected_row = next(row for row in expected["items"] if row["id"] == self.item_id)
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        self.assertTrue(sidecar.exists())
+        # Malformed sidecar falls back without wrong data.
+        sidecar.write_text("{not-json")
+        page = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        self.assertEqual(next(row for row in page["items"] if row["id"] == self.item_id), expected_row)
+        # Symlinked sidecar falls back without wrong data.
+        sidecar.unlink()
+        target = self.project.root / "work-item-state-target.json"
+        target.write_text("{}")
+        try:
+            os.symlink(str(target), str(sidecar))
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks unavailable")
+        page = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        self.assertEqual(next(row for row in page["items"] if row["id"] == self.item_id), expected_row)
+        sidecar.unlink(missing_ok=True)
+        # Hard-linked sidecar falls back without wrong data.
+        write_json(sidecar, {"schema": 1, "id": self.item_id, "seed_sha256": "0" * 64,
+                             "history_identity": [], "previous": None,
+                             "current": {"id": self.item_id}, "doing_since": None})
+        try:
+            os.link(str(sidecar), str(self.project.root / "work-item-state" / f"{self.item_id}.alias.json"))
+        except (OSError, NotImplementedError):
+            sidecar.unlink(missing_ok=True)
+            self.skipTest("Hard links unavailable")
+        try:
+            page = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+            self.assertEqual(next(row for row in page["items"] if row["id"] == self.item_id), expected_row)
+        finally:
+            with contextlib.suppress(OSError):
+                (self.project.root / "work-item-state" / f"{self.item_id}.alias.json").unlink()
+            with contextlib.suppress(OSError):
+                sidecar.unlink()
+
+    def test_sidecar_terminal_removes_and_keeps_exact_behavior(self):
+        self.change("doing")
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        self.assertTrue(sidecar.exists())
+        self.store.transition(self.item_id, expected_rev=2, status="dropped", actor="worker", reason="no longer needed")
+        self.assertFalse(sidecar.exists())
+        page = self.store.page_open_readonly(limit=100)
+        self.assertFalse(any(row["id"] == self.item_id for row in page["items"]))
+        closed = self.store.page_closed_readonly(limit=10)
+        self.assertTrue(any(row["id"] == self.item_id for row in closed["items"]))
+
+    def test_sidecar_absent_legacy_item_reads_exactly(self):
+        self.change("doing")
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        self.assertTrue(sidecar.exists())
+        sidecar.unlink()
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("doing", 2))
+        self.assertEqual(fresh.get(self.item_id)["status"], "doing")
+
+    def test_sidecar_recomputes_origin_on_read(self):
+        self.change("doing")
+        first = self.store.page_open_readonly(limit=100)
+        row = next(row for row in first["items"] if row["id"] == self.item_id)
+        self.assertFalse(row["stale"])
+        self.project.insights.revise(self.proposal["id"], source="worker",
+                                     title="Revised scope", body="Changed claims",
+                                     base_snapshot=None, expected_rev=1)
+        second = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        row = next(row for row in second["items"] if row["id"] == self.item_id)
+        self.assertTrue(row["stale"])
+        self.assertEqual(row["current_origin_rev"], 2)
 
 if __name__ == "__main__":
     unittest.main()

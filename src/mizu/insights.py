@@ -1198,6 +1198,27 @@ replacement insight without implying rejected substance.
             store.prepare_decision_write(need_wait=(registered is not None))
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
+                try:
+                    # Cache boundary: best-effort seed sidecars (previous None,
+                    # current exact immutable seed); never fails the commit.
+                    seeds = record.get("work_items", [record["work_item"]] if "work_item" in record else [])
+                    if not isinstance(seeds, list):
+                        raise ValueError("Invalid work-item seed list")
+                    for seed in seeds:
+                        try:
+                            if not isinstance(seed, dict):
+                                continue
+                            seed_id = seed.get("id")
+                            if not isinstance(seed_id, str):
+                                continue
+                            identity = store._history_identity(seed_id)
+                            store._sidecar_store(seed_id, seed, identity, None, seed, None)
+                        except (OSError, ValueError, TypeError, Denied, LimitExceeded,
+                                UnicodeError, AttributeError):
+                            pass
+                except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                        AttributeError):
+                    pass
                 write_json(self.root / "decisions" / f"{insight_id}.json", record)
                 if registered is not None:
                     registered = {**registered, "owner": insight_id, "rev": rev,

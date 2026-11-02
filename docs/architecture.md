@@ -581,17 +581,27 @@ the inbox or wider decision history. Origin staleness separately checks current 
 legacy decision binding; `page_open()` enumerates decision history and direct
 creation directories to build its inventory with O(limit) retained rows. The event's title is the immutable title authority, not the
 subsequently revisable insight.
-A read-only open page may reuse a validated current projection while the
-canonical seed digest and every entry's metadata in that item's directory are
-unchanged, on local POSIX where ctime is a metadata-change witness. The
-identity is sampled with the revision read; a post-replay mismatch is a
-concurrent append and is never cached. On Windows
-the work-item metadata caches are bypassed and every read validates the exact
-seed and chain. Origin staleness is recomputed on every call; an item with a
-current delivery binding, any new or changed revision, a changed seed, a
-non-regular entry or any unexpected directory shape bypasses the reuse and runs
-the complete chain validation. The locked recovery path never uses this
-read-only cache. Direct-seed reuse likewise rechecks the legacy sidecar and the
+A read-only open page may reuse a validated sidecar projection stored outside
+`work-items/<id>/` while the canonical seed digest and every entry's metadata
+in that item's directory are unchanged, on local POSIX where ctime is a
+metadata-change witness. The sidecar is a local POSIX metadata-witness fast
+path; the exact history replay is the fallback, and Windows bypasses sidecar
+reuse. The sidecar stores full source records (the immutable seed for rev 1,
+otherwise the exact previous and current revision records) and is never
+trusted alone: the stored current is compared byte-for-structure with the
+exact source record at its rev (one revision file read), and the stored
+previous with the seed or its exact source record (one more read at most),
+then the exact source records are revalidated with the same seed/transition
+checks as a status-only read (including the current delivery binding). The
+returned item is derived from the exact source current via the existing
+retirement projection, and origin staleness and hold state are recomputed on
+every call. The identity
+is sampled with the revision read; a post-replay mismatch is a concurrent
+append and is never cached. Any missing, malformed, unsafe, stale or
+mismatched sidecar, a changed seed, a new or changed revision, a non-regular
+entry or any unexpected directory shape bypasses the reuse and runs the
+complete chain validation. The locked recovery path never uses this read-only
+sidecar. Direct-seed reuse likewise rechecks the legacy sidecar and the
 decision-history ID collision on every lookup, so a conflicting source added
 after a cache warm still fails closed.
 Both direct creation and decision seeding call the same lock-held

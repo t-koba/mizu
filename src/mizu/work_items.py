@@ -5,9 +5,13 @@ hash-bound legacy sidecars. Reads and transitions share insights.lock; each succ
 Read-only views (`page_open_readonly`, `page_closed_readonly`) never acquire
 insights.lock and never recover or delete temporary files; they validate the
 same committed records and fail closed on unsafe or malformed state.
-A read-only page may reuse a current projection only while the seed digest
-and every entry's metadata in the item directory are unchanged; origin
-staleness is recomputed each call, and a current delivery binding or any
+A read-only page may reuse a source-backed sidecar projection only while the
+seed digest and every entry's metadata in the item directory are unchanged;
+the sidecar stores full source records and is compared byte-for-structure
+with the exact current/previous source records (at most two revision reads)
+before use. The sidecar is a local POSIX metadata-witness fast path, the
+exact history replay is the fallback, and Windows bypasses sidecar reuse.
+Origin staleness and hold state are recomputed on every call, and any
 unexpected shape bypasses the fast path. Unknown/unsafe records, incomplete
 chains and bounds fail closed. Retrying a
 committed CAS requires a re-read. Same-status events require a scope change or
@@ -72,6 +76,9 @@ _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _HISTORY_UNSET = object()
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
+_SIDECAR_SCHEMA = 1
+_SIDECAR_DIR = "work-item-state"
+_SIDECAR_MAX_BYTES = PREVIEW_BYTES * 2 + 4096
 
 
 def _reject_json_constant(value: str):
@@ -386,6 +393,303 @@ class WorkItems:
             self._history_cache[item_id] = (key, revisions)
         return revisions, key
 
+    def _sidecar_path(self, item_id: str) -> Path:
+        return self.root / _SIDECAR_DIR / f"{item_id}.json"
+
+    def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since) -> None:
+        """Best-effort write of exact source records; never fails a commit.
+
+        Cache boundary: any failure here falls back to exact replay and never
+        fails the committed business write. Callers store full source records
+        (the immutable seed or exact revision files), never projected items.
+        """
+        try:
+            if ITEM_ID.fullmatch(item_id) is None or not isinstance(seed, dict):
+                return
+            if since is not None and not _timestamp(since):
+                return
+            state_dir = self.root / _SIDECAR_DIR
+            try:
+                info = state_dir.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    return
+            identity_json = json.loads(canonical(identity))
+            payload = {"schema": _SIDECAR_SCHEMA, "id": item_id,
+                       "seed_sha256": digest(canonical(seed)),
+                       "history_identity": identity_json,
+                       "previous": previous, "current": current,
+                       "doing_since": since}
+            if len(canonical(payload)) > _SIDECAR_MAX_BYTES:
+                return
+            write_json(self._sidecar_path(item_id), payload, exclusive=False)
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            return
+
+    def _sidecar_remove(self, item_id: str) -> None:
+        """Best-effort removal of a terminal item's sidecar; never fails a commit.
+
+        Cache boundary: removal failure never fails the commit; the read path
+        rechecks retirement before trusting any sidecar.
+        """
+        try:
+            path = self._sidecar_path(item_id)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return
+            except OSError:
+                return
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return
+            with contextlib.suppress(OSError, NotImplementedError):
+                sync_dir(path.parent)
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            return
+
+    def _sidecar_expected_rev(self, identity, current_rev: int) -> bool:
+        """Check that a stored current revision matches its witnessed directory.
+
+        Cache boundary: any unexpected shape returns False and forces exact replay.
+        """
+        try:
+            if identity == ("missing",):
+                return current_rev == 1
+            if not isinstance(identity, tuple) or len(identity) != 2:
+                return False
+            _, entries = identity
+            names = []
+            for entry in entries:
+                if not isinstance(entry, (tuple, list)) or not entry:
+                    return False
+                names.append(entry[0])
+            for name in names:
+                if name == "create.json":
+                    continue
+                if _REVISION_NAME.fullmatch(name) is None:
+                    return False
+            numeric = sorted(int(name[:-5]) for name in names if _REVISION_NAME.fullmatch(name) is not None)
+            if not numeric:
+                return current_rev == 1
+            if numeric != list(range(2, len(numeric) + 2)):
+                return False
+            return current_rev == numeric[-1]
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            return False
+
+    def _sidecar_load(self, item_id: str, seed: dict, history_key):
+        """Return (item, since) from a source-backed sidecar, else None to replay exactly.
+
+        Cache boundary: any missing/malformed/unsafe/mismatched sidecar or source
+        read falls back to exact replay; sidecar content alone is never trusted.
+        Stored previous/current are full source records (seed or exact revision
+        files). At most the current and previous revision files are read here;
+        full history is never scanned.
+        """
+        try:
+            if IS_WINDOWS or history_key is None:
+                return None
+            if ITEM_ID.fullmatch(item_id) is None or not isinstance(seed, dict):
+                return None
+            state_dir = self.root / _SIDECAR_DIR
+            try:
+                dir_info = state_dir.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return None
+            if (not stat.S_ISDIR(dir_info.st_mode) or stat.S_ISLNK(dir_info.st_mode)
+                    or getattr(dir_info, "st_file_attributes", 0) & 0x400):
+                return None
+            path = self._sidecar_path(item_id)
+            try:
+                file_info = path.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return None
+            if (not stat.S_ISREG(file_info.st_mode) or stat.S_ISLNK(file_info.st_mode)
+                    or getattr(file_info, "st_file_attributes", 0) & 0x400):
+                return None
+            if getattr(file_info, "st_nlink", 1) != 1:
+                return None
+            if file_info.st_size > _SIDECAR_MAX_BYTES:
+                return None
+            try:
+                raw = safe_read(self.root, f"{_SIDECAR_DIR}/{item_id}.json", _SIDECAR_MAX_BYTES)
+            except (Denied, LimitExceeded, OSError, ValueError, UnicodeError):
+                return None
+            try:
+                payload = json.loads(raw, parse_constant=_reject_json_constant)
+            except (ValueError, UnicodeError):
+                return None
+            if (not isinstance(payload, dict)
+                    or set(payload) != {"schema", "id", "seed_sha256", "history_identity",
+                                        "previous", "current", "doing_since"}):
+                return None
+            if payload.get("schema") != _SIDECAR_SCHEMA or payload.get("id") != item_id:
+                return None
+            try:
+                if payload.get("seed_sha256") != digest(canonical(seed)):
+                    return None
+                if canonical(payload.get("history_identity")) != canonical(history_key):
+                    return None
+            except (ValueError, TypeError, UnicodeError, AttributeError):
+                return None
+            previous = payload.get("previous")
+            current_raw = payload.get("current")
+            since_stored = payload.get("doing_since")
+            if not isinstance(current_raw, dict):
+                return None
+            if current_raw.get("id") != item_id:
+                return None
+            if since_stored is not None and not _timestamp(since_stored):
+                return None
+            if current_raw.get("status") in ("done", "dropped"):
+                return None
+            try:
+                current_rev = current_raw.get("rev")
+                if type(current_rev) is not int:
+                    return None
+                if not self._sidecar_expected_rev(history_key, current_rev):
+                    return None
+                if previous is None:
+                    # Seed-only sidecar: stored current must equal the
+                    # already-validated seed; rev must be 1. No revision file
+                    # read is needed here.
+                    try:
+                        validate_seed(current_raw, decision_task="wait" in current_raw)
+                    except Denied:
+                        return None
+                    if current_raw != seed:
+                        return None
+                    if current_rev != 1:
+                        return None
+                    try:
+                        if canonical(current_raw) != canonical(seed):
+                            return None
+                    except (ValueError, TypeError, UnicodeError, AttributeError):
+                        return None
+                    exact_current = seed
+                    exact_previous = None
+                    current_raw = exact_current
+                    previous = exact_previous
+                else:
+                    if not isinstance(previous, dict):
+                        return None
+                    if previous.get("id") != item_id:
+                        return None
+                    prev_rev = previous.get("rev")
+                    if type(prev_rev) is not int or prev_rev != current_rev - 1:
+                        return None
+                    if current_rev == 1:
+                        return None
+                    # Source-backed byte-for-structure comparison: the stored
+                    # current must equal the exact source record at
+                    # current.rev, read as one revision file.
+                    try:
+                        exact_current = self._read(f"work-items/{item_id}/{current_rev}.json")
+                    except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                            UnicodeError, AttributeError):
+                        return None
+                    try:
+                        if canonical(current_raw) != canonical(exact_current):
+                            return None
+                    except (ValueError, TypeError, UnicodeError, AttributeError):
+                        return None
+                    if prev_rev == 1:
+                        try:
+                            validate_seed(previous, decision_task="wait" in previous)
+                        except Denied:
+                            return None
+                        if previous != seed:
+                            return None
+                        try:
+                            if canonical(previous) != canonical(seed):
+                                return None
+                        except (ValueError, TypeError, UnicodeError, AttributeError):
+                            return None
+                        exact_previous = seed
+                    else:
+                        # Stored previous must equal the exact source record at
+                        # previous.rev, read as one revision file.
+                        try:
+                            exact_previous = self._read(f"work-items/{item_id}/{prev_rev}.json")
+                        except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                                UnicodeError, AttributeError):
+                            return None
+                        try:
+                            if canonical(previous) != canonical(exact_previous):
+                                return None
+                        except (ValueError, TypeError, UnicodeError, AttributeError):
+                            return None
+                    # Validate the exact source records, never sidecar copies alone.
+                    try:
+                        if prev_rev == 1:
+                            validate_seed(exact_previous,
+                                          decision_task="wait" in exact_previous)
+                        self._validate_transition(exact_previous, exact_current,
+                                                  verify_snapshots=False)
+                        if exact_current.get("delivery") is not None:
+                            self._validate_delivery(exact_previous, exact_current,
+                                                    verify_snapshots=True)
+                    except (Denied, LimitExceeded):
+                        return None
+                    except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                        return None
+                    current_raw = exact_current
+                    previous = exact_previous
+            except (Denied, LimitExceeded):
+                return None
+            except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                return None
+            # A retirement record changes the witnessed directory, so a matching
+            # identity already proves none exists; recheck explicitly before trusting.
+            try:
+                (self.root / "work-items" / item_id / "retirement.json").lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
+            else:
+                return None
+            try:
+                item = work_item_retirement.project(current_raw, None)
+            except (Denied, LimitExceeded):
+                return None
+            except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                return None
+            if not isinstance(item, dict):
+                return None
+            try:
+                item_status = item.get("status")
+            except (AttributeError, TypeError, ValueError, UnicodeError):
+                return None
+            if item_status in ("done", "dropped"):
+                return None
+            if item_status == "doing":
+                # The exact current record determines the hold start; the
+                # sidecar cannot supply a different age.
+                if (since_stored is None or not _timestamp(since_stored)
+                        or since_stored != current_raw.get("updated_at")):
+                    return None
+            elif since_stored is not None:
+                return None
+            return item, since_stored
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            # Cache boundary: any sidecar/source failure falls back to exact
+            # replay, never fails the read.
+            return None
+
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
                     task_specs=None, task_index=None, wait=None,
@@ -533,6 +837,14 @@ class WorkItems:
             self.require_open_capacity(1)
             directory.mkdir(parents=True, exist_ok=True)
             write_json(directory / "create.json", record, exclusive=True)
+            try:
+                # Cache boundary: best-effort seed sidecar (previous None,
+                # current exact immutable seed); never fails the commit.
+                identity = self._history_identity(item_id)
+                self._sidecar_store(item_id, seed, identity, None, seed, None)
+            except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                    AttributeError):
+                pass
             return {"record": record, "created": True}
 
     def _iter_item_events_with_revisions(self, *, recover: bool, cache: bool = False,
@@ -2024,19 +2336,39 @@ class WorkItems:
                     history_revisions = self._history_revisions(seed["id"], recover=True)
             cache_key = (digest(canonical(seed)), history_key)
             cached = self._projection_cache.get(seed["id"]) if history_key is not None else None
+            if cacheable and history_key is not None:
+                # Revalidate the immutable seed binding before trusting any
+                # cached projection: a decision event whose reason/scope
+                # changed while its embedded work_item stayed put must fail
+                # closed, not reuse a stale projection or sidecar. A missing
+                # identity already forces exact replay, so skip the extra
+                # lookup there (and keep bounded-scan harnesses isolated).
+                self._seed(seed["id"], event, history_revisions=history_revisions)
             if cached is not None and cached[0] == cache_key:
                 item, since = cached[1], cached[2]
             else:
-                item, since = self._current_hold(
-                    seed["id"], seed_event=event,
-                    history_revisions=history_revisions,
-                    verify_snapshots=False, verify_current_delivery=True)
-                stable = (history_key is not None
-                          and self._history_identity(seed["id"]) == history_key)
-                if stable and cacheable and item.get("delivery") is None:
-                    self._projection_cache[seed["id"]] = (cache_key, item, since)
+                sidecar = (self._sidecar_load(seed["id"], seed, history_key)
+                           if cacheable else None)
+                if (sidecar is not None
+                        and self._history_identity(seed["id"]) != history_key):
+                    sidecar = None
+                if sidecar is not None:
+                    item, since = sidecar
+                    if item.get("delivery") is None:
+                        self._projection_cache[seed["id"]] = (cache_key, item, since)
+                    else:
+                        self._projection_cache.pop(seed["id"], None)
                 else:
-                    self._projection_cache.pop(seed["id"], None)
+                    item, since = self._current_hold(
+                        seed["id"], seed_event=event,
+                        history_revisions=history_revisions,
+                        verify_snapshots=False, verify_current_delivery=True)
+                    stable = (history_key is not None
+                              and self._history_identity(seed["id"]) == history_key)
+                    if stable and cacheable and item.get("delivery") is None:
+                        self._projection_cache[seed["id"]] = (cache_key, item, since)
+                    else:
+                        self._projection_cache.pop(seed["id"], None)
             view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                     **self._hold_projection(since)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
@@ -2278,7 +2610,7 @@ class WorkItems:
                     self, item_id, expected_rev=expected_rev, status=status, actor=actor, reason=reason,
                     history_revisions=history_revisions, wait=wait, snapshot_id=snapshot_id,
                     scope=scope, smoke_refs=smoke_refs)
-            current = self._get(item_id, history_revisions=history_revisions)
+            current, previous_since = self._current_hold(item_id, history_revisions=history_revisions)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
             if status == "blocked" and wait is None:
@@ -2383,7 +2715,38 @@ class WorkItems:
                 raise LimitExceeded("Work-item event exceeds byte bound")
             write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)
             if status in ("done", "dropped"):
+                self._sidecar_remove(item_id)
                 self._wake_terminal()
+            else:
+                try:
+                    # Cache boundary: best-effort transition sidecar storing full
+                    # source records (never a projected hold item); never fails
+                    # the commit. Previous is the exact previous full source
+                    # record: the seed for rev 1, otherwise the exact content
+                    # read from work-items/<id>/<previous_rev>.json under the
+                    # already-held record lock.
+                    try:
+                        (self.root / "work-items" / item_id / "legacy.json").lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        self._sidecar_remove(item_id)
+                        return record
+                    new_since = (previous_since or record["updated_at"]) if status == "doing" else None
+                    seed = self._seed(item_id, history_revisions=history_revisions)
+                    identity = self._history_identity(item_id)
+                    prev_rev = current.get("rev") if isinstance(current, dict) else None
+                    if type(prev_rev) is not int:
+                        return record
+                    if prev_rev == 1:
+                        previous_source = seed
+                    else:
+                        previous_source = self._read(f"work-items/{item_id}/{prev_rev}.json")
+                    self._sidecar_store(item_id, seed, identity, previous_source, record,
+                                        new_since)
+                except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                        AttributeError):
+                    pass
             return record
 
     def _wake_terminal(self):
