@@ -461,16 +461,16 @@ class ReadySetChangeTests(Fixture):
         import tracemalloc
         store = self.project.work_items
         seed = self.item('template')
-        view = {'item': seed, 'current_origin_rev': None, 'stale': False, 'redecision': None,
-                'doing_since': None, 'doing_age_seconds': None, 'doing_stale': False}
 
         def scan(count, reverse=False, limit=1):
             indices = range(count - 1, -1, -1) if reverse else range(count)
-            events = ((f'{i:032x}', {'id': f'wi_{i:032x}'}, None) for i in indices)
+            events = ((f'{i:032x}', {'id': f'wi_{i:032x}'}, frozenset(), None)
+                      for i in indices)
             with patch.object(store, '_iter_item_events_with_revisions', return_value=events), \
                  patch.object(store, '_seed_for_event', new=lambda _, event, **kw: ('seed', event)), \
-                 patch.object(store, '_build_projection', new=lambda item_id, **kw: {
-                     **view, 'item': {**seed, 'id': item_id}}):
+                 patch.object(store, '_history_revisions_readonly', return_value=(None, None)), \
+                 patch.object(store, '_current_hold', new=lambda item_id, **kw: (
+                     {**seed, 'id': item_id}, None)):
                 tracemalloc.start()
                 try:
                     page = store._page_open_impl(cursor=None, limit=limit, readonly=True,
