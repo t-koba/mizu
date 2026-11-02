@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
@@ -74,24 +75,25 @@ class SmokeRetentionTests(unittest.TestCase):
                 future = pool.submit(second.unresolved_counts, ['worker', 'reviewer'])
                 self.assertEqual(future.result(timeout=10), {'worker': 1, 'reviewer': 0})
 
-    def test_submit_and_unpinned_evidence_keep_shared_lock(self):
+    def test_submit_skips_shared_lock_but_evidence_keeps_it(self):
         insights, _ = self.owner()
         item = self.insight(insights)
         with shared_lock(self.data):
             # Instrument acquisition to fail immediately rather than wait on
-            # the lock held above. No operation may reach an inbox write.
+            # the lock held above. Only reference-bearing writes may reach it.
             with patch('mizu.smoke_refs.shared_lock', side_effect=Busy('shared lock held')) as shared:
-                with self.assertRaises(Busy):
-                    insights.submit(source='worker', title='New', body='No refs', base_snapshot=None)
+                submitted = insights.submit(source='worker', title='New', body='No refs',
+                                            base_snapshot=None)
                 for refs in ({}, {'smoke_refs': []}):
                     with self.subTest(refs=refs), self.assertRaises(Busy):
                         insights.attach_evidence(item['id'], source='worker', text='No refs',
                                                  expected_rev=1, **refs)
-                self.assertEqual(shared.call_count, 3)
+                self.assertEqual(shared.call_count, 2)
+        self.assertEqual(submitted['title'], 'New')
         self.assertEqual(insights.read(item['id'])['evidence'], [])
-        self.assertEqual(insights.unresolved_counts(['worker']), {'worker': 1})
+        self.assertEqual(insights.unresolved_counts(['worker']), {'worker': 2})
 
-    def test_cross_project_unpinned_write_waits_for_shared_lock(self):
+    def test_cross_project_unpinned_write_does_not_wait_for_shared_lock(self):
         first, _ = self.owner('first')
         second, _ = self.owner('second')
         attempted = threading.Event()
@@ -109,10 +111,20 @@ class SmokeRetentionTests(unittest.TestCase):
                     attempted.clear()  # Ignore project one's acquisition.
                     future = pool.submit(second.submit, source='worker', title='Other project',
                                          body='No references', base_snapshot=None)
-                    self.assertTrue(attempted.wait(10))
-                    self.assertFalse(future.done())
-            result = future.result(timeout=10)
-        self.assertEqual(second.read(result['id'])['title'], 'Other project')
+                    self.assertFalse(attempted.wait(1.0))
+                    started = time.monotonic()
+                    result = future.result(timeout=10)
+                    elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 5.0, f'unpinned submit waited {elapsed:.3f}s')
+            self.assertEqual(second.read(result['id'])['title'], 'Other project')
+
+    def test_submit_project_lock_failure_leaves_no_record(self):
+        insights, _ = self.owner()
+        before = self.snapshot()
+        with patch('mizu.smoke_refs.project_record_lock', side_effect=Busy('project lock held')):
+            with self.assertRaises(Busy):
+                insights.submit(source='worker', title='New', body='No refs', base_snapshot=None)
+        self.assertEqual(self.snapshot(), before)
 
     def test_isolated_project_publish_holds_no_in_tree_lock_handle(self):
         project = self.scratch_project(self.b)

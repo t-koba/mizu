@@ -17,7 +17,7 @@ from mizu.smoke_refs import record_lock
 class LockDiagnosticsTests(Fixture):
     def enable(self, enabled=True):
         text = self.file.read_text().replace(
-            "[limits]", f"[limits]\nlock_diagnostics = {str(enabled).lower()}", 1)
+            "lock_diagnostics = false", f"lock_diagnostics = {str(enabled).lower()}", 1)
         self.file.write_text(text)
 
     def invoke(self):
@@ -59,7 +59,8 @@ class LockDiagnosticsTests(Fixture):
         original = self.file.read_text()
         for value in ("true", "false", "0", "1", '"true"', "[]", "1.0"):
             with self.subTest(value=value):
-                self.file.write_text(original.replace("[limits]", f"[limits]\nlock_diagnostics = {value}", 1))
+                self.file.write_text(original.replace("lock_diagnostics = false",
+                                                      f"lock_diagnostics = {value}", 1))
                 if value in ("true", "false"):
                     self.assertIs(load(self.file).limits.lock_diagnostics, value == "true")
                 else:

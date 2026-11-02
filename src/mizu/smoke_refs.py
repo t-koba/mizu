@@ -59,12 +59,18 @@ def project_record_lock(root: Path, *, blocking: bool = True):
 
 
 @contextlib.contextmanager
-def record_lock(root: Path, *, blocking: bool = True):
-    # Standalone record stores (e.g. import tools/tests) have no shared data
-    # owner. Managed project roots always use <data>/projects/<project>.
-    # Preserve the same global-before-project order in both blocking modes.
-    shared = shared_lock(root.parent.parent, blocking=blocking) if root.parent.name == "projects" else contextlib.nullcontext()
-    with shared:
+def record_lock(root: Path, *, blocking: bool = True, shared: bool = True):
+    """Serialize a record write, optionally across the shared smoke boundary.
+
+    A write that cannot create or remove smoke references needs only its
+    project lock. ``shared=True`` keeps the global-before-project order for
+    reference-bearing writes, whose pin must stay serialized with retention.
+    Standalone record stores (e.g. import tools/tests) have no shared data
+    owner and never take it.
+    """
+    boundary = (shared_lock(root.parent.parent, blocking=blocking)
+                if shared and root.parent.name == "projects" else contextlib.nullcontext())
+    with boundary:
         with project_record_lock(root, blocking=blocking):
             yield
 

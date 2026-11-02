@@ -495,7 +495,7 @@ class Insights:
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
         # Even unpinned writes create inbox temporaries that retention must not scan.
-        with lock_diagnostics.operation("write"), record_lock(self.root):
+        with lock_diagnostics.operation("write"), record_lock(self.root, shared=False):
             if not explicit:
                 best = None
                 best_key = None
