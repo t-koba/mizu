@@ -18,6 +18,12 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
+The `acceptance.py` retained-evidence ceiling and the `ci_observation.py`
+shared-cache caps and `ci_waits.py` diagnostic page caps are fixed safety
+bounds; `ci_waits.py`'s serialized check-set size is a mechanism contract;
+`ci_wake.py`'s re-wake default is configured policy owned by
+`[vcs] ci_rewake_seconds`, and its record version is format, outside the
+name-scoped detector.
 The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
@@ -46,10 +52,43 @@ CANDIDATE = re.compile(
 )
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'acceptance.py': {
+        'MAX_BYTES': (
+            '1048576', 'safety',
+            'acceptance / fixed retained-evidence read and canonical-value ceiling; '
+            'limits.file_bytes may narrow reads'),
+    },
     'evidence_records.py': {
         'MAX_STARTED_EVIDENCE_BYTES': (
             '65536', 'safety',
             'evidence records / fixed started.json authorization-read ceiling; file_bytes may lower it'),
+    },
+    'ci_observation.py': {
+        'MAX_CI_FAILURES': (
+            '32', 'safety',
+            'CI observation / bounded flattened current-failure rows for the shared cache and prompt'),
+        'MAX_CI_CHECKS_PER_BRANCH': (
+            '16', 'safety',
+            'CI observation / bounded stored check rows per branch and per tick'),
+        'MAX_CI_FAILURE_BRANCHES': (
+            '128', 'safety',
+            'CI observation / bounded stored branches with failure or success evidence'),
+    },
+    'ci_waits.py': {
+        'MAX_CHECK_SET_BYTES': (
+            '2048', 'mechanism',
+            'CI waits / serialized public check-set contract bound'),
+        'MAX_DIAGNOSTIC_ITEMS': (
+            '10', 'safety',
+            'CI waits / bounded diagnostic wait rows per projection'),
+        'MAX_DIAGNOSTIC_ROWS': (
+            '32', 'safety',
+            'CI waits / bounded observed-check rows per diagnostic projection'),
+    },
+    'ci_wake.py': {
+        'DEFAULT_CI_REWAKE_SECONDS': (
+            '1800', 'configured policy',
+            'VCS CI wake / fallback default for [vcs] ci_rewake_seconds; config validates 60-86400'),
     },
     'usage.py': {
         'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
@@ -221,6 +260,8 @@ CONFIGURED_SETTINGS = {
         'poll_max_branches': ('4', 'configured policy', 'VCS polling / branches considered per daemon tick'),
         'poll_fetch_timeout_seconds': ('30', 'configured policy', 'VCS polling / upstream fetch timeout default'),
         'poll_status_timeout_seconds': ('15', 'configured policy', 'VCS polling / per-branch status timeout default'),
+        'ci_rewake_seconds': ('1800', 'configured policy',
+                              'VCS CI wake / unchanged-red re-wake interval default'),
     },
 }
 CONFIGURED = {
@@ -514,8 +555,9 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
 
-    def test_vcs_poll_fallbacks_match_configured_policy_defaults(self):
+    def test_vcs_poll_and_ci_wake_fallbacks_match_configured_policy_defaults(self):
         policy = inventory(ast.parse((ROOT / 'vcs_poll_policy.py').read_text(encoding='utf-8')))
+        wake = inventory(ast.parse((ROOT / 'ci_wake.py').read_text(encoding='utf-8')))
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
         assignment = next(node for node in ast.walk(tree)
                           if isinstance(node, ast.Assign)
@@ -531,6 +573,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             {'MAX_CI_BRANCHES': defaults['poll_max_branches'],
              'POLL_CALL_TIMEOUT_CAP': defaults['poll_status_timeout_seconds'],
              'POLL_FETCH_TIMEOUT_CAP': defaults['poll_fetch_timeout_seconds']})
+        self.assertEqual(wake['DEFAULT_CI_REWAKE_SECONDS'], defaults['ci_rewake_seconds'])
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
