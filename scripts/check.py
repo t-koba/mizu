@@ -84,8 +84,9 @@ def _allow_list(value: str) -> frozenset:
 
 #: Per-check ceiling inside the later phase. The default phase budget holds
 #: two full child bounds, so one hung child still leaves every remaining child
-#: its own run. The suite child bound and the phase budget are configured
-#: by --suite-child-timeout and --later-phase-budget.
+#: its own run. This default is exposed as --check-timeout; the suite child
+#: bound and the phase budget are --suite-child-timeout and
+#: --later-phase-budget.
 DEFAULT_CHECK_TIMEOUT_SECONDS = 600
 GATE_TIMEOUT_MIN_SECONDS = 1
 GATE_TIMEOUT_MAX_SECONDS = 86400
@@ -105,12 +106,16 @@ def _gate_seconds(value):
 
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 30
 #: Seconds budgeted for the environment setup that precedes the suite child
-#: (interpreter start, preflight probes, dependency resolution).
+#: (interpreter start, preflight probes, dependency resolution). This is a
+#: fixed conservative margin in the scope model, not an enforced process
+#: bound; the operator raises the enclosing scope, not this reserve.
 SETUP_RESERVE_SECONDS = 60
 #: Seconds budgeted for the process-group cleanup that follows a bounded
 #: child: two bounded waits plus the termination grace and the reap.
 CLEANUP_RESERVE_SECONDS = 2 * PROCESS_CLEANUP_TIMEOUT_SECONDS + 6
-#: Seconds budgeted for the receipt write and the trailing summary.
+#: Seconds budgeted for the receipt write and the trailing summary. This is a
+#: fixed conservative margin in the scope model, not an enforced process
+#: bound; the operator raises the enclosing scope, not this reserve.
 RECEIPT_RESERVE_SECONDS = 120
 #: The SDK contract suites the later phase runs when their pinned
 #: dependencies are ready, and the adapters each suite needs. Every suite is
@@ -1310,6 +1315,15 @@ def _gate_parser():
                         default=LATER_PHASE_BUDGET_SECONDS,
                         help='Shared wall-clock budget for the checks after the Python suite '
                              f'in seconds (default {LATER_PHASE_BUDGET_SECONDS})')
+    parser.add_argument('--check-timeout', type=_gate_seconds,
+                        default=DEFAULT_CHECK_TIMEOUT_SECONDS,
+                        help='Wall-clock bound for each check after the Python suite in seconds '
+                             f'(default {DEFAULT_CHECK_TIMEOUT_SECONDS}); the shared phase budget '
+                             'still caps the total')
+    parser.add_argument('--provision-timeout', type=_gate_seconds,
+                        default=NPM_PROVISION_TIMEOUT_SECONDS,
+                        help='Wall-clock bound for each pinned adapter dependency install in '
+                             f'seconds (default {NPM_PROVISION_TIMEOUT_SECONDS})')
     return parser
 
 
@@ -1343,8 +1357,10 @@ def main():
     # the last-running test visible, and a step timeout
     # is recorded as a structured failure with the partial output counted
     # instead of crashing the gate before the receipt is written.
+    check_timeout = args.check_timeout
     def execute(name, command, *, count=None, failure_summary=None,
-                timeout=DEFAULT_CHECK_TIMEOUT_SECONDS, later_phase=False):
+                timeout=None, later_phase=False):
+        timeout = check_timeout if timeout is None else timeout
         if later_phase:
             allowed = phase.timeout_for(timeout)
             phase.children += 1
@@ -1610,7 +1626,8 @@ def main():
         # actually run: a waived gate needs no dependencies.
         if not args.no_provision:
             for name in sorted(provision_targets(allowed_not_run)):
-                state, details = provision_pinned_dependencies(adapters[name])
+                state, details = provision_pinned_dependencies(adapters[name],
+                                                               timeout=args.provision_timeout)
                 if state == 'ready' and verdicts[name][0] != 'ready':
                     print('== provisioned ' + str(adapters[name])
                           + ' pinned dependencies from the offline npm cache ==')

@@ -347,9 +347,14 @@ previously claimed; whether the child bound or the suite duration should move
 is an operator decision, with the retained per-cell artifacts as evidence. The
 gate exposes the child bound and the later-phase budget as
 `--suite-child-timeout` and `--later-phase-budget` (defaults 1800 s and
-1200 s; validated 1 to 86400 s ranges). CI uses the defaults; a run that
-passes other values must also ensure its enclosing job scope holds the
-resulting modeled path. The modeled
+1200 s; validated 1 to 86400 s ranges). It also exposes the per-check
+ceiling and the pinned-adapter install bound as `--check-timeout` and
+`--provision-timeout` (defaults 600 s and 300 s, same validated range); the
+first bounds each later-phase child, the second each install. CI uses the
+defaults; a run that passes other values must also ensure its enclosing job
+scope holds the resulting modeled path. The scope model's 60 s setup and
+120 s receipt/summary reserves are fixed conservative margins, not command
+timeouts. The modeled
 setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
 the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
 worst-case runtime claim. The authoritative `durable-contract` scope is 70

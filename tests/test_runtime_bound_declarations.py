@@ -3,7 +3,9 @@
 The `src/mizu` files below cover named, direct module-level Assign/AnnAssign
 bounds and direct numeric literal/arithmetic values at a short resource-call
 keyword set. The gate inventory covers `scripts/check.py`'s host-cost, output
-and artifact bounds; its two host-cost choices are configured policy defaults.
+and artifact bounds; its enforced host-cost choices are configured policy
+defaults, while its scope reserves and output/artifact bounds are fixed safety
+ceilings.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
 ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
@@ -149,14 +151,16 @@ DECLARATIONS = {
 }
 
 
-# The validation gate is a separate owner. Its suite child bound and later-phase
-# budget are configured policy defaults; the remaining host-cost choices are
-# recorded as policy until a measured slice moves them, and output/artifact
-# bounds are fixed safety ceilings.
+# The validation gate is a separate owner. Its enforced host-cost choices have
+# configuration owners: the suite child, shared phase budget, per-check ceiling
+# and provisioning bound each have a validated option. The two modelled-path
+# reserves are fixed conservative safety margins, not command bounds, and
+# output/artifact bounds are fixed safety ceilings.
 GATE_DECLARATIONS = {
     'check.py': {
         'DEFAULT_CHECK_TIMEOUT_SECONDS': (
-            '600', 'policy', 'gate later phase / per-check ceiling; the phase budget holds two full bounds'),
+            '600', 'configured policy',
+            'gate later phase / per-check ceiling default; --check-timeout'),
         'GATE_TIMEOUT_MIN_SECONDS': (
             '1', 'safety', 'gate configuration / minimum accepted host-cost bound'),
         'GATE_TIMEOUT_MAX_SECONDS': (
@@ -164,9 +168,11 @@ GATE_DECLARATIONS = {
         'PROCESS_CLEANUP_TIMEOUT_SECONDS': (
             '30', 'mechanism', 'gate / bounded process-group cleanup wait'),
         'SETUP_RESERVE_SECONDS': (
-            '60', 'policy', 'gate modelled path / setup reserve for the enclosing scope'),
+            '60', 'safety',
+            'gate modelled path / fixed conservative setup margin; not an enforced command bound'),
         'RECEIPT_RESERVE_SECONDS': (
-            '120', 'policy', 'gate modelled path / receipt and summary reserve'),
+            '120', 'safety',
+            'gate modelled path / fixed conservative receipt/summary margin; not an enforced command bound'),
         'LATER_PHASE_BUDGET_SECONDS': (
             '1200', 'configured policy', 'gate later phase / default shared budget; --later-phase-budget'),
         'RELAY_BUDGET_BYTES': (
@@ -192,7 +198,8 @@ GATE_DECLARATIONS = {
         'TIMING_ARTIFACT_MAX_BYTES': (
             '192 * 1024', 'safety', 'gate timing artifact / bounded artifact page'),
         'NPM_PROVISION_TIMEOUT_SECONDS': (
-            '300', 'policy', 'gate provisioning / pinned adapter install timeout'),
+            '300', 'configured policy',
+            'gate provisioning / pinned adapter install timeout default; --provision-timeout'),
         'PROJECT_IMPORT_DIAGNOSTIC_BYTES': (
             '8192', 'safety', 'gate import diagnostic / bounded sidecar read'),
     },

@@ -82,17 +82,100 @@ class CheckTimeoutTests(unittest.TestCase):
         defaults = parser.parse_args([])
         self.assertEqual(defaults.suite_child_timeout, 1800)
         self.assertEqual(defaults.later_phase_budget, 1200)
+        self.assertEqual(defaults.check_timeout, 600)
+        self.assertEqual(defaults.provision_timeout, 300)
         configured = parser.parse_args(['--suite-child-timeout', '900',
-                                        '--later-phase-budget', '600'])
+                                        '--later-phase-budget', '600',
+                                        '--check-timeout', '7',
+                                        '--provision-timeout', '8'])
         self.assertEqual(configured.suite_child_timeout, 900)
         self.assertEqual(configured.later_phase_budget, 600)
+        self.assertEqual(configured.check_timeout, 7)
+        self.assertEqual(configured.provision_timeout, 8)
         for arguments in (['--suite-child-timeout', '0'],
                           ['--later-phase-budget', '0'],
+                          ['--check-timeout', '0'],
+                          ['--provision-timeout', '0'],
                           ['--suite-child-timeout', 'abc'],
-                          ['--later-phase-budget', '86401']):
+                          ['--later-phase-budget', '86401'],
+                          ['--check-timeout', '86401'],
+                          ['--provision-timeout', 'abc']):
             with mock.patch('sys.stderr', new=io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parser.parse_args(arguments)
+
+    def test_configured_check_timeout_reaches_a_later_phase_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'report.json'
+            budgets = []
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    self.stdout = io.StringIO('synthetic failure\n')
+
+                def wait(self, timeout):
+                    budgets.append(timeout)
+                    return 1
+
+                def kill(self):
+                    pass
+
+            with mock.patch.object(CHECK.sys, 'argv', [
+                        'check.py', '--report', str(report), '--no-provision',
+                        '--check-timeout', '7',
+                        '--allow-not-run', ','.join(CHECK.SDK_GATE_NAMES)]), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', return_value=None), \
+                    mock.patch.object(CHECK, 'javascript_sources', return_value=[]), \
+                    mock.patch.object(CHECK, 'shell_sources', return_value=[]), \
+                    mock.patch.object(CHECK, 'node_version', return_value='v0.test'), \
+                    mock.patch.object(CHECK, 'pi_sdk_deps_status',
+                                      return_value=('absent', 'not installed')), \
+                    mock.patch.object(CHECK.shutil, 'which',
+                                      side_effect=lambda name: '/usr/bin/node' if name == 'node' else None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                    mock.patch.object(CHECK.sys, 'stdout', io.StringIO()):
+                self.assertEqual(CHECK.main(), 1)
+            self.assertIn(7, budgets)
+
+    def test_configured_provision_timeout_reaches_pinned_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / 'report.json'
+            provisioned = []
+
+            class FakeProcess:
+                def __init__(self, command, **kwargs):
+                    self.stdout = io.StringIO('synthetic failure\n')
+
+                def wait(self, timeout):
+                    return 1
+
+                def kill(self):
+                    pass
+
+            def fake_provision(adapter, *, timeout):
+                provisioned.append(timeout)
+                return 'ready', ''
+
+            with mock.patch.object(CHECK.sys, 'argv', [
+                        'check.py', '--report', str(report), '--provision-timeout', '8']), \
+                    mock.patch.object(CHECK, 'spawn', FakeProcess), \
+                    mock.patch.object(CHECK, 'popen_kwargs', return_value={}), \
+                    mock.patch.object(CHECK, 'terminate_process', return_value=None), \
+                    mock.patch.object(CHECK, 'javascript_sources', return_value=[]), \
+                    mock.patch.object(CHECK, 'shell_sources', return_value=[]), \
+                    mock.patch.object(CHECK, 'node_version', return_value='v0.test'), \
+                    mock.patch.object(CHECK, 'pi_sdk_deps_status',
+                                      return_value=('absent', 'not installed')), \
+                    mock.patch.object(CHECK, 'provision_pinned_dependencies',
+                                      side_effect=fake_provision), \
+                    mock.patch.object(CHECK.shutil, 'which',
+                                      side_effect=lambda name: '/usr/bin/node' if name == 'node' else None), \
+                    mock.patch.object(CHECK, 'bash_available', return_value=False), \
+                    mock.patch.object(CHECK.sys, 'stdout', io.StringIO()):
+                self.assertEqual(CHECK.main(), 1)
+            self.assertEqual(provisioned, [8, 8])
 
     def test_configured_host_cost_bounds_reach_the_modelled_path(self):
         self.assertEqual(CHECK._unittest_timeout_seconds(900), 900)
