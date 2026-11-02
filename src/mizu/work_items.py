@@ -410,6 +410,10 @@ class WorkItems:
         (the immutable seed or exact revision files), never projected items.
         """
         try:
+            if IS_WINDOWS:
+                # Windows reads never use this POSIX-only cache (directory
+                # metadata is not a trustworthy invalidation witness there).
+                return False
             if ITEM_ID.fullmatch(item_id) is None or not isinstance(seed, dict):
                 return
             if since is not None and not _timestamp(since):
@@ -732,6 +736,10 @@ class WorkItems:
         """
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item state backfill limit must be an integer in [1, 100]")
+        if IS_WINDOWS:
+            # The read path intentionally bypasses the cache on Windows; do not
+            # create files no read can use or report them as warmed.
+            return {"checked": 0, "backfilled": 0}
         checked = 0
         backfilled = 0
         with lock(self.root / "locks" / "insights.lock"):

@@ -160,6 +160,23 @@ class WorkItemTests(Fixture):
         self.assertEqual(self.store._history_cache, {})
         self.assertEqual(self.store._projection_cache, {})
 
+    def test_windows_writes_no_current_state_sidecar_or_backfill(self):
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        self.assertTrue(sidecar.exists())
+        sidecar.unlink()
+        with patch("mizu.work_items.IS_WINDOWS", True):
+            created = self.store.create(idempotency_key="windows-sidecar",
+                                        title="Windows", actor="worker")["record"]["work_item"]
+            new_sidecar = self.project.root / "work-item-state" / f"{created['id']}.json"
+            self.assertFalse(new_sidecar.exists())
+            self.store.transition(created["id"], expected_rev=1, status="doing",
+                                  actor="worker")
+            self.assertFalse(new_sidecar.exists())
+            self.assertEqual(self.store.backfill_current_states(limit=100),
+                             {"checked": 0, "backfilled": 0})
+            self.assertFalse(sidecar.exists())
+            self.assertFalse(new_sidecar.exists())
+
     def test_weak_platform_same_size_create_rewrite_fails_closed(self):
         created = self.store.create(idempotency_key="weak-rewrite", title="Rewrite",
                                     actor="worker")["record"]["work_item"]
