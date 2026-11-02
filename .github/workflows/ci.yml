@@ -31,7 +31,7 @@ jobs:
     # modelled setup/child/later-phase/cleanup/
     # suffix path (3246 s) inside a 60-minute scope and the gate reports its
     # own bounded outcome instead of being cut off by the job scope. The
-    # later phase runs one child per check (nine on Windows, sixteen in a
+    # later phase runs one child per check (ten on Windows, seventeen in a
     # POSIX cell) and is bounded as a whole at 1200 s, so the number of
     # checked files cannot grow the modelled path.
     # The Linux/Python 3.13 cell also installs. That cell runs the gate

@@ -130,15 +130,17 @@ SDK_GATE_NAMES = tuple(SDK_GATE_ADAPTERS)
 #: The wall-clock budget the gate may spend on the checks that follow the
 #: Python suite. The later phase runs one child per check: the transport
 #: and SDK contract suites, one syntax check per JavaScript file, one per
-#: shell wrapper -- sixteen children in a POSIX matrix cell, nine on
-#: Windows, nineteen in the durable job. A budget per child would make the
-#: gate's own path grow with the number of checked files, so the phase is
+#: shell wrapper -- seventeen children in a POSIX matrix cell, ten on
+#: Windows, twenty in the durable job. `later_phase_child_count` derives
+#: these from the checked file set. A budget per child would make the gate's
+#: own path grow with the number of checked files, so the phase is
 #: bounded as a whole and every enclosing scope holds one phase budget.
 #: The budget covers the measured healthy phase with wide margin: about 4 s
-#: for the sixteen children of a POSIX matrix cell, and about 103 s for the
-#: nineteen children of the durable job (its three SDK contract suites
-#: measured 5.6 s, 75.5 s and 18.1 s on the development host). The budget
-#: also holds two children's full bounds, so one hung child still leaves
+#: for the earlier sixteen-child POSIX cell, and about 103 s for the earlier
+#: nineteen-child durable job (its three SDK contract suites measured 5.6 s,
+#: 75.5 s and 18.1 s on the development host). Those measurements predate the
+#: current seventeen- and twenty-child phases, so they are lower bounds. The
+#: budget also holds two children's full bounds, so one hung child still leaves
 #: every remaining child its own run. This value is the default for
 #: --later-phase-budget.
 LATER_PHASE_BUDGET_SECONDS = 1200

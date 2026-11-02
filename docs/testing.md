@@ -378,22 +378,24 @@ installer staging call holds the same path for the same reason.
 
 The later phase is bounded as a whole, not per child. It runs one child per
 check: the transport suite, every SDK contract suite that is not waived, one
-syntax check per JavaScript file, and one per shell wrapper -- nine children
-on Windows, sixteen in a POSIX matrix cell, nineteen in the durable job. A
-budget per child would make the gate's own path grow with the number of
-checked files, so the phase carries one 1200 s budget that every child and
-install shares: a child takes at most its own 600 s bound and what is left
-of the phase, with its own cleanup reserved inside that remainder. The
-budget covers the measured healthy phase with wide margin -- about 4 s for
-the sixteen children of a POSIX cell, and about 103 s for the nineteen
-children of the durable job, whose three SDK contract suites measured 5.6 s,
-75.5 s and 18.1 s on the development host. Without an install it holds two
-children's full bounds; an install is charged to the same budget, so the
-phase stays inside its modeled path and the receipt records the install
-count and time. A child the phase can no longer afford is recorded as a
-failure with the reason `later-phase-budget-exhausted`; it is never skipped
-silently, and the receipt records the phase's own child count, budget, and
-consumed time.
+syntax check per JavaScript file, and one per shell wrapper -- ten children
+on Windows, seventeen in a POSIX matrix cell, twenty in the durable job.
+The count test pins this account, and the gate's `later_phase_child_count`
+derives it from the checked file set. A budget per child would make the
+gate's own path grow with the number of checked files, so the phase carries
+one 1200 s budget that every child and install shares: a child takes at most
+its own 600 s bound and what is left of the phase, with its own cleanup
+reserved inside that remainder. The budget covers the measured healthy phase
+with wide margin -- about 4 s for the earlier sixteen-child POSIX cell, and
+about 103 s for the earlier nineteen-child durable job, whose three SDK
+contract suites measured 5.6 s, 75.5 s and 18.1 s on the development host.
+Those measurements predate the current seventeen- and twenty-child phases, so
+they are lower bounds. Without an install it holds two children's full bounds;
+an install is charged to the same budget, so the phase stays inside its
+modeled path and the receipt records the install count and time. A child the
+phase can no longer afford is recorded as a failure with the reason
+`later-phase-budget-exhausted`; it is never skipped silently, and the receipt
+records the phase's own child count, budget, and consumed time.
 The 2026-10-21 Windows/3.13 run completed 2233 of about 2265 tests in
 1447 s and reached the previous 1450 s child cap without a reported
 test failure, and the 2026-10-21 POSIX run reached the previous 1000 s child
