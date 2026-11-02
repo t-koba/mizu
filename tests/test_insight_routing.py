@@ -600,6 +600,24 @@ class PendingInsightLockTests(Fixture):
                     self.assertFalse(future.done())
             self.assertEqual(future.result(timeout=10), expected)
 
+    def test_pending_read_falls_back_when_unlocked_generation_is_replaced(self):
+        from mizu import insights as insights_module
+        self.submit('Replacement')
+        original = insights_module.safe_read_managed
+        replaced = [False]
+
+        def replace_once(*args, **kwargs):
+            if not replaced[0]:
+                replaced[0] = True
+                raise Denied("File changed while reading")
+            return original(*args, **kwargs)
+
+        with patch("mizu.insights.safe_read_managed", side_effect=replace_once):
+            events, diagnostics = self.pending()
+        self.assertTrue(replaced[0])
+        self.assertEqual([event["title"] for event in events], ["Replacement"])
+        self.assertEqual(diagnostics, [])
+
     def test_pending_read_scan_does_not_block_same_project_submit(self):
         self.submit('Before')
         entered, release = threading.Event(), threading.Event()

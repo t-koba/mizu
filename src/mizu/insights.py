@@ -1937,8 +1937,9 @@ replacement insight without implying rejected substance.
 
         The source scan runs without the project record lock; the lock is
         taken only to recheck selected source rows and receipts, or to run the
-        exact fallback when the before/after metadata witness changed. A
-        changed source therefore never becomes a stale or incomplete page.
+        exact fallback when the before/after metadata witness changed or an
+        unlocked read refuses an overlapping replacement. A changed source
+        therefore never becomes a stale or incomplete page.
         """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -1964,8 +1965,17 @@ replacement insight without implying rejected substance.
                         yield (dt.datetime.fromisoformat(event["created_at"]),
                                event, envelope)
 
-            selected = heapq.nsmallest(limit, eligible(),
-                                       key=lambda row: (row[0], row[1]["event"]))
+            try:
+                selected = heapq.nsmallest(limit, eligible(),
+                                           key=lambda row: (row[0], row[1]["event"]))
+            except Denied:
+                # A concurrent atomic replacement can make a handle-bound
+                # POSIX read refuse between open and its final fstat. The
+                # unlocked generation is no longer trustworthy; run the exact
+                # locked scan for a fresh page instead of failing the caller.
+                with project_record_lock(self.root):
+                    return self._pending_insight_events_exact(
+                        role_name, configured_roles, limit)
             after = self._pending_source_fingerprint(role_name)
             if before is None or before != after:
                 with project_record_lock(self.root):
