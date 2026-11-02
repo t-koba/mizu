@@ -4,6 +4,8 @@ The `src/mizu` files below cover named, direct module-level Assign/AnnAssign
 bounds and direct numeric literal/arithmetic values at a short resource-call
 keyword set. The gate inventory covers `scripts/check.py`'s host-cost, output
 and artifact bounds; its two host-cost choices are configured policy defaults.
+The `vcs.py` provider response-shape bounds are fixed mechanism and safety
+ceilings for untrusted content; their audit found no host-cost policy bound.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -49,6 +51,35 @@ DECLARATIONS = {
     },
     'web.py': {
         'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
+    },
+    'vcs.py': {
+        'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
+        'MAX_ACQUIRE_CONTENT': (
+            '524288', 'safety', 'VCS acquire / bounded acquired content; callers narrow scope'),
+        'MAX_ARTIFACTS': ('256', 'mechanism', 'VCS artifacts / bounded true artifact entries'),
+        'MAX_ARTIFACT_NAME': (
+            '512', 'mechanism', 'VCS artifacts / bounded relative file-name chars'),
+        'MAX_ARTIFACT_CONTENT': (
+            '524288', 'safety', 'VCS artifacts / bounded whole-artifact text chars'),
+        'MAX_ARTIFACT_PAGE_BYTES': (
+            '8192', 'mechanism', 'VCS artifacts / bounded UTF-8 page read'),
+        'MAX_CHECKS': ('1024', 'mechanism', 'VCS status / adapter payload already capped'),
+        'MAX_PROPOSALS': ('256', 'mechanism', 'VCS proposals / bounded external proposal rows'),
+        'MAX_REVIEWS': ('64', 'mechanism', 'VCS proposals / bounded independent reviews per row'),
+        'MAX_PROPOSAL_CHECK_DETAIL_BYTES': (
+            '16 * 1024', 'safety', 'VCS proposals / fixed UTF-8 budget for retained check detail'),
+        'MAX_CLOSE_IF_ADOPTED_REASON': (
+            '4096', 'mechanism', 'VCS conditional close / bounded reason text'),
+        'MAX_CLOSE_IF_ADOPTED_MISMATCHES': (
+            '50', 'mechanism', 'VCS conditional close / bounded mismatch rows'),
+        'MAX_CLOSE_IF_ADOPTED_PATH': (
+            '4096', 'mechanism', 'VCS conditional close / bounded path text'),
+        'MAX_CLOSE_IF_ADOPTED_CHANGED_PATHS': (
+            '2000', 'mechanism', 'VCS conditional close / bounded reported changed-path count'),
+        'MAX_CI_WORKFLOWS': ('8', 'mechanism', 'VCS CI request / at most eight workflows'),
+        'MAX_CI_JOB_SECONDS': (
+            '7 * 86400', 'safety',
+            'VCS CI status / one-week sanity ceiling for reported job time'),
     },
     'vcs_poll_policy.py': {
         'MAX_CI_BRANCHES': ('4', 'configured policy', 'VCS polling / fail-closed fallback for poll_max_branches'),
