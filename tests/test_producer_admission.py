@@ -144,7 +144,7 @@ class ProducerCountsTests(Fixture):
         reader = threading.current_thread()
 
         @contextlib.contextmanager
-        def observed_lock(root):
+        def observed_lock(root, **kwargs):
             if threading.current_thread() is not reader:
                 try:
                     # Prove contention at the actual per-project Insights lock
@@ -154,7 +154,9 @@ class ProducerCountsTests(Fixture):
                             pass
                 finally:
                     contention_checked.set()
-            with record_lock(root):
+            # Forward every lock option faithfully; submit is ref-free and uses
+            # shared=False, while the test still decides from the real lock.
+            with record_lock(root, **kwargs):
                 yield
 
         def read_during_submission(*args):
