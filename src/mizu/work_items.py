@@ -1877,7 +1877,7 @@ class WorkItems:
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
-                        blocked_only: bool = False):
+                        blocked_only: bool = False, include_open_count: bool = False):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -1896,6 +1896,7 @@ class WorkItems:
         counts = {state: 0 for state in
                   ("absent", "pending", "due", "impossible", "receipt_bound", "unknown")}
         total = 0
+        open_count = 0
         eligible = 0
         unseeded_decisions = 0
         unknown_blocked = 0
@@ -1916,6 +1917,7 @@ class WorkItems:
             item = view["item"]
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
+            open_count += 1
             if order_fingerprint:
                 leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope"),
                                   view["current_origin_rev"], view["stale"], view["redecision"]])
@@ -1978,6 +1980,8 @@ class WorkItems:
                     "overflow_count": overflow_count, "truncated": more,
                     "unseeded_decisions": unseeded_decisions,
                     "coverage_complete": complete, "diagnostic": None if complete else "incomplete"}
+            if include_open_count:
+                result["open_count"] = open_count
         if ready_only:
             complete = unseeded_decisions == 0 and unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked
@@ -2066,6 +2070,28 @@ class WorkItems:
             return {"items": [], "total": None, "counts": None, "overflow_count": None,
                     "truncated": None, "unseeded_decisions": None,
                     "coverage_complete": False, "diagnostic": "unreadable"}
+
+    def open_state_readonly(self, *, limit=25) -> dict:
+        """Return the seeded open count and blocked liveness from one scan.
+
+        The caller gets the same fail-closed diagnostic shape as
+        :meth:`blocked_liveness_readonly` and an ``open_count`` derived from the
+        same validated projections. A read error reports both as unavailable;
+        it never falls back to a zero or an unvalidated cache.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item page limit must be an integer in [1, 100]")
+        try:
+            blocked = self._page_open_impl(cursor=None, limit=limit, readonly=True,
+                                           blocked_only=True, include_open_count=True)
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
+            return {"open_count": None,
+                    "blocked_work": {"items": [], "total": None, "counts": None,
+                                     "overflow_count": None, "truncated": None,
+                                     "unseeded_decisions": None,
+                                     "coverage_complete": False, "diagnostic": "unreadable"}}
+        open_count = blocked.pop("open_count")
+        return {"open_count": open_count, "blocked_work": blocked}
 
     def page_closed_readonly(self, *, limit=10) -> dict:
         """Return the newest seeded terminal items without lock or recovery.

@@ -22,6 +22,9 @@ from .snapshot import (no_progress_recovery_due, open_store,
 from .work_items import WorkItems
 
 
+_UNSET = object()
+
+
 def session_persistence_scope(config: Config, role_name: str | None) -> str:
     """Classify whether every, some, or no role profile can retain a session.
 
@@ -228,7 +231,7 @@ class Project:
         from .acceptance import effective
         return effective(self, snapshot)
 
-    def backpressure(self) -> dict:
+    def backpressure(self, *, open_count=_UNSET) -> dict:
         """Report configured producer/open-work congestion and current load.
 
         Both configured limits, the authoritative open/doing/blocked count,
@@ -288,6 +291,7 @@ class Project:
             open_limit = _raw_limit("open_work_items")
         limits_ok = per_source_valid and open_limit_valid
         counts: dict = {}
+        supplied_open_count = open_count
         open_count = None
         counts_ok = open_ok = True
         try:
@@ -296,7 +300,13 @@ class Project:
         except Exception:
             counts_ok = False
         try:
-            open_count = self.work_items.count_open_readonly()
+            if supplied_open_count is _UNSET:
+                open_count = self.work_items.count_open_readonly()
+            elif type(supplied_open_count) is not int or supplied_open_count < 0:
+                open_ok = False
+                open_count = None
+            else:
+                open_count = supplied_open_count
         except Exception:
             open_ok = False
         # Status readability is independent of the metrics admission needs.
@@ -377,6 +387,9 @@ class Project:
         # old run idle. The observation was bound into the progress record
         # when this snapshot was created.
         idle_diagnostic = idle_with_open_work(snapshot)
+        open_state = self.work_items.open_state_readonly()
+        backpressure = self.backpressure(open_count=open_state["open_count"])
+        blocked_work = open_state["blocked_work"]
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
@@ -403,12 +416,12 @@ class Project:
                 # never admitted.
                 "admission": admission_waiting(self.config, self.name),
                 "selection": project_status(self.config, self),
-                "backpressure": self.backpressure(),
+                "backpressure": backpressure,
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
                 "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),
                 "work_order": self.work_order_status(),
-                "blocked_work": self.work_items.blocked_liveness_readonly(),
+                "blocked_work": blocked_work,
                 "budget": {"used_requests": budget["used"], "limit_requests": budget["limit"],
                            "shared_used_requests": budget["shared_used"],
                            "shared_limit_requests": budget["shared_limit"],

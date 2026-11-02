@@ -481,7 +481,9 @@ class ProducerHoldTests(Fixture):
         self.project.insights.producer_inputs_per_source = 100
         self.project.insights.open_work_items = 0
         with patch.object(self.project.work_items, "count_open_readonly",
-                          side_effect=OSError("injected")):
+                          side_effect=OSError("injected")), \
+                patch.object(self.project.work_items, "_page_open_impl",
+                             side_effect=OSError("injected")):
             self.assertIsNone(producer_hold(self.project, "searcher"))
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"])
@@ -632,7 +634,7 @@ class ProducerStatusTests(Fixture):
         for name in ("searcher", "reviewer"):
             self.config.roles[name] = dataclasses.replace(
                 self.config.roles[name], held_at_capacity=True)
-        with patch.object(self.project.work_items, "count_open_readonly", side_effect=OSError("injected")):
+        with patch.object(self.project.work_items, "_page_open_impl", side_effect=OSError("injected")):
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"])
             self.assertIsNone(view["open_work_count"])
@@ -658,7 +660,7 @@ class ProducerStatusTests(Fixture):
         for name in ("searcher", "reviewer"):
             self.config.roles[name] = dataclasses.replace(
                 self.config.roles[name], held_at_capacity=True)
-        with patch.object(self.project.work_items, "count_open_readonly",
+        with patch.object(self.project.work_items, "_page_open_impl",
                           side_effect=OSError("injected")):
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"])

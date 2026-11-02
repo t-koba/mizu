@@ -59,6 +59,22 @@ class WorkItemTests(Fixture):
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
                 self.store.blocked_liveness_readonly, self.store.page_open_for_order)
 
+    def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
+        calls = []
+        original = self.store._page_open_impl
+
+        def scanned(**kwargs):
+            calls.append(kwargs)
+            return original(**kwargs)
+
+        with patch.object(self.store, "_page_open_impl", side_effect=scanned):
+            status = self.project.status()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["blocked_only"])
+        self.assertTrue(calls[0]["include_open_count"])
+        self.assertEqual(status["backpressure"]["open_work_count"], 1)
+        self.assertEqual(status["blocked_work"]["total"], 0)
+
     def test_status_projections_skip_superseded_snapshots_and_check_current_binding(self):
         self.change("doing")
         historical = self.snapshot("valid")
