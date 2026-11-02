@@ -1,13 +1,15 @@
 """Typed smoke IDs and lock ordering for shared smoke-reference state.
 
-Record writes acquire the shared lock before the project lock: even unpinned
-inbox writes create temporaries that the strict retention scan must not see.
-The smoke publisher also moves a whole project root while holding the shared
-lock; the project lock lives inside that movable root and cannot replace the
-shared boundary safely. Read-only unresolved-count and pending-insight scans
-use the project lock alone. IDs are scoped by their containing project/owner
-record; Insight entries also store the exact revision. History keeps IDs, but
-only current live owners pin.
+A ref-free record write (a new Insight submission) takes the project lock
+alone; retention skips the recognized atomic-write temporaries it creates.
+Writes that can add or remove smoke references acquire the shared lock before
+the project lock, keeping their pins serialized with retention's pair
+deletion. The smoke publisher also moves a whole project root while holding
+the shared lock; the project lock lives inside that movable root and cannot
+replace the shared boundary safely. Read-only unresolved-count and
+pending-insight scans use the project lock alone. IDs are scoped by their
+containing project/owner record; Insight entries also store the exact
+revision. History keeps IDs, but only current live owners pin.
 """
 from __future__ import annotations
 

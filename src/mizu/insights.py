@@ -35,10 +35,13 @@ grants operator approval. Model ``submit_insight`` exposes no origin field
 and is stored with ``origin`` None; the Editor outbox accepts only
 ``title``/``body``/``base_snapshot`` so capsule content cannot forge origin.
 
-Inbox writes hold the shared retention lock before the project record lock,
-even without smoke references: atomic-write temporaries must not overlap the
-strict retention scan. Only the read-only unresolved-count scan uses the
-project lock alone, remaining serialized with same-project writers.
+A ref-free inbox write (a new Insight submission) takes the project record
+lock alone; retention skips the recognized atomic-write temporaries it
+creates. Writes that can add or remove smoke references hold the shared
+retention lock before the project record lock, keeping their pins serialized
+with retention's pair deletion. The read-only unresolved-count and
+pending-insight scans also use the project lock alone, remaining serialized
+with same-project writers.
 """
 from __future__ import annotations
 
@@ -494,7 +497,8 @@ class Insights:
                  "base_snapshot": base_snapshot, "run": run, "origin": origin, **specified}
         if len(canonical(probe)) > self.maximum:
             raise Denied("Insight exceeds byte limit")
-        # Even unpinned writes create inbox temporaries that retention must not scan.
+        # A new record has no evidence, so this ref-free write needs only the
+        # project lock; retention skips the atomic temporaries it creates.
         with lock_diagnostics.operation("write"), record_lock(self.root, shared=False):
             if not explicit:
                 best = None
