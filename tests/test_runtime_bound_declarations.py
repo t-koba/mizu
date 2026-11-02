@@ -6,6 +6,8 @@ keyword set. The gate inventory covers `scripts/check.py`'s host-cost, output
 and artifact bounds; its two host-cost choices are configured policy defaults.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
 ceilings for untrusted content; their audit found no host-cost policy bound.
+The `project.py` git-tree import time bounds are configured policy; its
+remaining output caps are fixed safety ceilings.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -51,6 +53,12 @@ DECLARATIONS = {
     },
     'web.py': {
         'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
+    },
+    'project.py': {
+        'MAX_VERIFY_COMMANDS': ('32', 'safety', 'project / bounded verification command list'),
+        'MAX_RECORDED_BATCHES': ('32', 'safety', 'project / bounded named batch definitions'),
+        'MAX_RECORDED_BATCH_COMMANDS': (
+            '32', 'safety', 'project / bounded commands per named batch'),
     },
     'vcs.py': {
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
@@ -176,6 +184,14 @@ CONFIGURED = {
         'name_processing_limit': ('10000', 'configured policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
         'record_limit': ('1000', 'configured policy', 'CI requests / candidate-record validation budget'),
     },
+    'ProjectImport': {
+        'status_timeout_seconds': (
+            '30', 'configured policy', 'project import / git status command wall-time budget'),
+        'clone_timeout_seconds': (
+            '300', 'configured policy', 'project import / git clone command wall-time budget'),
+        'local_timeout_seconds': (
+            '15', 'configured policy', 'project import / local git config and remote command budget'),
+    },
     'PublicationPolicy': {
         'source_commit_timeout_seconds': ('5', 'configured policy', 'publication / local Git HEAD command wall-time budget'),
     },
@@ -235,6 +251,16 @@ CALLS = {
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },
     'ci_requests.py': {},
+    'project.py': {
+        ('config_managed_repo', 'run', 'maximum', 0): (
+            '8192', 'safety', 'project import / local git config output read bound'),
+        ('_import_git_tree', 'run', 'maximum', 0): (
+            '65536', 'safety', 'project import / git status output read bound'),
+        ('_import_git_tree', 'run', 'maximum', 1): (
+            '1048576', 'safety', 'project import / git clone output read bound'),
+        ('_import_git_tree', 'run', 'maximum', 2): (
+            '8192', 'safety', 'project import / origin removal output read bound'),
+    },
     'publication.py': {
         ('source_commit', 'process.run', 'maximum', 0): (
             '4096', 'safety', 'publication / local Git HEAD output read bound'),

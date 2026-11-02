@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from .budget import Budget
-from .config import Config, _lineage_target, keys, strings
+from .config import Config, ProjectImport, _lineage_target, keys, strings
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .insights import Insights
@@ -529,17 +529,38 @@ def git_env() -> dict[str, str]:
                               "GIT_CONFIG_VALUE_0": "explicit"})
 
 
-def config_managed_repo(workspace: Path, env: dict[str, str]) -> None:
+def _stopped_import(result, bound: int, label: str) -> str:
+    """Describe a stopped local command without treating it as content."""
+    if result.reason == "timeout":
+        detail = (f"{label} stopped at the {bound}s time bound after "
+                  f"{result.seconds:.1f}s (timeout)")
+    else:
+        detail = f"{label} stopped after {result.seconds:.1f}s ({result.reason})"
+    note = stop_note(result)
+    return detail + (f"; {note}" if note else "")
+
+
+def _git_error(result, fallback: str) -> str:
+    """Keep a bounded local-git detail for a real nonzero exit."""
+    text = (result.stderr or result.stdout).strip()
+    return text[-512:] if text else fallback
+
+
+def config_managed_repo(workspace: Path, env: dict[str, str], policy: ProjectImport) -> None:
     for key, value in (("user.name", "Mizu"), ("user.email", "automation@localhost"),
                        ("core.hooksPath", os.devnull)):
         configured = run(["git", "-C", str(workspace), "config", key, value],
-                         timeout=15, maximum=8192, env=env)
+                         timeout=policy.local_timeout_seconds, maximum=8192, env=env)
+        if configured.reason != "exited":
+            raise Denied("Cannot configure managed repository: "
+                         + _stopped_import(configured, policy.local_timeout_seconds, "git config"))
         if configured.exit_code != 0:
-            raise Denied("Cannot configure managed repository"
-                         + (": " + stop_note(configured) if stop_note(configured) else ""))
+            raise Denied("Cannot configure managed repository: "
+                         + _git_error(configured, f"git exited {configured.exit_code}"))
 
 
-def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None:
+def _import_git_tree(source: Path, workspace: Path, env: dict[str, str],
+                     policy: ProjectImport) -> None:
     """Clone a clean git tree without history leakage. Loud failure only."""
     if not shutil.which("git"):
         raise Denied("Git is required for git-tree import; make a separate plain-directory export first")
@@ -547,21 +568,38 @@ def _import_git_tree(source: Path, workspace: Path, env: dict[str, str]) -> None
                   "-c", f"core.hooksPath={os.devnull}",
                   "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
                  # Only emptiness matters; truncation preserves truthiness.
-                 timeout=30, maximum=65536, env=env)
-    if status.exit_code != 0 or status.stdout.strip():
+                 timeout=policy.status_timeout_seconds, maximum=65536, env=env)
+    if status.reason != "exited":
+        # A stopped status check says nothing about the tree's content.
+        raise Denied("Git import could not check the source tree: "
+                     + _stopped_import(status, policy.status_timeout_seconds, "status check"))
+    if status.exit_code != 0:
+        # A real exit failure keeps the git diagnostic, not the dirty-tree text.
+        raise Denied("Git import status check failed: "
+                     + _git_error(status, f"git exited {status.exit_code}"))
+    if status.stdout.strip():
         # An incomplete status output cannot prove the tree is clean.
-        raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first"
-                     + (": " + stop_note(status) if stop_note(status) else ""))
+        raise Denied("Git import requires a clean source tree; commit or make a separate plain-directory export first")
     result = run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
                   "-c", f"core.hooksPath={os.devnull}",
                   "clone", "--no-local",
                   "--no-hardlinks", "--", str(source), str(workspace)],
-                 timeout=300, maximum=1048576, env=env)
+                 timeout=policy.clone_timeout_seconds, maximum=1048576, env=env)
+    if result.reason != "exited":
+        raise Denied("Repository import stopped: "
+                     + _stopped_import(result, policy.clone_timeout_seconds, "clone"))
     if result.exit_code != 0:
-        raise Denied(f"Repository import failed: {stop_note(result) or result.stderr}")
-    run(["git", "-C", str(workspace), "remote", "remove", "origin"],
-        timeout=15, maximum=8192, env=env)
-    config_managed_repo(workspace, env)
+        raise Denied("Repository import failed: "
+                     + _git_error(result, f"git exited {result.exit_code}"))
+    removed = run(["git", "-C", str(workspace), "remote", "remove", "origin"],
+                  timeout=policy.local_timeout_seconds, maximum=8192, env=env)
+    if removed.reason != "exited":
+        raise Denied("Cannot remove the imported origin remote: "
+                     + _stopped_import(removed, policy.local_timeout_seconds, "remote removal"))
+    if removed.exit_code != 0:
+        raise Denied("Cannot remove the imported origin remote: "
+                     + _git_error(removed, f"git exited {removed.exit_code}"))
+    config_managed_repo(workspace, env, policy)
 
 
 def _import_plain_directory(source: Path, workspace: Path, stage: Path, config: Config,
@@ -747,7 +785,7 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
                 _check_project_paths(identities)
                 env = git_env()
                 if (source / ".git").exists():
-                    _import_git_tree(source, stage / "workspace", env)
+                    _import_git_tree(source, stage / "workspace", env, config.project_import)
                 else:
                     _import_plain_directory(source, stage / "workspace", stage, config,
                                             exclude_dirs=exclude_dirs)

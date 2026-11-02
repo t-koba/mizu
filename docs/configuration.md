@@ -2077,6 +2077,35 @@ CI-request records), 4 KiB caller-supplied lineage JSON cap, and 4 KiB local Git
 HEAD output cap remain separate defensive read limits, not configurable reader
 budgets.
 
+The top-level `[project_import]` section owns the local Git command bounds for
+the `mizu init` git-tree import:
+
+```toml
+[project_import]
+status_timeout_seconds = 30
+clone_timeout_seconds = 300
+local_timeout_seconds = 15
+```
+
+| Setting | Default | Effect |
+|---|---:|---|
+| `status_timeout_seconds` | 30 | Wall-time bound for the source-tree `git status --porcelain` check |
+| `clone_timeout_seconds` | 300 | Wall-time bound for the `git clone --no-local --no-hardlinks` import |
+| `local_timeout_seconds` | 15 | Per-command bound for origin removal and the three managed `git config` writes |
+
+Each value is an integer from 1 to `TOML_INTEGER_MAX`
+(9223372036854775807), with the defaults shown. The upper bound is TOML's
+signed-64-bit representation ceiling, not a runtime-performance guarantee.
+Omission preserves the defaults; unknown keys, booleans and non-integers are
+rejected. These are operator choices about how long a host may take, so a slow
+host can be given more time without changing the mechanism. A command that
+stops before exit reports its stop reason, elapsed time and, for a timeout, the
+configured bound; it is not reported as a dirty source tree or as an empty
+import failure. A real non-zero exit keeps git's bounded diagnostic.
+Cancellation, output caps and clone contents are unchanged. The settings apply
+only to the local git-tree import; they do not affect the external VCS adapter,
+publication Git commands, CI timeouts or the import exclusion rules.
+
 Log reads require `branch` and preserve the existing optional `sha` behavior.
 When `check` is supplied, the request also requires an exact 40/64-hex commit
 SHA and selects one exact CI check name:

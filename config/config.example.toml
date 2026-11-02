@@ -69,6 +69,15 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # [publication]
 # source_commit_timeout_seconds = 5
 
+# Local `mizu init` git-tree import command bounds. Integer seconds
+# 1..9223372036854775807 (TOML representation ceiling); defaults shown. A
+# stopped command reports its reason and bound; a real non-zero exit keeps
+# git's bounded diagnostic.
+# [project_import]
+# status_timeout_seconds = 30
+# clone_timeout_seconds = 300
+# local_timeout_seconds = 15
+
 # Named dynamic-model selectors (see docs/model-selection.md). Empty by default;
 # a role's selector key replaces its profile with one of these tables.
 # [selectors]

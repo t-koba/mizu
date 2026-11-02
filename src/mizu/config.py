@@ -267,7 +267,8 @@ ROOT_KEYS = frozenset({
     "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude",
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
-    "dispatch_evidence", "ci_requests", "publication_evidence", "publication"})
+    "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
+    "project_import"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -992,6 +993,31 @@ def publication_policy(raw: dict) -> PublicationPolicy:
 
 
 @dataclasses.dataclass(frozen=True)
+class ProjectImport:
+    """Host-cost bounds for the local git-tree import used by ``mizu init``.
+
+    These are operator choices about how long a host may take to inspect, clone
+    and configure a source tree, not properties of the tree. The defaults
+    preserve the former inline values; the range is 1 through TOML's
+    signed-64-bit ceiling.
+    """
+
+    status_timeout_seconds: int = 30
+    clone_timeout_seconds: int = 300
+    local_timeout_seconds: int = 15
+
+
+def project_import_policy(raw: dict) -> ProjectImport:
+    fields = dataclasses.fields(ProjectImport)
+    keys(raw, {field.name for field in fields}, "project_import")
+    return ProjectImport(**{
+        field.name: number(raw.get(field.name, field.default),
+                           f"project_import.{field.name}", 1, TOML_INTEGER_MAX)
+        for field in fields
+    })
+
+
+@dataclasses.dataclass(frozen=True)
 class PublicationEvidence:
     name_processing_limit: int = 10000
     record_limit: int = 1000
@@ -1105,6 +1131,7 @@ class Config:
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
     publication: PublicationPolicy = dataclasses.field(default_factory=PublicationPolicy)
+    project_import: ProjectImport = dataclasses.field(default_factory=ProjectImport)
     publication_evidence: PublicationEvidence = dataclasses.field(default_factory=PublicationEvidence)
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
 
@@ -1692,5 +1719,6 @@ def load(file: Path) -> Config:
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),
                   publication=publication_policy(data.get("publication", {})),
+                  project_import=project_import_policy(data.get("project_import", {})),
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})))
