@@ -157,7 +157,7 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store._direct_record(created["id"])
 
-    def test_weak_platform_bypasses_direct_and_projection_caches(self):
+    def test_weak_platform_bypasses_direct_projection_and_sidecar_caches(self):
         created = self.store.create(idempotency_key="weak-platform", title="Weak",
                                     actor="worker")["record"]["work_item"]
         self.store._direct_cache.clear()
@@ -165,7 +165,13 @@ class WorkItemTests(Fixture):
         self.store._projection_cache.clear()
         with patch("mizu.work_items.IS_WINDOWS", True):
             self.store._direct_record(created["id"])
-            self.store.page_open_readonly(limit=100)
+            with (patch.object(self.store, "_sidecar_load",
+                               side_effect=AssertionError("sidecar read on weak platform")),
+                  patch.object(self.store, "_history_identity",
+                               side_effect=AssertionError("metadata witness on weak platform"))):
+                for reader in self.status_readers():
+                    with self.subTest(reader=reader.__name__):
+                        reader()
         self.assertEqual(self.store._direct_cache, {})
         self.assertEqual(self.store._history_cache, {})
         self.assertEqual(self.store._projection_cache, {})

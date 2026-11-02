@@ -615,6 +615,20 @@ using exact replay; the read-only CLI default never writes, while the explicit
 `mizu work-items --backfill N` maintenance variant takes the record lock and
 builds at most N missing terminal or nonterminal sidecars from their exact
 source records.
+
+On Windows the bypass is deliberate, not a missing cache: directory metadata
+is not a trustworthy invalidation witness there, so every current-state reader
+uses the exact-chain reader. With the Windows branch forced on the development
+host, a synthetic 100-item ledger measured 0.24-0.28 s per status, page,
+blocked-state or prompt reader at 575 retained revisions and 0.33-0.40 s at
+1,575 revisions (experiment `c8179ef08d14482aa79ed41318affb92`). The cost is
+linear in retained revisions; each item's history is bounded by the
+256-revision chain limit, the configured open-work cap bounds newly seeded
+inventory when enabled, and the 100-row page limit bounds returned rows rather
+than the scan. The `WorkItems` exact-chain readers own this platform trade-off.
+The sample is a synthetic forced-branch measurement, not a native Windows
+performance claim.
+
 Both direct creation and decision seeding call the same lock-held
 `WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
 binding, safe empty item slot, and exact current origin revision. New seeds
