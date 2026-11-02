@@ -598,10 +598,9 @@ class PendingInsightLockTests(Fixture):
                     self.assertFalse(future.done())
             self.assertEqual(future.result(timeout=10), expected)
 
-    def test_pending_read_serializes_actual_same_project_submit(self):
+    def test_pending_read_scan_does_not_block_same_project_submit(self):
         self.submit('Before')
-        expected = self.pending()
-        entered, release, contended = (threading.Event() for _ in range(3))
+        entered, release = threading.Event(), threading.Event()
         envelopes = self.project.insights._pending_insight_envelopes_locked
 
         def paused_read(*args, **kwargs):
@@ -609,31 +608,39 @@ class PendingInsightLockTests(Fixture):
             self.assertTrue(release.wait(10), 'pending read release timed out')
             return envelopes(*args, **kwargs)
 
-        @contextmanager
-        def observed_writer_lock(root, *, blocking=True):
-            self.assertEqual(root, self.project.root)
-            with self.assertRaises(Busy):
-                with project_record_lock(root, blocking=False):
-                    pass
-            contended.set()
-            with project_record_lock(root, blocking=blocking):
-                yield
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with patch.object(self.project.insights, '_pending_insight_envelopes_locked', paused_read):
+                reader = pool.submit(self.pending)
+                try:
+                    self.assertTrue(entered.wait(10))
+                    # The full scan runs without the project lock, so a writer
+                    # can commit while it is paused; the reader then falls back
+                    # to the exact locked scan and includes the new row.
+                    submitted = pool.submit(self.submit, 'After').result(timeout=10)
+                finally:
+                    release.set()
+            result = reader.result(timeout=10)
+        self.assertEqual(submitted['title'], 'After')
+        self.assertEqual({event['title'] for event in result[0]}, {'Before', 'After'})
+
+    def test_pending_read_rechecks_receipts_when_source_changes(self):
+        self.submit('Only')
+        event = self.pending()[0][0]
+        entered, release = threading.Event(), threading.Event()
+        envelopes = self.project.insights._pending_insight_envelopes_locked
+
+        def paused_read(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(10), 'pending read release timed out')
+            return envelopes(*args, **kwargs)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             with patch.object(self.project.insights, '_pending_insight_envelopes_locked', paused_read):
                 reader = pool.submit(self.pending)
                 try:
                     self.assertTrue(entered.wait(10))
-                    # Observe the actual submit's global-before-project path;
-                    # the pending read keeps its imported project-lock alias.
-                    with patch('mizu.smoke_refs.project_record_lock', observed_writer_lock):
-                        writer = pool.submit(self.submit, 'After')
-                        self.assertTrue(contended.wait(10))
-                        self.assertFalse(writer.done())
-                        release.set()
-                        self.assertEqual(reader.result(timeout=10), expected)
-                        submitted = writer.result(timeout=10)
+                    self.project.insights.acknowledge_decisions('reviewer', [event])
                 finally:
                     release.set()
-        self.assertEqual(self.project.insights.read(submitted['id'])['title'], 'After')
-        self.assertEqual({e['title'] for e in self.pending()[0]}, {'Before', 'After'})
+            result = reader.result(timeout=10)
+        self.assertEqual(result[0], [])

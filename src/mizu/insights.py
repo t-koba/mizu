@@ -55,6 +55,7 @@ import datetime as dt
 import heapq
 import uuid
 import os
+import stat
 from pathlib import Path
 
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
@@ -1787,8 +1788,10 @@ replacement insight without implying rejected substance.
         projections/pages; do not cap unrelated inbox history before routing
         filters, since old human/decided items must not prevent a configured
         role from seeing its own pending attention. Legacy omissions never
-        invent a route. Omission scans the whole inbox; ``paths`` revalidates a
-        bounded selected subset, which the page runs again under the lock.
+        invent a route. Omission scans the whole inbox; callers may run that
+        full scan outside the project record lock and revalidate selected
+        ``paths`` under it. A selected path is still fully validated before
+        its event is returned.
         """
         identifier(role_name)
         inbox = self.root / "inbox"
@@ -1828,8 +1831,16 @@ replacement insight without implying rejected substance.
             except FileNotFoundError:
                 decision = None
             else:
-                decision = json.loads(safe_read(self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
-                if (type(decision) is not dict or decision.get("id") != item["id"]
+                try:
+                    decision = json.loads(safe_read(
+                        self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
+                except Denied:
+                    if self._source_missing(decision_path):
+                        decision = None
+                    else:
+                        raise
+                if decision is not None and (
+                        type(decision) is not dict or decision.get("id") != item["id"]
                         or type(decision.get("rev", 1)) is not int or decision.get("rev", 1) < 1
                         or decision.get("action") not in _DECISION_ACTIONS | {"withdraw"}):
                     raise Denied("Malformed pending insight decision")
@@ -1853,12 +1864,86 @@ replacement insight without implying rejected substance.
                 raise LimitExceeded("Pending insight envelope exceeds byte bound")
             yield envelope["id"], envelope
 
+    def _pending_source_fingerprint(self, role_name):
+        """Metadata witness for sources the legacy pending scan reads.
+
+        The full scan runs without the exclusive record lock. A before/after
+        mismatch means a concurrent source change, so the caller falls back to
+        the exact locked scan rather than presenting a stale or incomplete
+        page. Entries are included, not only their directories.
+        """
+        names = ("inbox", "decisions", "decision-receipts",
+                 f"decision-receipts/{role_name}")
+        parts = []
+        for name in names:
+            path = self.root / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                parts.append((name, None, ()))
+                continue
+            except OSError:
+                return None
+            if not stat.S_ISDIR(info.st_mode):
+                return None
+            entries = []
+            try:
+                with os.scandir(path) as scanned:
+                    for entry in scanned:
+                        try:
+                            entry_info = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            return None
+                        entries.append((entry.name, entry_info.st_mode,
+                                        entry_info.st_nlink, entry_info.st_mtime_ns,
+                                        entry_info.st_ctime_ns, entry_info.st_size))
+            except FileNotFoundError:
+                parts.append((name, None, ()))
+                continue
+            except OSError:
+                return None
+            entries.sort()
+            parts.append((name, (info.st_mtime_ns, info.st_ctime_ns, info.st_size),
+                          tuple(entries)))
+        return tuple(parts)
+
+    def _pending_insight_events_exact(self, role_name, configured_roles, limit):
+        """Exact locked selection; caller holds the project record lock."""
+        diagnostics = []
+
+        def eligible():
+            for _, envelope in self._pending_insight_envelopes_locked(configured_roles, role_name):
+                payload = envelope["payload"]
+                if payload["target"] != role_name:
+                    continue
+                event = dict(payload, ack_token=self._decision_token(role_name, payload))
+                try:
+                    received = self._decision_received(role_name, event)
+                except CorruptDecisionReceipt as corrupt:
+                    if len(diagnostics) < DECISION_RECEIPT_DIAGNOSTIC_LIMIT:
+                        diagnostics.append({"event": event["event"], "ack_token": event["ack_token"],
+                                            "action": "pending", "reason": corrupt.reason})
+                    continue
+                if not received:
+                    yield event
+
+        events = heapq.nsmallest(limit, eligible(), key=lambda e: (
+            dt.datetime.fromisoformat(e["created_at"]), e["event"]))
+        return events, diagnostics
+
     def pending_insight_events(self, role_name, configured_roles, *, limit=10):
-        """Legacy exact receipts, same count bound and fail-closed receipt reader."""
+        """Legacy exact receipts, same count bound and fail-closed receipt reader.
+
+        The source scan runs without the project record lock; the lock is
+        taken only to recheck selected source rows and receipts, or to run the
+        exact fallback when the before/after metadata witness changed. A
+        changed source therefore never becomes a stale or incomplete page.
+        """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Pending insight event limit must be in [1, 100]")
-        with lock_diagnostics.operation("list"), project_record_lock(self.root):
+        with lock_diagnostics.operation("list"):
+            before = self._pending_source_fingerprint(role_name)
             diagnostics = []
 
             def eligible():
@@ -1875,11 +1960,41 @@ replacement insight without implying rejected substance.
                                                 "action": "pending", "reason": corrupt.reason})
                         continue
                     if not received:
-                        yield event
+                        yield (dt.datetime.fromisoformat(event["created_at"]),
+                               event, envelope)
 
-            events = heapq.nsmallest(limit, eligible(), key=lambda e: (
-                dt.datetime.fromisoformat(e["created_at"]), e["event"]))
-            return events, diagnostics
+            selected = heapq.nsmallest(limit, eligible(),
+                                       key=lambda row: (row[0], row[1]["event"]))
+            after = self._pending_source_fingerprint(role_name)
+            if before is None or before != after:
+                with project_record_lock(self.root):
+                    return self._pending_insight_events_exact(role_name, configured_roles, limit)
+            with project_record_lock(self.root):
+                # A source may have changed after the post-scan sample but
+                # before this lock; recheck the metadata witness now that no
+                # writer can move it.
+                if self._pending_source_fingerprint(role_name) != after:
+                    return self._pending_insight_events_exact(
+                        role_name, configured_roles, limit)
+                fresh = []
+                for _, event, envelope in selected:
+                    payload = envelope["payload"]
+                    path = self.root / "inbox" / f"{payload['insight']}.json"
+                    current = list(self._pending_insight_envelopes_locked(
+                        configured_roles, role_name, paths=[path]))
+                    if len(current) != 1 or current[0][1] != envelope:
+                        return self._pending_insight_events_exact(
+                            role_name, configured_roles, limit)
+                    try:
+                        received = self._decision_received(role_name, event)
+                    except CorruptDecisionReceipt:
+                        return self._pending_insight_events_exact(
+                            role_name, configured_roles, limit)
+                    if received:
+                        return self._pending_insight_events_exact(
+                            role_name, configured_roles, limit)
+                    fresh.append(event)
+                return fresh, diagnostics
 
     def _source_missing(self, path):
         try:

@@ -771,13 +771,17 @@ post-apply verification. Runtime already holds its own role exclusion through
 finish/ack. Direct legacy ack acquires only that role's receipt lock: it never
 acquires a source or role lock while holding it. Mutations of the decision
 boundary take `record_lock` and never acquire role exclusions or receipt locks
-in reverse order. The read-only Insight `unresolved_counts` and legacy
-`pending_insight_events` scans and the ref-free Insight submission take the
-per-project record lock alone: they remain serialized with same-project
-writers without blocking on another project's shared retention lock.
-Pending-event selection reads only project-local inbox/decision/receipt data,
-not shared smoke pairs; a new insight has no evidence, and retention skips
-the recognized atomic-write temporaries it creates. All evidence appends,
+in reverse order. The read-only Insight `unresolved_counts` and the ref-free Insight submission
+take the per-project record lock alone. The legacy `pending_insight_events`
+scan reads project-local inbox/decision/receipt data outside that lock, then
+takes the lock only to revalidate selected rows and receipts; a before/after
+metadata-witness change falls back to the exact locked scan. These paths remain
+independent of another project's shared retention lock. Pending-event selection
+reads only project-local inbox/decision/receipt data, not shared smoke pairs; a
+new insight has no evidence, and retention skips the recognized atomic-write
+temporaries it creates.
+
+All evidence appends,
 revisions (which drop evidence), pin-bearing mutations and multi-record
 decision/wait/task transactions retain the global-before-project path because
 they can add or remove smoke references. Unknown store entries still fail
@@ -811,8 +815,11 @@ readiness hint: a real unit may bind the cached empty input only while the same
 complete fingerprint is unchanged, and any row created through a sampled source
 forces the exact scan. This bounds an unchanged idle tick. A real page scans
 without the exclusive record lock and revalidates only the rows it selects
-under that lock; the remaining end state is a delta reader instead of a full
-re-scan on change.
+under that lock. The legacy non-empty pending-insight page now uses the same
+read/write split: the full inbox/decision/receipt scan is unlocked, only the
+selected candidates are revalidated under the record lock, and a metadata
+witness change falls back to the exact locked scan. The remaining end state is
+a delta reader instead of a full re-scan on change.
 
 ### Exact schema and identity
 
