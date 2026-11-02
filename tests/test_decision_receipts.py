@@ -263,6 +263,28 @@ class DecisionReceiptTests(Fixture):
         sidecar = read_json(run_dir / "decision-receipt-diagnostics.json")
         self.assertEqual(sidecar["diagnostics"], prompt["decision_receipt_diagnostics"])
 
+    def test_configured_receipt_diagnostic_sample_and_range(self):
+        for i in range(3):
+            _reject(self.project, "reviewer", title=f"Corrupt {i}")
+        rows = self.rows()
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            path = self.project.root / "decision-receipts/reviewer" / f"{row['ack_token']}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"{invalid-json")
+        events, diagnostics = Insights(
+            self.project.root, decision_receipt_diagnostics=1
+        ).decision_events_with_diagnostics("reviewer", ("reject",))
+        self.assertEqual(events, [])
+        self.assertEqual(len(diagnostics), 1)
+        events, diagnostics = Insights(
+            self.project.root, decision_receipt_diagnostics=0
+        ).decision_events_with_diagnostics("reviewer", ("reject",))
+        self.assertEqual(events, [])
+        self.assertEqual(diagnostics, [])
+        with self.assertRaisesRegex(Denied, "Decision receipt diagnostics"):
+            Insights(self.project.root, decision_receipt_diagnostics=101)
+
     def test_unsafe_shared_receipt_directory_fails_closed(self):
         _reject(self.project, "reviewer")
         receipt_root = self.project.root / "decision-receipts"

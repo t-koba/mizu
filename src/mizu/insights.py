@@ -58,7 +58,8 @@ import os
 import stat
 from pathlib import Path
 
-from .config import DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS
+from .config import (DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS,
+                     DEFAULT_DECISION_RECEIPT_DIAGNOSTICS, MAX_DECISION_RECEIPT_DIAGNOSTICS)
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events, lock_diagnostics
 from .work_item_waits import WAIT_KINDS, normalize_wait
@@ -73,9 +74,6 @@ MAX_DECISION_EVENT_BYTES = 1024 * 1024
 #: Bound for one per-token decision receipt file (1 KiB). Receipts are small
 #: fixed-shape records; the bound keeps the acknowledgement check bounded.
 DECISION_RECEIPT_BYTES = 1024
-#: Bound for the number of per-token receipt diagnostics returned alongside
-#: decision events. Diagnostics carry only safe identifiers and reason codes.
-DECISION_RECEIPT_DIAGNOSTIC_LIMIT = 10
 #: Reason codes for per-token receipt content invalidity. Only these bounded
 #: codes ever leave the receipt check; receipt bytes are never surfaced.
 DECISION_RECEIPT_REASONS = frozenset({"malformed_json", "invalid_receipt", "invalid_timestamp"})
@@ -433,7 +431,8 @@ class Insights:
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
                  cursor_ttl_seconds: int = 86400, open_work_items: int = 100,
                  producer_inputs_per_source: int = 20,
-                 decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS):
+                 decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS,
+                 decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
         self.open_work_items = open_work_items
@@ -444,6 +443,11 @@ class Insights:
             raise Denied(
                 f"Decision projection records must be an integer in [1, {MAX_DECISION_PROJECTION_RECORDS}]")
         self.decision_projection_records = decision_projection_records
+        if (type(decision_receipt_diagnostics) is not int
+                or not 0 <= decision_receipt_diagnostics <= MAX_DECISION_RECEIPT_DIAGNOSTICS):
+            raise Denied(
+                f"Decision receipt diagnostics must be an integer in [0, {MAX_DECISION_RECEIPT_DIAGNOSTICS}]")
+        self.decision_receipt_diagnostics = decision_receipt_diagnostics
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.
@@ -1997,7 +2001,7 @@ replacement insight without implying rejected substance.
                 try:
                     received = self._decision_received(role_name, event)
                 except CorruptDecisionReceipt as corrupt:
-                    if len(diagnostics) < DECISION_RECEIPT_DIAGNOSTIC_LIMIT:
+                    if len(diagnostics) < self.decision_receipt_diagnostics:
                         diagnostics.append({"event": event["event"], "ack_token": event["ack_token"],
                                             "action": "pending", "reason": corrupt.reason})
                     continue
@@ -2033,7 +2037,7 @@ replacement insight without implying rejected substance.
                     try:
                         received = self._decision_received(role_name, event)
                     except CorruptDecisionReceipt as corrupt:
-                        if len(diagnostics) < DECISION_RECEIPT_DIAGNOSTIC_LIMIT:
+                        if len(diagnostics) < self.decision_receipt_diagnostics:
                             diagnostics.append({"event": event["event"], "ack_token": event["ack_token"],
                                                 "action": "pending", "reason": corrupt.reason})
                         continue
@@ -2409,7 +2413,7 @@ replacement insight without implying rejected substance.
                 try:
                     received = self._decision_received(role_name, payload)
                 except CorruptDecisionReceipt as corrupt:
-                    if len(diagnostics) < DECISION_RECEIPT_DIAGNOSTIC_LIMIT:
+                    if len(diagnostics) < self.decision_receipt_diagnostics:
                         diagnostics.append({"event": payload["event"],
                                             "ack_token": payload["ack_token"],
                                             "action": payload["action"],

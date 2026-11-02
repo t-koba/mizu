@@ -472,6 +472,8 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `pending_insights` | Newest pending proposals offered in prompts (1–1,000; default 30). `mizu insight list` uses 1,000 |
 | `decision_events_limit` | Decision events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Prompt-size bound only; unacknowledged decisions replay globally oldest-first, including deferrals |
 | `decision_projection_records` | Per-scan retention bound for one combined window of current routed decisions and addressed pending attention (1–512; default 512). History policy, not a format limit: the shared page keeps the oldest unacknowledged rows up to this bound and delivers the next window after acknowledgements; explicit `project_decision_records` reconciliation still refuses overflow instead of returning an incomplete result. The page retains full source-bounded envelopes; a synthetic 512-row scan with 64 KiB bodies held 32.6 MiB, so the validated ceiling is the default rather than an unmeasured larger retained set. At the 1 MiB source bound the existing default can retain up to 512 MiB; raising the ceiling would multiply that exposure |
+| `decision_receipt_diagnostics` | Malformed per-token decision-receipt diagnostics reported alongside one decision page (0–100; default 10). Each diagnostic is the fixed identity/reason shape; zero hides the sample without hiding valid events or changing acknowledgement. This is an operator-selected output sample, not a history or delivery bound |
+| `queue_observations` | Contended execution-admission observations retained in `started.json` (0–100; default 8). Further admissions increment `omitted` instead of growing the record. Run-local evidence only; no scheduling, admission or history effect |
 | `work_item_events_limit` | Terminal work-item events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Independent of the decision batch: each source uses only its own limit |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
@@ -543,7 +545,7 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `open_work_items`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `open_work_items`, `decision_receipt_diagnostics`, `queue_observations`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 
@@ -1457,7 +1459,7 @@ role-effective limit (fixed maximum 100 rows).
 A safely read per-token receipt with invalid content or semantics (malformed
 JSON, wrong shape or role/event/token binding, bad timestamp) isolates only
 that event: it stays undelivered and unacknowledged, its bytes are left
-unchanged, and at most 10 bounded diagnostics are reported as
+unchanged, and at most `[limits].decision_receipt_diagnostics` (default 10) bounded diagnostics are reported as
 `decision_receipt_diagnostics` (each `{event, ack_token, action, reason}` with
 `reason` in `malformed_json`, `invalid_receipt`, `invalid_timestamp` and no
 receipt bytes or untrusted content) in full and delta prompts, the run record

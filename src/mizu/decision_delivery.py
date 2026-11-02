@@ -7,7 +7,7 @@ import json
 from .config import role_decision_events_limit
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, digest, loads_finite, safe_read
-from .insights import INSIGHT_DELIVERY_POLICIES, DECISION_RECEIPT_DIAGNOSTIC_LIMIT
+from .insights import INSIGHT_DELIVERY_POLICIES
 from .shared_records import SharedRecords
 
 AUTHORITY_FILE = "decision-authority.json"
@@ -78,7 +78,7 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True):
         insight_capped = len(insights) == limit
         source_capped = decision_capped or insight_capped
         combined_all = [*events, *insights]
-        diagnostics = (diagnostics + troubled)[:DECISION_RECEIPT_DIAGNOSTIC_LIMIT]
+        diagnostics = (diagnostics + troubled)[:project.insights.decision_receipt_diagnostics]
         combined_all.sort(key=lambda e: (datetime.fromisoformat(e.get("decided_at", e.get("created_at"))),
                                          e.get("kind") == "insight.pending", e["event"]))
         if source_capped:

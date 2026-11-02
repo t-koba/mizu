@@ -10,11 +10,13 @@ The `vcs.py` provider response-shape bounds are fixed mechanism and safety
 ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. The `insights.py` module
-constants are fixed record, evidence and diagnostic safety bounds; its
-constructor policy defaults are named config defaults already inventoried or are
-supplied by `Project`. The `runtime.py` literals are fixed run-local memory,
-one-row probe and public page bounds; its configurable admission and dispatch
-choices are `Limits` and `[dispatch_evidence]` fields. The `lock_diagnostics.py`
+constants are fixed record and evidence safety bounds; its constructor policy
+defaults are named config defaults already inventoried or are supplied by
+`Project`, including the configured malformed-receipt diagnostic sample. The
+`runtime.py` literals are fixed run-local memory, one-row probe and public page
+bounds; its configurable admission and dispatch choices are `Limits` and
+`[dispatch_evidence]` fields, including the run-local queue-observation sample.
+The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
 Expressions are inventoried without evaluating source. This does not lint
@@ -74,8 +76,6 @@ DECLARATIONS = {
             '1024 * 1024', 'safety', 'insights / fixed decision-event record read and write ceiling'),
         'DECISION_RECEIPT_BYTES': (
             '1024', 'safety', 'insights / fixed-shape per-token decision receipt read bound'),
-        'DECISION_RECEIPT_DIAGNOSTIC_LIMIT': (
-            '10', 'safety', 'insights / bounded receipt-diagnostic output sample'),
         'MAX_EVIDENCE_ENTRIES': (
             '16', 'safety', 'insights / fixed append-only evidence entries per insight'),
         'MAX_EVIDENCE_CHARS': (
@@ -89,8 +89,6 @@ DECLARATIONS = {
             'lock diagnostics / fixed signed-32-bit duration saturation'),
     },
     'runtime.py': {
-        'MAX_QUEUE_OBSERVATIONS': (
-            '8', 'safety', 'runtime / bounded run-local queue-observation evidence sample'),
         'MAX_ENGINE_TOOL_INVOCATIONS': (
             '4096', 'safety', 'runtime / fixed run-local engine-tool admission identity memory bound'),
         'MAX_ENGINE_TOOL_ID': (
@@ -280,6 +278,27 @@ HISTORY_TEMPORARIES = {
                                     'config / unchanged decision-history recovery default'),
     'MAX_HISTORY_TEMPORARIES': ('4096', 'safety',
                                 'config / absolute untrusted temporary-metadata ceiling'),
+}
+
+
+# The receipt-diagnostic and queue-observation samples are operator-selected
+# output/evidence policy. Their ceilings keep one page or run record bounded;
+# neither is a history-sized scan or a delivery bound.
+DIAGNOSTIC_SAMPLES = {
+    'decision_receipt_diagnostics': (
+        'DEFAULT_DECISION_RECEIPT_DIAGNOSTICS', 'configured policy',
+        'Limits / malformed-receipt diagnostics per decision page'),
+    'DEFAULT_DECISION_RECEIPT_DIAGNOSTICS': (
+        '10', 'configured policy', 'config / unchanged receipt-diagnostic sample default'),
+    'MAX_DECISION_RECEIPT_DIAGNOSTICS': (
+        '100', 'safety', 'config / fixed companion output-page diagnostic ceiling'),
+    'queue_observations': (
+        'DEFAULT_QUEUE_OBSERVATIONS', 'configured policy',
+        'Limits / contended-admission observations per started.json'),
+    'DEFAULT_QUEUE_OBSERVATIONS': (
+        '8', 'configured policy', 'config / unchanged queue-observation sample default'),
+    'MAX_QUEUE_OBSERVATIONS': (
+        '100', 'safety', 'config / fixed run-local evidence-record sample ceiling'),
 }
 
 
@@ -545,6 +564,31 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                                       'MAX_DECISION_PROJECTION_RECORDS')],
                          ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in DECISION_PROJECTION.values()))
+
+    def test_diagnostic_sample_policy_and_safety_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        fields = {field.target.id: ast.unparse(field.value) for field in limits.body
+                  if isinstance(field, ast.AnnAssign)}
+        self.assertEqual(fields['decision_receipt_diagnostics'],
+                         DIAGNOSTIC_SAMPLES['decision_receipt_diagnostics'][0])
+        self.assertEqual(fields['queue_observations'],
+                         DIAGNOSTIC_SAMPLES['queue_observations'][0])
+        for key in ('DEFAULT_DECISION_RECEIPT_DIAGNOSTICS',
+                    'MAX_DECISION_RECEIPT_DIAGNOSTICS',
+                    'DEFAULT_QUEUE_OBSERVATIONS', 'MAX_QUEUE_OBSERVATIONS'):
+            assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == key
+                                      for target in node.targets))
+            self.assertEqual(ast.unparse(assignment.value), DIAGNOSTIC_SAMPLES[key][0])
+        self.assertEqual([DIAGNOSTIC_SAMPLES[key][1] for key in (
+            'decision_receipt_diagnostics', 'DEFAULT_DECISION_RECEIPT_DIAGNOSTICS',
+            'MAX_DECISION_RECEIPT_DIAGNOSTICS', 'queue_observations',
+            'DEFAULT_QUEUE_OBSERVATIONS', 'MAX_QUEUE_OBSERVATIONS')],
+                         ['configured policy', 'configured policy', 'safety',
+                          'configured policy', 'configured policy', 'safety'])
+        self.assertTrue(all(entry[2].strip() for entry in DIAGNOSTIC_SAMPLES.values()))
 
     def test_configured_raw_settings_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

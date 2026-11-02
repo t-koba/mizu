@@ -52,6 +52,16 @@ MAX_DECISION_PROJECTION_RECORDS = 512
 #: One named configured default; Limits and Insights both use it. Keep the
 #: safety ceiling independent so changing the default does not silently raise it.
 DEFAULT_DECISION_PROJECTION_RECORDS = 512
+#: Per-page malformed-receipt diagnostics are an operator-selected output
+#: sample, not a history or delivery bound. The ceiling matches the public
+#: decision-event page cap so diagnostics never dominate the report.
+DEFAULT_DECISION_RECEIPT_DIAGNOSTICS = 10
+MAX_DECISION_RECEIPT_DIAGNOSTICS = 100
+#: Run-local contended-admission observations are an operator-selected
+#: evidence sample. The ceiling keeps one started.json record bounded; further
+#: admissions are counted in `omitted` instead of growing the record.
+DEFAULT_QUEUE_OBSERVATIONS = 8
+MAX_QUEUE_OBSERVATIONS = 100
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -374,6 +384,12 @@ class Limits:
     #: Crash-leftover decision-history temporary scan budget; default 64.
     history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES
     decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS
+    #: Malformed-receipt diagnostics retained per decision page; 0 hides the
+    #: diagnostic sample without hiding the corresponding decision events.
+    decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS
+    #: Contended-admission observations retained in started.json; further
+    #: observations increment `omitted` without changing scheduling.
+    queue_observations: int = DEFAULT_QUEUE_OBSERVATIONS
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.
@@ -493,6 +509,8 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "check_retained": (1, MAX_CHECK_RETAINED),
                  "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
                  "decision_projection_records": (1, MAX_DECISION_PROJECTION_RECORDS),
+                 "decision_receipt_diagnostics": (0, MAX_DECISION_RECEIPT_DIAGNOSTICS),
+                 "queue_observations": (0, MAX_QUEUE_OBSERVATIONS),
                  "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),

@@ -6,7 +6,8 @@ import unittest
 
 from support import Fixture
 from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
-                         MAX_HISTORY_TEMPORARIES, Limits, ROOT_KEYS, _LIMIT_RANGES, load)
+                         MAX_DECISION_RECEIPT_DIAGNOSTICS, MAX_HISTORY_TEMPORARIES,
+                         MAX_QUEUE_OBSERVATIONS, Limits, ROOT_KEYS, _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
 
@@ -115,6 +116,33 @@ class DecisionProjectionConfigTests(Fixture):
                     with self.assertRaisesRegex(ConfigError,
                                                 'limits.decision_projection_records'):
                         load(self.file)
+
+
+class DiagnosticSampleConfigTests(Fixture):
+    def test_defaults_and_ranges(self):
+        self.assertEqual(MAX_DECISION_RECEIPT_DIAGNOSTICS, 100)
+        self.assertEqual(MAX_QUEUE_OBSERVATIONS, 100)
+        self.assertEqual(Limits().decision_receipt_diagnostics, 10)
+        self.assertEqual(Limits().queue_observations, 8)
+        base = self.file.read_text()
+        for name, default, ceiling in (
+                ('decision_receipt_diagnostics', 10, 100),
+                ('queue_observations', 8, 100)):
+            with self.subTest(name=name):
+                original = re.sub(rf'(?m)^{name} = .*\n', '', base)
+                self.file.write_text(original)
+                self.assertEqual(getattr(load(self.file).limits, name), default)
+                for value in ('0', str(default), str(ceiling), str(ceiling + 1),
+                              '-1', 'true', 'false', '1.5', '"1"', '[]', '{}'):
+                    with self.subTest(value=value):
+                        self.file.write_text(original.replace(
+                            '\n[limits]\n', f'\n[limits]\n{name} = {value}\n'))
+                        if value in ('0', str(default), str(ceiling)):
+                            self.assertEqual(getattr(load(self.file).limits, name), int(value))
+                        else:
+                            with self.assertRaisesRegex(ConfigError, f'limits.{name}'):
+                                load(self.file)
+                self.file.write_text(base)
 
 
 if __name__ == "__main__":

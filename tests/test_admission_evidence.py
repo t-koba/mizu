@@ -119,6 +119,31 @@ class AdmissionEvidenceTests(Fixture):
                         self.assertIsNone(row['profile'])
                         self.assertEqual(row['profile_engine_reason'], 'selector_not_resolved_at_admission')
 
+    def test_configured_queue_observation_sample_bounds_started_evidence(self):
+        config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, queue_observations=2))
+        engine = Engine(config)
+        held_stack = []
+        original = engine._admit
+        def admit(*args, **kwargs):
+            held_stack[:] = [args[3]]
+            return original(*args, **kwargs)
+        def callback(ctx, *_):
+            role = dataclasses.replace(ctx.role, selector='not-executed')
+            for _ in range(10):
+                engine._selection_retry_wait(ctx, self.project, held_stack[0],
+                                             role, 'reporter', 0.0)
+                self.assertTrue(ctx._slot_lease)
+        engine.driver = ScriptDriver(callback)
+        with self.blocked_head(), patch.object(engine, '_admit', side_effect=admit):
+            result = engine.run(self.project, 'reporter')
+        self.assertEqual(result['status'], 'completed')
+        started = read_json(self.project.root / 'runs' / result['run'] / 'started.json')
+        view = started['queue_observations']
+        self.assertEqual(len(view['observations']), 2)
+        self.assertEqual(view['omitted'], 9)
+
     def test_first_contended_readmission_attaches_to_uncontended_start(self):
         engine = Engine(self.config)
         stacks = []

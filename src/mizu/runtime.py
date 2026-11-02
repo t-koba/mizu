@@ -132,8 +132,6 @@ def slot(config: Config):
 #: as a run_deferred event.
 INFRA_WAIT = (Busy, InfraExceeded)
 
-#: Run-local shadow queue evidence retains the first few contended admissions.
-MAX_QUEUE_OBSERVATIONS = 8
 #: Fixed memory bounds for run-local pre-send admission identities.
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
@@ -2668,11 +2666,13 @@ class Engine:
                                  "open_count": held.get("open_count"),
                                  "limits": dict(held.get("limits", {}))}}
             # Bounded run-local evidence, not a scheduling input. Keep the
-            # first eight contended admissions, count any further omissions.
+            # configured number of contended admissions and count any further
+            # omissions instead of growing the run record.
             queue_observations = {"version": 1, "observations": [], "omitted": 0}
+            queue_observation_limit = self.config.limits.queue_observations
             started = None
             def record_admission(row):
-                if len(queue_observations["observations"]) < MAX_QUEUE_OBSERVATIONS:
+                if len(queue_observations["observations"]) < queue_observation_limit:
                     queue_observations["observations"].append(row)
                 else:
                     queue_observations["omitted"] += 1
@@ -2802,7 +2802,7 @@ class Engine:
                             "ci_failures": len(ci_present),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))}
-                if queue_observations["observations"]:
+                if queue_observations["observations"] or queue_observations["omitted"]:
                     started["queue_observations"] = queue_observations
                 if continuation is not None:
                     continuations.start(project.snapshots, continuation, started)
