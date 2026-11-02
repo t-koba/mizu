@@ -62,6 +62,14 @@ MAX_DECISION_RECEIPT_DIAGNOSTICS = 100
 #: admissions are counted in `omitted` instead of growing the record.
 DEFAULT_QUEUE_OBSERVATIONS = 8
 MAX_QUEUE_OBSERVATIONS = 100
+#: Host-only activation plans/reports are local evidence, not transport
+#: frames, and grow with the complete current decision/pending source set.
+#: A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan and a
+#: 1.9 MiB post-map report; the default leaves room for several thousand
+#: routed rows. The ceiling bounds parsed evidence on the host and is not a
+#: recommended plan size; raising it needs a new measurement.
+DEFAULT_DECISION_RECONCILIATION_BYTES = 8 * 1024 * 1024
+MAX_DECISION_RECONCILIATION_BYTES = 64 * 1024 * 1024
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -390,6 +398,10 @@ class Limits:
     #: Contended-admission observations retained in started.json; further
     #: observations increment `omitted` without changing scheduling.
     queue_observations: int = DEFAULT_QUEUE_OBSERVATIONS
+    #: Host-only activation plan/report serialized-byte bound. This is history
+    #: policy because the complete current decision set is pinned; it is not a
+    #: transport frame bound.
+    decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.
@@ -511,6 +523,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "decision_projection_records": (1, MAX_DECISION_PROJECTION_RECORDS),
                  "decision_receipt_diagnostics": (0, MAX_DECISION_RECEIPT_DIAGNOSTICS),
                  "queue_observations": (0, MAX_QUEUE_OBSERVATIONS),
+                 "decision_reconciliation_bytes": (1, MAX_DECISION_RECONCILIATION_BYTES),
                  "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),

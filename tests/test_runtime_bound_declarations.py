@@ -314,6 +314,22 @@ DECISION_PROJECTION = {
 }
 
 
+# The host-only activation plan/report is history-sized local evidence. Its
+# default is configured policy; the ceiling bounds parsed evidence held on the
+# host rather than a transport frame.
+DECISION_RECONCILIATION = {
+    'decision_reconciliation_bytes': (
+        'DEFAULT_DECISION_RECONCILIATION_BYTES', 'configured policy',
+        'Limits / serialized activation plan and post-map report bytes'),
+    'DEFAULT_DECISION_RECONCILIATION_BYTES': (
+        '8 * 1024 * 1024', 'configured policy',
+        'config / activation plan/report default for several thousand routed rows'),
+    'MAX_DECISION_RECONCILIATION_BYTES': (
+        '64 * 1024 * 1024', 'safety',
+        'config / bounded parsed host evidence for the local activation plan/report'),
+}
+
+
 CALL_KEYWORDS = frozenset({
     'timeout', 'timeout_seconds', 'maximum', 'max_bytes', 'max_files',
     'max_entries', 'max_depth', 'limit',
@@ -564,6 +580,39 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                                       'MAX_DECISION_PROJECTION_RECORDS')],
                          ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in DECISION_PROJECTION.values()))
+
+    def test_decision_reconciliation_policy_and_safety_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body
+                     if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'decision_reconciliation_bytes')
+        self.assertEqual(ast.unparse(field.value),
+                         DECISION_RECONCILIATION['decision_reconciliation_bytes'][0])
+        self.assertEqual(inventory(tree)['MAX_DECISION_RECONCILIATION_BYTES'],
+                         DECISION_RECONCILIATION['MAX_DECISION_RECONCILIATION_BYTES'][0])
+        default = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name)
+                               and target.id == 'DEFAULT_DECISION_RECONCILIATION_BYTES'
+                               for target in node.targets))
+        self.assertEqual(ast.unparse(default.value),
+                         DECISION_RECONCILIATION['DEFAULT_DECISION_RECONCILIATION_BYTES'][0])
+        insights = ast.parse((ROOT / 'insights.py').read_text(encoding='utf-8'))
+        constructor = next(node for node in insights.body
+                           if isinstance(node, ast.ClassDef) and node.name == 'Insights')
+        initializer = next(node for node in constructor.body
+                           if isinstance(node, ast.FunctionDef) and node.name == '__init__')
+        index = [arg.arg for arg in initializer.args.kwonlyargs].index(
+            'decision_reconciliation_bytes')
+        self.assertEqual(ast.unparse(initializer.args.kw_defaults[index]),
+                         DECISION_RECONCILIATION['decision_reconciliation_bytes'][0])
+        self.assertEqual([DECISION_RECONCILIATION[key][1]
+                          for key in ('decision_reconciliation_bytes',
+                                      'DEFAULT_DECISION_RECONCILIATION_BYTES',
+                                      'MAX_DECISION_RECONCILIATION_BYTES')],
+                         ['configured policy', 'configured policy', 'safety'])
+        self.assertTrue(all(entry[2].strip() for entry in DECISION_RECONCILIATION.values()))
 
     def test_diagnostic_sample_policy_and_safety_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

@@ -9,7 +9,7 @@ from mizu import decision_reconciliation as reconciliation
 from mizu.admission import role_exclusion
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import canonical, digest, held, lock, read_json
+from mizu.fs import MAX_FRAME, canonical, digest, held, lock, read_json
 from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY
 from mizu.project import Project
 from mizu.runtime import Engine, _role_events_due, prompt_for
@@ -402,14 +402,26 @@ class DecisionCutoverTests(Fixture):
         self.role(decision_page_bytes=150)
         authority = delivery.authority
         calls = 0
-        def switched(root):
+        def switched(root, **kwargs):
             nonlocal calls
             calls += 1
             # Simulate the atomic marker becoming visible between the wake's
             # initial authority observation and its decision consumer read.
-            return None if calls == 1 else authority(root)
+            return None if calls == 1 else authority(root, **kwargs)
         with patch.object(delivery, 'authority', side_effect=switched), self.assertRaises(LimitExceeded):
             _role_events_due(self.project, self.project.snapshots.get(), 'reviewer')
+
+    def test_authority_reads_a_history_scale_report_under_the_safety_ceiling(self):
+        plan_digest = 'a' * 64
+        report = {'plan_digest': plan_digest, 'padding': 'x' * (MAX_FRAME + 1)}
+        raw = canonical(report)
+        marker = {'schema': 1, 'kind': 'insight.decision', 'authority': 'shared',
+                  'plan_digest': plan_digest, 'report_digest': digest(raw)}
+        (self.root / delivery.REPORT_FILE).write_bytes(raw)
+        (self.root / delivery.AUTHORITY_FILE).write_bytes(canonical(marker))
+        self.assertEqual(delivery.authority(self.root), marker)
+        with self.assertRaises(LimitExceeded):
+            delivery.authority(self.root, report_bytes=MAX_FRAME)
 
     def test_shared_receipt_corruption_is_not_legacy_pending(self):
         self.decide()

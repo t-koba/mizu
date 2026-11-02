@@ -59,7 +59,8 @@ import stat
 from pathlib import Path
 
 from .config import (DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS,
-                     DEFAULT_DECISION_RECEIPT_DIAGNOSTICS, MAX_DECISION_RECEIPT_DIAGNOSTICS)
+                     DEFAULT_DECISION_RECEIPT_DIAGNOSTICS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
+                     DEFAULT_DECISION_RECONCILIATION_BYTES, MAX_DECISION_RECONCILIATION_BYTES)
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events, lock_diagnostics
 from .work_item_waits import WAIT_KINDS, normalize_wait
@@ -432,7 +433,8 @@ class Insights:
                  cursor_ttl_seconds: int = 86400, open_work_items: int = 100,
                  producer_inputs_per_source: int = 20,
                  decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS,
-                 decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS):
+                 decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS,
+                 decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
         self.open_work_items = open_work_items
@@ -448,6 +450,11 @@ class Insights:
             raise Denied(
                 f"Decision receipt diagnostics must be an integer in [0, {MAX_DECISION_RECEIPT_DIAGNOSTICS}]")
         self.decision_receipt_diagnostics = decision_receipt_diagnostics
+        if (type(decision_reconciliation_bytes) is not int
+                or not 1 <= decision_reconciliation_bytes <= MAX_DECISION_RECONCILIATION_BYTES):
+            raise Denied(
+                f"Decision reconciliation bytes must be an integer in [1, {MAX_DECISION_RECONCILIATION_BYTES}]")
+        self.decision_reconciliation_bytes = decision_reconciliation_bytes
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.

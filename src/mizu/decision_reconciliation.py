@@ -12,7 +12,7 @@ import re
 
 from .admission import role_exclusion
 from .errors import Denied, LimitExceeded
-from .fs import MAX_FRAME, atomic_write, canonical, digest, identifier, loads_finite, lock, safe_read
+from .fs import atomic_write, canonical, digest, identifier, loads_finite, lock, safe_read
 from .insights import (DECISION_RECEIPT_BYTES, INSIGHT_DECISION_POLICY,
                        INSIGHT_PENDING_POLICY, MAX_DECISION_EVENT_BYTES)
 from .shared_records import RECEIPT_BYTES, RECORD_BYTES, SharedRecords
@@ -21,7 +21,7 @@ from .smoke_refs import record_lock
 _ACTIONS = {"accept", "modify", "reject", "defer"}
 
 
-def _routes(routes, enabled_roles):
+def _routes(routes, enabled_roles, *, maximum):
     if (type(enabled_roles) not in (list, tuple) or type(routes) is not dict
             or any(not isinstance(role, str) for role in enabled_roles)):
         raise Denied("Expected explicit enabled roles and decision routes")
@@ -40,14 +40,14 @@ def _routes(routes, enabled_roles):
                 or route["sources"] not in ("own", "any")):
             raise Denied("Invalid explicit decision route")
         normalized[role] = {"actions": sorted(route["actions"]), "sources": route["sources"]}
-    _bounded(normalized)
+    _bounded(normalized, maximum)
     return normalized
 
 
-def _bounded(value):
+def _bounded(value, maximum):
     raw = canonical(value)
-    if len(raw) > MAX_FRAME:
-        raise LimitExceeded("Decision reconciliation exceeds MAX_FRAME")
+    if len(raw) > maximum:
+        raise LimitExceeded("Decision reconciliation exceeds configured byte bound")
     return raw
 
 
@@ -216,16 +216,16 @@ def _scan(insights, routes):
     return boundary, roles, envelopes, pending_envelopes, store
 
 
-def _plan(boundary, roles):
+def _plan(boundary, roles, *, maximum):
     body = {"schema": 1, "boundary": boundary, "roles": roles}
-    _bounded(body)
+    _bounded(body, maximum)
     # Identity pins input authority, not progress in the append-only output.
     result = dict(body, plan_digest=digest(canonical({"schema": 1, "boundary": boundary})))
-    _bounded(result)
+    _bounded(result, maximum)
     return result
 
 
-def _bound_post_report(boundary, roles):
+def _bound_post_report(boundary, roles, *, maximum):
     post_roles = {}
     for role, report in roles.items():
         pending = report.get("pending_insights") or {}
@@ -240,7 +240,7 @@ def _bound_post_report(boundary, roles):
                                 shared_receipt_digests={rid: "0" * 64
                                                         for rid in report["legacy_received_ids"]},
                                 pending_insights=post_pending)
-    _plan(boundary, post_roles)  # Same serialized size as the final report.
+    _plan(boundary, post_roles, maximum=maximum)  # Same serialized size as the final report.
 
 
 def preflight_decision_receipts(insights, routes, *, enabled_roles) -> dict:
@@ -250,12 +250,13 @@ def preflight_decision_receipts(insights, routes, *, enabled_roles) -> dict:
     required even when empty. No projections are written. Busy, corrupt stores,
     mismatch or overflow refuses, without repair or runtime cutover.
     """
-    routes = _routes(routes, enabled_roles)
+    maximum = insights.decision_reconciliation_bytes
+    routes = _routes(routes, enabled_roles, maximum=maximum)
     with _boundary(insights, routes):
         _require_legacy(insights)
         boundary, roles, _, _, _ = _scan(insights, routes)
-        _bound_post_report(boundary, roles)
-        return _plan(boundary, roles)
+        _bound_post_report(boundary, roles, maximum=maximum)
+        return _plan(boundary, roles, maximum=maximum)
 
 
 def apply_decision_receipts(insights, plan, routes, *, enabled_roles) -> dict:
@@ -265,26 +266,27 @@ def apply_decision_receipts(insights, plan, routes, *, enabled_roles) -> dict:
     (including restart) permits any existing shared subset of legacy received;
     shared state is deliberately excluded from the pinned boundary identity.
     """
-    routes = _routes(routes, enabled_roles)
-    _validate_plan(plan)
+    maximum = insights.decision_reconciliation_bytes
+    routes = _routes(routes, enabled_roles, maximum=maximum)
+    _validate_plan(plan, maximum=maximum)
     with _boundary(insights, routes):
         _require_legacy(insights)
-        return _apply_locked(insights, plan, routes)
+        return _apply_locked(insights, plan, routes, maximum=maximum)
 
 
-def _validate_plan(plan):
+def _validate_plan(plan, *, maximum):
     if (type(plan) is not dict or set(plan) != {"schema", "boundary", "roles", "plan_digest"}
             or type(plan["schema"]) is not int or plan["schema"] != 1):
         raise Denied("Invalid decision reconciliation plan")
-    _bounded(plan)
+    _bounded(plan, maximum)
     if digest(canonical({"schema": 1, "boundary": plan["boundary"]})) != plan["plan_digest"]:
         raise Denied("Decision reconciliation plan digest mismatch")
 
 
-def _apply_locked(insights, plan, routes):
+def _apply_locked(insights, plan, routes, *, maximum):
     boundary, roles, envelopes, pending_envelopes, store = _scan(insights, routes)
     # Bound all reports before any writes, including the post-map report.
-    _plan(boundary, roles)
+    _plan(boundary, roles, maximum=maximum)
     if boundary != plan["boundary"]:
         raise Denied("Decision reconciliation boundary changed")
     # Original shared receipts must remain unchanged. Newly appearing
@@ -323,7 +325,7 @@ def _apply_locked(insights, plan, routes):
                 or any(pending_report["shared_receipt_digests"].get(rid) != computed
                        for rid, computed in original_pending_shared.items())):
             raise Denied("Existing shared pending receipt or report changed")
-    _bound_post_report(boundary, roles)
+    _bound_post_report(boundary, roles, maximum=maximum)
     # Only routed, legacy-acknowledged identities require a projection/write.
     for role, report in roles.items():
         ids = report["legacy_received_ids"]
@@ -353,7 +355,7 @@ def _apply_locked(insights, plan, routes):
         if (pending["shared_received_ids"] != pending["legacy_received_ids"]
                 or pending["shared_pending_ids"] != pending["legacy_pending_ids"]):
             raise Denied("Decision reconciliation pending-set mismatch after apply")
-    return _plan(boundary, verified)
+    return _plan(boundary, verified, maximum=maximum)
 
 
 def _require_legacy(insights):
@@ -374,9 +376,10 @@ def activate_decision_delivery(project):
     from .decision_delivery import AUTHORITY_FILE, PLAN_FILE, REPORT_FILE, authority, page_bytes
     insights = project.insights
     enabled = list(project.roles)
+    maximum = insights.decision_reconciliation_bytes
     routes = _routes({name: {"actions": list(project.config.roles[name].decision_events),
                             "sources": project.config.roles[name].decision_sources}
-                      for name in enabled}, enabled)
+                      for name in enabled}, enabled, maximum=maximum)
     for name in enabled:
         if routes[name]["actions"]:
             page_bytes(project.config.roles[name])
@@ -385,7 +388,7 @@ def activate_decision_delivery(project):
         if marker is not None:
             return marker
         boundary, roles, _, _, store = _scan(insights, routes)
-        _bound_post_report(boundary, roles)
+        _bound_post_report(boundary, roles, maximum=maximum)
         # The shadow pilot has no authority to hide even a route-excluded or
         # stale event. Refuse unexplained receipts anywhere, including
         # disabled recipients, rather than importing uncertain state. Both
@@ -417,18 +420,18 @@ def activate_decision_delivery(project):
         try:
             (insights.root / PLAN_FILE).lstat()
         except FileNotFoundError:
-            plan = _plan(boundary, roles)
+            plan = _plan(boundary, roles, maximum=maximum)
             atomic_write(insights.root / PLAN_FILE, canonical(plan), exclusive=True)
         else:
-            plan = loads_finite(safe_read(insights.root, PLAN_FILE, MAX_FRAME))
-            _validate_plan(plan)
-        report = _apply_locked(insights, plan, routes)
+            plan = loads_finite(safe_read(insights.root, PLAN_FILE, maximum))
+            _validate_plan(plan, maximum=maximum)
+        report = _apply_locked(insights, plan, routes, maximum=maximum)
         try:
             (insights.root / REPORT_FILE).lstat()
         except FileNotFoundError:
             atomic_write(insights.root / REPORT_FILE, canonical(report), exclusive=True)
         else:
-            if safe_read(insights.root, REPORT_FILE, MAX_FRAME) != canonical(report):
+            if safe_read(insights.root, REPORT_FILE, maximum) != canonical(report):
                 raise Denied("Decision activation report changed before marker")
         marker = {"schema": 1, "kind": "insight.decision", "authority": "shared",
                   "plan_digest": report["plan_digest"], "report_digest": digest(canonical(report))}

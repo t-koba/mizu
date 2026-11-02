@@ -8,7 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from mizu.admission import role_exclusion
-from mizu.decision_reconciliation import preflight_decision_receipts, apply_decision_receipts
+from mizu.decision_reconciliation import (_plan, preflight_decision_receipts,
+                                          apply_decision_receipts)
+from mizu.config import (DEFAULT_DECISION_RECONCILIATION_BYTES,
+                         MAX_DECISION_RECONCILIATION_BYTES)
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import MAX_FRAME, canonical, digest, held, lock, read_json, write_json
 from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY, CorruptDecisionReceipt
@@ -391,6 +394,52 @@ class DecisionReconciliationTests(unittest.TestCase):
             self.insights.acknowledge_decisions("reviewer", reviewer, sources="any")
         self.assertEqual(len(self.legacy_bytes()), len(worker) + len(reviewer))
 
+    def test_constructor_owns_the_configured_reconciliation_bound(self):
+        self.assertEqual(DEFAULT_DECISION_RECONCILIATION_BYTES, 8 * 1024 * 1024)
+        self.assertEqual(MAX_DECISION_RECONCILIATION_BYTES, 64 * 1024 * 1024)
+        self.assertEqual(Insights(self.root).decision_reconciliation_bytes,
+                         DEFAULT_DECISION_RECONCILIATION_BYTES)
+        for value in (0, -1, MAX_DECISION_RECONCILIATION_BYTES + 1, True, 1.5, "8 MiB"):
+            with self.subTest(value=value), self.assertRaises(Denied):
+                Insights(self.root, decision_reconciliation_bytes=value)
+
+    def test_history_scale_plan_uses_the_configured_bound(self):
+        routes = {role: {"actions": ["accept", "modify", "reject", "defer"],
+                         "sources": "any"}
+                  for role in ("reviewer", "worker", "editor")}
+        sources = {}
+        legacy = {role: {} for role in routes}
+        ids = []
+        for index in range(1_000):
+            rid = f"insight.decision/{index:032x}"
+            ids.append(rid)
+            sources[rid] = {"record_digest": "a" * 64,
+                            "history_digest": "b" * 64,
+                            "insight_digest": "c" * 64,
+                            "decision_digest": "d" * 64}
+            for role in routes:
+                legacy[role][rid] = {"ack_token": "e" * 64,
+                                     "receipt_digest": "f" * 64}
+        roles = {role: {"current_ids": ids, "legacy_received_ids": ids,
+                        "legacy_pending_ids": [], "shared_received_ids": [],
+                        "shared_pending_ids": ids, "shared_receipt_digests": {},
+                        "pending_insights": {"current_ids": [],
+                                             "legacy_received_ids": [],
+                                             "legacy_pending_ids": [],
+                                             "shared_received_ids": [],
+                                             "shared_pending_ids": [],
+                                             "shared_receipt_digests": {},
+                                             "post_map_pending_ids": [],
+                                             "post_map_parity": True}}
+                 for role in routes}
+        boundary = {"routes": routes, "route_digest": "0" * 64, "page_bound": 512,
+                    "sources": sources, "legacy_receipts": legacy,
+                    "pending_sources": {}, "pending_legacy_receipts": {}}
+        plan = _plan(boundary, roles, maximum=DEFAULT_DECISION_RECONCILIATION_BYTES)
+        self.assertGreater(len(canonical(plan)), MAX_FRAME)
+        with self.assertRaises(LimitExceeded):
+            _plan(boundary, roles, maximum=MAX_FRAME)
+
     def test_active_role_including_empty_subscription_is_busy_before_writes(self):
         self.decide()
         self.ack("reviewer", self.rows())
@@ -415,7 +464,7 @@ class DecisionReconciliationTests(unittest.TestCase):
             report["shared_receipt_digests"] = {rid: "0" * 64 for rid in report["legacy_received_ids"]}
         bound = len(canonical(plan))
         self.assertGreater(len(canonical(post)), bound)
-        with patch("mizu.decision_reconciliation.MAX_FRAME", bound):
+        with patch.object(self.insights, "decision_reconciliation_bytes", bound):
             with self.assertRaises(LimitExceeded):
                 self.preflight()
             with self.assertRaises(LimitExceeded):
@@ -427,7 +476,7 @@ class DecisionReconciliationTests(unittest.TestCase):
         self.decide()
         self.ack("reviewer", self.rows())
         plan = self.preflight()
-        with patch("mizu.decision_reconciliation.MAX_FRAME", 512):
+        with patch.object(self.insights, "decision_reconciliation_bytes", 512):
             with self.assertRaises(LimitExceeded):
                 self.preflight()
             with self.assertRaises(LimitExceeded):
@@ -697,7 +746,7 @@ class DecisionReconciliationTests(unittest.TestCase):
             pending["shared_receipt_digests"] = {rid: "0" * 64 for rid in pending["legacy_received_ids"]}
         bound = len(canonical(plan))
         self.assertGreater(len(canonical(post)), bound)
-        with patch("mizu.decision_reconciliation.MAX_FRAME", bound):
+        with patch.object(self.insights, "decision_reconciliation_bytes", bound):
             with self.assertRaises(LimitExceeded):
                 self.preflight()
             with self.assertRaises(LimitExceeded):

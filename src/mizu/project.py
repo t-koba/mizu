@@ -148,6 +148,7 @@ class Project:
                                  producer_inputs_per_source=config.limits.producer_inputs_per_source,
                                  decision_projection_records=config.limits.decision_projection_records,
                                  decision_receipt_diagnostics=config.limits.decision_receipt_diagnostics,
+                                 decision_reconciliation_bytes=config.limits.decision_reconciliation_bytes,
                                  cursor_ttl_seconds=config.limits.insight_cursor_ttl_seconds,
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])

@@ -887,8 +887,8 @@ digest pins exact live inbox bytes, or canonical retained archive content when
 there is no live inbox record. Thus non-payload source movement also invalidates
 the boundary. `sources` contains the complete strict source-current decision
 set before routes. The host-only preflight scans this complete set, then bounds
-the serialized plan by `MAX_FRAME`; the plan binds the configured runtime page
-bound, which is not a cutover refusal. `legacy_receipts` contains every routed
+the serialized plan/report by `[limits].decision_reconciliation_bytes`; the
+plan binds the configured runtime page bound, which is not a cutover refusal. `legacy_receipts` contains every routed
 role/record pair, recomputed with `Insights._decision_token`; `receipt_digest`
 is the exact receipt-file byte digest, or **null for absence**. Only receipts
 validated by `_decision_received` count: exact role, event, full payload token
@@ -904,8 +904,8 @@ for each explicit enabled role, `INSIGHT_PENDING_POLICY` alongside
 `INSIGHT_DECISION_POLICY`). `pending_sources` binds each current
 `insight.pending/<event>` record digest, route target, exact inbox byte digest
 and decision-pointer byte digest (or explicit null absence); the host-only
-preflight scans the complete current pending set, with the serialized plan
-bounded by `MAX_FRAME`. `pending_legacy_receipts` binds every
+preflight scans the complete current pending set, with the serialized plan/
+report bounded by `[limits].decision_reconciliation_bytes`. `pending_legacy_receipts` binds every
 addressed role/record token and receipt digest (null for absence). Only exact
 current events already acknowledged in legacy map; unacknowledged attention
 never gains a shared receipt, and legacy receipts are never modified.
@@ -931,9 +931,15 @@ parity lives only in the nested `pending_insights` object.
 
 Before any writes, apply checks the identical source/legacy-receipt/route
 boundary and all bounds. The full serialized plan/report, including its
-post-map form, must fit `fs.MAX_FRAME` (1 MiB); this is a refusal ceiling, **not a
-page budget default**. Count or byte overflow refuses without shared receipt
-writes. This API adds no index, scan cache, page default or storage optimization.
+post-map form, must fit `[limits].decision_reconciliation_bytes` (default 8 MiB,
+validated 1-64 MiB); this is a history-scale refusal ceiling, **not a page budget
+default**. A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan and
+a 1.9 MiB post-map report; the default covers several thousand routed rows. The
+plan and report are host-retained local evidence, not transport frames. Existing
+plan/report reads accept the fixed 64 MiB safety ceiling, so lowering the
+configured write bound does not invalidate retained evidence. Count or byte
+overflow refuses without shared receipt writes. This API adds no index, scan
+cache, page default or storage optimization.
 The prior 205-event shadow scan evidence (3–5x slower reads) does not justify
 additional storage complexity here.
 
@@ -994,10 +1000,12 @@ rewritten, deleted or used as timestamp watermarks.
 Durable project-root evidence, included in backup/restore:
 
 - `decision-activation-plan.json`: create-only schema-1 exact reconciliation
-  plan, at most `MAX_FRAME`. Written before mapping. Retained original input
+  plan, at most `[limits].decision_reconciliation_bytes`. Written before mapping.
+  Retained original input
   identity survives restart; retries use this plan, not a silently fresh one.
 - `decision-activation-report.json`: completed schema-1 reconciliation report,
-  at most `MAX_FRAME`, with actual whole-set parity. Written after successful
+  at most `[limits].decision_reconciliation_bytes`, with actual whole-set parity.
+  Written after successful
   apply; a pre-marker exact retry validates/reuses the same bytes without
   rewriting the report. Corrupt or mismatched prior report bytes refuse.
 - `decision-authority.json`: canonical create-only marker, at most 4096 bytes,

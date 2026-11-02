@@ -4,7 +4,7 @@ from datetime import datetime
 
 import json
 
-from .config import role_decision_events_limit
+from .config import MAX_DECISION_RECONCILIATION_BYTES, role_decision_events_limit
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, digest, loads_finite, safe_read
 from .insights import INSIGHT_DELIVERY_POLICIES
@@ -15,7 +15,7 @@ PLAN_FILE = "decision-activation-plan.json"
 REPORT_FILE = "decision-activation-report.json"
 
 
-def authority(root):
+def authority(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
     """Absent means legacy. An unsafe, malformed or partial marker never does."""
     try:
         (root / AUTHORITY_FILE).lstat()
@@ -32,7 +32,7 @@ def authority(root):
             raise ValueError("marker schema")
     except (ValueError, TypeError, UnicodeError) as exc:
         raise Denied("Invalid decision authority marker; reconciliation required") from exc
-    report_raw = safe_read(root, REPORT_FILE, MAX_FRAME)
+    report_raw = safe_read(root, REPORT_FILE, report_bytes)
     if digest(report_raw) != marker["report_digest"]:
         raise Denied("Decision authority report digest mismatch")
     report = loads_finite(report_raw)

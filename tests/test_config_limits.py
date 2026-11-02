@@ -7,7 +7,8 @@ import unittest
 from support import Fixture
 from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
                          MAX_DECISION_RECEIPT_DIAGNOSTICS, MAX_HISTORY_TEMPORARIES,
-                         MAX_QUEUE_OBSERVATIONS, Limits, ROOT_KEYS, _LIMIT_RANGES, load)
+                         MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
+                         Limits, ROOT_KEYS, _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
 
@@ -116,6 +117,31 @@ class DecisionProjectionConfigTests(Fixture):
                     with self.assertRaisesRegex(ConfigError,
                                                 'limits.decision_projection_records'):
                         load(self.file)
+
+
+class ReconciliationPlanConfigTests(Fixture):
+    def test_default_and_absolute_range(self):
+        self.assertEqual(MAX_DECISION_RECONCILIATION_BYTES, 64 * 1024 * 1024)
+        self.assertEqual(Limits().decision_reconciliation_bytes, 8 * 1024 * 1024)
+        base = self.file.read_text()
+        for name, default, ceiling in (
+                ('decision_reconciliation_bytes', 8 * 1024 * 1024,
+                 MAX_DECISION_RECONCILIATION_BYTES),):
+            with self.subTest(name=name):
+                original = re.sub(rf'(?m)^{name} = .*\n', '', base)
+                self.file.write_text(original)
+                self.assertEqual(getattr(load(self.file).limits, name), default)
+                for value in ('1', str(default), str(ceiling), str(ceiling + 1),
+                              '0', '-1', 'true', 'false', '1.5', '"1"', '[]', '{}'):
+                    with self.subTest(value=value):
+                        self.file.write_text(original.replace(
+                            '\n[limits]\n', f'\n[limits]\n{name} = {value}\n'))
+                        if value in ('1', str(default), str(ceiling)):
+                            self.assertEqual(getattr(load(self.file).limits, name), int(value))
+                        else:
+                            with self.assertRaisesRegex(ConfigError, f'limits.{name}'):
+                                load(self.file)
+                self.file.write_text(base)
 
 
 class DiagnosticSampleConfigTests(Fixture):
