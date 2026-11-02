@@ -775,6 +775,19 @@ exception/death and are never unlinked. Preflight can create lock infrastructure
 but creates **no immutable projections or receipts**. Legacy delivery and exact
 acknowledgement remain the only active runtime authority for decisions.
 
+### Idle re-evaluation
+
+An idle dispatch or readiness check first samples a cheap metadata fingerprint
+of the role's `inbox`, `decision-history`, `decisions` and receipt directories.
+When the last exact scan returned no decision or attention events and the
+fingerprint is unchanged, the check uses an empty readiness page: it reads no
+decision-history file and takes no record lock. Any source change, any
+non-empty result, and any metadata error run the existing exact scan; a real
+dispatch still recomputes its page and manifest, so the fingerprint is never a
+delivery cache. This bounds an unchanged idle tick; the remaining end state —
+readers that never hold the exclusive lock for a full-history scan and a delta
+reader instead of a full re-scan on change — is tracked separately.
+
 ### Exact schema and identity
 
 The returned JSON object has exactly the following schema (decision maps below

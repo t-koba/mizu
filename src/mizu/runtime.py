@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import threading
 import time
 import uuid
@@ -2476,7 +2477,7 @@ class Engine:
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
         record_state = operator_records.pending(project, role)
-        decision_state = decision_delivery.pending(project, role)
+        decision_state = _decision_delivery_state(project, role_name, role)
         decision_events = decision_state["events"]
         receipt_diagnostics = decision_state["diagnostics"]
         # Reuse validated records only within this dispatch, never across rechecks.
@@ -3993,6 +3994,89 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
         return False
 
 
+#: Process-local idle fast path. An empty decision/attention page is reused only
+#: while every source directory and the role's receipts are unchanged; a
+#: non-empty result is never cached as empty. This is a readiness cache, not a
+#: delivery authority: any real dispatch recomputes the exact page and manifest.
+_DECISION_IDLE_CACHE: dict = {}
+_DECISION_IDLE_CACHE_LIMIT = 256
+
+
+def _empty_decision_state(shared: bool) -> dict:
+    page = ({"events": [], "pending_count": 0, "truncated": False,
+             "count_truncated": False, "byte_truncated": False}
+            if shared else None)
+    return {"shared": shared, "events": [], "diagnostics": [], "page": page,
+            "manifest": ()}
+
+
+def _decision_source_fingerprint(project, role_name):
+    """Cheap, path-free metadata token for decision/attention sources."""
+    root = project.insights.root
+    parts = []
+    for name in ("inbox", "decision-history", "decisions",
+                 f"decision-receipts/{role_name}"):
+        path = root / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            parts.append((name, 0, 0, 0))
+            continue
+        except OSError:
+            return None
+        if not stat.S_ISDIR(info.st_mode):
+            return None
+        parts.append((name, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+    for name in (decision_delivery.AUTHORITY_FILE, decision_delivery.REPORT_FILE):
+        path = root / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            parts.append((name, 0, 0, 0))
+            continue
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        parts.append((name, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+    return tuple(parts)
+
+
+def _decision_policy_signature(project, role):
+    return (role.name,
+            tuple(getattr(role, "decision_events", ()) or ()),
+            getattr(role, "decision_sources", "own") or "own",
+            decision_delivery.role_decision_events_limit(project.config, role),
+            getattr(role, "decision_page_bytes", 0),
+            tuple(sorted(set(project.roles) & project.config.roles.keys())))
+
+
+def _decision_delivery_state(project, role_name, role):
+    """Return the exact pending decision/attention state, with an idle fast path.
+
+    The fingerprint is sampled before and after a scan; an empty page is cached
+    only when neither sample changed. A scan that observes a change, or returns
+    any event/diagnostic, is never reused. Errors reading the source metadata
+    simply disable the fast path for that evaluation.
+    """
+    key = (project.insights.root, role_name, _decision_policy_signature(project, role))
+    before = _decision_source_fingerprint(project, role_name)
+    cached = _DECISION_IDLE_CACHE.get(key)
+    if before is not None and cached is not None and cached[0] == before:
+        return _empty_decision_state(cached[1])
+    shared = decision_delivery.authority(project.insights.root) is not None
+    state = decision_delivery.pending(project, role)
+    after = _decision_source_fingerprint(project, role_name)
+    if (not state["events"] and not state["diagnostics"]
+            and before is not None and before == after):
+        if len(_DECISION_IDLE_CACHE) >= _DECISION_IDLE_CACHE_LIMIT:
+            _DECISION_IDLE_CACHE.clear()
+        _DECISION_IDLE_CACHE[key] = (before, shared)
+    else:
+        _DECISION_IDLE_CACHE.pop(key, None)
+    return state
+
+
 def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
     """Routed decisions/insight attention, terminal events or waits due to a role.
 
@@ -4018,10 +4102,14 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             pass
         triggers = project.config.roles[name].decision_events
         sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
-        state = decision_delivery.pending(
-            project, project.config.roles[name],
-            actions=triggers if sources == "any" else tuple(a for a in triggers if a != "defer"),
-            limit=1)
+        if sources == "any" or "defer" not in triggers:
+            state = _decision_delivery_state(project, name, project.config.roles[name])
+        else:
+            # Deferrals must not hide a substantive trigger outside a bounded
+            # full page; preserve the filtered exact scan for this edge.
+            state = decision_delivery.pending(
+                project, project.config.roles[name],
+                actions=tuple(a for a in triggers if a != "defer"), limit=1)
         pending, troubled = state["events"], state["diagnostics"]
         if sources == "any":
             if pending or troubled:
