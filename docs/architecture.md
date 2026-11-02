@@ -581,7 +581,9 @@ creation directories to build its inventory with O(limit) retained rows. The eve
 subsequently revisable insight.
 A read-only open page may reuse a validated current projection while the
 canonical seed digest and every entry's metadata in that item's directory are
-unchanged, on local POSIX where ctime is a metadata-change witness. On Windows
+unchanged, on local POSIX where ctime is a metadata-change witness. The
+identity is sampled with the revision read; a post-replay mismatch is a
+concurrent append and is never cached. On Windows
 the work-item metadata caches are bypassed and every read validates the exact
 seed and chain. Origin staleness is recomputed on every call; an item with a
 current delivery binding, any new or changed revision, a changed seed, a

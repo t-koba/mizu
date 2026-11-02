@@ -367,18 +367,24 @@ class WorkItems:
                  dir_info.st_ctime_ns, dir_info.st_size), tuple(entries))
 
     def _history_revisions_readonly(self, item_id: str):
-        """Reuse the validated revision set while its directory is unchanged."""
+        """Return a revision set and the identity it was read under.
+
+        The identity is sampled before the revision scan. A caller that later
+        sees a different directory identity must not stamp the resulting item
+        with the newer identity; the mismatch is a concurrent append, not a
+        cacheable unchanged state.
+        """
         if IS_WINDOWS:
-            return self._history_revisions(item_id, recover=False)
+            return self._history_revisions(item_id, recover=False), None
         key = self._history_identity(item_id)
         if key is not None:
             cached = self._history_cache.get(item_id)
             if cached is not None and cached[0] == key:
-                return cached[1]
+                return cached[1], key
         revisions = self._history_revisions(item_id, recover=False)
         if key is not None:
             self._history_cache[item_id] = (key, revisions)
-        return revisions
+        return revisions, key
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
@@ -529,7 +535,8 @@ class WorkItems:
             write_json(directory / "create.json", record, exclusive=True)
             return {"record": record, "created": True}
 
-    def _iter_item_events_with_revisions(self, *, recover: bool, cache: bool = False):
+    def _iter_item_events_with_revisions(self, *, recover: bool, cache: bool = False,
+                                         with_identity: bool = False):
         task_sources = set()
         ambiguous_task_sources = set()
         for event_id, event in self._iter_decision_events(recover=recover):
@@ -539,9 +546,15 @@ class WorkItems:
                         ambiguous_task_sources.add(seed["id"])
                     else:
                         task_sources.add(seed["id"])
-                    yield seed["id"][3:], event, None
+                    if with_identity:
+                        yield seed["id"][3:], event, None, None
+                    else:
+                        yield seed["id"][3:], event, None
             else:
-                yield event_id, event, None
+                if with_identity:
+                    yield event_id, event, None, None
+                else:
+                    yield event_id, event, None
         directory = self.root / "work-items"
         if not _directory(directory):
             return
@@ -562,19 +575,24 @@ class WorkItems:
                         if entry.name in ambiguous_task_sources:
                             raise Denied("Ambiguous task seed sources")
                         group = entry.name in task_sources
-                        revisions = (self._history_revisions_readonly(entry.name)
-                                     if cache else
-                                     self._history_revisions(entry.name, recover=recover))
+                        if cache:
+                            revisions, identity = self._history_revisions_readonly(entry.name)
+                        else:
+                            revisions, identity = (self._history_revisions(entry.name, recover=recover), None)
                         if group:
                             continue
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")
                     continue
-                revisions = (self._history_revisions_readonly(entry.name)
-                             if cache else
-                             self._history_revisions(entry.name, recover=recover))
+                if cache:
+                    revisions, identity = self._history_revisions_readonly(entry.name)
+                else:
+                    revisions, identity = (self._history_revisions(entry.name, recover=recover), None)
                 record = self._direct_record(entry.name)
-                yield entry.name[3:], record, revisions
+                if with_identity:
+                    yield entry.name[3:], record, revisions, identity
+                else:
+                    yield entry.name[3:], record, revisions
 
     def _iter_item_events(self, *, recover: bool):
         for event_id, event, _ in self._iter_item_events_with_revisions(recover=recover):
@@ -1970,7 +1988,8 @@ class WorkItems:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         cacheable = readonly and not IS_WINDOWS
         events = self._iter_item_events_with_revisions(recover=not readonly,
-                                                        cache=cacheable)
+                                                        cache=cacheable,
+                                                        with_identity=cacheable)
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -1982,7 +2001,12 @@ class WorkItems:
         unknown_blocked = 0
         ready_sum = 0
         order_sum = 0
-        for event_id, event, scanned in events:
+        for row in events:
+            if cacheable:
+                event_id, event, scanned, history_key = row
+            else:
+                event_id, event, scanned = row
+                history_key = None
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind == "skip":
                 continue
@@ -1992,10 +2016,12 @@ class WorkItems:
             # Reuse this safely read event; _seed still validates its complete contract.
             history_revisions = scanned
             if history_revisions is None:
-                history_revisions = (self._history_revisions_readonly(seed["id"])
-                                     if readonly else
-                                     self._history_revisions(seed["id"], recover=True))
-            history_key = self._history_identity(seed["id"]) if cacheable else None
+                if cacheable:
+                    history_revisions, history_key = self._history_revisions_readonly(seed["id"])
+                elif readonly:
+                    history_revisions = self._history_revisions(seed["id"], recover=False)
+                else:
+                    history_revisions = self._history_revisions(seed["id"], recover=True)
             cache_key = (digest(canonical(seed)), history_key)
             cached = self._projection_cache.get(seed["id"]) if history_key is not None else None
             if cached is not None and cached[0] == cache_key:

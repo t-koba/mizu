@@ -102,6 +102,29 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.page_open_readonly(limit=100)
 
+    def test_readonly_page_does_not_cache_a_pre_append_projection(self):
+        created = self.store.create(idempotency_key="append-race", title="Race",
+                                    actor="worker")["record"]["work_item"]
+        item_id = created["id"]
+        original = self.store._history_revisions
+        appended = [False]
+
+        def append_after_read(target, **kwargs):
+            result = original(target, **kwargs)
+            if target == item_id and not appended[0]:
+                appended[0] = True
+                self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+            return result
+
+        with patch.object(self.store, "_history_revisions", side_effect=append_after_read):
+            first = self.store.page_open_readonly(limit=100)
+        self.assertTrue(appended[0])
+        self.assertEqual(next(row for row in first["items"] if row["id"] == item_id)["status"],
+                         "open")
+        second = self.store.page_open_readonly(limit=100)
+        row = next(row for row in second["items"] if row["id"] == item_id)
+        self.assertEqual((row["status"], row["rev"]), ("doing", 2))
+
     def test_readonly_page_invalidates_projection_on_new_revision(self):
         self.store.page_open_readonly(limit=100)
         changed = self.change("doing")
