@@ -336,7 +336,7 @@ previous 1000 s bound cut it off). Measured Windows cells have since reached
 that edge: on 2026-11-01 the 3.14 job took 1282 s on one publication and was
 cut off at the 1800 s child bound on the next, a documentation-only change;
 the same run's 3.11 job took 1710 s, and an earlier 3.13 job took 1628 s. On
-2026-11-02 the 3.11 cell was cut off at the same 1800 s child bound (job wall
+2026-11-02 the 3.13 cell was cut off at the same 1800 s child bound (job wall
 1821 s). These are single observations on unguaranteed hosted hardware and disk
 layout; published same-revision measurements show that hosted runs can vary
 enough that one cell is neither a cell cost nor a test ranking. Repeat or
@@ -381,8 +381,9 @@ The 2026-10-21 Windows/3.13 run completed 2233 of about 2265 tests in
 1447 s and reached the previous 1450 s child cap without a reported
 test failure, and the 2026-10-21 POSIX run reached the previous 1000 s child
 cap with the suite still running and three load-sensitive assertions
-failing, so the child bound covers the suite's measured cost on both hosts
-with margin.
+failing. Those observations moved the bound to 1800 s; the 2026-11-01 and
+2026-11-02 Windows observations above show that bound is now at its edge, not
+comfortably above the slowest host.
 A test that waits for a spawned child waits with one shared host-cost
 bound (60 s, with a 600 s backstop for the child's own release): the
 child is a fresh interpreter that re-imports the product's modules, so

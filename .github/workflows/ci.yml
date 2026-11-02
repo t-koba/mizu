@@ -20,7 +20,7 @@ jobs:
     # since reached the edge: on 2026-11-01 the 3.14 job took 1282 s on one
     # publication and was cut off at the 1800-second child bound on the next, a
     # documentation-only change, while 3.11 took 1710 s and an earlier 3.13 job
-    # took 1628 s. On 2026-11-02 the 3.11 cell was also cut off at that bound
+    # took 1628 s. On 2026-11-02 the 3.13 cell was also cut off at that bound
     # (job wall 1821 s). These are single observations on unguaranteed hosted
     # hardware and disk layout; same-revision hosted runs can vary enough that
     # one cell is neither a cell cost nor a test ranking. Repeat or interleave

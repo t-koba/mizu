@@ -1472,7 +1472,7 @@ def main():
     # Timestamped verbose progress: on a timeout the killed step leaves the
     # unfinished test as the last timestamped line in the live log.
     # The suite has reached the 1800 s Windows child bound: on 2026-11-02 the
-    # Windows/Python 3.11 cell was cut off at 1800 s (job wall 1821 s); on
+    # Windows/Python 3.13 cell was cut off at 1800 s (job wall 1821 s); on
     # 2026-11-01 the 3.14 cell was cut off at 1800 s on a documentation-only
     # publication after taking 1282 s on the preceding one, while 3.11 took
     # 1710 s and an earlier 3.13 took 1628 s. A loaded POSIX host has also
