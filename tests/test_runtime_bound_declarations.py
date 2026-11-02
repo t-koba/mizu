@@ -1,8 +1,10 @@
 """First runtime-bound inventory, not a general numeric-literal linter.
 
-The nine files below cover named, direct module-level Assign/AnnAssign bounds
-and direct numeric literal/arithmetic values at a short resource-call keyword
-set. Expressions are inventoried without evaluating source. This does not lint
+The `src/mizu` files below cover named, direct module-level Assign/AnnAssign
+bounds and direct numeric literal/arithmetic values at a short resource-call
+keyword set. The gate inventory covers `scripts/check.py`'s host-cost, output
+and artifact bounds; its two host-cost choices are configured policy defaults.
+Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
@@ -21,6 +23,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1] / 'src' / 'mizu'
+GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
     r'(?:MAX_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|ENTRIES|BYTES|ROWS|COUNT))\Z'
 )
@@ -63,6 +66,56 @@ DECLARATIONS = {
         'AUDIT_LIMIT': ('128', 'policy', 'smoke retention / retained audit-event count'),
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
+    },
+}
+
+
+# The validation gate is a separate owner. Its suite child bound and later-phase
+# budget are configured policy defaults; the remaining host-cost choices are
+# recorded as policy until a measured slice moves them, and output/artifact
+# bounds are fixed safety ceilings.
+GATE_DECLARATIONS = {
+    'check.py': {
+        'DEFAULT_CHECK_TIMEOUT_SECONDS': (
+            '600', 'policy', 'gate later phase / per-check ceiling; the phase budget holds two full bounds'),
+        'GATE_TIMEOUT_MIN_SECONDS': (
+            '1', 'safety', 'gate configuration / minimum accepted host-cost bound'),
+        'GATE_TIMEOUT_MAX_SECONDS': (
+            '86400', 'safety', 'gate configuration / maximum accepted host-cost bound'),
+        'PROCESS_CLEANUP_TIMEOUT_SECONDS': (
+            '30', 'mechanism', 'gate / bounded process-group cleanup wait'),
+        'SETUP_RESERVE_SECONDS': (
+            '60', 'policy', 'gate modelled path / setup reserve for the enclosing scope'),
+        'RECEIPT_RESERVE_SECONDS': (
+            '120', 'policy', 'gate modelled path / receipt and summary reserve'),
+        'LATER_PHASE_BUDGET_SECONDS': (
+            '1200', 'configured policy', 'gate later phase / default shared budget; --later-phase-budget'),
+        'RELAY_BUDGET_BYTES': (
+            '49152', 'safety', 'gate output relay / bounded retained child output'),
+        'RELAY_TAIL_BYTES': (
+            '16384', 'safety', 'gate output relay / bounded failure tail'),
+        'RECEIPT_OUTPUT_BUDGET_BYTES': (
+            '16384', 'safety', 'gate output relay / bounded receipt output'),
+        'SUMMARY_OUTPUT_BUDGET_BYTES': (
+            '8192', 'safety', 'gate output relay / bounded summary output'),
+        'PROGRESS_OUTPUT_BUDGET_BYTES': (
+            '98304', 'safety', 'gate output relay / bounded live progress output'),
+        'FINAL_NOTICE_BUDGET_BYTES': (
+            '1024', 'safety', 'gate output relay / bounded final notice'),
+        'SUITE_CHILD_TIMEOUT_SECONDS': (
+            '1800', 'configured policy', 'gate suite child / default wall bound; --suite-child-timeout'),
+        'TIMING_SIDECAR_MAX_BYTES': (
+            '1000000', 'safety', 'gate timing artifact / bounded sidecar read'),
+        'TIMING_MAX_SECONDS': (
+            '100000.0', 'safety', 'gate timing artifact / accepted timestamp range'),
+        'TIMING_PHASE_MAX_ENTRIES': (
+            '200', 'safety', 'gate timing artifact / bounded phase entries'),
+        'TIMING_ARTIFACT_MAX_BYTES': (
+            '192 * 1024', 'safety', 'gate timing artifact / bounded artifact page'),
+        'NPM_PROVISION_TIMEOUT_SECONDS': (
+            '300', 'policy', 'gate provisioning / pinned adapter install timeout'),
+        'PROJECT_IMPORT_DIAGNOSTIC_BYTES': (
+            '8192', 'safety', 'gate import diagnostic / bounded sidecar read'),
     },
 }
 
@@ -238,6 +291,18 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                     self.assertIn(category, categories)
                     self.assertTrue(rationale.strip())
                 tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+                self.assertEqual(inventory(tree), {
+                    name: entry[0] for name, entry in declarations.items()
+                })
+
+    def test_gate_declared_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for filename, declarations in GATE_DECLARATIONS.items():
+            with self.subTest(file=filename):
+                for expression, category, rationale in declarations.values():
+                    self.assertIn(category, categories)
+                    self.assertTrue(rationale.strip())
+                tree = ast.parse((GATE_ROOT / filename).read_text(encoding='utf-8'))
                 self.assertEqual(inventory(tree), {
                     name: entry[0] for name, entry in declarations.items()
                 })

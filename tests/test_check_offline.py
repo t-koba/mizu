@@ -77,6 +77,31 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(required, 3246)
         self.assertGreaterEqual(60 * 60, required)
 
+    def test_gate_host_cost_options_preserve_defaults_and_validate_range(self):
+        parser = CHECK._gate_parser()
+        defaults = parser.parse_args([])
+        self.assertEqual(defaults.suite_child_timeout, 1800)
+        self.assertEqual(defaults.later_phase_budget, 1200)
+        configured = parser.parse_args(['--suite-child-timeout', '900',
+                                        '--later-phase-budget', '600'])
+        self.assertEqual(configured.suite_child_timeout, 900)
+        self.assertEqual(configured.later_phase_budget, 600)
+        for arguments in (['--suite-child-timeout', '0'],
+                          ['--later-phase-budget', '0'],
+                          ['--suite-child-timeout', 'abc'],
+                          ['--later-phase-budget', '86401']):
+            with mock.patch('sys.stderr', new=io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(arguments)
+
+    def test_configured_host_cost_bounds_reach_the_modelled_path(self):
+        self.assertEqual(CHECK._unittest_timeout_seconds(900), 900)
+        self.assertEqual(CHECK.modelled_gate_seconds(900, 600),
+                         CHECK.SETUP_RESERVE_SECONDS + 900 + 600
+                         + CHECK.CLEANUP_RESERVE_SECONDS + CHECK.RECEIPT_RESERVE_SECONDS)
+        self.assertEqual(CHECK.core_cell_scope_seconds(900, 10, 600),
+                         CHECK.modelled_gate_seconds(900, 600) + 10)
+
     def test_matrix_job_scopes_hold_the_modelled_gate_path(self):
         # A job scope that is shorter than the gate's own modelled path kills
         # a healthy run before the gate can report its bounded outcome, so
@@ -170,9 +195,8 @@ class CheckTimeoutTests(unittest.TestCase):
                 f'spec = importlib.util.spec_from_file_location("check", {str(ROOT / "scripts" / "check.py")!r})\n'
                 'module = importlib.util.module_from_spec(spec)\n'
                 'spec.loader.exec_module(module)\n'
-                'module.LATER_PHASE_BUDGET_SECONDS = 1\n'
-                'module._unittest_timeout_seconds = lambda platform=None: 1\n'
-                f'sys.argv = ["check.py", "--report", {str(report)!r}, "--allow-not-run", {waivers!r}]\n'
+                f'sys.argv = ["check.py", "--report", {str(report)!r}, "--allow-not-run", {waivers!r}, '
+                '"--suite-child-timeout", "1", "--later-phase-budget", "1"]\n'
                 'sys.exit(module.main())\n', encoding='utf-8')
             completed = subprocess.run([sys.executable, str(wrapper)], cwd=ROOT,
                                        capture_output=True, text=True, timeout=300)
@@ -185,6 +209,7 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertFalse(receipt['ok'])
         # The phase's own evidence matches the children it refused.
         self.assertEqual(receipt['later_phase']['children'], len(refused))
+        self.assertEqual(receipt['later_phase']['suite_child_timeout_seconds'], 1)
         self.assertEqual(receipt['later_phase']['budget_seconds'], 1)
         self.assertEqual(receipt['later_phase']['consumed_seconds'], 0.0)
         # Every later child the gate would run in this configuration is

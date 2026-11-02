@@ -82,7 +82,27 @@ def _allow_list(value: str) -> frozenset:
     return frozenset(part.strip() for part in value.split(',') if part.strip())
 
 
+#: Per-check ceiling inside the later phase. The default phase budget holds
+#: two full child bounds, so one hung child still leaves every remaining child
+#: its own run. The suite child bound and the phase budget are configured
+#: by --suite-child-timeout and --later-phase-budget.
 DEFAULT_CHECK_TIMEOUT_SECONDS = 600
+GATE_TIMEOUT_MIN_SECONDS = 1
+GATE_TIMEOUT_MAX_SECONDS = 86400
+
+
+def _gate_seconds(value):
+    """Parse one validated gate host-cost bound in seconds."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError('must be an integer number of seconds') from None
+    if not GATE_TIMEOUT_MIN_SECONDS <= seconds <= GATE_TIMEOUT_MAX_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f'must be between {GATE_TIMEOUT_MIN_SECONDS} and {GATE_TIMEOUT_MAX_SECONDS} seconds')
+    return seconds
+
+
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 30
 #: Seconds budgeted for the environment setup that precedes the suite child
 #: (interpreter start, preflight probes, dependency resolution).
@@ -114,7 +134,8 @@ SDK_GATE_NAMES = tuple(SDK_GATE_ADAPTERS)
 #: nineteen children of the durable job (its three SDK contract suites
 #: measured 5.6 s, 75.5 s and 18.1 s on the development host). The budget
 #: also holds two children's full bounds, so one hung child still leaves
-#: every remaining child its own run.
+#: every remaining child its own run. This value is the default for
+#: --later-phase-budget.
 LATER_PHASE_BUDGET_SECONDS = 1200
 
 
@@ -467,7 +488,8 @@ def later_phase_child_count(*, platform: str | None = None, sdk_suites: int = 0,
     return count
 
 
-def modelled_gate_seconds(child_timeout: int) -> int:
+def modelled_gate_seconds(child_timeout: int,
+                          later_phase_budget: int = LATER_PHASE_BUDGET_SECONDS) -> int:
     """Return the seconds a bounded gate run needs from setup to receipt.
 
     Every outer scope that encloses the gate (a CI job, the installer
@@ -475,15 +497,17 @@ def modelled_gate_seconds(child_timeout: int) -> int:
     off a healthy run before the gate can report its own bounded outcome,
     so the enclosing scope must never be the tighter bound.
 
-    The later phase is bounded as a whole (LATER_PHASE_BUDGET_SECONDS), not
-    per child: the phase runs one child per check, so a per-child term would
-    make this path grow with the number of checked files.
+    The later phase is bounded as a whole, not per child: the phase runs one
+    child per check, so a per-child term would make this path grow with the
+    number of checked files. ``later_phase_budget`` is the validated
+    --later-phase-budget value; omission keeps the 1200 s default.
     """
-    return (SETUP_RESERVE_SECONDS + child_timeout + LATER_PHASE_BUDGET_SECONDS
+    return (SETUP_RESERVE_SECONDS + child_timeout + later_phase_budget
             + CLEANUP_RESERVE_SECONDS + RECEIPT_RESERVE_SECONDS)
 
 
-def core_cell_scope_seconds(child_timeout: int, staging_timeout: int) -> int:
+def core_cell_scope_seconds(child_timeout: int, staging_timeout: int,
+                            later_phase_budget: int = LATER_PHASE_BUDGET_SECONDS) -> int:
     """Return the seconds the core CI cell needs from its first step to its last.
 
     The cell that installs runs the gate once: the installer reuses the
@@ -493,7 +517,7 @@ def core_cell_scope_seconds(child_timeout: int, staging_timeout: int) -> int:
     bounded staging call, so the job never cuts off a healthy run before the
     gate reports its own bounded outcome.
     """
-    return modelled_gate_seconds(child_timeout) + staging_timeout
+    return modelled_gate_seconds(child_timeout, later_phase_budget) + staging_timeout
 
 
 #: The wall-clock bound the gate holds the Python suite child to. The suite
@@ -502,19 +526,22 @@ def core_cell_scope_seconds(child_timeout: int, staging_timeout: int) -> int:
 #: 1000 s bound cut it off). On 2026-11-01 a Windows 3.14 child was cut off at
 #: this bound on a documentation-only change after the same cell took 1282 s;
 #: the 3.11 and 3.13 Windows cells have measured 1710 s and 1628 s. The bound
-#: is at its edge, not comfortably above the slowest host; changing it or the
-#: operator-owned job scope is a separate decision.
+#: is at its edge, not comfortably above the slowest host. This value is the
+#: default for --suite-child-timeout; changing it or the operator-owned job
+#: scope is a separate decision.
 SUITE_CHILD_TIMEOUT_SECONDS = 1800
 
 
-def _unittest_timeout_seconds() -> int:
+def _unittest_timeout_seconds(configured: int | None = None) -> int:
     """Bound the suite child so the gate finishes inside its job scope.
 
     The platform does not change the bound: the suite's cost is a fact about
     the host, and the slowest supported host sets one bound for all of them.
-    The job scope holds the full modelled path.
+    ``configured`` is the validated --suite-child-timeout value; omission
+    keeps the 1800 s default. The enclosing job scope must hold the full
+    modelled path.
     """
-    return SUITE_CHILD_TIMEOUT_SECONDS
+    return SUITE_CHILD_TIMEOUT_SECONDS if configured is None else int(configured)
 
 
 WRAPPER_TRACE_TEST = ('test_install_ci.InstallWrapperCITests.'
@@ -885,7 +912,8 @@ def _write_bounded_timing_json(path: Path, data: bytes) -> None:
 
 def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int | None,
                            elapsed_seconds: float, phases=(), source_sha=None,
-                           reason=None, collection_state='complete') -> None:
+                           reason=None, collection_state='complete',
+                           timeout_seconds: int | None = None) -> None:
     """Best-effort versioned summary and byte-bounded, hash-bound detail pages.
 
     Only internal manifest identity is used, never CI environment/branch IDs.
@@ -907,7 +935,7 @@ def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: i
                    'source_sha256': source_sha,
                    'mizu_version': __version__,
                    'python': sys.version.split()[0], 'os': sys.platform,
-                   'unittest_timeout_seconds': _unittest_timeout_seconds(),
+                   'unittest_timeout_seconds': _unittest_timeout_seconds(timeout_seconds),
                    'unittest_elapsed_seconds': round(float(elapsed_seconds), 3),
                    'unittest_status': status if status in ('pass', 'fail', 'not_run') else 'fail',
                    'unittest_exit_code': exit_code if type(exit_code) is int else None,
@@ -1255,7 +1283,7 @@ def project_import_diagnostic(env, scratch, source_sha):
             pass
 
 
-def main():
+def _gate_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fail-fast', action='store_true',
                         help='Stop the Python suite at its first failure; successful gates still run every test')
@@ -1273,6 +1301,20 @@ def main():
                              'node-pi-reasoning-replay-tests where the operator has not '
                              'provisioned the pinned SDK); absent SDK dependencies fail '
                              'without an explicit waiver')
+    parser.add_argument('--suite-child-timeout', type=_gate_seconds,
+                        default=SUITE_CHILD_TIMEOUT_SECONDS,
+                        help='Wall-clock bound for the Python suite child in seconds '
+                             f'(default {SUITE_CHILD_TIMEOUT_SECONDS}); the enclosing job '
+                             'scope must hold the modelled path')
+    parser.add_argument('--later-phase-budget', type=_gate_seconds,
+                        default=LATER_PHASE_BUDGET_SECONDS,
+                        help='Shared wall-clock budget for the checks after the Python suite '
+                             f'in seconds (default {LATER_PHASE_BUDGET_SECONDS})')
+    return parser
+
+
+def main():
+    parser = _gate_parser()
     args = parser.parse_args()
     allowed_not_run = _allow_list(args.allow_not_run)
     checked_node_version = node_version()
@@ -1285,7 +1327,7 @@ def main():
     sys.stdout = progress_stream
     checks = []
     counts = {}
-    phase = LaterPhase()
+    phase = LaterPhase(args.later_phase_budget)
     relay = OutputRelay()
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONFAULTHANDLER': '1'}
     # The offline suite is process-spawn heavy. Every outer scope that
@@ -1516,7 +1558,7 @@ def main():
         with project_import_diagnostic(env, Path(temporary), source_sha):
             ended_at = execute('python-unit-and-contract-tests', command,
                     count=unittest_counts, failure_summary=lambda: unittest_failure_summary(sidecar),
-                    timeout=_unittest_timeout_seconds())
+                    timeout=_unittest_timeout_seconds(args.suite_child_timeout))
         if args.test_timings and timing_sidecar is not None and timing_origin is not None:
             try:
                 pending_timings = parse_unittest_timings(
@@ -1544,7 +1586,8 @@ def main():
                                    exit_code=pending_unittest_exit,
                                    elapsed_seconds=pending_unittest_elapsed,
                                    phases=checks, source_sha=source_sha,
-                                   reason=pending_unittest_reason, collection_state='partial')
+                                   reason=pending_unittest_reason, collection_state='partial',
+                                   timeout_seconds=args.suite_child_timeout)
     if not shutil.which('node'):
         checks.append({'name': 'node-available', 'status': 'fail'})
     # bash is a POSIX convenience for shell-syntax checks, not a runtime
@@ -1620,7 +1663,8 @@ def main():
                                exit_code=pending_unittest_exit,
                                elapsed_seconds=pending_unittest_elapsed,
                                phases=checks, source_sha=source_sha,
-                               reason=pending_unittest_reason)
+                               reason=pending_unittest_reason,
+                               timeout_seconds=args.suite_child_timeout)
     receipt = {'suite': 'offline' if args.test_shard is None else 'offline-shard',
                'report_version': OFFLINE_REPORT_VERSION,
                'mizu_version': __version__, 'source_sha256': source_sha,
@@ -1629,6 +1673,8 @@ def main():
                'ok': all(c['status'] != 'fail' for c in checks),
                'checks': checks, 'counts': counts, 'python': sys.version.split()[0], 'os': sys.platform,
                'later_phase': {'children': phase.children,
+                               'suite_child_timeout_seconds': _unittest_timeout_seconds(
+                                   args.suite_child_timeout),
                                'budget_seconds': phase.budget,
                                'consumed_seconds': round(phase.consumed, 3)},
                'not_run': ['installed-Pi', 'rootless-Podman', 'live-provider', '24-hour-soak', 'cross-distribution-deployment']}

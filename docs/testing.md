@@ -344,7 +344,12 @@ interleave observations with host identity and volume layout before deciding
 whether the bound or the suite shape should move. The bound therefore no longer
 carries the margin this paragraph
 previously claimed; whether the child bound or the suite duration should move
-is an operator decision, with the retained per-cell artifacts as evidence. The modeled
+is an operator decision, with the retained per-cell artifacts as evidence. The
+gate exposes the child bound and the later-phase budget as
+`--suite-child-timeout` and `--later-phase-budget` (defaults 1800 s and
+1200 s; validated 1 to 86400 s ranges). CI uses the defaults; a run that
+passes other values must also ensure its enclosing job scope holds the
+resulting modeled path. The modeled
 setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
 the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
 worst-case runtime claim. The authoritative `durable-contract` scope is 70
