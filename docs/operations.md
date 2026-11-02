@@ -166,13 +166,25 @@ mizu cleanup demo
 各プロジェクトのデータディレクトリ（`data_dir/projects/NAME/`）には、以下のファイルおよびディレクトリが配置されます。`mizu backup` の対象は `storage.py` の `MEMBERS`（下記のうち `★`）のみで、それ以外は稼働中の live 状態でありバックアップ・復元の対象外です。
 - `workspace/`: 管理対象の作業コピー（backup対象外：未確定の作業内容）
 - `PROJECT.md`, `project.toml`: 運用者が定義した目標とプロジェクト設定 ★
-- `control.json`: プロジェクトの制御状態（arm / pause 等） ★
+- `control.json`, `safe-point.json`: プロジェクトの制御状態（arm / pause 等）と安全点 ★
 - `current.json`, `histories/`: 最新の確定状態を指すアトミックなポインタと不変の公開履歴 ★
 - `snapshots/`, `objects/`: 不変なスナップショットマニフェストとコンテンツオブジェクト ★
-- `inbox/`, `insight-archive.sqlite3`, `decisions/`, `decision-history/`: 提案（Insight）の現行作業集合、決定済み本文・証拠の永続アーカイブ、採否判断、判断履歴 ★
+- `inbox/`, `insight-ids/`, `insight-revisions/`, `insight-archive.sqlite3`,
+  `.ingest/`: 提案（Insight）の現行作業集合、ID・改訂の索引、決定済み本文・証拠の
+  永続アーカイブ、Editor取り込み状態 ★
+- `decisions/`, `decision-history/`, `decision-authority.json`,
+  `decision-activation-plan.json`, `decision-activation-report.json`,
+  `decision-cursors/`, `decision-receipts/`: 採否判断、判断履歴、判断権限・有効化
+  計画、カーソルと受領記録 ★
+- `work-items/`, `work-item-receipts/`, `obligation-receipts/`, `waits/`,
+  `shared-records/`, `shared-record-receipts/`, `selection/`: 作業項目とその受領・
+  待機・共有記録、選択状態 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
 - `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
+- `work-item-state/`: 現在状態の検証済みプロジェクションを保持する派生キャッシュ
+  （backup対象外：`mizu work-items --backfill` で再構築。Windows では作成・
+  バックフィルせず、常に元の記録を厳密に読みます）
 - `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
   snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
   ます。実行の `error.json` にも同じ原因が記録され、次の実行の context に
