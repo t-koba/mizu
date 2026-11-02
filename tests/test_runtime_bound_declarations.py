@@ -10,7 +10,9 @@ The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. The `insights.py` module
 constants are fixed record, evidence and diagnostic safety bounds; its
 constructor policy defaults are `Limits` fields already inventoried and are
-supplied by `Project`.
+supplied by `Project`. The `runtime.py` literals are fixed run-local memory,
+one-row probe and public page bounds; its configurable admission and dispatch
+choices are `Limits` and `[dispatch_evidence]` fields.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -74,6 +76,20 @@ DECLARATIONS = {
             '16', 'safety', 'insights / fixed append-only evidence entries per insight'),
         'MAX_EVIDENCE_CHARS': (
             '8192', 'safety', 'insights / fixed evidence text bound per entry'),
+    },
+    'runtime.py': {
+        'MAX_QUEUE_OBSERVATIONS': (
+            '8', 'safety', 'runtime / bounded run-local queue-observation evidence sample'),
+        'MAX_ENGINE_TOOL_INVOCATIONS': (
+            '4096', 'safety', 'runtime / fixed run-local engine-tool admission identity memory bound'),
+        'MAX_ENGINE_TOOL_ID': (
+            '256', 'mechanism', 'runtime / engine-tool invocation id format bound'),
+        'OBSERVED_CURSOR_MAX_BYTES': (
+            '4096', 'safety', 'runtime / bounded role cursor state read'),
+        'MAX_COVERED_BYTES': (
+            '2048', 'safety', 'runtime / bounded serialized CI-request covered-item set'),
+        '_DECISION_IDLE_CACHE_LIMIT': (
+            '256', 'safety', 'runtime / bounded in-process empty-decision cache entries'),
     },
     'vcs.py': {
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
@@ -270,6 +286,35 @@ CALLS = {
         ('Insights.shared_decision_page', 'self._decision_projection_envelopes_locked', 'limit', 0): (
             '512', 'safety',
             'insights / current-decision projection scan bound; overflow refuses before writing'),
+    },
+    'runtime.py': {
+        ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row readiness existence check'),
+        ('_ready_work_changed', 'store.page_ready', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row readiness fingerprint check'),
+        ('Context._op_vcs_read_publications', 'Publication.list_receipts', 'limit', 0): (
+            '100', 'mechanism', 'runtime / publication receipt public page bound'),
+        ('Context._op_vcs_read_ci_requests',
+         'CiRequests(self.project.root, self.config.ci_requests).daily', 'limit', 0): (
+            '100', 'mechanism', 'runtime / CI-request public page bound'),
+        ('Engine._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row pending-decision dispatch check'),
+        ('Engine._run', 'read_json', 'max_bytes', 0): (
+            '1024 * 1024', 'safety', 'runtime / bounded run-state record read'),
+        ('Engine._run', 'project.work_items.page_ready', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row readiness check during a run'),
+        ('_role_events_due', 'work_item_events.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row work-item event check'),
+        ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row decision-delivery check'),
+        ('_role_events_due', 'ci_waits.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row CI-wait check'),
+        ('_role_events_due', 'proposal_waits.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row proposal-wait check'),
+        ('should_run', 'ci_waits.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row CI-wait scheduling check'),
+        ('should_run', 'proposal_waits.pending', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row proposal-wait scheduling check'),
     },
     'project.py': {
         ('config_managed_repo', 'run', 'maximum', 0): (
