@@ -1745,7 +1745,11 @@ replacement insight without implying rejected substance.
                 for record_id in sorted(pending)}
 
     def _decision_projection_envelopes_locked(self, *, limit: int) -> dict:
-        """Select/validate without writes; caller holds record_lock."""
+        """Select/validate without writes.
+
+        The page calls this full-history scan outside the record lock; callers
+        that write the returned projections serialize those writes separately.
+        """
         history = self.root / "decision-history"
         if not insight_archive._directory(history):
             return {}
@@ -1776,20 +1780,21 @@ replacement insight without implying rejected substance.
                 raise LimitExceeded("Decision projection exceeds record count bound")
         return pending
 
-    def _pending_insight_envelopes_locked(self, configured_roles, role_name):
+    def _pending_insight_envelopes_locked(self, configured_roles, role_name, *, paths=None):
         """Stream exact current-source candidates for one configured recipient.
 
-        Caller holds record_lock. Each source read is individually bounded and
-        callers bound retained projections/pages; do not cap unrelated inbox
-        history before routing filters, since old human/decided items must not
-        prevent a configured role from seeing its own pending attention.
-        Legacy omissions never invent a route.
+        Each source read is individually bounded and callers bound retained
+        projections/pages; do not cap unrelated inbox history before routing
+        filters, since old human/decided items must not prevent a configured
+        role from seeing its own pending attention. Legacy omissions never
+        invent a route. Omission scans the whole inbox; ``paths`` revalidates a
+        bounded selected subset, which the page runs again under the lock.
         """
         identifier(role_name)
         inbox = self.root / "inbox"
         if not insight_archive._directory(inbox):
             return
-        for path in inbox.iterdir():
+        for path in (inbox.iterdir() if paths is None else paths):
             if path.suffix != ".json":
                 continue
             item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
@@ -1867,6 +1872,62 @@ replacement insight without implying rejected substance.
                 dt.datetime.fromisoformat(e["created_at"]), e["event"]))
             return events, diagnostics
 
+    def _source_missing(self, path):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    def _delivery_candidate_current(self, envelope, configured_roles, role_name):
+        """Revalidate one projection against its current source.
+
+        The page uses this bounded check once outside the record lock to build
+        its scan-time eligible set, then again under the lock for only the rows
+        it is about to select. A decision or revision committed during the scan
+        is therefore never delivered from the stale page.
+        """
+        payload = envelope["payload"]
+        if payload.get("kind") == "insight.pending":
+            if configured_roles is None:
+                return False
+            insight = payload.get("insight")
+            if not isinstance(insight, str):
+                return False
+            path = self.root / "inbox" / f"{insight}.json"
+            try:
+                identifier(insight)
+                current = next(self._pending_insight_envelopes_locked(
+                    configured_roles, role_name, paths=[path]))
+            except StopIteration:
+                return False
+            except Denied:
+                if self._source_missing(path):
+                    return False
+                raise
+            except (ValueError, TypeError, KeyError, AttributeError,
+                    OverflowError) as exc:
+                raise Denied("Malformed pending insight source") from exc
+            return current[0] == envelope["id"] and current[1] == envelope
+        event = payload.get("event")
+        if not isinstance(event, str):
+            return False
+        path = self.root / "decision-history" / f"{event}.json"
+        try:
+            identifier(event)
+            selected = self._current_decision_event(
+                path, _DECISION_ACTIONS, strict=True)
+        except Denied:
+            if self._source_missing(path):
+                return False
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError,
+                OverflowError) as exc:
+            raise Denied("Malformed decision projection source") from exc
+        return selected is not None and selected[1] == payload
+
     def shared_decision_page(self, role_name: str, actions, *, max_bytes: int,
                              limit: int = 10, sources: str = "own",
                              prompt: bool = False, configured_roles=None) -> tuple[dict, tuple[Delivery, ...]]:
@@ -1875,9 +1936,13 @@ replacement insight without implying rejected substance.
         max_bytes covers canonical(page) by default, or actual prompt decision
         fields/framing with prompt=True. Both include metadata/tokens/references.
         Source projection is bounded to 512 current rows; overflow refuses before
-        writing. Retain the manifest only for this role/unit, never from model
-        input. The caller must honor the durable delivery authority marker;
-        this method alone never activates shared delivery. See docs/shared-records.md.
+        writing. The full-history scan runs without the exclusive record lock;
+        the short locked phase writes missing immutable projections, revalidates
+        only the rows being selected, and freezes their manifest, so a decision
+        or revision committed during the scan cannot be delivered stale.
+        Retain the manifest only for this role/unit, never from model input. The
+        caller must honor the durable delivery authority marker; this method
+        alone never activates shared delivery. See docs/shared-records.md.
         """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -1906,44 +1971,69 @@ replacement insight without implying rejected substance.
             if size(empty) > max_bytes:
                 raise LimitExceeded("Decision page metadata exceeds byte bound")
             return empty, ()
-        with lock_diagnostics.operation("page"), record_lock(self.root):
-            projected = self._project_decision_records_locked(limit=512)
+        with lock_diagnostics.operation("page"):
             store = SharedRecords(self.root, INSIGHT_DELIVERY_POLICIES)
-            if configured_roles is not None:
-                pending = {}
-                for rid, envelope in self._pending_insight_envelopes_locked(configured_roles, role_name):
-                    computed = digest(canonical(envelope))
-                    # Previously acknowledged pending-insight records remain in
-                    # the immutable source inbox. Validate them, but do not let
-                    # that retained history consume this role's live projection
-                    # ceiling or block a newer unacknowledged event.
-                    exists = any(store._read(name, RECORD_BYTES) is not None
-                                 for name in store._record_names(rid))
-                    if exists:
-                        store.get(rid, expected_digest=computed)
-                        if store.received(role_name, rid, computed):
-                            continue
-                    elif store._read(store._receipt_name(role_name, rid), RECEIPT_BYTES) is not None:
+            # The full-history source scan runs without the exclusive lock.
+            decision_candidates = self._decision_projection_envelopes_locked(limit=512)
+            pending_candidates = (list(self._pending_insight_envelopes_locked(
+                configured_roles, role_name)) if configured_roles is not None else [])
+            projected = {}
+            new_decisions = {}
+            for record_id, envelope in decision_candidates.items():
+                if any(store._read(name, RECORD_BYTES) is not None
+                       for name in store._record_names(record_id)):
+                    existing, computed = store.get(record_id)
+                    if existing != envelope:
+                        raise Denied("Shared decision projection identity conflict")
+                    projected[record_id] = (envelope, computed)
+                else:
+                    new_decisions[record_id] = envelope
+            new_pending = {}
+            for record_id, envelope in pending_candidates:
+                computed = digest(canonical(envelope))
+                if any(store._read(name, RECORD_BYTES) is not None
+                       for name in store._record_names(record_id)):
+                    existing, current = store.get(record_id, expected_digest=computed)
+                    if existing != envelope:
+                        raise Denied("Shared insight projection identity conflict")
+                    # Acknowledged retained history is validated above but does
+                    # not consume the live projection bound.
+                    if store.received(role_name, record_id, computed):
+                        continue
+                    projected[record_id] = (envelope, current)
+                else:
+                    if store._read(store._receipt_name(role_name, record_id),
+                                   RECEIPT_BYTES) is not None:
                         raise Denied("Shared insight receipt has no immutable record")
-                    pending[rid] = envelope
-                    if len(projected) + len(pending) > 512:
-                        raise LimitExceeded("Insight delivery projection exceeds record count bound")
-                projected.update({rid: (envelope, store.put(envelope, writer="host.insights"))
-                                  for rid, envelope in pending.items()})
+                    new_pending[record_id] = envelope
+                if len(projected) + len(new_decisions) + len(new_pending) > 512:
+                    raise LimitExceeded("Insight delivery projection exceeds record count bound")
+            all_projected = dict(projected)
+            new_ids = set(new_decisions) | set(new_pending)
+            for record_id, envelope in new_decisions.items():
+                all_projected[record_id] = (envelope, digest(canonical(envelope)))
+            for record_id, envelope in new_pending.items():
+                all_projected[record_id] = (envelope, digest(canonical(envelope)))
             eligible = []
-            for record_id, (envelope, computed) in projected.items():
+            for record_id, (envelope, computed) in all_projected.items():
                 payload = envelope["payload"]
                 routed = (payload["target"] == role_name if payload.get("kind") == "insight.pending"
                           else payload["action"] in wanted
                           and (sources != "own" or payload["source"] == role_name))
                 if not routed:
-                    # Filtered rows still need a post-put integrity/path check.
-                    store.get(record_id, expected_digest=computed)
+                    # Filtered rows still need an integrity/path check. New
+                    # rows are validated by put below; existing immutable rows
+                    # can be checked without the lock.
+                    if record_id not in new_ids:
+                        store.get(record_id, expected_digest=computed)
                     continue
-                # received() revalidates eligible rows against this exact digest.
-                if not store.received(role_name, record_id, computed):
-                    stamp = dt.datetime.fromisoformat(envelope["created_at"]).astimezone(dt.timezone.utc)
-                    eligible.append((stamp, record_id, computed, envelope))
+                if record_id not in new_ids and store.received(role_name, record_id, computed):
+                    continue
+                if not self._delivery_candidate_current(
+                        envelope, configured_roles, role_name):
+                    continue
+                stamp = dt.datetime.fromisoformat(envelope["created_at"]).astimezone(dt.timezone.utc)
+                eligible.append((stamp, record_id, computed, envelope))
             eligible.sort(key=lambda row: (row[0], row[1]))
             pending_count = len(eligible)
 
@@ -1953,38 +2043,64 @@ replacement insight without implying rejected substance.
                         "count_truncated": pending_count > limit,
                         "byte_truncated": len(events) < min(pending_count, limit)}
 
-            events = []
-            record_ids = []
-            if size(page(events)) > max_bytes:
-                raise LimitExceeded("Decision page metadata exceeds byte bound")
-            for _, record_id, computed, envelope in eligible[:limit]:
-                # Reserve the exact fixed-width token space before freezing only
-                # the rows actually selected. Canonical size is value-independent
-                # for lowercase hex tokens; replace after the final selection.
-                row = dict(envelope["payload"], ack_token="0" * 64)
-                if size(page(events + [row])) > max_bytes:
-                    payload = envelope["payload"]
-                    keys = (("event", "insight", "rev", "kind", "target")
-                            if payload.get("kind") == "insight.pending"
-                            else ("event", "insight", "rev", "action"))
-                    row = {key: payload[key] for key in keys}
-                    row.update(preview=payload["title"][:80], ack_token="0" * 64,
-                               ref={"record_id": record_id, "record_digest": computed,
-                                    "bytes": len(canonical(envelope))})
-                    if size(page(events + [row])) > max_bytes:
-                        if not events:
-                            raise LimitExceeded("Decision page reference exceeds byte bound")
+            with record_lock(self.root):
+                for record_id, envelope in new_decisions.items():
+                    all_projected[record_id] = (envelope,
+                                                 store.put(envelope, writer="host.insights"))
+                for record_id, envelope in new_pending.items():
+                    if store._read(store._receipt_name(role_name, record_id),
+                                   RECEIPT_BYTES) is not None:
+                        raise Denied("Shared insight receipt has no immutable record")
+                    all_projected[record_id] = (envelope,
+                                                 store.put(envelope, writer="host.insights"))
+                events = []
+                record_ids = []
+                if size(page(events)) > max_bytes:
+                    raise LimitExceeded("Decision page metadata exceeds byte bound")
+                for _, record_id, _, envelope in eligible:
+                    if len(events) >= limit:
                         break
-                events.append(row)
-                record_ids.append(record_id)
-            manifest = store.freeze(role_name, record_ids)
-            for row, entry in zip(events, manifest):
-                if entry.record_digest != projected[entry.record_id][1]:
-                    raise Denied("Decision page record changed during freeze")
-                row["ack_token"] = entry.ack_token
-            result = page(events)
-            if size(result) > max_bytes:
-                raise LimitExceeded("Decision page exceeds byte bound")
+                    # A source change during the unlocked scan must never be
+                    # delivered from the stale page. This bounded check reads
+                    # only rows being selected, not the whole history.
+                    if not self._delivery_candidate_current(
+                            envelope, configured_roles, role_name):
+                        continue
+                    computed = all_projected[record_id][1]
+                    if store.received(role_name, record_id, computed):
+                        continue
+                    # Reserve the exact fixed-width token space before freezing only
+                    # the rows actually selected. Canonical size is value-independent
+                    # for lowercase hex tokens; replace after the final selection.
+                    row = dict(envelope["payload"], ack_token="0" * 64)
+                    if size(page(events + [row])) > max_bytes:
+                        payload = envelope["payload"]
+                        keys = (("event", "insight", "rev", "kind", "target")
+                                if payload.get("kind") == "insight.pending"
+                                else ("event", "insight", "rev", "action"))
+                        row = {key: payload[key] for key in keys}
+                        row.update(preview=payload["title"][:80], ack_token="0" * 64,
+                                   ref={"record_id": record_id, "record_digest": computed,
+                                        "bytes": len(canonical(envelope))})
+                        if size(page(events + [row])) > max_bytes:
+                            if not events:
+                                raise LimitExceeded("Decision page reference exceeds byte bound")
+                            break
+                    events.append(row)
+                    record_ids.append(record_id)
+                manifest = store.freeze(role_name, record_ids)
+                for row, entry in zip(events, manifest):
+                    if entry.record_digest != all_projected[entry.record_id][1]:
+                        raise Denied("Decision page record changed during freeze")
+                    row["ack_token"] = entry.ack_token
+                result = page(events)
+                if size(result) > max_bytes:
+                    raise LimitExceeded("Decision page exceeds byte bound")
+            # New immutable projections were written under the lock. Validate
+            # them here, outside the lock, including rows filtered from this
+            # role, so a corrupt post-put record cannot be reported as a page.
+            for record_id in new_ids:
+                store.get(record_id, expected_digest=all_projected[record_id][1])
             return result, manifest
 
     def _scan_decision_delivery(self, role_name: str, actions, *, limit: int,

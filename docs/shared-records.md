@@ -644,15 +644,21 @@ than pending; `count_truncated` means pending exceeds `limit`;
 budget. A reference represents one row; replacing an oversized full row with a
 reference does not itself count as an omitted row. There is no timestamp cursor.
 
-Selection, projection, shared receipt checks and page construction hold the
-existing insight record lock together. The projector's existing ceiling of 512
-current source records applies before routing/receipts; overflow refuses before
-any projection writes. The public projector still returns only ID-to-digest
-bindings. Exact current decision and source revision/action must match; retained
-stale or withdrawn projections cannot become new page rows. Shared exact receipts
-are filtered before oldest-first selection, independently of legacy receipts.
-Timestamps are normalized to UTC and ties use the stable record ID. There is no
-index: this remains a bounded, fully validated scan.
+The full-history scan and routing/receipt filtering run without the existing
+insight record lock, so concurrent readers do not exclude each other and a page
+never holds the lock for the scan. The short locked phase writes any missing
+immutable projections, revalidates only the rows about to be selected against
+their exact current source and shared receipt, and freezes their manifest. A
+decision or revision committed during the scan therefore cannot be delivered
+from the stale page; `pending_count` is the scan-time eligible set. The
+projector's existing ceiling of 512 current source records applies before
+routing/receipts; overflow refuses before any projection writes. The public
+projector still returns only ID-to-digest bindings. Exact current decision and
+source revision/action must match; retained stale or withdrawn projections
+cannot become new page rows. Shared exact receipts are filtered before
+oldest-first selection, independently of legacy receipts. Timestamps are
+normalized to UTC and ties use the stable record ID. There is no index: this
+remains a bounded, fully validated scan.
 
 A full `row` preserves every legacy decision-event payload field, replacing only
 `ack_token` with the shared manifest token. If that row cannot fit in the
@@ -784,9 +790,10 @@ fingerprint is unchanged, the check uses an empty readiness page: it reads no
 decision-history file and takes no record lock. Any source change, any
 non-empty result, and any metadata error run the existing exact scan; a real
 dispatch still recomputes its page and manifest, so the fingerprint is never a
-delivery cache. This bounds an unchanged idle tick; the remaining end state —
-readers that never hold the exclusive lock for a full-history scan and a delta
-reader instead of a full re-scan on change — is tracked separately.
+delivery cache. This bounds an unchanged idle tick. A real page scans without
+the exclusive record lock and revalidates only the rows it selects under that
+lock; the remaining end state is a delta reader instead of a full re-scan on
+change.
 
 ### Exact schema and identity
 

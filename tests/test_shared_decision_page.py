@@ -4,7 +4,9 @@ from dataclasses import asdict, replace
 import datetime as dt
 import json
 from pathlib import Path
+import shutil
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -208,6 +210,10 @@ class SharedDecisionPageTests(unittest.TestCase):
                                       ("worker", ("reject",), "own")):
             for malformed in (True, False):
                 with self.subTest(role=role, actions=actions, malformed=malformed):
+                    # The first page projects the record; later pages reuse the
+                    # unchanged record. Start each subtest from an absent record
+                    # so the patched put publishes the row under test.
+                    shutil.rmtree(self.root / "shared-records", ignore_errors=True)
                     corrupted = []
 
                     def corrupt(store, envelope, *, writer):
@@ -321,13 +327,120 @@ class SharedDecisionPageTests(unittest.TestCase):
                 return method(*args, **kwargs)
             return wrapped
 
+        scanned = []
+        original_current = Insights._current_decision_event
+
+        def observe_current(*args, **kwargs):
+            # The full-history scan is deliberately unlocked; selected rows are
+            # revalidated against their exact source while the lock is held.
+            scanned.append(held)
+            return original_current(*args, **kwargs)
+
         with patch("mizu.insights.record_lock", observed_lock), \
-                patch.object(Insights, "_current_decision_event", observe(Insights._current_decision_event)), \
+                patch.object(Insights, "_current_decision_event", observe_current), \
                 patch.object(SharedRecords, "put", observe(SharedRecords.put)), \
                 patch.object(SharedRecords, "received", observe(SharedRecords.received)), \
                 patch.object(SharedRecords, "freeze", observe(SharedRecords.freeze)):
             self.page()
+        self.assertIn(False, scanned)
+        self.assertIn(True, scanned)
         self.assertFalse(held)
+
+    def test_unlocked_scan_does_not_exclude_a_concurrent_source_write(self):
+        self.decide()
+        original = Insights._decision_projection_envelopes_locked
+        started = threading.Event()
+        release = threading.Event()
+        failures = []
+
+        def blocking(insights, limit):
+            started.set()
+            self.assertTrue(release.wait(5))
+            return original(insights, limit=limit)
+
+        def page():
+            try:
+                with patch.object(Insights, "_decision_projection_envelopes_locked", blocking):
+                    self.page()
+            except BaseException as exc:  # surfaced in the main thread
+                failures.append(exc)
+
+        reader = threading.Thread(target=page)
+        reader.start()
+        try:
+            self.assertTrue(started.wait(2))
+            committed = threading.Event()
+
+            def write():
+                item = self.insights.submit(source="reviewer", title="Concurrent",
+                                            body="Committed during the scan", base_snapshot=None)
+                self.insights.decide(item["id"], "reject", "Exact reason", "Exact revisit",
+                                     "test", expected_rev=1)
+                committed.set()
+
+            writer = threading.Thread(target=write)
+            writer.start()
+            self.assertTrue(committed.wait(2))
+            writer.join(5)
+            self.assertFalse(writer.is_alive())
+        finally:
+            release.set()
+            reader.join(5)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(failures, [])
+
+    def test_unlocked_scan_row_must_still_be_current_at_selection(self):
+        self.decide()
+        original = Insights._decision_projection_envelopes_locked
+
+        def stale(insights, limit):
+            candidates = original(insights, limit=limit)
+            for key in candidates:
+                event = key.rsplit("/", 1)[-1]
+                (self.root / "decision-history" / f"{event}.json").unlink()
+            return candidates
+
+        with patch.object(Insights, "_decision_projection_envelopes_locked", stale):
+            page, manifest = self.page()
+        self.assertEqual(page["events"], [])
+        self.assertEqual(page["pending_count"], 0)
+        self.assertEqual(manifest, ())
+
+    def test_unlocked_scan_source_becoming_malformed_fails_closed(self):
+        self.decide()
+        original = Insights._decision_projection_envelopes_locked
+
+        def broken(insights, *, limit):
+            candidates = original(insights, limit=limit)
+            for key in candidates:
+                event = key.rsplit("/", 1)[-1]
+                (self.root / "decision-history" / f"{event}.json").write_bytes(b"not json")
+            return candidates
+
+        with patch.object(Insights, "_decision_projection_envelopes_locked", broken), \
+                self.assertRaises(Denied):
+            self.page()
+
+    def test_unlocked_scan_pending_revision_is_revalidated(self):
+        item = self.insights.submit(source="reviewer", title="Pending", body="v1",
+                                    base_snapshot=None, addressee="worker")
+        original = Insights._pending_insight_envelopes_locked
+
+        def stale(insights, configured_roles, role_name, *, paths=None):
+            candidates = list(original(insights, configured_roles, role_name, paths=paths))
+            if paths is None:
+                self.insights.revise(item["id"], source="reviewer", title="Pending",
+                                     body="v2", base_snapshot=None, expected_rev=1,
+                                     addressee="worker")
+                return candidates
+            return iter(candidates)
+
+        with patch.object(Insights, "_pending_insight_envelopes_locked", stale):
+            page, manifest = self.insights.shared_decision_page(
+                "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
+        self.assertEqual(page["events"], [])
+        self.assertEqual(page["pending_count"], 0)
+        self.assertEqual(manifest, ())
 
     def test_partial_projection_failure_retry_and_only_selected_rows_frozen(self):
         for i in range(3):
