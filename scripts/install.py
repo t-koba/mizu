@@ -466,11 +466,13 @@ def stage(args):
                 command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
                          "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
                         # The staging call holds the gate's modelled path (3246 s on
-                        # every platform), and the core CI cell that installs holds
-                        # this bound together with the source gate's own path.
-                        # The CI cell reaches this call only when no source receipt
-                        # is reused; with the receipt it stages from the source
-                        # gate and runs no gate of its own.
+                        # every platform). Any pinned-adapter install it performs is
+                        # charged to that path's later-phase budget, so it cannot
+                        # extend this bound. The core CI cell that installs holds this
+                        # bound together with the source gate's own path. The CI cell
+                        # reaches this call only when no source receipt is reused; with
+                        # the receipt it stages from the source gate and runs no gate
+                        # of its own.
                         cwd=temporary, timeout=3300)
                 staged_report = read_json(temporary / "installation-checks.json")
                 check_entries = staged_report["checks"]

@@ -149,22 +149,32 @@ class LaterPhase:
 
     The phase is bounded as a whole: every child takes at most the phase's
     remaining time and its own per-child bound, so the number of children
-    cannot multiply the gate's path. A child the phase can no longer afford
-    is recorded as a failure, never skipped silently.
+    cannot multiply the gate's path. Pinned-adapter installs are charged to
+    the same budget. A child or install the phase can no longer afford is
+    refused, never skipped silently.
     """
 
     def __init__(self, budget: int | None = None):
         self.budget = LATER_PHASE_BUDGET_SECONDS if budget is None else int(budget)
         self.consumed = 0.0
         self.children = 0
+        self.installs = 0
+        self.install_seconds = 0.0
 
     def remaining(self) -> float:
-        """The seconds the phase may still spend on its children."""
+        """The seconds the phase may still spend on its children and installs."""
         return self.budget - self.consumed
 
     def consume(self, seconds: float) -> None:
         """Charge one child's own elapsed time, its cleanup included."""
         self.consumed += max(0.0, float(seconds))
+
+    def consume_install(self, seconds: float) -> None:
+        """Charge one pinned-adapter install to the phase and record it."""
+        elapsed = max(0.0, float(seconds))
+        self.installs += 1
+        self.install_seconds += elapsed
+        self.consume(elapsed)
 
     def timeout_for(self, cap: int) -> int | None:
         """The bound for the next child, or None when the phase is spent.
@@ -504,8 +514,10 @@ def modelled_gate_seconds(child_timeout: int,
 
     The later phase is bounded as a whole, not per child: the phase runs one
     child per check, so a per-child term would make this path grow with the
-    number of checked files. ``later_phase_budget`` is the validated
-    --later-phase-budget value; omission keeps the 1200 s default.
+    number of checked files. Pinned-adapter installs are charged to the same
+    phase, so they cannot extend this path either. ``later_phase_budget`` is
+    the validated --later-phase-budget value; omission keeps the 1200 s
+    default.
     """
     return (SETUP_RESERVE_SECONDS + child_timeout + later_phase_budget
             + CLEANUP_RESERVE_SECONDS + RECEIPT_RESERVE_SECONDS)
@@ -1623,11 +1635,22 @@ def main():
         # The pinned SDK is provisioned outside git, so a frozen source copy
         # carries none of it. Install it from the operator's offline npm cache
         # before the suites that need it, and only for a suite that will
-        # actually run: a waived gate needs no dependencies.
+        # actually run: a waived gate needs no dependencies. The install is
+        # part of the later phase's bounded path, not an uncharged step
+        # between its children: its own --provision-timeout and the phase's
+        # remaining budget both bound it, and its elapsed time is charged so
+        # the phase (and every enclosing scope) still holds.
         if not args.no_provision:
             for name in sorted(provision_targets(allowed_not_run)):
+                provision_bound = phase.timeout_for(args.provision_timeout)
+                if provision_bound is None:
+                    verdicts[name] = ('absent', verdicts[name][1]
+                                      + '; the later phase has no budget left to provision it')
+                    continue
+                started = time.monotonic()
                 state, details = provision_pinned_dependencies(adapters[name],
-                                                               timeout=args.provision_timeout)
+                                                               timeout=provision_bound)
+                phase.consume_install(time.monotonic() - started)
                 if state == 'ready' and verdicts[name][0] != 'ready':
                     print('== provisioned ' + str(adapters[name])
                           + ' pinned dependencies from the offline npm cache ==')
@@ -1690,10 +1713,12 @@ def main():
                'ok': all(c['status'] != 'fail' for c in checks),
                'checks': checks, 'counts': counts, 'python': sys.version.split()[0], 'os': sys.platform,
                'later_phase': {'children': phase.children,
+                               'installs': phase.installs,
                                'suite_child_timeout_seconds': _unittest_timeout_seconds(
                                    args.suite_child_timeout),
                                'budget_seconds': phase.budget,
-                               'consumed_seconds': round(phase.consumed, 3)},
+                               'consumed_seconds': round(phase.consumed, 3),
+                               'install_seconds': round(phase.install_seconds, 3)},
                'not_run': ['installed-Pi', 'rootless-Podman', 'live-provider', '24-hour-soak', 'cross-distribution-deployment']}
     if args.test_shard is not None:
         receipt['test_shard'] = args.test_shard

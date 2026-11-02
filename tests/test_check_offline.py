@@ -156,6 +156,7 @@ class CheckTimeoutTests(unittest.TestCase):
 
             def fake_provision(adapter, *, timeout):
                 provisioned.append(timeout)
+                time.sleep(0.02)
                 return 'ready', ''
 
             with mock.patch.object(CHECK.sys, 'argv', [
@@ -176,6 +177,11 @@ class CheckTimeoutTests(unittest.TestCase):
                     mock.patch.object(CHECK.sys, 'stdout', io.StringIO()):
                 self.assertEqual(CHECK.main(), 1)
             self.assertEqual(provisioned, [8, 8])
+            phase = json.loads(report.read_text(encoding='utf-8'))['later_phase']
+            self.assertEqual(phase['installs'], 2)
+            self.assertGreaterEqual(phase['install_seconds'], 0.03)
+            self.assertGreaterEqual(phase['consumed_seconds'], phase['install_seconds'])
+            self.assertEqual(phase['budget_seconds'], CHECK.LATER_PHASE_BUDGET_SECONDS)
 
     def test_configured_host_cost_bounds_reach_the_modelled_path(self):
         self.assertEqual(CHECK._unittest_timeout_seconds(900), 900)
@@ -239,6 +245,17 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertGreaterEqual(CHECK.LATER_PHASE_BUDGET_SECONDS,
                                  2 * CHECK.DEFAULT_CHECK_TIMEOUT_SECONDS)
 
+    def test_later_phase_charges_installs_to_the_same_budget(self):
+        phase = CHECK.LaterPhase(budget=1000)
+        phase.consume(100)
+        phase.consume_install(300)
+        self.assertEqual(phase.installs, 1)
+        self.assertEqual(phase.install_seconds, 300)
+        self.assertEqual(phase.consumed, 400)
+        self.assertEqual(phase.remaining(), 600)
+        # The next child still reserves its cleanup inside the remainder.
+        self.assertEqual(phase.timeout_for(600), 600 - CHECK.CLEANUP_RESERVE_SECONDS)
+
     def test_later_phase_reserves_each_child_cleanup(self):
         phase = CHECK.LaterPhase(budget=1000)
         self.assertEqual(phase.timeout_for(600), 600)
@@ -295,6 +312,8 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(receipt['later_phase']['suite_child_timeout_seconds'], 1)
         self.assertEqual(receipt['later_phase']['budget_seconds'], 1)
         self.assertEqual(receipt['later_phase']['consumed_seconds'], 0.0)
+        self.assertEqual(receipt['later_phase']['installs'], 0)
+        self.assertEqual(receipt['later_phase']['install_seconds'], 0.0)
         # Every later child the gate would run in this configuration is
         # refused, and nothing else is: the transport suite, one syntax
         # check per JavaScript file, and one per shell wrapper where the
@@ -356,15 +375,17 @@ class CheckTimeoutTests(unittest.TestCase):
 
     def test_durable_contract_job_scope_covers_the_modelled_gate_path(self):
         # The authoritative job runs the whole gate on a POSIX host after
-        # provisioning two pinned adapters, so its scope holds the modelled
-        # path plus both provisioning steps at the product's own per-adapter
-        # provisioning bound.
+        # provisioning two pinned adapters. Each install is charged to the
+        # later phase, so the scope holds the modelled path and the phase
+        # budget must be able to pay for both installs at the product's own
+        # per-adapter provisioning bound.
         required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds())
-        provisioning = 2 * CHECK.NPM_PROVISION_TIMEOUT_SECONDS
+        self.assertGreaterEqual(CHECK.LATER_PHASE_BUDGET_SECONDS,
+                                 2 * CHECK.NPM_PROVISION_TIMEOUT_SECONDS)
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
         match = re.search(r'durable-contract:.*?timeout-minutes: (\d+)', workflow, re.S)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(int(match.group(1)) * 60, required + provisioning)
+        self.assertGreaterEqual(int(match.group(1)) * 60, required)
 
     def test_installer_staging_gate_outlives_the_modelled_gate_path(self):
         # The staged gate runs the same child; a staging timeout shorter than

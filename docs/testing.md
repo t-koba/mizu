@@ -354,19 +354,24 @@ first bounds each later-phase child, the second each install. CI uses the
 defaults; a run that passes other values must also ensure its enclosing job
 scope holds the resulting modeled path. The scope model's 60 s setup and
 120 s receipt/summary reserves are fixed conservative margins, not command
-timeouts. The modeled
+timeouts. Pinned-adapter installs are charged to the later-phase budget, not
+added outside it: each install is bounded by `--provision-timeout` and by
+the phase's remaining time, and its elapsed time is recorded in the
+receipt's `later_phase` object. The modeled
 setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
 the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
 worst-case runtime claim. The authoritative `durable-contract` scope is 70
-minutes, holding the modeled path plus the two pinned-adapter provisioning
-steps at the product's own 300 s per-adapter bound (3846 s). The
+minutes, holding the 3246 s modeled path; two 300 s installs are bounded
+inside its 1200 s later-phase budget and cannot extend that path. The
 Linux/Python 3.13 cell also installs. That cell runs the gate once: the
 installer reuses the source gate's receipt, and the idempotence reinstall
 finds the release the cell already staged, so neither install runs a second
 gate. Its scope is still 120 minutes, holding the source gate's modeled path
-(3246 s) plus the installer's own bounded staging call (3300 s) = 6546 s,
-leaving 654 s inside the job, so the cell is not cut off while the installer
-works whether or not an install reaches its staged gate. Every scope that
+(3246 s), the installer's own bounded staging call (3300 s), and the OCI
+step (600 s) = 7146 s, leaving 54 s inside the job, so the cell is not cut
+off while the installer works whether or not an install reaches its staged
+gate. A staged gate's install is charged to its own later-phase budget, so
+it does not extend the 3300 s staging bound. Every scope that
 encloses the gate holds the gate's modeled path, so a bounded run reports
 its own outcome instead of being cut off by the enclosing scope; the
 installer staging call holds the same path for the same reason.
@@ -376,17 +381,19 @@ check: the transport suite, every SDK contract suite that is not waived, one
 syntax check per JavaScript file, and one per shell wrapper -- nine children
 on Windows, sixteen in a POSIX matrix cell, nineteen in the durable job. A
 budget per child would make the gate's own path grow with the number of
-checked files, so the phase carries one 1200 s budget that every child
-shares: a child takes at most its own 600 s bound and what is left of the
-phase, with its own cleanup reserved inside that remainder. The budget
-covers the measured healthy phase with wide margin -- about 4 s for the
-sixteen children of a POSIX cell, and about 103 s for the nineteen children
-of the durable job, whose three SDK contract suites measured 5.6 s, 75.5 s
-and 18.1 s on the development host -- and it holds two children's full
-bounds, so one hung child still leaves every remaining child a run. A child
-the phase can no longer afford is recorded as a failure with the reason
-`later-phase-budget-exhausted`; it is never skipped silently, and the
-receipt records the phase's own child count, budget, and consumed time.
+checked files, so the phase carries one 1200 s budget that every child and
+install shares: a child takes at most its own 600 s bound and what is left
+of the phase, with its own cleanup reserved inside that remainder. The
+budget covers the measured healthy phase with wide margin -- about 4 s for
+the sixteen children of a POSIX cell, and about 103 s for the nineteen
+children of the durable job, whose three SDK contract suites measured 5.6 s,
+75.5 s and 18.1 s on the development host. Without an install it holds two
+children's full bounds; an install is charged to the same budget, so the
+phase stays inside its modeled path and the receipt records the install
+count and time. A child the phase can no longer afford is recorded as a
+failure with the reason `later-phase-budget-exhausted`; it is never skipped
+silently, and the receipt records the phase's own child count, budget, and
+consumed time.
 The 2026-10-21 Windows/3.13 run completed 2233 of about 2265 tests in
 1447 s and reached the previous 1450 s child cap without a reported
 test failure, and the 2026-10-21 POSIX run reached the previous 1000 s child

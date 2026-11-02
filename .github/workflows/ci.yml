@@ -40,7 +40,9 @@ jobs:
     # neither install runs a second gate. The cell's scope still holds the
     # source gate's path plus the installer's own bounded staging call, so
     # the cell is not cut off while the installer works, whether or not an
-    # install reaches its staged gate. The OCI step is capped at another 600 s:
+    # install reaches its staged gate. A staged gate's pinned-adapter install
+    # is charged to its own later-phase budget, so it does not extend the
+    # 3300 s staging bound. The OCI step is capped at another 600 s:
     # 3246 + 3300 + 600 = 7146 s still fits the unchanged 7200 s cell scope.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
@@ -172,9 +174,10 @@ jobs:
     # fallbacks for environments that cannot provision; their receipts record
     # the waiver, and promotion still requires this job green.
     runs-on: ubuntu-24.04
-    # The authoritative scope holds the modelled gate path (3246 s) plus the
-    # two pinned-adapter provisioning steps at the product's own 300 s
-    # per-adapter bound (3846 s), so this job cannot kill the gate before the
+    # The authoritative scope holds the modelled gate path (3246 s). Any
+    # pinned-adapter install is charged to that path's 1200 s later-phase
+    # budget, so two 300 s installs cannot extend the path; this job cannot
+    # kill the gate before the
     # gate reaches its own bound.
     timeout-minutes: 70
     steps:
