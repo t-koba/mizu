@@ -644,8 +644,10 @@ def check_artifact_range(params: dict) -> dict:
 def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dict:
     """Validate an artifact response and recompute its UTF-8 page hash.
 
-    Exact schema: {artifact, digest, content, size, offset, next_offset,
-    page_digest}. Sizes/positions are UTF-8 bytes; limit=None requires a
+    Paged responses carry exactly {artifact, digest, content, size, offset,
+    next_offset, page_digest}. Whole-file mode also accepts the established
+    {artifact, digest, content} shape, normalizing it and verifying the whole
+    digest locally. Sizes/positions are UTF-8 bytes; limit=None requires a
     whole file (still capped at MAX_ARTIFACT_CONTENT characters). The
     adapter must reject offsets inside codepoints and over-cap files.
     Partial pages carry an adapter-asserted whole digest, NOT a locally
@@ -656,6 +658,23 @@ def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dic
         check_artifact_range({"offset": offset, "limit": limit})
     elif type(offset) is not int or offset != 0:
         raise Denied("Whole artifact reads start at zero")
+    if (limit is None and isinstance(data, dict)
+            and set(data) == {"artifact", "digest", "content"}):
+        # Keep the whole-file operation usable with the established adapter
+        # response; page requests still require the complete byte-page shape.
+        legacy = data
+        content = legacy["content"]
+        content_digest = legacy["digest"]
+        if not isinstance(content, str) or not isinstance(content_digest, str):
+            raise Denied("Invalid VCS artifact content entry")
+        try:
+            raw = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise Denied("Artifact content must be valid UTF-8 text") from exc
+        data = {"artifact": legacy["artifact"], "digest": content_digest,
+                "content": content, "size": len(raw), "offset": 0,
+                "next_offset": None,
+                "page_digest": hashlib.sha256(raw).hexdigest()}
     keys = {"artifact", "digest", "content", "size", "offset", "next_offset", "page_digest"}
     if not isinstance(data, dict) or set(data) != keys:
         raise Denied("Invalid VCS artifact content entry")

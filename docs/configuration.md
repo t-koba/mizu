@@ -2217,12 +2217,19 @@ The shared tool schema exposes these maxima; CI-cost reads retain their
 separate 1–8 request limit and 0–999 positional offset bounds. Other VCS
 operations do not gain paging.
 
-The adapter request adds `offset` and `limit` only in page mode. The adapter
-response in **both** modes has exactly these fields:
+The adapter request adds `offset` and `limit` only in page mode. A paged
+response has exactly these fields:
 
 ```text
 {artifact, digest, content, size, offset, next_offset, page_digest}
 ```
+
+Whole-file mode also accepts the established adapter shape
+`{artifact, digest, content}`. Mizu derives `size`, `offset`, `next_offset`
+and `page_digest` from the UTF-8 content and verifies `digest` locally before
+returning it; the normalized result carries the same seven fields. Page mode
+requires the full shape above, so a legacy response cannot satisfy a page
+request.
 
 - `artifact` exactly echoes the requested relative name; `content` is valid
   UTF-8 text, without replacement/repair of invalid bytes or lone surrogates.

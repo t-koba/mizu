@@ -80,6 +80,25 @@ class ArtifactValidationTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.parse(artifact("x" * (vcs.MAX_ARTIFACT_CONTENT + 1)))
 
+    def test_legacy_whole_file_read_is_normalized_and_locally_verified(self):
+        content = "é😀\n"
+        payload = {"artifact": NAME, "digest": sha256(content), "content": content}
+        out = self.parse(payload)
+        self.assertEqual(out["artifact"], NAME)
+        self.assertEqual(out["digest"], sha256(content))
+        self.assertEqual(out["content"], content)
+        self.assertEqual(out["size"], len(content.encode("utf-8")))
+        self.assertEqual(out["offset"], 0)
+        self.assertIsNone(out["next_offset"])
+        self.assertEqual(out["page_digest"], sha256(content))
+        with self.assertRaises(Denied):
+            self.parse({**payload, "digest": "0" * 64})
+        with self.assertRaises(Denied):
+            self.parse({**payload, "artifact": "other.jsonl"})
+        # Paging is a new contract; the legacy shape cannot satisfy a page.
+        with self.assertRaises(Denied):
+            self.parse(payload, offset=0, limit=8)
+
     def test_paged_complete_and_empty_eof_reads(self):
         for content in ("", "é😀"):
             with self.subTest(content=content):
@@ -113,7 +132,7 @@ class ArtifactValidationTests(unittest.TestCase):
     def test_exact_response_shape_name_text_and_digests(self):
         good = artifact("é😀")
         bad = [None, [], {k: v for k, v in good.items() if k != "size"},
-               {**good, "extra": 0}, {k: good[k] for k in ("artifact", "digest", "content")}]
+               {**good, "extra": 0}]
         for key, values in {
                 "artifact": ["other.jsonl", None], "content": [None, 1, "\ud800", "\udfff"],
                 "digest": [None, 0, "F" * 64, "f" * 63, "0" * 64,
@@ -196,6 +215,20 @@ class ArtifactTests(Fixture):
         out = vcs.read_via(settings, "artifact", params)
         self.assertEqual(out, {"op": "artifact", "branch": "mizu", "sha": SHA_A,
                                **payload, "trust": "external-untrusted"})
+
+    def test_artifact_legacy_full_read_adapter_compatibility(self):
+        content = '{"bench": "é😀"}\n'
+        payload = {"artifact": NAME, "digest": sha256(content), "content": content}
+        params = {"branch": "mizu", "artifact": NAME}
+        settings = adapter_settings(serving_code(payload, {"op": "artifact", **params}))
+        out = vcs.read_via(settings, "artifact", params)
+        self.assertEqual(out, {"op": "artifact", "branch": "mizu",
+                               "artifact": NAME, "digest": sha256(content),
+                               "content": content,
+                               "size": len(content.encode("utf-8")),
+                               "offset": 0, "next_offset": None,
+                               "page_digest": sha256(content),
+                               "trust": "external-untrusted"})
 
     def test_utf8_chunking_reassembly_eof_and_adapter_boundary_rejection(self):
         settings = adapter_settings(PAGING_ADAPTER)
