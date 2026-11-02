@@ -204,13 +204,16 @@ class CheckTimeoutTests(unittest.TestCase):
     def test_core_installer_cell_scope_holds_the_gate_path_and_the_installers_call(self):
         # The Linux cell runs the gate once: the installer reuses the source
         # gate's receipt and the idempotence reinstall finds the release the
-        # cell already staged. Its scope must still hold the source gate's
-        # bounded path plus the installer's own bounded staging call, so the
-        # job cannot cut a healthy run off while the installer works.
+        # cell already staged. Its scope must hold the source gate's bounded
+        # path, the installer's own bounded staging call, and the separate
+        # OCI step's bounded 600 s cap: 3246 + 3300 + 600 = 7146 s inside the
+        # 7200 s cell, leaving 54 s.
         scopes = self._core_cell_scopes()
         staging = self._installer_staging_timeout()
-        required = CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds(), staging)
-        self.assertEqual(required, 3246 + 3300)
+        oci = self._oci_step_timeout()
+        required = (CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds(), staging)
+                    + oci)
+        self.assertEqual(required, 3246 + 3300 + 600)
         self.assertGreaterEqual(scopes['linux_installer'] * 60, required)
 
     def test_later_phase_counts_the_children_the_gate_actually_runs(self):
@@ -391,6 +394,17 @@ class CheckTimeoutTests(unittest.TestCase):
         match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
         self.assertIsNotNone(match)
         return int(match.group(1))
+
+    def _oci_step_timeout(self) -> int:
+        """Read the separate OCI integration step's own workflow cap."""
+        workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
+        step = re.search(
+            r'name: Rootless OCI persistent exec integration\n(.*?)(?=\n\s*- name:|\Z)',
+            workflow, re.S)
+        self.assertIsNotNone(step)
+        match = re.search(r'timeout-minutes: (\d+)', step.group(1))
+        self.assertIsNotNone(match)
+        return int(match.group(1)) * 60
 
     def test_posix_job_scope_covers_the_modelled_gate_path(self):
         # The POSIX matrix cell runs the same gate with the 1800-second child:

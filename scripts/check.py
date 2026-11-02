@@ -529,14 +529,16 @@ def modelled_gate_seconds(child_timeout: int,
 
 def core_cell_scope_seconds(child_timeout: int, staging_timeout: int,
                             later_phase_budget: int = LATER_PHASE_BUDGET_SECONDS) -> int:
-    """Return the seconds the core CI cell needs from its first step to its last.
+    """Return the gate path and the installer's staging call in the core cell.
 
     The cell that installs runs the gate once: the installer reuses the
     source gate's receipt, and the idempotence reinstall finds the release
     the cell already staged, so neither install runs a second gate. The
     cell's scope still holds the source gate's path plus the installer's own
     bounded staging call, so the job never cuts off a healthy run before the
-    gate reports its own bounded outcome.
+    gate reports its own bounded outcome. The cell also runs a separate
+    bounded OCI integration step; that step's workflow cap is outside this
+    gate model and the cell-scope regression adds it explicitly.
     """
     return modelled_gate_seconds(child_timeout, later_phase_budget) + staging_timeout
 
