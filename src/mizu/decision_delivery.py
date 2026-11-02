@@ -32,13 +32,34 @@ def authority(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
             raise ValueError("marker schema")
     except (ValueError, TypeError, UnicodeError) as exc:
         raise Denied("Invalid decision authority marker; reconciliation required") from exc
+    # The marker alone authorizes runtime delivery. Its report digest is checked
+    # over the exact retained bytes, but the history-scale report body is not
+    # parsed here: activation proves plan_digest before publication and a host
+    # retry validates it against the retained body, while re-parsing on every
+    # wake would charge that scale to each decision evaluation.
     report_raw = safe_read(root, REPORT_FILE, report_bytes)
     if digest(report_raw) != marker["report_digest"]:
         raise Denied("Decision authority report digest mismatch")
-    report = loads_finite(report_raw)
-    if not isinstance(report, dict) or report.get("plan_digest") != marker["plan_digest"]:
-        raise Denied("Decision authority plan digest mismatch")
     return marker
+
+
+def retained_report(root, marker, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
+    """Read and validate the retained report where its body is actually needed.
+
+    The runtime authority path deliberately does not call this: activation and
+    explicit host retries use the full body, while each wake stays independent
+    of the report's history scale.
+    """
+    raw = safe_read(root, REPORT_FILE, report_bytes)
+    if digest(raw) != marker["report_digest"]:
+        raise Denied("Decision authority report digest mismatch")
+    try:
+        report = loads_finite(raw)
+        if not isinstance(report, dict) or report.get("plan_digest") != marker["plan_digest"]:
+            raise ValueError("plan digest")
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise Denied("Decision authority plan digest mismatch") from exc
+    return report
 
 
 def page_bytes(role):

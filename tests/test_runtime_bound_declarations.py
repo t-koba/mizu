@@ -316,8 +316,8 @@ DECISION_PROJECTION = {
 
 
 # The host-only activation plan/report is history-sized local evidence. Its
-# default is configured policy; the ceiling bounds parsed evidence held on the
-# host rather than a transport frame.
+# default is configured policy; the ceiling bounds activation-time parsing and
+# the retained report's exact-byte check, not a transport frame.
 DECISION_RECONCILIATION = {
     'decision_reconciliation_bytes': (
         'DEFAULT_DECISION_RECONCILIATION_BYTES', 'configured policy',
@@ -327,7 +327,8 @@ DECISION_RECONCILIATION = {
         'config / activation plan/report default for several thousand routed rows'),
     'MAX_DECISION_RECONCILIATION_BYTES': (
         '64 * 1024 * 1024', 'safety',
-        'config / bounded parsed host evidence for the local activation plan/report'),
+        'config / bounded activation-time plan/report parse and retained report digest read; '
+        'runtime parses only the 4096-byte marker'),
 }
 
 

@@ -67,8 +67,10 @@ MAX_QUEUE_OBSERVATIONS = 100
 #: frames, and grow with the complete current decision/pending source set.
 #: A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan and a
 #: 1.9 MiB post-map report; the default leaves room for several thousand
-#: routed rows. The ceiling bounds parsed evidence on the host and is not a
-#: recommended plan size; raising it needs a new measurement.
+#: routed rows. The ceiling bounds activation-time parsing and the per-wake
+#: exact-byte report check on the host; the report body is not parsed on the
+#: wake path. It is not a recommended plan size; raising it needs a new
+#: measurement.
 DEFAULT_DECISION_RECONCILIATION_BYTES = 8 * 1024 * 1024
 MAX_DECISION_RECONCILIATION_BYTES = 64 * 1024 * 1024
 MAX_RESOURCES = 64

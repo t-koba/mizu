@@ -937,9 +937,15 @@ default**. A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan an
 a 1.9 MiB post-map report; the default covers several thousand routed rows. The
 plan and report are host-retained local evidence, not transport frames. Existing
 plan/report reads accept the fixed 64 MiB safety ceiling, so lowering the
-configured write bound does not invalidate retained evidence. Count or byte
-overflow refuses without shared receipt writes. This API adds no index, scan
-cache, page default or storage optimization.
+configured write bound does not invalidate retained evidence. Runtime authority
+reads the small marker and verifies the retained report's byte bound and exact
+digest without parsing its body; activation and explicit host retry validate
+`plan_digest` against the retained body. On the reference host a digest-only
+authority call measured 4 ms / 4 MB peak at 1.9 MiB, 13 ms / 17 MB at the
+8 MiB default, and 217 ms / 138 MB at the 64 MiB ceiling; one role evaluation
+can make two to four such checks. Count or byte overflow refuses without shared
+receipt writes.
+This API adds no index, scan cache, page default or storage optimization.
 The prior 205-event shadow scan evidence (3–5x slower reads) does not justify
 additional storage complexity here.
 
@@ -1011,8 +1017,10 @@ Durable project-root evidence, included in backup/restore:
 - `decision-authority.json`: canonical create-only marker, at most 4096 bytes,
   `{schema: 1, kind: "insight.decision", authority: "shared", plan_digest,
   report_digest}`. `report_digest` pins the entire canonical completed report;
-  its `plan_digest` must match the marker. Published atomically and durably
-  **last**, while all the same exclusions/locks remain held.
+  its `plan_digest` is validated against the marker at activation and explicit
+  host retry; the wake path checks marker schema and report bytes/digest only.
+  Published atomically and durably **last**, while all the same
+  exclusions/locks remain held.
 
 Before the marker exists, decision delivery remains legacy-only, even with an interrupted
 projection/receipt prefix. Exact retry validates the original source/receipt/

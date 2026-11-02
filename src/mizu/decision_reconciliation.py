@@ -373,7 +373,8 @@ def activate_decision_delivery(project):
     authoritative and an idempotent prefix. A retry after publication returns
     the marker (never reimports legacy receipts). No model tool calls this API.
     """
-    from .decision_delivery import AUTHORITY_FILE, PLAN_FILE, REPORT_FILE, authority, page_bytes
+    from .decision_delivery import (AUTHORITY_FILE, PLAN_FILE, REPORT_FILE, authority, page_bytes,
+                                    retained_report)
     insights = project.insights
     enabled = list(project.roles)
     maximum = insights.decision_reconciliation_bytes
@@ -386,6 +387,9 @@ def activate_decision_delivery(project):
     with _boundary(insights, routes):
         marker = authority(insights.root)
         if marker is not None:
+            # A host retry validates the history-scale body; the runtime wake
+            # path stays marker-only and never parses it.
+            retained_report(insights.root, marker)
             return marker
         boundary, roles, _, _, store = _scan(insights, routes)
         _bound_post_report(boundary, roles, maximum=maximum)
@@ -436,4 +440,5 @@ def activate_decision_delivery(project):
         marker = {"schema": 1, "kind": "insight.decision", "authority": "shared",
                   "plan_digest": report["plan_digest"], "report_digest": digest(canonical(report))}
         atomic_write(insights.root / AUTHORITY_FILE, canonical(marker), exclusive=True)
-        return authority(insights.root)
+        retained_report(insights.root, marker)
+        return marker

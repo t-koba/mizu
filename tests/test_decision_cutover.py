@@ -225,13 +225,19 @@ class DecisionCutoverTests(Fixture):
         report_path = self.project.root / delivery.REPORT_FILE
         report = report_path.read_bytes()
         for raw in (b'bad json', canonical(dict(marker, authority='legacy')),
-                    canonical(dict(marker, plan_digest='0' * 64)), canonical(dict(marker, report_digest='0' * 64))):
+                    canonical(dict(marker, report_digest='0' * 64))):
             path.write_bytes(raw)
             with self.subTest(raw=raw), patch.object(self.project.insights, 'decision_events_with_diagnostics',
                                                    side_effect=AssertionError('fallback')):
                 with self.assertRaises(Denied): self.pending()
                 with self.assertRaises(Denied): self.activate()
                 with self.assertRaises(Denied): _role_events_due(self.project, self.project.snapshots.get(), 'reviewer')
+        # A plan_digest-only marker mismatch no longer needs a body parse on
+        # the wake path; the host retry still refuses it against the retained body.
+        path.write_bytes(canonical(dict(marker, plan_digest='0' * 64)))
+        self.assertTrue(self.pending()['shared'])
+        with self.assertRaisesRegex(Denied, 'plan digest mismatch'):
+            self.activate()
         path.write_bytes(good)
         report_path.write_bytes(report + b' ')
         with self.assertRaises(Denied): self.pending()
@@ -422,6 +428,21 @@ class DecisionCutoverTests(Fixture):
         self.assertEqual(delivery.authority(self.root), marker)
         with self.assertRaises(LimitExceeded):
             delivery.authority(self.root, report_bytes=MAX_FRAME)
+
+    def test_authority_parses_only_the_marker_not_the_retained_report(self):
+        plan_digest = 'a' * 64
+        raw = canonical({'plan_digest': plan_digest, 'padding': 'x' * 20000})
+        marker = {'schema': 1, 'kind': 'insight.decision', 'authority': 'shared',
+                  'plan_digest': plan_digest, 'report_digest': digest(raw)}
+        (self.root / delivery.REPORT_FILE).write_bytes(raw)
+        (self.root / delivery.AUTHORITY_FILE).write_bytes(canonical(marker))
+        with patch.object(delivery, 'loads_finite', wraps=delivery.loads_finite) as parse:
+            self.assertEqual(delivery.authority(self.root), marker)
+        # One parse for the 4096-byte marker; the report body stays unparsed.
+        self.assertEqual(parse.call_count, 1)
+        (self.root / delivery.REPORT_FILE).write_bytes(raw + b' ')
+        with self.assertRaisesRegex(Denied, 'report digest mismatch'):
+            delivery.authority(self.root)
 
     def test_shared_receipt_corruption_is_not_legacy_pending(self):
         self.decide()
