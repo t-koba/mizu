@@ -329,23 +329,26 @@ v4.6.2, 7-day retention, `if: always()` with missing-file tolerance), and the
 authoritative `durable-contract` job publishes its own. Each supported host's
 suite timing is therefore sampled where it runs, so the one shared child bound
 rests on observations from that host rather than on a sibling's measurement. It
-records diagnostic evidence; it sets no timeout policy. One 1800 s child cap bounds the suite on every
-platform: the suite costs about 923 s on the development host and about 1050 s
-on a loaded verification host (the 2026-10-21 run was still running when the
-previous 1000 s bound cut it off). Measured Windows cells have since reached
-that edge: on 2026-11-01 the 3.14 job took 1282 s on one publication and was
-cut off at the 1800 s child bound on the next, a documentation-only change;
-the same run's 3.11 job took 1710 s, and an earlier 3.13 job took 1628 s. On
-2026-11-02 the 3.13 cell was cut off at the same 1800 s child bound (job wall
-1821 s). These are single observations on unguaranteed hosted hardware and disk
-layout; published same-revision measurements show that hosted runs can vary
-enough that one cell is neither a cell cost nor a test ranking. Repeat or
-interleave observations with host identity and volume layout before deciding
-whether the bound or the suite shape should move. The bound therefore no longer
-carries the margin this paragraph
-previously claimed; whether the child bound or the suite duration should move
-is an operator decision, with the retained per-cell artifacts as evidence. The
-gate exposes the child bound and the later-phase budget as
+records diagnostic evidence; it sets no timeout policy. One 1800 s child cap
+bounds the suite on every platform. The 2026-11-02 retained status rows
+(`vcs-read/27eb0828bca74cb282791859c3944da3`) report green Windows job walls
+of 1540 s (3.11), 1494 s (3.14) and 1437 s (3.13); the two 3.12 shards, each a
+partial suite, took 923 s and 911 s. On 2026-11-01 the 3.14 job took 1282 s on
+one publication and was cut off at the 1800 s child bound on the next, a
+documentation-only change; the same run's 3.11 job took 1710 s, and an earlier
+3.13 job took 1628 s. On 2026-11-02 the 3.13 cell was cut off at the same
+1800 s child bound (job wall 1821 s). These are single observations on
+unguaranteed hosted hardware and disk layout; published same-revision
+measurements show that hosted runs can vary enough that one cell is neither a
+cell cost nor a test ranking. Repeat or interleave observations with host
+identity and volume layout before deciding whether the bound or the suite shape
+should move. The bound therefore covers the slowest green cell but carries no
+growth margin; whether the child bound or the suite duration should move is an
+operator decision. The retained per-cell timing artifacts are listed, but their
+content reads are currently refused by the adapter response schema, so these
+job walls cannot yet be split into suite and later-phase cost; the status rows
+are the evidence used here. The gate exposes the child bound and the
+later-phase budget as
 `--suite-child-timeout` and `--later-phase-budget` (defaults 1800 s and
 1200 s; validated 1 to 86400 s ranges). It also exposes the per-check
 ceiling and the pinned-adapter install bound as `--check-timeout` and
