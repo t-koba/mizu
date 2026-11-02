@@ -11,7 +11,7 @@ ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. The `insights.py` module
 constants are fixed record, evidence and diagnostic safety bounds; its
-constructor policy defaults are `Limits` fields already inventoried and are
+constructor policy defaults are named config defaults already inventoried or are
 supplied by `Project`. The `runtime.py` literals are fixed run-local memory,
 one-row probe and public page bounds; its configurable admission and dispatch
 choices are `Limits` and `[dispatch_evidence]` fields. The `lock_diagnostics.py`
@@ -286,10 +286,12 @@ HISTORY_TEMPORARIES = {
 # The current-decision projection is history policy; its separate absolute
 # in-process row ceiling is name-scoped, not a full config.py inventory.
 DECISION_PROJECTION = {
-    'decision_projection_records': ('512', 'configured policy',
+    'decision_projection_records': ('DEFAULT_DECISION_PROJECTION_RECORDS', 'configured policy',
                                     'Limits / current-decision projection and preflight scan rows'),
-    'MAX_DECISION_PROJECTION_RECORDS': ('1000000', 'safety',
-                                        'config / absolute in-process projection-row ceiling'),
+    'DEFAULT_DECISION_PROJECTION_RECORDS': ('512', 'configured policy',
+                                            'config / single page-retention default, independent of the measured ceiling'),
+    'MAX_DECISION_PROJECTION_RECORDS': ('512', 'safety',
+                                        'config / measured in-process projection-row ceiling'),
 }
 
 
@@ -522,10 +524,26 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         self.assertEqual(ast.unparse(field.value), DECISION_PROJECTION['decision_projection_records'][0])
         self.assertEqual(inventory(tree)['MAX_DECISION_PROJECTION_RECORDS'],
                          DECISION_PROJECTION['MAX_DECISION_PROJECTION_RECORDS'][0])
+        default = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name)
+                               and target.id == 'DEFAULT_DECISION_PROJECTION_RECORDS'
+                               for target in node.targets))
+        self.assertEqual(ast.unparse(default.value),
+                         DECISION_PROJECTION['DEFAULT_DECISION_PROJECTION_RECORDS'][0])
+        insights = ast.parse((ROOT / 'insights.py').read_text(encoding='utf-8'))
+        constructor = next(node for node in insights.body
+                           if isinstance(node, ast.ClassDef) and node.name == 'Insights')
+        initializer = next(node for node in constructor.body
+                           if isinstance(node, ast.FunctionDef) and node.name == '__init__')
+        index = [arg.arg for arg in initializer.args.kwonlyargs].index(
+            'decision_projection_records')
+        self.assertEqual(ast.unparse(initializer.args.kw_defaults[index]),
+                         DECISION_PROJECTION['decision_projection_records'][0])
         self.assertEqual([DECISION_PROJECTION[key][1]
                           for key in ('decision_projection_records',
+                                      'DEFAULT_DECISION_PROJECTION_RECORDS',
                                       'MAX_DECISION_PROJECTION_RECORDS')],
-                         ['configured policy', 'safety'])
+                         ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in DECISION_PROJECTION.values()))
 
     def test_configured_raw_settings_declarations(self):

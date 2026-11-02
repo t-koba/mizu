@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from mizu.config import DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical, digest, read_json, write_json
 from mizu.insights import Insights, INSIGHT_DECISION_POLICY
@@ -220,6 +221,14 @@ class DecisionProjectionTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.insights.project_decision_records()
         self.assertEqual(path.read_bytes(), original)
+
+    def test_constructor_owns_one_default_and_enforces_the_ceiling(self):
+        self.assertEqual(DEFAULT_DECISION_PROJECTION_RECORDS, 512)
+        self.assertEqual(MAX_DECISION_PROJECTION_RECORDS, 512)
+        self.assertEqual(Insights(self.root).decision_projection_records, 512)
+        for value in (0, -1, 513, 1_000_000, True, 1.5, "512"):
+            with self.subTest(value=value), self.assertRaises(Denied):
+                Insights(self.root, decision_projection_records=value)
 
     def test_configured_projection_records_own_the_scan_and_explicit_limit(self):
         self.decide(0)

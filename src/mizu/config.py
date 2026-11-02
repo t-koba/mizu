@@ -42,8 +42,16 @@ MAX_CHECK_RETAINED = 1024
 MAX_HISTORY_TEMPORARIES = 4096
 DEFAULT_HISTORY_TEMPORARIES = 64
 #: Absolute in-process ceiling for configured current-decision projection rows.
-#: The 512-row default is history policy; this ceiling keeps one scan bounded.
-MAX_DECISION_PROJECTION_RECORDS = 1_000_000
+#: The page retains full source-bounded envelopes. A synthetic 512-row scan with
+#: 64 KiB bodies held 32.6 MiB; the source record can reach 1 MiB, so the ceiling
+#: is capped at the existing 512-row default rather than admitting an unmeasured
+#: larger retained set. At the 1 MiB source bound that default is a 512 MiB
+#: exposure; raising the ceiling would multiply it. Raising it needs a new
+#: measurement and a page that does not retain every payload.
+MAX_DECISION_PROJECTION_RECORDS = 512
+#: One named configured default; Limits and Insights both use it. Keep the
+#: safety ceiling independent so changing the default does not silently raise it.
+DEFAULT_DECISION_PROJECTION_RECORDS = 512
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -365,7 +373,7 @@ class Limits:
     check_retained: int = 1024
     #: Crash-leftover decision-history temporary scan budget; default 64.
     history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES
-    decision_projection_records: int = 512
+    decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.

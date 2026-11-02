@@ -58,6 +58,7 @@ import os
 import stat
 from pathlib import Path
 
+from .config import DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events, lock_diagnostics
 from .work_item_waits import WAIT_KINDS, normalize_wait
@@ -432,14 +433,16 @@ class Insights:
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
                  cursor_ttl_seconds: int = 86400, open_work_items: int = 100,
                  producer_inputs_per_source: int = 20,
-                 decision_projection_records: int = 512):
+                 decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
         self.open_work_items = open_work_items
         self.producer_inputs_per_source = producer_inputs_per_source
         self.cursor_ttl_seconds = cursor_ttl_seconds
-        if type(decision_projection_records) is not int or decision_projection_records < 1:
-            raise Denied("Decision projection records must be a positive integer")
+        if (type(decision_projection_records) is not int
+                or not 1 <= decision_projection_records <= MAX_DECISION_PROJECTION_RECORDS):
+            raise Denied(
+                f"Decision projection records must be an integer in [1, {MAX_DECISION_PROJECTION_RECORDS}]")
         self.decision_projection_records = decision_projection_records
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
