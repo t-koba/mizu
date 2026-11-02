@@ -423,8 +423,8 @@ target-bound, oldest-first, sharing the existing decision-event count limit
 budget and manifest-only `decision_read` references; an attention-only role with
 no explicit budget uses the existing 1 MiB transport ceiling. The combined
 current shared page retains at most the configured `[limits].decision_projection_records`
-(default 512) oldest routed unacknowledged rows per scan and advances after
-acknowledgements. The legacy source scan
+(default 512) oldest routed unacknowledged rows per scan across both decisions
+and pending attention, and advances after acknowledgements. The legacy source scan
 streams individually bounded inbox records and filters to the current recipient
 before retaining attention rows; the prompt/result bounds stay at the existing
 1–100 count limit. Its scan work scales with retained inbox history, but unrelated

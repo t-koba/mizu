@@ -287,7 +287,7 @@ HISTORY_TEMPORARIES = {
 # in-process row ceiling is name-scoped, not a full config.py inventory.
 DECISION_PROJECTION = {
     'decision_projection_records': ('DEFAULT_DECISION_PROJECTION_RECORDS', 'configured policy',
-                                    'Limits / current-decision projection and preflight scan rows'),
+                                    'Limits / combined decision and pending-attention page retention rows'),
     'DEFAULT_DECISION_PROJECTION_RECORDS': ('512', 'configured policy',
                                             'config / single page-retention default, independent of the measured ceiling'),
     'MAX_DECISION_PROJECTION_RECORDS': ('512', 'safety',

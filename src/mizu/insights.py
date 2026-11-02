@@ -1813,16 +1813,22 @@ replacement insight without implying rejected substance.
 
     @classmethod
     def _retain_oldest(cls, retained: dict, record_id: str, envelope: dict,
-                       limit: int) -> None:
-        """Keep the oldest ``limit`` rows without retaining the full history."""
+                       limit: int) -> str | None:
+        """Keep the oldest ``limit`` rows without retaining the full history.
+
+        Return the evicted record ID, or ``record_id`` when the new row is
+        itself newer than the retained window.
+        """
         if len(retained) < limit:
             retained[record_id] = envelope
-            return
+            return None
         newest_id = max(retained, key=lambda rid: cls._decision_key(rid, retained[rid]))
         if cls._decision_key(record_id, envelope) < cls._decision_key(newest_id,
                                                                        retained[newest_id]):
             del retained[newest_id]
             retained[record_id] = envelope
+            return newest_id
+        return record_id
 
     def _decision_projection_envelopes_locked(self, *, limit: int | None = None) -> dict:
         """Select/validate without writes.
@@ -2209,7 +2215,10 @@ replacement insight without implying rejected substance.
             # The full-history source scan runs without the exclusive lock.
             decision_candidates, decision_total = self._decision_page_envelopes_locked(
                 validate=validate_decision, keep=keep_decision)
-            pending_candidates = {}
+            # One shared window: pending attention can displace a decision and
+            # vice versa, so neither class gets a second full bound.
+            candidates = decision_candidates
+            kinds = {record_id: "decision" for record_id in candidates}
             pending_total = 0
             if configured_roles is not None:
                 for record_id, envelope in self._pending_insight_envelopes_locked(
@@ -2227,8 +2236,18 @@ replacement insight without implying rejected substance.
                                        RECEIPT_BYTES) is not None:
                             raise Denied("Shared insight receipt has no immutable record")
                     pending_total += 1
-                    self._retain_oldest(pending_candidates, record_id, envelope,
-                                        self.decision_projection_records)
+                    evicted = self._retain_oldest(candidates, record_id, envelope,
+                                                  self.decision_projection_records)
+                    if evicted is not None and evicted != record_id:
+                        kinds.pop(evicted, None)
+                    if record_id in candidates:
+                        kinds[record_id] = "pending"
+            decision_candidates = {record_id: envelope
+                                   for record_id, envelope in candidates.items()
+                                   if kinds[record_id] == "decision"}
+            pending_candidates = {record_id: envelope
+                                  for record_id, envelope in candidates.items()
+                                  if kinds[record_id] == "pending"}
             projected = {}
             new_decisions = {}
             for record_id, envelope in decision_candidates.items():
@@ -2301,10 +2320,12 @@ replacement insight without implying rejected substance.
                         envelope, store.put(envelope, writer="host.insights"))
                 if len(validated_new) != len(new_ids):
                     # The scan-time list may contain a new row that moved
-                    # before validation; it is no longer pending.
+                    # before validation; only that row leaves the scan-time
+                    # total. Rows beyond the retained window stay counted.
+                    pending_count = max(0, pending_count
+                                        - (len(new_ids) - len(validated_new)))
                     eligible = [row for row in eligible
                                 if row[1] not in new_ids or row[1] in validated_new]
-                    pending_count = len(eligible)
                 events = []
                 record_ids = []
                 if size(page(events)) > max_bytes:

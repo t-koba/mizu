@@ -658,10 +658,12 @@ rows about to be selected against their exact current source and shared receipt
 and freezes their manifest. A decision or revision committed during the scan
 therefore cannot be delivered from the stale page. `pending_count` is the
 scan-time count of routed unacknowledged decisions plus addressed pending
-attention. It includes rows beyond the retained window and may overcount a row
-that moves after the scan, but such a row is never delivered. The page retains at
-most the configured `[limits].decision_projection_records`
-(default 512) oldest routed and unacknowledged rows, while it validates every
+attention. It includes rows beyond the retained window and subtracts a retained
+new candidate that moved before locked validation; other rows that move after
+the scan may be overcounted, but such a row is never delivered. The page
+retains at most the configured `[limits].decision_projection_records`
+(default 512) oldest routed and unacknowledged rows across both decisions and
+pending attention, while it validates every
 current existing projection; it does not refuse because more rows exist, and
 acknowledgements advance the next oldest window. It writes new projections only
 for the rows retained for that role. The explicit public projector applies the

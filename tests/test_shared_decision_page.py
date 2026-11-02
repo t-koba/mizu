@@ -372,6 +372,71 @@ class SharedDecisionPageTests(unittest.TestCase):
                     "reviewer", [asdict(entry) for entry in manifest], manifest=manifest)
         self.assertEqual(delivered, 513)
 
+    def test_moved_retained_attention_keeps_complete_pending_total(self):
+        for index in range(3):
+            self.insights.submit(source="worker", title=f"Attention {index}",
+                                 body=f"Attention body {index}", base_snapshot=None,
+                                 addressee="worker")
+        original = Insights._pending_insight_envelopes_locked
+        moved = []
+
+        def stale(insights, configured_roles, role_name, *, paths=None):
+            candidates = list(original(insights, configured_roles, role_name, paths=paths))
+            if paths is None:
+                oldest = min(candidates, key=lambda pair: Insights._decision_key(*pair))
+                insight_id = oldest[1]["payload"]["insight"]
+                self.insights.revise(insight_id, source="worker", title="Moved attention",
+                                     body="Revised during the page scan", base_snapshot=None,
+                                     expected_rev=1, addressee="worker")
+                moved.append(oldest[0])
+            return iter(candidates)
+
+        with patch.object(Insights, "_pending_insight_envelopes_locked", stale):
+            page, manifest = Insights(
+                self.root, decision_projection_records=1).shared_decision_page(
+                    "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(page["events"], [])
+        self.assertEqual(page["pending_count"], 2)
+        self.assertTrue(page["truncated"])
+        self.assertTrue(page["byte_truncated"])
+        self.assertEqual(manifest, ())
+        page, manifest = Insights(
+            self.root, decision_projection_records=1).shared_decision_page(
+                "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
+        self.assertEqual(page["pending_count"], 3)
+        self.assertEqual(len(page["events"]), 1)
+        self.assertEqual(len(manifest), 1)
+
+    def test_one_combined_window_across_decisions_and_pending_attention(self):
+        self.decide(0, source="worker")
+        self.decide(1, source="worker")
+        for index in range(2):
+            self.insights.submit(source="worker", title=f"Attention {index}",
+                                 body=f"Attention body {index}", base_snapshot=None,
+                                 addressee="worker")
+        page, manifest = Insights(
+            self.root, decision_projection_records=2).shared_decision_page(
+                "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
+        self.assertEqual(page["pending_count"], 4)
+        self.assertEqual(len(page["events"]), 2)
+        self.assertTrue(page["truncated"])
+        store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY,
+                                          "insight.pending": INSIGHT_PENDING_POLICY})
+        store.acknowledge("worker", [asdict(entry) for entry in manifest], manifest=manifest)
+        page, manifest = Insights(
+            self.root, decision_projection_records=2).shared_decision_page(
+                "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
+        self.assertEqual(page["pending_count"], 2)
+        self.assertEqual(len(page["events"]), 2)
+        store.acknowledge("worker", [asdict(entry) for entry in manifest], manifest=manifest)
+        page, manifest = Insights(
+            self.root, decision_projection_records=2).shared_decision_page(
+                "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
+        self.assertEqual(page["events"], [])
+        self.assertEqual(page["pending_count"], 0)
+        self.assertEqual(manifest, ())
+
     def test_pending_attention_past_configured_bound_delivers_after_ack(self):
         for index in range(2):
             self.insights.submit(source="reviewer", title=f"Pending {index}",
