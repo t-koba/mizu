@@ -116,6 +116,23 @@ class PortablePrimitiveTests(unittest.TestCase):
             safe_read(self.root, "link.txt", 1000)
         self.assertEqual(safe_read(self.root, "real.txt", 1000), b"portable")
 
+    def test_safe_read_managed_survives_portable_replacement(self):
+        from mizu import fs
+        path = self.root / "state.json"
+        path.write_bytes(b"old")
+        original = fs._read_bounded
+
+        def replace_then_read(stream, maximum, observed_size):
+            replacement = self.root / "replacement.json"
+            replacement.write_bytes(b"new")
+            os.replace(replacement, path)
+            return original(stream, maximum, observed_size)
+
+        with unittest.mock.patch.object(fs._platform, "HAS_OPENAT", False), \
+                unittest.mock.patch.object(fs._platform, "HAS_DIR_FD", False), \
+                unittest.mock.patch.object(fs, "_read_bounded", side_effect=replace_then_read):
+            self.assertEqual(fs.safe_read_managed(self.root, "state.json", 100), b"old")
+
     def test_process_run_portable(self):
         from mizu.process import environment, run
         result = run([sys.executable, "-c", "print('portable')"], timeout=10, maximum=1024)

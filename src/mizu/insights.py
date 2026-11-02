@@ -65,7 +65,8 @@ from .errors import Busy, Denied, LimitExceeded
 from .shared_records import Delivery, KindPolicy, RECEIPT_BYTES, RECORD_BYTES, SharedRecords
 from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_tasks,
                              task_id, task_seeds)
-from .fs import MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json, safe_read, write_json, mkdir, DIGEST
+from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
+                 read_json, safe_read, safe_read_managed, write_json, mkdir, DIGEST)
 
 MAX_DECISION_EVENT_BYTES = 1024 * 1024
 #: Bound for one per-token decision receipt file (1 KiB). Receipts are small
@@ -1801,7 +1802,7 @@ replacement insight without implying rejected substance.
             if path.suffix != ".json":
                 continue
             try:
-                raw = safe_read(self.root, f"inbox/{path.name}", self.maximum)
+                raw = safe_read_managed(self.root, f"inbox/{path.name}", self.maximum)
             except Denied:
                 # A retention sweep may archive a decided inbox copy between
                 # the directory listing and this read. That source is gone,
@@ -1832,7 +1833,7 @@ replacement insight without implying rejected substance.
                 decision = None
             else:
                 try:
-                    decision = json.loads(safe_read(
+                    decision = json.loads(safe_read_managed(
                         self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
                 except Denied:
                     if self._source_missing(decision_path):

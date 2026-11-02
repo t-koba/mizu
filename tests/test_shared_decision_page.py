@@ -359,7 +359,7 @@ class SharedDecisionPageTests(unittest.TestCase):
                 removed.append(name)
             return real(root, name, maximum)
 
-        with patch("mizu.insights.safe_read", vanish):
+        with patch("mizu.insights.safe_read_managed", vanish):
             page, manifest = self.insights.shared_decision_page(
                 "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
         self.assertEqual(len(removed), 1)

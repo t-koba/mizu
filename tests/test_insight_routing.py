@@ -190,7 +190,9 @@ class InsightRoutingLegacyTests(Fixture):
             self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), 'reviewer'))
         self.assertEqual(path.read_bytes(), b'{invalid')
         path.unlink()
-        with patch('mizu.insights.safe_read', side_effect=Denied('unsafe read')):
+        with patch('mizu.insights.safe_read', side_effect=Denied('unsafe read')), \
+                patch('mizu.insights.safe_read_managed',
+                      side_effect=Denied('unsafe managed read')):
             with self.assertRaises(Denied):
                 self.pending()
 

@@ -648,20 +648,23 @@ def _same_file(first, second):
     return _file_identity(first) == _file_identity(second)
 
 
-def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> tuple[bytes, os.stat_result]:
+def _check_read_components(root: Path, name: str, parts: tuple[str, ...]) -> Path:
+    """Refuse symlink/reparse components before a portable managed read."""
     target = root.joinpath(*parts)
+    current = root
+    for part in ('', *parts):
+        current = current / part
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise Denied(f"Unsafe or unavailable path: {name}")
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise Denied(f"Unsafe or unavailable path: {name}")
+    return target
+
+
+def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> tuple[bytes, os.stat_result]:
     try:
-        # Refuse any symlink along the path, including the final component.
-        def check_components():
-            current = root
-            for part in ('', *parts):
-                current = current / part
-                info = current.lstat()
-                if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
-                    raise Denied(f"Unsafe or unavailable path: {name}")
-            if not target.resolve().is_relative_to(root.resolve()):
-                raise Denied(f"Unsafe or unavailable path: {name}")
-        check_components()
+        target = _check_read_components(root, name, parts)
         info = target.stat()
         if not stat.S_ISREG(info.st_mode):
             raise Denied("Only regular, non-hardlinked files are readable")
@@ -681,10 +684,52 @@ def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: 
             after = os.fstat(stream.fileno())
         if len(data) > maximum or after.st_size > maximum:
             raise LimitExceeded("File grew past configured byte limit")
-        check_components()
+        _check_read_components(root, name, parts)
         if _file_identity(before) != _file_identity(after) or not _same_file(after, target.stat()):
             raise Denied("File changed while reading; retry at a stable boundary")
         return data, after
+    except (Denied, LimitExceeded):
+        raise
+    except OSError as exc:
+        raise Denied(f"Unsafe or unavailable path: {name}") from exc
+
+
+def safe_read_managed(root: Path, name: str, maximum: int) -> bytes:
+    """Read managed state without forbidding an overlapping atomic replace.
+
+    POSIX keeps the openat-pinned path. On Windows the portable branch uses
+    the delete-sharing handle from :func:`_open_read`, and validates only the
+    opened generation; it deliberately does not re-stat the replaceable path
+    after the read, which can already name the next generation. Symlink,
+    reparse and regular/hardlink checks still happen before and on the handle.
+    """
+    parts = relative_parts(name)
+    if _platform.HAS_OPENAT and _platform.HAS_DIR_FD:
+        return safe_read_info(root, name, maximum)[0]
+    try:
+        target = _check_read_components(root, name, parts)
+        with _open_read(target, nonblocking=True) as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise Denied("Only regular, non-hardlinked files are readable")
+            if before.st_size > maximum:
+                raise LimitExceeded("File exceeds configured byte limit")
+            data = _read_bounded(stream, maximum, before.st_size)
+            after = os.fstat(stream.fileno())
+        if len(data) > maximum or after.st_size > maximum:
+            raise LimitExceeded("File grew past configured byte limit")
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_mode,
+                                 info.st_size, info.st_mtime_ns)
+        # An overlapping replacement may unlink the opened generation, changing
+        # nlink/ctime without changing the bytes read from this handle. Follow
+        # read_json's handle-bound rule: allow removal, refuse a new link.
+        if (identity(before) != identity(after) or after.st_nlink not in (0, 1)
+                or after.st_nlink > before.st_nlink
+                or (after.st_nlink == before.st_nlink
+                    and before.st_ctime_ns != after.st_ctime_ns)
+                or len(data) != before.st_size):
+            raise Denied("File changed while reading; retry at a stable boundary")
+        return data
     except (Denied, LimitExceeded):
         raise
     except OSError as exc:

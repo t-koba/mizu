@@ -818,8 +818,11 @@ without the exclusive record lock and revalidates only the rows it selects
 under that lock. The legacy non-empty pending-insight page now uses the same
 read/write split: the full inbox/decision/receipt scan is unlocked, only the
 selected candidates are revalidated under the record lock, and a metadata
-witness change falls back to the exact locked scan. The remaining end state is
-a delta reader instead of a full re-scan on change.
+witness change falls back to the exact locked scan. Managed source records use
+the delete-sharing, handle-bound reader on Windows, so an overlapping atomic
+replacement yields a complete source generation and is caught by revalidation
+or the metadata witness rather than a path re-stat failure. The remaining end
+state is a delta reader instead of a full re-scan on change.
 
 ### Exact schema and identity
 

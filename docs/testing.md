@@ -193,6 +193,12 @@ that omit delete sharing can still block replacement; permission/sharing errors
 propagate rather than becoming missing state. This is not the untrusted-path
 validation contract of `safe_read`, nor a guarantee for in-place writes.
 
+`safe_read_managed` applies the same handle-bound, delete-sharing contract to
+managed records that can overlap a writer but still need link/reparse screening.
+On Windows it opens through `_open_read`, validates the opened generation and
+does not re-stat the replaceable path after the read; on POSIX it keeps the
+openat-pinned path. `safe_read` remains the untrusted-tree contract.
+
 `FileTests.test_atomic_replace_with_retained_reader` holds A behind events until
 B is published and read, and checks create-only idempotence/conflicts before
 releasing A. It is included in the ordinary CI matrix; Windows semantics require
