@@ -169,6 +169,28 @@ class SmokeRetentionTests(unittest.TestCase):
                 self.assertEqual(result['retired'], [])
         self.assertEqual(len(insights.read(item['id'])['evidence']), 3)
 
+    def test_recognized_atomic_temporary_is_not_a_store_record(self):
+        self.pair()
+        insights, _ = self.owner()
+        self.insight(insights)
+        temporary = insights.root / 'inbox' / '.new-abcdefgh'
+        temporary.write_bytes(b'{}')
+        result = self.run_retention(apply=True)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['retired'], [self.a])
+        self.assertTrue(temporary.exists())
+        temporary.unlink()
+
+    def test_preflight_ignores_recognized_temporaries(self):
+        root = self.data / 'projects' / 'one'
+        (root / 'inbox').mkdir(parents=True)
+        (root / 'inbox' / '.new-abcdefgh').write_bytes(b'{}')
+        item = root / 'work-items' / ('wi_' + 'c' * 32)
+        item.mkdir(parents=True)
+        (item / '.new-abcdefgh').write_bytes(b'{}')
+        retention._preflight(retention.Metadata(self.data), root,
+                             ("inbox", "work-items"))
+
     def test_unknown_temporary_without_writer_still_fails_closed(self):
         pair = self.pair()
         insights, _ = self.owner()

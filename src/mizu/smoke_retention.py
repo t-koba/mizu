@@ -33,6 +33,9 @@ MAX_ENTRIES = 100000  # Includes empty directories and records, not payloads.
 MAX_DAYS = 36500
 AUDIT_LIMIT = 128
 
+#: In-progress atomic writes (mkstemp prefix `.new-` plus eight name chars).
+ATOMIC_TEMPORARY = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
+
 
 def directory(path: Path, *, optional=False) -> bool:
     try:
@@ -400,11 +403,16 @@ def _preflight(metadata, root, names):
         base = root / name
         for path in entries(base, MAX_ENTRIES, optional=True):
             metadata.entries += 1
+            if ATOMIC_TEMPORARY.fullmatch(path.name):
+                # A writer's unpublished atomic file is not a store record.
+                continue
             if name != "work-items" and (path.suffix != ".json" or not re.fullmatch(r"[A-Za-z0-9_.-]+", path.stem)):
                 raise Denied("Unknown smoke reference store entry")
             if name == "work-items":
                 directory(path)
                 for child in entries(path, 260):
+                    if ATOMIC_TEMPORARY.fullmatch(child.name):
+                        continue
                     metadata.read(child)
             else:
                 record = metadata.read(path)
@@ -430,6 +438,12 @@ def _preflight(metadata, root, names):
                     stored_wait({key: value for key, value in record.items() if key not in fields})
             if metadata.entries + metadata.count > MAX_ENTRIES:
                 raise LimitExceeded("Smoke reference store entry bound exceeded")
+
+
+def _store_entries(base: Path):
+    """Yield committed record names, never a writer's atomic temporary."""
+    return (path for path in entries(base, MAX_ENTRIES, optional=True)
+            if not ATOMIC_TEMPORARY.fullmatch(path.name))
 
 
 def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
@@ -471,7 +485,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
             identifier(root.name)
         directory(root)
         _preflight(metadata, root, ("inbox", "insight-ids", "decisions", "waits", "decision-history", "work-items"))
-        for path in entries(root / "insight-ids", MAX_ENTRIES, optional=True):
+        for path in _store_entries(root / "insight-ids"):
             identity = metadata.read(path)
             if (set(identity) != {"id", "sha256", "created_at"} or identity["id"] != path.stem
                     or not isinstance(identity["sha256"], str)
@@ -487,7 +501,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
         snapshots = ReferenceSnapshots(root, excludes=(), max_file=2**63-1,
                                        max_bytes=2**63-1, max_files=MAX_ENTRIES, create_dirs=False)
         store = ReferenceItems(root, snapshots, insights)
-        for path in entries(root / "inbox", MAX_ENTRIES, optional=True):
+        for path in _store_entries(root / "inbox"):
             record = metadata.read(path)
             if (set(record) - {"id", "source", "title", "body", "base_snapshot", "run", "origin", "created_at", "updated_at", "rev", "evidence", *INSIGHT_METADATA_DEFAULTS}
                     or path.suffix != ".json" or record.get("id") != path.stem
@@ -532,7 +546,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
                     raise Denied("Smoke wait owner/revision mismatch")
                 if active and effective is not None and effective["action"] == "defer" and wait.get("rev") == rev:
                     add(refs)
-        for path in entries(root / "waits", MAX_ENTRIES, optional=True):
+        for path in _store_entries(root / "waits"):
             wait = metadata.read(path)
             if wait.get("smoke_refs") and not (root / "inbox" / path.name).exists():
                 # Terminal archived waits may remain, but must have a current
