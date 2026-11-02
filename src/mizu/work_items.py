@@ -164,6 +164,7 @@ class WorkItems:
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
         self.history_temporaries = history_temporaries
+        self._direct_cache: dict[str, tuple] = {}
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
                for value in (doing_limit, *self.doing_limits.values())):
             raise Denied("Work-item doing limit must be an integer in [1, 100]")
@@ -272,10 +273,20 @@ class WorkItems:
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
             return None
+        create = directory / "create.json"
         try:
-            (directory / "create.json").lstat()
+            directory_info = directory.lstat()
+            create_info = create.lstat()
         except FileNotFoundError:
             return None
+        key = (directory_info.st_dev, directory_info.st_ino, directory_info.st_mode,
+               directory_info.st_mtime_ns, directory_info.st_ctime_ns,
+               directory_info.st_size, create_info.st_dev, create_info.st_ino,
+               create_info.st_mode, create_info.st_nlink, create_info.st_mtime_ns,
+               create_info.st_ctime_ns, create_info.st_size)
+        cached = self._direct_cache.get(item_id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
         try:
             (directory / "legacy.json").lstat()
         except FileNotFoundError:
@@ -304,6 +315,7 @@ class WorkItems:
                 pass
             else:
                 raise Denied("Direct work-item ID collides with a decision event")
+        self._direct_cache[item_id] = (key, record)
         return record
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,

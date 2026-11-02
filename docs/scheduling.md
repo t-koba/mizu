@@ -310,7 +310,10 @@ results, never evidence of zero blockers. `Project.status()` derives both
 `backpressure.open_work_count` and `blocked_work` from one validated read-only
 open scan; it does not run a second count-only pass. Both values fail together
 when that inventory is unreadable, and the scan still covers the full seeded
-inventory. There is no cursor: use the existing
+inventory. Within one process, an immutable direct creation record may be reused
+only while its directory and `create.json` identity, mode, link count and
+timestamps are unchanged; any changed, missing or unsafe path revalidates and
+fails closed. There is no cursor: use the existing
 work-item read/explain APIs for the authoritative ledger and full history.
 Retries simply observe a new live view; no external facts or new CI facts are
 polled. Deadline, published-code and exact dependency-result conditions retain

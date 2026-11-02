@@ -59,6 +59,26 @@ class WorkItemTests(Fixture):
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,
                 self.store.blocked_liveness_readonly, self.store.page_open_for_order)
 
+    def test_direct_record_cache_reuses_unchanged_seed_and_invalidates_tamper(self):
+        created = self.store.create(idempotency_key="direct-cache", title="Cache",
+                                    actor="worker")["record"]["work_item"]
+        reads = []
+        original = self.store._read
+
+        def counted(name):
+            reads.append(name)
+            return original(name)
+
+        with patch.object(self.store, "_read", side_effect=counted):
+            first = self.store._direct_record(created["id"])
+            second = self.store._direct_record(created["id"])
+        self.assertEqual(first, second)
+        self.assertEqual(sum(name.endswith("/create.json") for name in reads), 1)
+        create = self.project.root / "work-items" / created["id"] / "create.json"
+        create.write_text("{")
+        with self.assertRaises(Denied):
+            self.store._direct_record(created["id"])
+
     def test_status_shares_one_open_scan_for_open_count_and_blocked_work(self):
         calls = []
         original = self.store._page_open_impl
