@@ -106,6 +106,16 @@ class RetirementTests(Fixture):
         for page in (self.store.page_open(), self.store.page_open_readonly(), self.store.page_ready()):
             self.assertNotIn(self.item_id, [r["id"] for r in page["items"]])
         self.assertEqual(self.store.page_closed_readonly()["items"][0]["id"], self.item_id)
+        state_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        self.assertTrue(state_path.exists())
+        state = json.loads(state_path.read_bytes())
+        self.assertEqual(state["retirement"], terminal)
+        self.assertEqual(state["current"]["rev"], MAX_REVISIONS)
+        fresh = type(self.store)(self.project.root, self.project.snapshots, self.project.insights)
+        with patch.object(fresh, "_get",
+                          side_effect=AssertionError("retired history replayed")):
+            closed = fresh.page_closed_readonly(limit=10)
+        self.assertEqual(closed["items"][0]["id"], self.item_id)
         self.assertEqual(work_item_events.pending(self.store, "reviewer", ["dropped"])["pending"], 1)
         claimed = self.store.transition(other["id"], expected_rev=1, status="doing", actor="worker")
         self.assertEqual(claimed["holder"], "worker")

@@ -8,14 +8,16 @@ same committed records and fail closed on unsafe or malformed state.
 A read-only page may reuse a source-backed sidecar projection only while the
 seed digest and every entry's metadata in the item directory are unchanged;
 the sidecar stores full source records and is compared byte-for-structure
-with the exact current/previous source records (at most two revision reads)
-before use. The sidecar is a local POSIX metadata-witness fast path, the
-exact history replay is the fallback, and Windows bypasses sidecar reuse.
-Origin staleness and hold state are recomputed on every call, and any
-unexpected shape bypasses the fast path. A continued doing-to-doing revision has no source-backed
-earlier hold start in its current and previous records, so it removes the
-sidecar and stays exact; all other misses also replay exactly. Unknown/unsafe
-records, incomplete
+with the exact current/previous source records (at most two revision reads,
+plus a retirement file when present) before use. Terminal and retired items
+retain a source-backed sidecar so open/status scans skip their closed
+histories. The sidecar is a local POSIX metadata-witness fast path, the exact
+history replay is the fallback, and Windows bypasses sidecar reuse. Origin
+staleness and hold state are recomputed on every call, and any unexpected
+shape bypasses the fast path. A continued doing-to-doing revision has no
+source-backed earlier hold start in its current and previous records, so it
+removes the sidecar and stays exact; all other misses also replay exactly.
+Unknown/unsafe records, incomplete
 chains and bounds fail closed. Retrying a
 committed CAS requires a re-read. Same-status events require a scope change or
 explicit delivery binding; only a proven forward dropped-to-done correction
@@ -399,7 +401,8 @@ class WorkItems:
     def _sidecar_path(self, item_id: str) -> Path:
         return self.root / _SIDECAR_DIR / f"{item_id}.json"
 
-    def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since) -> bool:
+    def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since,
+                       retirement=None) -> bool:
         """Best-effort write of exact source records; never fails a commit.
 
         Cache boundary: any failure here falls back to exact replay and never
@@ -425,7 +428,7 @@ class WorkItems:
                        "seed_sha256": digest(canonical(seed)),
                        "history_identity": identity_json,
                        "previous": previous, "current": current,
-                       "doing_since": since}
+                       "doing_since": since, "retirement": retirement}
             if len(canonical(payload)) > _SIDECAR_MAX_BYTES:
                 return False
             path = self._sidecar_path(item_id)
@@ -487,7 +490,7 @@ class WorkItems:
                     return False
                 names.append(entry[0])
             for name in names:
-                if name == "create.json":
+                if name in ("create.json", "retirement.json"):
                     continue
                 if _REVISION_NAME.fullmatch(name) is None:
                     return False
@@ -507,8 +510,8 @@ class WorkItems:
         Cache boundary: any missing/malformed/unsafe/mismatched sidecar or source
         read falls back to exact replay; sidecar content alone is never trusted.
         Stored previous/current are full source records (seed or exact revision
-        files). At most the current and previous revision files are read here;
-        full history is never scanned.
+        files). At most the current/previous revision and retirement files are
+        read here; full history is never scanned.
         """
         try:
             if IS_WINDOWS or history_key is None:
@@ -547,9 +550,10 @@ class WorkItems:
                 payload = json.loads(raw, parse_constant=_reject_json_constant)
             except (ValueError, UnicodeError):
                 return None
-            if (not isinstance(payload, dict)
-                    or set(payload) != {"schema", "id", "seed_sha256", "history_identity",
-                                        "previous", "current", "doing_since"}):
+            base_fields = {"schema", "id", "seed_sha256", "history_identity",
+                           "previous", "current", "doing_since"}
+            if not isinstance(payload, dict) or set(payload) not in (base_fields,
+                                                                     base_fields | {"retirement"}):
                 return None
             if payload.get("schema") != _SIDECAR_SCHEMA or payload.get("id") != item_id:
                 return None
@@ -563,13 +567,14 @@ class WorkItems:
             previous = payload.get("previous")
             current_raw = payload.get("current")
             since_stored = payload.get("doing_since")
+            retirement_raw = payload.get("retirement")
             if not isinstance(current_raw, dict):
                 return None
             if current_raw.get("id") != item_id:
                 return None
             if since_stored is not None and not _timestamp(since_stored):
                 return None
-            if current_raw.get("status") in ("done", "dropped"):
+            if retirement_raw is not None and not isinstance(retirement_raw, dict):
                 return None
             try:
                 current_rev = current_raw.get("rev")
@@ -578,16 +583,11 @@ class WorkItems:
                 if not self._sidecar_expected_rev(history_key, current_rev):
                     return None
                 if previous is None:
-                    # Seed-only sidecar: stored current must equal the
-                    # already-validated seed; rev must be 1. No revision file
-                    # read is needed here.
                     try:
                         validate_seed(current_raw, decision_task="wait" in current_raw)
                     except Denied:
                         return None
-                    if current_raw != seed:
-                        return None
-                    if current_rev != 1:
+                    if current_raw != seed or current_rev != 1:
                         return None
                     try:
                         if canonical(current_raw) != canonical(seed):
@@ -596,21 +596,12 @@ class WorkItems:
                         return None
                     exact_current = seed
                     exact_previous = None
-                    current_raw = exact_current
-                    previous = exact_previous
                 else:
-                    if not isinstance(previous, dict):
-                        return None
-                    if previous.get("id") != item_id:
+                    if not isinstance(previous, dict) or previous.get("id") != item_id:
                         return None
                     prev_rev = previous.get("rev")
-                    if type(prev_rev) is not int or prev_rev != current_rev - 1:
+                    if type(prev_rev) is not int or prev_rev != current_rev - 1 or current_rev == 1:
                         return None
-                    if current_rev == 1:
-                        return None
-                    # Source-backed byte-for-structure comparison: the stored
-                    # current must equal the exact source record at
-                    # current.rev, read as one revision file.
                     try:
                         exact_current = self._read(f"work-items/{item_id}/{current_rev}.json")
                     except (Denied, LimitExceeded, OSError, ValueError, TypeError,
@@ -628,15 +619,8 @@ class WorkItems:
                             return None
                         if previous != seed:
                             return None
-                        try:
-                            if canonical(previous) != canonical(seed):
-                                return None
-                        except (ValueError, TypeError, UnicodeError, AttributeError):
-                            return None
                         exact_previous = seed
                     else:
-                        # Stored previous must equal the exact source record at
-                        # previous.rev, read as one revision file.
                         try:
                             exact_previous = self._read(f"work-items/{item_id}/{prev_rev}.json")
                         except (Denied, LimitExceeded, OSError, ValueError, TypeError,
@@ -647,55 +631,83 @@ class WorkItems:
                                 return None
                         except (ValueError, TypeError, UnicodeError, AttributeError):
                             return None
-                    # Validate the exact source records, never sidecar copies alone.
                     try:
                         if prev_rev == 1:
                             validate_seed(exact_previous,
                                           decision_task="wait" in exact_previous)
                         self._validate_transition(exact_previous, exact_current,
                                                   verify_snapshots=False)
-                        if exact_current.get("delivery") is not None:
+                        if (exact_current.get("delivery") is not None
+                                and exact_current.get("status") not in ("done", "dropped")):
                             self._validate_delivery(exact_previous, exact_current,
                                                     verify_snapshots=True)
                     except (Denied, LimitExceeded):
                         return None
                     except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
                         return None
-                    current_raw = exact_current
-                    previous = exact_previous
             except (Denied, LimitExceeded):
                 return None
             except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
                 return None
-            # A retirement record changes the witnessed directory, so a matching
-            # identity already proves none exists; recheck explicitly before trusting.
+            if retirement_raw is not None:
+                if (current_rev != MAX_REVISIONS
+                        or exact_current.get("status") not in ("open", "doing", "blocked")):
+                    return None
+                try:
+                    exact_retirement = self._read(f"work-items/{item_id}/retirement.json")
+                except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                        UnicodeError, AttributeError):
+                    return None
+                try:
+                    if canonical(retirement_raw) != canonical(exact_retirement):
+                        return None
+                except (ValueError, TypeError, UnicodeError, AttributeError):
+                    return None
+                if (set(exact_retirement) != {"schema", "request", "request_sha256",
+                                              "chain_sha256", "created_at"}
+                        or exact_retirement.get("schema") != 1
+                        or not isinstance(exact_retirement.get("request"), dict)
+                        or not _timestamp(exact_retirement.get("created_at"))):
+                    return None
+                req = exact_retirement["request"]
+                if set(req) != {"id", "expected_rev", "status", "actor", "reason"}:
+                    return None
+                try:
+                    normalized = work_item_retirement.request(
+                        item_id, req.get("expected_rev"), req.get("status"),
+                        req.get("actor"), req.get("reason"))
+                except (Denied, TypeError, ValueError):
+                    return None
+                if (req != normalized
+                        or exact_retirement.get("request_sha256") != digest(canonical(normalized))
+                        or not isinstance(exact_retirement.get("chain_sha256"), str)
+                        or not DIGEST.fullmatch(exact_retirement["chain_sha256"])):
+                    return None
+                try:
+                    item = work_item_retirement.project(exact_current, exact_retirement)
+                except (Denied, LimitExceeded):
+                    return None
+                except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                    return None
+                if since_stored is not None:
+                    return None
+                return item, None
             try:
-                (self.root / "work-items" / item_id / "retirement.json").lstat()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                return None
-            else:
-                return None
-            try:
-                item = work_item_retirement.project(current_raw, None)
+                item = work_item_retirement.project(exact_current, None)
             except (Denied, LimitExceeded):
                 return None
             except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
                 return None
             if not isinstance(item, dict):
                 return None
-            try:
-                item_status = item.get("status")
-            except (AttributeError, TypeError, ValueError, UnicodeError):
-                return None
+            item_status = item.get("status")
             if item_status in ("done", "dropped"):
-                return None
+                if since_stored is not None:
+                    return None
+                return item, None
             if item_status == "doing":
-                # The exact current record determines the hold start; the
-                # sidecar cannot supply a different age.
                 if (since_stored is None or not _timestamp(since_stored)
-                        or since_stored != current_raw.get("updated_at")):
+                        or since_stored != exact_current.get("updated_at")):
                     return None
             elif since_stored is not None:
                 return None
@@ -707,15 +719,16 @@ class WorkItems:
             return None
 
     def backfill_current_states(self, *, limit=MAX_OPEN_PAGE_ROWS) -> dict:
-        """Build at most ``limit`` missing nonterminal current-state sidecars.
+        """Build at most ``limit`` missing current-state sidecars.
 
         The caller must be a writable project operation: this method holds the
         record lock, validates each selected item's exact source chain, and
         writes only the disposable sidecar cache. A valid sidecar costs at most
-        its source-identity and current/previous revision reads; an item that
-        still lacks one pays the existing exact replay once. Terminal items and
-        unsafe or ambiguous sources are left alone. The return value reports
-        how many seeded items were checked and how many sidecars were written.
+        its source-identity and current/previous/retirement reads; an item that
+        still lacks one pays the existing exact replay once. Normal terminal
+        items and retirement are cached too, so later open/status scans can skip
+        their history. Unsafe or ambiguous sources are left alone. The return
+        value reports checked items and sidecars written.
         """
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item state backfill limit must be an integer in [1, 100]")
@@ -737,9 +750,6 @@ class WorkItems:
                 item, since = self._current_hold(
                     seed["id"], seed_event=event, history_revisions=revisions,
                     verify_snapshots=False, verify_current_delivery=True)
-                if item["status"] in ("done", "dropped"):
-                    self._sidecar_remove(seed["id"])
-                    continue
                 revision = item["rev"]
                 if revision == 1:
                     previous, current = None, seed
@@ -749,14 +759,20 @@ class WorkItems:
                 else:
                     previous = self._read(f"work-items/{seed['id']}/{revision - 1}.json")
                     current = self._read(f"work-items/{seed['id']}/{revision}.json")
-                if (item["status"] == "doing" and previous is not None
+                retirement = None
+                if item["status"] in ("done", "dropped"):
+                    if current.get("status") not in ("done", "dropped"):
+                        retirement = self._read(
+                            f"work-items/{seed['id']}/retirement.json")
+                    since = None
+                elif (item["status"] == "doing" and previous is not None
                         and previous.get("status") == "doing"):
                     # The earlier doing_since is not recoverable from only the
                     # current and previous records; keep this item exact-only.
                     self._sidecar_remove(seed["id"])
                     continue
                 if self._sidecar_store(seed["id"], seed, self._history_identity(seed["id"]),
-                                       previous, current, since):
+                                       previous, current, since, retirement=retirement):
                     backfilled += 1
                 if backfilled >= limit:
                     break
@@ -2441,12 +2457,12 @@ class WorkItems:
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
                     else:
                         self._projection_cache.pop(seed["id"], None)
+            if item["status"] not in ("open", "doing", "blocked"):
+                continue
             view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                     **self._hold_projection(since)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
-            if item["status"] not in ("open", "doing", "blocked"):
-                continue
             open_count += 1
             if order_fingerprint:
                 leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope"),
@@ -2532,10 +2548,18 @@ class WorkItems:
         """
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
-        events = self._iter_item_events_with_revisions(recover=not readonly)
+        cacheable = readonly and not IS_WINDOWS
+        events = self._iter_item_events_with_revisions(recover=not readonly,
+                                                        cache=cacheable,
+                                                        with_identity=cacheable)
         selected = []
         total = 0
-        for event_id, event, scanned in events:
+        for row in events:
+            if cacheable:
+                event_id, event, scanned, history_key = row
+            else:
+                event_id, event, scanned = row
+                history_key = None
             kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
             if kind != "seed":
                 continue
@@ -2544,10 +2568,22 @@ class WorkItems:
             # are not returned. Keep the full chain replay but skip those
             # unused manifests. _validate_transition still validates the
             # current done snapshot strictly when it reaches the closure.
-            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=not readonly)
-            item = self._get(seed["id"], seed_event=event,
-                             history_revisions=revisions,
-                             verify_snapshots=False)
+            if history_key is None and cacheable:
+                revisions, history_key = self._history_revisions_readonly(seed["id"])
+            else:
+                revisions = (scanned if scanned is not None else
+                             self._history_revisions(seed["id"], recover=not readonly))
+            sidecar = (self._sidecar_load(seed["id"], seed, history_key)
+                       if cacheable and history_key is not None else None)
+            if (sidecar is not None
+                    and self._history_identity(seed["id"]) != history_key):
+                sidecar = None
+            if sidecar is not None:
+                item = sidecar[0]
+            else:
+                item = self._get(seed["id"], seed_event=event,
+                                 history_revisions=revisions,
+                                 verify_snapshots=False)
             if item["status"] not in ("done", "dropped"):
                 continue
             total += 1
@@ -2787,44 +2823,42 @@ class WorkItems:
                 raise LimitExceeded("Work-item event exceeds byte bound")
             write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)
             if status in ("done", "dropped"):
-                self._sidecar_remove(item_id)
                 self._wake_terminal()
-            else:
+            try:
+                # Cache boundary: best-effort transition sidecar storing full
+                # source records (never a projected hold item); never fails
+                # the commit. Previous is the exact previous full source
+                # record: the seed for rev 1, otherwise the exact content
+                # read from work-items/<id>/<previous_rev>.json under the
+                # already-held record lock.
                 try:
-                    # Cache boundary: best-effort transition sidecar storing full
-                    # source records (never a projected hold item); never fails
-                    # the commit. Previous is the exact previous full source
-                    # record: the seed for rev 1, otherwise the exact content
-                    # read from work-items/<id>/<previous_rev>.json under the
-                    # already-held record lock.
-                    try:
-                        (self.root / "work-items" / item_id / "legacy.json").lstat()
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        self._sidecar_remove(item_id)
-                        return record
-                    if status == "doing" and current["status"] == "doing":
-                        # A continued doing revision retains an earlier hold
-                        # start that the exact current/previous records cannot
-                        # establish. A sidecar would be unusable; keep exact.
-                        self._sidecar_remove(item_id)
-                        return record
-                    new_since = (previous_since or record["updated_at"]) if status == "doing" else None
-                    seed = self._seed(item_id, history_revisions=history_revisions)
-                    identity = self._history_identity(item_id)
-                    prev_rev = current.get("rev") if isinstance(current, dict) else None
-                    if type(prev_rev) is not int:
-                        return record
-                    if prev_rev == 1:
-                        previous_source = seed
-                    else:
-                        previous_source = self._read(f"work-items/{item_id}/{prev_rev}.json")
-                    self._sidecar_store(item_id, seed, identity, previous_source, record,
-                                        new_since)
-                except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
-                        AttributeError):
+                    (self.root / "work-items" / item_id / "legacy.json").lstat()
+                except FileNotFoundError:
                     pass
+                else:
+                    self._sidecar_remove(item_id)
+                    return record
+                if status == "doing" and current["status"] == "doing":
+                    # A continued doing revision retains an earlier hold
+                    # start that the exact current/previous records cannot
+                    # establish. A sidecar would be unusable; keep exact.
+                    self._sidecar_remove(item_id)
+                    return record
+                new_since = (previous_since or record["updated_at"]) if status == "doing" else None
+                seed = self._seed(item_id, history_revisions=history_revisions)
+                identity = self._history_identity(item_id)
+                prev_rev = current.get("rev") if isinstance(current, dict) else None
+                if type(prev_rev) is not int:
+                    return record
+                if prev_rev == 1:
+                    previous_source = seed
+                else:
+                    previous_source = self._read(f"work-items/{item_id}/{prev_rev}.json")
+                self._sidecar_store(item_id, seed, identity, previous_source, record,
+                                    new_since, retirement=None)
+            except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                    AttributeError):
+                pass
             return record
 
     def _wake_terminal(self):

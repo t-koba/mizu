@@ -590,12 +590,14 @@ reuse. The sidecar stores full source records (the immutable seed for rev 1,
 otherwise the exact previous and current revision records) and is never
 trusted alone: the stored current is compared byte-for-structure with the
 exact source record at its rev (one revision file read), and the stored
-previous with the seed or its exact source record (one more read at most),
-then the exact source records are revalidated with the same seed/transition
-checks as a status-only read (including the current delivery binding). The
-returned item is derived from the exact source current via the existing
-retirement projection, and origin staleness and hold state are recomputed on
-every call. The identity
+previous with the seed or its exact source record (one more read at most);
+a retired item also compares the exact retirement file. The exact source
+records are revalidated with the same seed/transition checks as a status-only
+read (including the current delivery binding), and the returned item is
+derived via the existing retirement projection. Normal terminal and retired
+items retain their sidecar, so both the open/status scan and the closed page
+classify them without replaying closed history. Origin staleness and hold
+state are recomputed on every call. The identity
 is sampled with the revision read; a post-replay mismatch is a concurrent
 append and is never cached. Any missing, malformed, unsafe, stale or
 mismatched sidecar, a changed seed, a new or changed revision, a non-regular
@@ -609,7 +611,8 @@ decision-history ID collision on every lookup, so a conflicting source added
 after a cache warm still fails closed. Legacy items without a sidecar keep
 using exact replay; the read-only CLI default never writes, while the explicit
 `mizu work-items --backfill N` maintenance variant takes the record lock and
-builds at most N missing nonterminal sidecars from their exact source records.
+builds at most N missing terminal or nonterminal sidecars from their exact
+source records.
 Both direct creation and decision seeding call the same lock-held
 `WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
 binding, safe empty item slot, and exact current origin revision. New seeds

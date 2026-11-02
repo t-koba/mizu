@@ -559,7 +559,8 @@ document with `open`, `closed`, and `event_delivery` fields and never
 writes, locks, recovers or deletes. The project is opened with
 `Project(..., read_only=True)`. Adding `--backfill N` is an explicit writable
 maintenance variant: before reading, it takes the record lock and builds up to
-N missing nonterminal current-state sidecars from their exact source records;
+N missing terminal or nonterminal current-state sidecars from their exact
+source records;
 the response then also has a `backfill` object with `checked` and `backfilled`
 counts. It is bounded to 1-100 items and does not scan or recover a source
 without the existing validation.

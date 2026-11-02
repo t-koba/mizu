@@ -88,16 +88,15 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
         require_pairs(store.root, current.get("smoke_refs", []))
         project(current, record)  # Refuse an unreadable projection before committing.
         write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
-        try:
-            # Cache boundary: best-effort terminal removal; never fails the commit.
-            store._sidecar_remove(item_id)
-        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
-                AttributeError):
-            pass
         store._wake_terminal()
     try:
-        # Cache boundary: best-effort terminal removal; never fails the read.
-        store._sidecar_remove(item_id)
+        # Cache boundary: store the exact retirement binding with the last two
+        # ordinary source records; never fails the commit or retry.
+        seed = store._seed(item_id, history_revisions=history_revisions)
+        identity = store._history_identity(item_id)
+        previous = store._read(f"work-items/{item_id}/{current['rev'] - 1}.json")
+        store._sidecar_store(item_id, seed, identity, previous, current, None,
+                             retirement=record)
     except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
             AttributeError):
         pass
