@@ -18,6 +18,16 @@ class DecisionIdleCacheTests(Fixture):
     def test_unchanged_idle_skips_pending_lock_and_history(self):
         with patch.object(runtime.decision_delivery, "pending",
                           wraps=runtime.decision_delivery.pending) as pending:
+            if runtime._platform.IS_WINDOWS:
+                # Windows has no ctime change witness, so the empty-page fast
+                # path is disabled; both evaluations run the exact scan.
+                first = self.state()
+                second = self.state()
+                self.assertEqual(pending.call_count, 2)
+                self.assertEqual(first["events"], [])
+                self.assertEqual(second["events"], [])
+                self.assertEqual(second["page"], first["page"])
+                return
             first = self.state()
             self.assertEqual(pending.call_count, 1)
             with patch("mizu.insights.record_lock",
