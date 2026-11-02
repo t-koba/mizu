@@ -12,7 +12,9 @@ constants are fixed record, evidence and diagnostic safety bounds; its
 constructor policy defaults are `Limits` fields already inventoried and are
 supplied by `Project`. The `runtime.py` literals are fixed run-local memory,
 one-row probe and public page bounds; its configurable admission and dispatch
-choices are `Limits` and `[dispatch_evidence]` fields.
+choices are `Limits` and `[dispatch_evidence]` fields. The `lock_diagnostics.py`
+constants are fixed journal-line row and numeric-field format bounds; the
+opt-in collection is policy, but it introduces no host-cost numeric bound.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -76,6 +78,13 @@ DECLARATIONS = {
             '16', 'safety', 'insights / fixed append-only evidence entries per insight'),
         'MAX_EVIDENCE_CHARS': (
             '8192', 'safety', 'insights / fixed evidence text bound per entry'),
+    },
+    'lock_diagnostics.py': {
+        'MAX_LOCK_DIAGNOSTIC_ROWS': (
+            '32', 'mechanism', 'lock diagnostics / fixed journal-line row bound'),
+        'MAX_LOCK_DIAGNOSTIC_VALUE': (
+            '2147483647', 'mechanism',
+            'lock diagnostics / fixed signed-32-bit duration saturation'),
     },
     'runtime.py': {
         'MAX_QUEUE_OBSERVATIONS': (
