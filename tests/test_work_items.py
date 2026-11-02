@@ -1503,6 +1503,24 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.backfill_current_states(limit=0)
 
+    def test_continued_doing_sidecar_is_removed_and_exact(self):
+        with patch("mizu.work_items.now",
+                   side_effect=["2031-01-01T00:00:00+00:00",
+                                "2031-01-02T00:00:00+00:00"]):
+            first = self.change("doing")
+            second = self.change("doing", expected_rev=2, scope="continued scope",
+                                 reason="scope change while held")
+        self.assertEqual(first["updated_at"], "2031-01-01T00:00:00+00:00")
+        self.assertEqual(second["updated_at"], "2031-01-02T00:00:00+00:00")
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        self.assertFalse(sidecar.exists())
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("doing", 3))
+        self.assertEqual(row["doing_since"], first["updated_at"])
+        self.assertFalse(row["doing_stale"])
+
     def test_sidecar_blocked_wait_replays_exactly(self):
         self.change("doing")
         self.store.transition(self.item_id, expected_rev=2, status="blocked", actor="worker",

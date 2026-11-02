@@ -12,7 +12,10 @@ with the exact current/previous source records (at most two revision reads)
 before use. The sidecar is a local POSIX metadata-witness fast path, the
 exact history replay is the fallback, and Windows bypasses sidecar reuse.
 Origin staleness and hold state are recomputed on every call, and any
-unexpected shape bypasses the fast path. Unknown/unsafe records, incomplete
+unexpected shape bypasses the fast path. A continued doing-to-doing revision has no source-backed
+earlier hold start in its current and previous records, so it removes the
+sidecar and stays exact; all other misses also replay exactly. Unknown/unsafe
+records, incomplete
 chains and bounds fail closed. Retrying a
 committed CAS requires a re-read. Same-status events require a scope change or
 explicit delivery binding; only a proven forward dropped-to-done correction
@@ -746,6 +749,12 @@ class WorkItems:
                 else:
                     previous = self._read(f"work-items/{seed['id']}/{revision - 1}.json")
                     current = self._read(f"work-items/{seed['id']}/{revision}.json")
+                if (item["status"] == "doing" and previous is not None
+                        and previous.get("status") == "doing"):
+                    # The earlier doing_since is not recoverable from only the
+                    # current and previous records; keep this item exact-only.
+                    self._sidecar_remove(seed["id"])
+                    continue
                 if self._sidecar_store(seed["id"], seed, self._history_identity(seed["id"]),
                                        previous, current, since):
                     backfilled += 1
@@ -2793,6 +2802,12 @@ class WorkItems:
                     except FileNotFoundError:
                         pass
                     else:
+                        self._sidecar_remove(item_id)
+                        return record
+                    if status == "doing" and current["status"] == "doing":
+                        # A continued doing revision retains an earlier hold
+                        # start that the exact current/previous records cannot
+                        # establish. A sidecar would be unusable; keep exact.
                         self._sidecar_remove(item_id)
                         return record
                     new_since = (previous_since or record["updated_at"]) if status == "doing" else None

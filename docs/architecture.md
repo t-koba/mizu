@@ -600,7 +600,10 @@ is sampled with the revision read; a post-replay mismatch is a concurrent
 append and is never cached. Any missing, malformed, unsafe, stale or
 mismatched sidecar, a changed seed, a new or changed revision, a non-regular
 entry or any unexpected directory shape bypasses the reuse and runs the
-complete chain validation. The locked recovery path never uses this read-only
+complete chain validation. A continued doing-to-doing revision removes its
+sidecar: the earlier hold start is not present in the current and previous
+source records, so the page stays on exact replay rather than inventing a
+doing age. The locked recovery path never uses this read-only
 sidecar. Direct-seed reuse likewise rechecks the legacy sidecar and the
 decision-history ID collision on every lookup, so a conflicting source added
 after a cache warm still fails closed. Legacy items without a sidecar keep
