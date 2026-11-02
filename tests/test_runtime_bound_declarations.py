@@ -27,6 +27,12 @@ name-scoped detector.
 The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
+The `cli.py` module-level inventory is empty; its numeric page defaults remain
+explicit command-line presentation flags, not runtime bounds. The `config.py`
+module-level candidates are closed over the existing policy/default
+dictionaries and `CONFIG_MODULE_BOUNDS`: the include, role-policy, resource,
+CI-wake-branch and workspace-depth ceilings are fixed mechanism or safety
+bounds, and the wait-seconds value is the protocol format bound.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -96,6 +102,7 @@ DECLARATIONS = {
     'dispatch_evidence.py': {
         'MAX_TEXT': ('256', 'safety', 'dispatch evidence / fixed persisted text-label length ceiling'),
     },
+    'cli.py': {},
     'workspace_cache.py': {},
     'ci_requests.py': {
         'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded evidence-record read'),
@@ -380,6 +387,37 @@ DECISION_RECONCILIATION = {
 }
 
 
+# Remaining config.py module-level candidates not owned by the special
+# policy/default dictionaries above. These are fixed mechanism or safety
+# ceilings; MAX_WAIT_SECONDS is the protocol format bound. The inventory test
+# adds the module-level names already declared by those dictionaries, so a
+# new unexplained config.py literal fails it.
+CONFIG_MODULE_BOUNDS = {
+    'MAX_RESOURCES': (
+        '64', 'safety', 'config / bounded per-profile local resource list'),
+    'MAX_CI_WAKE_EXTRA_BRANCHES': (
+        '64', 'mechanism', 'config / fixed CI wake branch-set bound'),
+    'MAX_WAIT_SECONDS': (
+        '86400', 'format', 'protocol / finish wait_seconds wire bound mirrored by config ranges'),
+    'MAX_INCLUDE_DEPTH': (
+        '8', 'mechanism', 'config include / fixed graph depth'),
+    'MAX_INCLUDE_FILES': (
+        '32', 'mechanism', 'config include / fixed file-count bound'),
+    'MAX_INCLUDE_BYTES': (
+        '1048576', 'mechanism', 'config include / fixed cumulative TOML byte budget'),
+    'MAX_INCLUDE_ENTRIES': (
+        '32', 'mechanism', 'config include / fixed entries per included file'),
+    'MAX_ROLE_POLICY_PARTS': (
+        '16', 'mechanism', 'config role policy / fixed Markdown part count'),
+    'MAX_ROLE_POLICY_BYTES': (
+        '65536', 'mechanism', 'config role policy / fixed bytes per Markdown part'),
+    'MAX_ROLE_POLICY_TOTAL': (
+        '262144', 'mechanism', 'config role policy / fixed composed-text byte total'),
+    'MAX_WORKSPACE_CACHE_DEPTH': (
+        '64', 'safety', 'workspace cache / traversal depth ceiling; configured max_depth may lower it'),
+}
+
+
 CALL_KEYWORDS = frozenset({
     'timeout', 'timeout_seconds', 'maximum', 'max_bytes', 'max_files',
     'max_entries', 'max_depth', 'limit',
@@ -553,6 +591,21 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                              {name: entry[0] for name, entry in declarations.items()})
             for _, category, rationale in declarations.values():
                 self.assertEqual(category, 'configured policy')
+                self.assertTrue(rationale.strip())
+
+    def test_config_module_bounds_are_fully_declared(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        found = inventory(tree)
+        declared = set(CONFIG_MODULE_BOUNDS)
+        for special in (CHECK_RETENTION, HISTORY_TEMPORARIES, DECISION_PROJECTION,
+                        DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION):
+            declared.update(name for name in special if name in found)
+        self.assertEqual(set(found), declared)
+        categories = {'mechanism', 'format', 'safety'}
+        for name, (expression, category, rationale) in CONFIG_MODULE_BOUNDS.items():
+            with self.subTest(bound=name):
+                self.assertEqual(found[name], expression)
+                self.assertIn(category, categories)
                 self.assertTrue(rationale.strip())
 
     def test_vcs_poll_and_ci_wake_fallbacks_match_configured_policy_defaults(self):
