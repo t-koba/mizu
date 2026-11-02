@@ -3997,8 +3997,9 @@ def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
 #: Process-local idle fast path. An empty decision/attention page is reused only
 #: while every source the exact scan reads is unchanged: the role's inbox,
 #: decision-history, decisions and decision receipts; the authority/report
-#: marker; the shared insight record partitions; and the role's shared receipt
-#: store. A non-empty result is never cached as empty. This is a delivery
+#: marker; the shared `shared-records/insight` record partition; and the
+#: hashed shared receipt store for the role. A non-empty result is never cached
+#: as empty. This is a delivery
 #: precondition, not a delivery authority: a real unit may bind the empty page
 #: and manifest only while the same complete fingerprint is unchanged.
 _DECISION_IDLE_CACHE: dict = {}
@@ -4030,9 +4031,9 @@ def _decision_source_fingerprint(project, role_name):
             return None
         return (name, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
 
-    names = ["inbox", "decision-history", "decisions",
+    names = ["inbox", "decision-history", "decisions", "decision-receipts",
              f"decision-receipts/{role_name}", "shared-records",
-             "shared-records/insight.decision", "shared-records/insight.pending",
+             "shared-records/insight", "shared-record-receipts",
              f"shared-record-receipts/{digest(role_name.encode())}"]
     for name in names:
         part = directory(name)

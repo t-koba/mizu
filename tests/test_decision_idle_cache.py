@@ -1,4 +1,4 @@
-"""Idle decision evaluation skips unchanged sources without a delivery cache."""
+"""Idle decision evaluation uses a complete source fingerprint; exact scans stay authoritative."""
 import unittest
 from unittest.mock import patch
 
@@ -53,7 +53,7 @@ class DecisionIdleCacheTests(Fixture):
                           side_effect=[empty, non_empty]) as pending:
             self.assertEqual(self.state()["events"], [])
             self.assertEqual(pending.call_count, 1)
-            partition = self.project.insights.root / "shared-records" / "insight.pending"
+            partition = self.project.insights.root / "shared-records" / "insight"
             partition.mkdir(parents=True)
             (partition / "change.json").write_text("{}")
             second = self.state()
@@ -73,13 +73,30 @@ class DecisionIdleCacheTests(Fixture):
             engine._dispatch_state(self.project, "worker", self.role,
                                    event_trigger=True)
             self.assertEqual(pending.call_count, 1)
-            partition = self.project.insights.root / "shared-records" / "insight.decision"
+            partition = self.project.insights.root / "shared-records" / "insight"
             partition.mkdir(parents=True)
             (partition / "change.json").write_text("{}")
             state = engine._dispatch_state(self.project, "worker", self.role,
                                            event_trigger=True)
             self.assertEqual(pending.call_count, 2)
             self.assertEqual(state["decision_events"], [row])
+
+    def test_hashed_shared_receipt_store_change_invalidates_the_empty_page(self):
+        from mizu.fs import digest
+        empty = runtime._empty_decision_state(False)
+        non_empty = {"shared": False, "events": [{"event": "a" * 32}],
+                     "diagnostics": [], "page": {"events": [{"event": "a" * 32}],
+                     "pending_count": 1, "truncated": False,
+                     "count_truncated": False, "byte_truncated": False}, "manifest": ()}
+        with patch.object(runtime.decision_delivery, "pending",
+                          side_effect=[empty, non_empty]) as pending:
+            self.assertEqual(self.state()["events"], [])
+            receipt = (self.project.insights.root / "shared-record-receipts" /
+                       digest(b"worker"))
+            receipt.mkdir(parents=True)
+            (receipt / "change.json").write_text("{}")
+            self.assertEqual(self.state()["events"], [{"event": "a" * 32}])
+            self.assertEqual(pending.call_count, 2)
 
     def test_non_empty_result_is_never_reused_as_empty(self):
         non_empty = {"shared": False, "events": [{"event": "x"}], "diagnostics": [],

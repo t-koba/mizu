@@ -793,9 +793,11 @@ acknowledgement remain the only active runtime authority for decisions.
 An idle dispatch or readiness check first samples a cheap metadata fingerprint
 of every source the exact decision/attention scan reads: the role's `inbox`,
 `decision-history`, `decisions` and `decision-receipts/<role>` directory; the
-decision authority/report marker; the shared `insight.decision` and
-`insight.pending` record partitions; and the role's shared
-`shared-record-receipts/<role>` store. When the last exact scan returned no
+decision authority/report marker; the shared `shared-records/insight`
+partition (which holds both `insight.decision` and `insight.pending` records);
+the `decision-receipts` and `shared-record-receipts` parent directories;
+and the role's hashed
+`shared-record-receipts/<sha256(role)>` store. When the last exact scan returned no
 decision or attention events and that complete fingerprint is unchanged, the
 check uses an empty page and empty manifest: it reads no decision-history file
 and takes no record lock. Any source change, any non-empty result, and any
