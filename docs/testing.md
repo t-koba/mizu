@@ -16,6 +16,15 @@
 
 `tests/fake_pi.py` and fake runners in `tests/test_drivers.py` are contract test doubles, not production fallbacks. Tests verify argv construction, stdio MCP framing (`mizu.mcp_proxy`), and error handling without contacting live endpoints. Node tests use a local Unix socket with a simulated extension registry.
 
+Local acceptance for a work unit runs the configured acceptance commands
+against the exact code digest. When that command is a syntax check such as
+`python3 -m compileall`, it proves that the tree parses but never executes a
+changed test. A change that touches tests therefore needs its focused test
+module or class run against the same digest, from `tests/` with
+`PYTHONPATH=../src`; CI remains the full-suite evidence. Compilation alone is
+not test evidence, and a passing local acceptance record does not substitute
+for the changed test's execution.
+
 ## Offline test execution (Linux / macOS / Windows)
 
 `make test` and `make check` both run the complete offline acceptance gate in
