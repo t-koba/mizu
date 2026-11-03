@@ -42,6 +42,8 @@ character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` currently holds only the
 probe header-pair count, whose name falls outside the pattern. Lock waits stay
 fixed until the scheduled-contention work proves a replay-safe boundary.
+Container cleanup and systemd-analyze verification walls are host-dependent
+policy pending container-runtime measurement; their output reads are safety.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
 not-yet-wired single-child delegation pilot. Its 1024-job history cap is
 shared project-state capacity policy pending the pilot's configuration section:
@@ -1030,7 +1032,8 @@ CALLS = {
     },
     'engine_config.py': {
         ('stop_engine_containers', 'run', 'timeout', 0): (
-            '15', 'safety', 'engine config / bounded best-effort MCP container cleanup'),
+            '15', 'policy', 'engine config / host-dependent MCP container cleanup wall; '
+            'policy pending measurement'),
         ('stop_engine_containers', 'run', 'maximum', 0): (
             '8192', 'safety', 'engine config / bounded cleanup output read'),
     },
@@ -1040,7 +1043,8 @@ CALLS = {
     },
     'persistent_exec.py': {
         ('ExecSession._remove', 'run', 'timeout', 0): (
-            '15', 'safety', 'persistent exec / bounded launcher cleanup'),
+            '15', 'policy', 'persistent exec / host-dependent launcher cleanup wall; '
+            'policy pending measurement'),
         ('ExecSession._remove', 'run', 'maximum', 0): (
             '8192', 'safety', 'persistent exec / bounded cleanup output read'),
     },
@@ -1062,31 +1066,38 @@ CALLS = {
     },
     'sandbox.py': {
         ('assert_no_checkpoint', 'run', 'timeout', 0): (
-            '15', 'safety', 'sandbox / bounded checkpoint-image inspect'),
+            '15', 'policy', 'sandbox / host-dependent checkpoint-image inspect wall; '
+            'policy pending measurement'),
         ('remove_leftover', 'run', 'timeout', 0): (
-            '15', 'safety', 'sandbox / bounded leftover-container list'),
+            '15', 'policy', 'sandbox / host-dependent leftover-container list wall; '
+            'policy pending measurement'),
         ('remove_leftover', 'run', 'maximum', 0): (
             '8192', 'safety', 'sandbox / bounded leftover-container list output'),
         ('remove_leftover', 'run', 'timeout', 1): (
-            '15', 'safety', 'sandbox / bounded leftover-container removal'),
+            '15', 'policy', 'sandbox / host-dependent leftover-container removal wall; '
+            'policy pending measurement'),
         ('remove_leftover', 'run', 'maximum', 1): (
             '8192', 'safety', 'sandbox / bounded leftover-container removal output'),
         ('Sandbox.execute', 'run', 'timeout', 0): (
-            '15', 'safety', 'sandbox / bounded post-command container removal'),
+            '15', 'policy', 'sandbox / host-dependent post-command removal wall; '
+            'policy pending measurement'),
         ('Sandbox.execute', 'run', 'maximum', 0): (
             '8192', 'safety', 'sandbox / bounded cleanup output read'),
         ('_remove_containers', 'run', 'timeout', 0): (
-            '15', 'safety', 'sandbox / bounded project-container list'),
+            '15', 'policy', 'sandbox / host-dependent project-container list wall; '
+            'policy pending measurement'),
         ('_remove_containers', 'run', 'maximum', 0): (
             '65536', 'safety', 'sandbox / bounded project-container list output'),
         ('_remove_containers', 'run', 'timeout', 1): (
-            '30', 'safety', 'sandbox / bounded bulk container removal'),
+            '30', 'policy', 'sandbox / host-dependent bulk removal wall; '
+            'policy pending measurement'),
         ('_remove_containers', 'run', 'maximum', 1): (
             '65536', 'safety', 'sandbox / bounded bulk removal output'),
     },
     'services.py': {
         ('install', 'subprocess.run', 'timeout', 0): (
-            '60', 'safety', 'services / bounded systemd-analyze verification'),
+            '60', 'policy', 'services / host-dependent systemd-analyze verification wall; '
+            'policy pending measurement'),
     },
 }
 
