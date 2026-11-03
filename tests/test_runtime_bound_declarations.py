@@ -36,6 +36,11 @@ bounds, and the wait-seconds value is the protocol format bound.
 The `work_items.py` module-level page, cursor, row and revision bounds are
 fixed mechanism or safety contracts; its page-byte aliases reuse those
 declared bases rather than introducing separate literals.
+The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
+lock-wait and spawn-reap bounds are fixed mechanism or safety. The read-page and
+script-input names are checked through EXTRA_CANDIDATES because the name pattern
+does not match them. Lock waits stay fixed until the scheduled-contention work
+proves a replay-safe boundary.
 The `delegation_jobs.py` ledger bounds are private format and read ceilings for
 the not-yet-wired single-child delegation pilot: capacity exhaustion refuses new
 starts rather than forgetting keys, and none is scheduling policy.
@@ -70,6 +75,10 @@ GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
     r'(?:MAX_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN))\Z'
 )
+# Module-level names outside CANDIDATE that still bound public resource behavior.
+EXTRA_CANDIDATES = {
+    'fs.py': frozenset({'READ_PAGE_CHARS', 'SCRIPT_MAX'}),
+}
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
     'acceptance.py': {
@@ -127,6 +136,38 @@ DECLARATIONS = {
         'DEFAULT_CI_REWAKE_SECONDS': (
             '1800', 'configured policy',
             'VCS CI wake / fallback default for [vcs] ci_rewake_seconds; config validates 60-86400'),
+    },
+    'fs.py': {
+        'PREVIEW_BYTES': (
+            '131072', 'safety',
+            'fs / fixed preview, insight and canonical-list framing; file_bytes and '
+            'snapshot_bytes remain policy'),
+        'READ_PAGE_CHARS': (
+            '8192', 'safety',
+            'fs / per-response read page character cap; keeps escaped responses below '
+            'the frame bound'),
+        'MAX_FRAME': (
+            '1024 * 1024', 'mechanism',
+            'fs / shared MCP and socket LF frame bound across bridge and editor server'),
+        'MAX_JSON_DEPTH': (
+            '64', 'mechanism',
+            'fs / parser nesting bound; independent of the runtime recursion limit'),
+        'SCRIPT_MAX': (
+            '65536', 'mechanism',
+            'fs / shared tool-contract and sandbox script input bound'),
+        '_LOCAL_BLOCKING_TIMEOUT': (
+            '30.0', 'mechanism',
+            'fs / ADR-026 intra-process lock-wait bound; fixed until scheduled-contention '
+            'work proves a replay-safe boundary'),
+    },
+    'platform.py': {
+        'LOCK_TIMEOUT': (
+            '30.0', 'mechanism',
+            'platform / ADR-026 cross-process lock-wait bound; fixed until '
+            'scheduled-contention work proves a replay-safe boundary'),
+        '_SPAWN_REAP_TIMEOUT': (
+            '5.0', 'safety',
+            'platform / bounded reap of a process that failed secured startup'),
     },
     'usage.py': {
         'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
@@ -647,7 +688,7 @@ def numeric(node):
     return False
 
 
-def inventory(tree):
+def inventory(tree, extras=()):
     found = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -657,7 +698,8 @@ def inventory(tree):
         else:
             continue
         for target in targets:
-            if (isinstance(target, ast.Name) and CANDIDATE.fullmatch(target.id)
+            if (isinstance(target, ast.Name)
+                    and (target.id in extras or CANDIDATE.fullmatch(target.id))
                     and numeric(value)):
                 if target.id in found:
                     raise AssertionError(f'Duplicate bound declaration: {target.id}')
@@ -712,7 +754,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                     self.assertIn(category, categories)
                     self.assertTrue(rationale.strip())
                 tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-                self.assertEqual(inventory(tree), {
+                self.assertEqual(inventory(tree, EXTRA_CANDIDATES.get(filename, ())), {
                     name: entry[0] for name, entry in declarations.items()
                 })
 
