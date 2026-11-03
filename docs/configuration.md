@@ -974,6 +974,7 @@ Safety-critical bounds are fixed in code rather than exposed as configuration kn
 | | `MAX_STARTED_EVIDENCE_BYTES` (`evidence_records.py`) | 64 KiB | Hard ceiling for run metadata used only to authorize retained-evidence reads and to trim the configured queue-observation sample; `file_bytes` may lower it |
 | | `MAX_FRAME` (`fs.py`) | 1 MiB | Maximum JSON-RPC message size across bridge and MCP servers |
 | | `MAX_JSON_DEPTH` (`fs.py`) | 64 | Maximum JSON nesting depth `loads_finite` accepts; a deeper document is refused before it is parsed, so the refusal does not follow a runtime's recursion limit |
+| **VCS artifacts** | `MAX_ARTIFACT_FIELD_NAMES` / `MAX_ARTIFACT_FIELD_NAME_CHARS` (`vcs.py`) | 8 / 32 | Bounds the field identifiers a shape refusal may name; values and arbitrary keys are never echoed |
 | **Tool inputs** | `exec` / `experiment` script | 64 KiB | Sandbox command size (`SCRIPT_MAX`) |
 | **Adapter diagnostics** | `ADAPTER_DIAGNOSTIC_BYTES_MAX` (`process.py`) | 8 KiB | Hard ceiling for any configured model-visible stderr excerpt; per-adapter `diagnostic_bytes` may lower it or disable it |
 | | `submit_insight` body | 60 KiB | Proposal prose size |
@@ -2262,7 +2263,9 @@ Whole-file mode also accepts the established adapter shape
 and `page_digest` from the UTF-8 content and verifies `digest` locally before
 returning it; the normalized result carries the same seven fields. Page mode
 requires the full shape above, so a legacy response cannot satisfy a page
-request.
+request. A shape refusal names only bounded field identifiers (at most 8
+names of at most 32 lowercase characters); values and arbitrary keys are
+never echoed.
 
 - `artifact` exactly echoes the requested relative name; `content` is valid
   UTF-8 text, without replacement/repair of invalid bytes or lone surrogates.

@@ -357,9 +357,11 @@ should move. The bound therefore covers the slowest green cell with only 32 s
 of observed margin; whether the child bound or the suite duration should move
 is an operator decision. The retained per-cell timing artifacts are listed, but
 their content reads are currently refused; the adapter response shape has not
-been observed, so the refusal is not attributed to a particular cause. These
-job walls cannot yet be split into suite and later-phase cost; the status rows
-are the evidence used here. The gate exposes the child bound and the
+been observed, so the refusal is not attributed to a particular cause. Once a
+deployment carries the artifact-field disclosure, that refusal names bounded
+missing/unexpected identifiers, making the shape observable without content.
+These job walls cannot yet be split into suite and later-phase cost; the status
+rows are the evidence used here. The gate exposes the child bound and the
 later-phase budget as
 `--suite-child-timeout` and `--later-phase-budget` (defaults 1800 s and
 1200 s; validated 1 to 86400 s ranges). It also exposes the per-check

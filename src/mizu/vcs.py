@@ -581,7 +581,10 @@ MAX_ARTIFACT_BYTES = 4 * MAX_ARTIFACT_CONTENT
 MAX_ARTIFACT_PAGE_BYTES = 8192
 #: Field names disclosed in an artifact-shape denial. Only short lowercase
 #: identifiers are echoed; values, arbitrary keys and response text never are.
-_ARTIFACT_FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+MAX_ARTIFACT_FIELD_NAMES = 8
+MAX_ARTIFACT_FIELD_NAME_CHARS = 32
+_ARTIFACT_FIELD_NAME = re.compile(
+    rf"[a-z][a-z0-9_]{{0,{MAX_ARTIFACT_FIELD_NAME_CHARS - 1}}}\Z")
 
 
 def _artifact_field_delta(actual: set, expected: set) -> str:
@@ -594,7 +597,7 @@ def _artifact_field_delta(actual: set, expected: set) -> str:
     if missing:
         parts.append("missing " + ", ".join(missing))
     if names:
-        shown = names[:8]
+        shown = names[:MAX_ARTIFACT_FIELD_NAMES]
         detail = ", ".join(shown)
         if len(extra) > len(shown):
             detail += f" (+{len(extra) - len(shown)} more)"

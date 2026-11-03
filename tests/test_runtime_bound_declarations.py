@@ -279,6 +279,12 @@ DECLARATIONS = {
             'adapter startup / bounded host measurement-record read'),
     },
     'vcs.py': {
+        'MAX_ARTIFACT_FIELD_NAMES': (
+            '8', 'safety',
+            'VCS artifact shape refusal / bounded field identifiers named; values are never echoed'),
+        'MAX_ARTIFACT_FIELD_NAME_CHARS': (
+            '32', 'safety',
+            'VCS artifact shape refusal / bounded disclosed identifier length'),
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
         'MAX_ACQUIRE_CONTENT': (
             '524288', 'safety', 'VCS acquire / bounded acquired content; callers narrow scope'),
