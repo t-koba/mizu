@@ -88,9 +88,11 @@ listed raw web and VCS settings; the decision-history recovery ceiling is checke
 not as a full work_items.py inventory. Validation is covered
 by focused config tests. Classification records current ownership, not
 approval to leave policy in code. `format` is reserved for intrinsic wire or
-schema ranges; a product-chosen validation maximum for an operator-settable
-value is `safety`; safety classifications here are defensive read or validation
-bounds, not intrinsic format limits.
+schema ranges; `safety` is a defensive ceiling on untrusted or oversized input,
+including a product-chosen validation maximum; `mechanism` is a fixed internal
+or public contract, including a retry-loop bound; `policy` is an operator
+decision not yet configurable. Safety classifications here are defensive read
+or validation bounds, not intrinsic format limits.
 """
 import ast
 from pathlib import Path
