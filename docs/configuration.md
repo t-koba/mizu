@@ -965,7 +965,10 @@ quarantine recovery, partial-failure results and bounded maintenance audit.
 
 ## Fixed mechanism bounds
 
-Safety-critical bounds are fixed in code rather than exposed as configuration knobs:
+Safety-critical bounds are fixed in code rather than exposed as configuration knobs.
+This table is the operator-visible subset; the exhaustive per-module classification
+is in `tests/test_runtime_bound_declarations.py`, which fails when a module adds a
+detected bound without declaring it:
 
 | Category | Bound | Value | Purpose |
 |---|---|---|---|
