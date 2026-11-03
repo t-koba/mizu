@@ -60,6 +60,7 @@ MAX_JOBS = 1024
 MAX_STATE_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 32768
+MAX_TASK_BYTES = 65536
 _STATES = {'queued', 'running', 'cancel-requested', 'terminal'}
 _OUTCOMES = {'succeeded', 'failed', 'cancelled'}
 _FIELDS = {'owner', 'key', 'request_digest', 'status', 'token', 'run_id', 'execution',
@@ -91,7 +92,7 @@ def _request(value):
     identifier(value['role'])
     if value['profile'] is not None:
         identifier(value['profile'])
-    _text(value['task'], 65536)
+    _text(value['task'], MAX_TASK_BYTES)
     if not value['task'].strip() or not _sha(value['source_snapshot']):
         raise Denied('Invalid delegation task or source snapshot')
     raw = canonical(value)

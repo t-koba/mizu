@@ -275,8 +275,8 @@ class DelegationJobTests(unittest.TestCase):
                    {**self.request, 'source_snapshot': 'live'},
                    {**self.request, 'profile': []}, {**self.request, 'task': '  '},
                    {**self.request, 'task': '\ud800'},
-                   {**self.request, 'task': 'é' * 32769},
-                   {**self.request, 'task': '\x00' * 65536}]
+                   {**self.request, 'task': 'é' * (jobs.MAX_TASK_BYTES // 2 + 1)},
+                   {**self.request, 'task': '\x00' * jobs.MAX_TASK_BYTES}]
         for request in invalid:
             with self.subTest(request_type=type(request)), self.assertRaises(Denied):
                 self.store.start('worker', 'first', request)

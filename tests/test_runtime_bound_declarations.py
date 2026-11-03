@@ -36,6 +36,9 @@ bounds, and the wait-seconds value is the protocol format bound.
 The `work_items.py` module-level page, cursor, row and revision bounds are
 fixed mechanism or safety contracts; its page-byte aliases reuse those
 declared bases rather than introducing separate literals.
+The `delegation_jobs.py` ledger bounds are private format and read ceilings for
+the not-yet-wired single-child delegation pilot: capacity exhaustion refuses new
+starts rather than forgetting keys, and none is scheduling policy.
 The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
 `smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
 the work-order page/rationale/record caps, selection list/state/retention/
@@ -101,6 +104,24 @@ DECLARATIONS = {
         'MAX_DIAGNOSTIC_ROWS': (
             '32', 'safety',
             'CI waits / bounded observed-check rows per diagnostic projection'),
+    },
+    'delegation_jobs.py': {
+        'MAX_JOBS': (
+            '1024', 'mechanism',
+            'async delegation / private ledger history capacity; exhaustion refuses new starts, '
+            'never forgets keys'),
+        'MAX_STATE_BYTES': (
+            '1024 * 1024', 'safety',
+            'async delegation / bounded ledger read; oversized state is refused, never reset'),
+        'MAX_REQUEST_BYTES': (
+            '128 * 1024', 'safety',
+            'async delegation / bounded canonical request record'),
+        'MAX_RESULT_BYTES': (
+            '32768', 'safety',
+            'async delegation / bounded untrusted result text'),
+        'MAX_TASK_BYTES': (
+            '65536', 'safety',
+            'async delegation / bounded task field within the request record'),
     },
     'ci_wake.py': {
         'DEFAULT_CI_REWAKE_SECONDS': (
