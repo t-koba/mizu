@@ -49,8 +49,9 @@ day conversion and automatic-prune/audit read limits are fixed mechanism or
 safety bounds. The `drivers.py` event-stream default is the configured
 `[limits] event_stream_bytes` policy default; its per-record transport ceiling,
 stderr diagnostics tail and error-evidence tail are fixed safety bounds. The
-character-count suffix is part of the inventory so operator-facing text limits
-are classified too, including the publication reference format.
+character-count and maximum suffixes are part of the inventory so
+operator-facing text and protocol limits are classified too, including the
+publication reference format and the probe header/media bounds.
 The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
 `smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
 the work-order page/rationale/record caps, selection list/state/reservation/
@@ -88,11 +89,11 @@ ROOT = Path(__file__).resolve().parents[1] / 'src' / 'mizu'
 GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
     r'(?:MAX_\w+|DEFAULT_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|'
-    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN|CHARS))\Z'
+    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN|CHARS|MAX))\Z'
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
-    'fs.py': frozenset({'SCRIPT_MAX'}),
+    'web.py': frozenset({'PROBE_MAX_HEADERS'}),
 }
 # Non-numeric module-level policy defaults checked by their exact literal value.
 POLICY_DEFAULTS = {
@@ -222,6 +223,9 @@ DECLARATIONS = {
         '_AUDIT_JSON_BYTES': (
             '1048576', 'safety',
             'storage audit / bounded reference-JSON read; larger records are skipped and counted'),
+        'AUTOMATIC_PRUNE_INTERVAL_MAX': (
+            '2678400', 'format',
+            'configuration schema / maximum accepted automatic-prune interval (31 days)'),
     },
     'usage.py': {
         'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
@@ -247,6 +251,13 @@ DECLARATIONS = {
     },
     'web.py': {
         'SEARCH_RESULT_LIMIT': ('1000', 'mechanism', 'web search / retained-result ceiling shared with the tool page bound'),
+        'PROBE_MAX_HEADERS': ('16', 'mechanism', 'probe / caller header-pair count bound'),
+        'PROBE_HEADER_NAME_MAX': ('128', 'mechanism', 'probe / caller header-name character bound'),
+        'PROBE_HEADER_VALUE_MAX': ('4096', 'mechanism', 'probe / caller header-value character bound'),
+        'PROBE_RESPONSE_HEADERS_MAX': ('64', 'mechanism', 'probe / retained response-header count'),
+        'PROBE_RESPONSE_NAME_MAX': ('256', 'mechanism', 'probe / retained response-header name bound'),
+        'PROBE_RESPONSE_VALUE_MAX': ('8192', 'safety', 'probe / retained response-header value bound'),
+        'RESPONSE_MEDIA_MAX': ('256', 'safety', 'web fetch/probe / media-type label character bound'),
     },
     'project.py': {
         'MAX_VERIFY_COMMANDS': ('32', 'safety', 'project / bounded verification command list'),
@@ -404,6 +415,8 @@ DECLARATIONS = {
             'adapter startup / bounded host measurement-record read'),
     },
     'vcs.py': {
+        'REF_CONTENT_MAX': (
+            '4096', 'safety', 'vcs ref store / bounded local ref-content read'),
         'MAX_ARTIFACT_FIELD_NAMES': (
             '8', 'safety',
             'VCS artifact shape refusal / bounded field identifiers named; values are never echoed'),
@@ -454,6 +467,9 @@ DECLARATIONS = {
         'AUDIT_LIMIT': ('128', 'policy', 'smoke retention / retained audit-event count'),
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
+        'AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX': (
+            '2678400', 'format',
+            'configuration schema / maximum accepted automatic smoke-retention interval (31 days)'),
     },
 }
 
@@ -502,6 +518,8 @@ GATE_DECLARATIONS = {
             '100000.0', 'safety', 'gate timing artifact / accepted timestamp range'),
         'TIMING_PHASE_MAX_ENTRIES': (
             '200', 'safety', 'gate timing artifact / bounded phase entries'),
+        'TIMING_COUNTS_MAX': (
+            '1000000', 'safety', 'gate timing artifact / accepted event-count range'),
         'TIMING_ARTIFACT_MAX_BYTES': (
             '192 * 1024', 'safety', 'gate timing artifact / bounded artifact page'),
         'NPM_PROVISION_TIMEOUT_SECONDS': (
@@ -669,6 +687,10 @@ CONFIG_MODULE_BOUNDS = {
         '65536', 'mechanism', 'config role policy / fixed bytes per Markdown part'),
     'MAX_ROLE_POLICY_TOTAL': (
         '262144', 'mechanism', 'config role policy / fixed composed-text byte total'),
+    'TOML_INTEGER_MAX': (
+        '(1 << 63) - 1', 'format', 'config / TOML signed-64-bit integer wire range'),
+    'EVENT_POLL_SECONDS_MAX': (
+        '31 * 86400', 'format', 'config / event-poll interval schema maximum (31 days)'),
     'MAX_WORKSPACE_CACHE_DEPTH': (
         '64', 'safety', 'workspace cache / traversal depth ceiling; configured max_depth may lower it'),
 }
@@ -1063,7 +1085,7 @@ if True:
     MAX_CONDITIONAL = 3
 '''
         expected = dict.fromkeys(names, '2 * 1024')
-        expected.update(_PRIVATE_BYTES='-8', FIRST_CAP='3', SECOND_CAP='3')
+        expected.update(_PRIVATE_BYTES='-8', FIRST_CAP='3', SECOND_CAP='3', INTERVAL_MAX='10')
         self.assertEqual(inventory(ast.parse(source)), expected)
 
     def test_detector_exposes_additions_removals_and_expression_changes(self):
