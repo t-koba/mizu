@@ -68,10 +68,13 @@ are configured schema defaults declared separately; the per-rule and
 per-classifier tables are their owning configuration. Every current
 `src/mizu` module with a detected candidate is covered here (`config.py` has
 its own field-scoped table), so a new module with such a bound fails until it
-is declared. The inventory remains name- and numeric-scoped and therefore
-partial; absence from the table is not evidence that a value is not a decision.
-Expressions are inventoried without evaluating source. This does not lint
-arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
+is declared. Every module with a detected numeric argument at the listed
+resource-call keywords is covered in `CALLS` too, so a new host deadline or
+read bound at those call sites fails until it is declared. The inventory
+remains name- and numeric-scoped and therefore partial; absence from the tables
+is not evidence that a value is not a decision. Expressions are inventoried
+without evaluating source. This does not lint arbitrary numeric literals,
+aliases, nested declarations, call arguments outside the listed keyword set,
 local arithmetic or other modules. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
 CiRequestEvidence, PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults,
@@ -976,6 +979,106 @@ CALLS = {
             '2 ** 63 - 1', 'mechanism',
             'smoke retention / disable duplicate snapshot byte cap; outer metadata reader is bounded'),
     },
+    'bridge.py': {
+        ('Bridge.__exit__', 'self.thread.join', 'timeout', 0): (
+            '2', 'safety', 'bridge / bounded listener-thread join during shutdown'),
+    },
+    'ci_waits.py': {
+        ('_resolved', 'Publication.list_receipts', 'limit', 0): (
+            '2', 'mechanism', 'CI wait / strict uniqueness check reads one extra receipt'),
+    },
+    'cli.py': {
+        ('_cmd_insight', 'project.insights.list', 'limit', 0): (
+            '1000', 'mechanism', 'CLI / fixed legacy insight-list page bound'),
+    },
+    'doctor.py': {
+        ('container_runtime', 'run', 'timeout', 0): (
+            '20', 'policy', 'doctor / container-runtime version probe wall deadline; host-dependent, current value only'),
+        ('container_runtime', 'run', 'maximum', 0): (
+            '8192', 'safety', 'doctor / bounded runtime version output read'),
+        ('container_runtime', 'run', 'timeout', 1): (
+            '10', 'policy', 'doctor / namespace-helper probe wall deadline; host-dependent, current value only'),
+        ('container_runtime', 'run', 'maximum', 1): (
+            '1024', 'safety', 'doctor / bounded namespace-helper output read'),
+        ('sandbox_image', 'run', 'timeout', 0): (
+            '15', 'policy', 'doctor / image-presence inspect wall deadline; host-dependent, current value only'),
+        ('node_capability', 'run', 'timeout', 0): (
+            '10', 'policy', 'doctor / Node capability probe wall deadline; host-dependent, current value only'),
+        ('node_capability', 'run', 'maximum', 0): (
+            '1024', 'safety', 'doctor / bounded Node capability output read'),
+        ('check.exercise', 'engine.execute', 'timeout', 0): (
+            '30', 'policy', 'doctor / sandbox smoke command wall deadline; host-dependent, current value only'),
+    },
+    'engine_channel.py': {
+        ('Channel._put', 'self.records.put', 'timeout', 0): (
+            '0.1', 'safety', 'engine channel / bounded handshake queue put'),
+        ('Channel.receive', 'self.records.get', 'timeout', 0): (
+            '0.1', 'safety', 'engine channel / bounded handshake queue get'),
+        ('Channel.close', 'self.process.wait', 'timeout', 0): (
+            '1', 'safety', 'engine channel / bounded child-exit wait during teardown'),
+        ('Channel.close', 'thread.join', 'timeout', 0): (
+            '0.5', 'safety', 'engine channel / bounded reader-thread join during teardown'),
+    },
+    'engine_config.py': {
+        ('stop_engine_containers', 'run', 'timeout', 0): (
+            '15', 'safety', 'engine config / bounded best-effort MCP container cleanup'),
+        ('stop_engine_containers', 'run', 'maximum', 0): (
+            '8192', 'safety', 'engine config / bounded cleanup output read'),
+    },
+    'operator_records.py': {
+        ('store', 'KindPolicy', 'maximum', 0): (
+            '140000', 'safety', 'operator records / bounded shared-record payload envelope'),
+    },
+    'persistent_exec.py': {
+        ('ExecSession._remove', 'run', 'timeout', 0): (
+            '15', 'safety', 'persistent exec / bounded launcher cleanup'),
+        ('ExecSession._remove', 'run', 'maximum', 0): (
+            '8192', 'safety', 'persistent exec / bounded cleanup output read'),
+    },
+    'pi_reselection.py': {
+        ('_family_record', 'read_json', 'max_bytes', 0): (
+            '4096', 'safety', 'pi reselection / bounded family record read'),
+    },
+    'platform.py': {
+        ('terminate_process', 'process.wait', 'timeout', 0): (
+            '2', 'safety', 'platform / bounded process reap wait'),
+    },
+    'proposal_waits.py': {
+        ('shared_store', 'KindPolicy', 'maximum', 0): (
+            '8192', 'safety', 'proposal waits / bounded shared-record payload envelope'),
+    },
+    'safe_point.py': {
+        ('read', 'read_json', 'max_bytes', 0): (
+            '4096', 'safety', 'safe point / bounded saved-state read'),
+    },
+    'sandbox.py': {
+        ('assert_no_checkpoint', 'run', 'timeout', 0): (
+            '15', 'safety', 'sandbox / bounded checkpoint-image inspect'),
+        ('remove_leftover', 'run', 'timeout', 0): (
+            '15', 'safety', 'sandbox / bounded leftover-container list'),
+        ('remove_leftover', 'run', 'maximum', 0): (
+            '8192', 'safety', 'sandbox / bounded leftover-container list output'),
+        ('remove_leftover', 'run', 'timeout', 1): (
+            '15', 'safety', 'sandbox / bounded leftover-container removal'),
+        ('remove_leftover', 'run', 'maximum', 1): (
+            '8192', 'safety', 'sandbox / bounded leftover-container removal output'),
+        ('Sandbox.execute', 'run', 'timeout', 0): (
+            '15', 'safety', 'sandbox / bounded post-command container removal'),
+        ('Sandbox.execute', 'run', 'maximum', 0): (
+            '8192', 'safety', 'sandbox / bounded cleanup output read'),
+        ('_remove_containers', 'run', 'timeout', 0): (
+            '15', 'safety', 'sandbox / bounded project-container list'),
+        ('_remove_containers', 'run', 'maximum', 0): (
+            '65536', 'safety', 'sandbox / bounded project-container list output'),
+        ('_remove_containers', 'run', 'timeout', 1): (
+            '30', 'safety', 'sandbox / bounded bulk container removal'),
+        ('_remove_containers', 'run', 'maximum', 1): (
+            '65536', 'safety', 'sandbox / bounded bulk removal output'),
+    },
+    'services.py': {
+        ('install', 'subprocess.run', 'timeout', 0): (
+            '60', 'safety', 'services / bounded systemd-analyze verification'),
+    },
 }
 
 
@@ -1348,6 +1451,13 @@ if True:
                 self.assertEqual(call_inventory(tree), {
                     site: entry[0] for site, entry in declarations.items()
                 })
+
+    def test_every_module_with_call_literals_is_inventoried(self):
+        for path in sorted(ROOT.glob('*.py')):
+            with self.subTest(file=path.name):
+                found = call_inventory(ast.parse(path.read_text(encoding='utf-8')))
+                if found:
+                    self.assertIn(path.name, CALLS)
 
     def test_call_detector_scope_and_mismatch_detection(self):
         source = '''
