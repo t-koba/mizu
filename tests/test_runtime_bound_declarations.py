@@ -53,7 +53,9 @@ stderr diagnostics tail and error-evidence tail are fixed safety bounds. The
 character-count and maximum suffixes are part of the inventory so
 operator-facing text and protocol limits are classified too, including the
 publication reference format and the probe header/media bounds.
-The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
+The `doctor.py` probe wall deadlines are configured policy owned by `[doctor]`;
+its probe output reads remain fixed safety. The `work_order.py`, `selection.py`,
+`continuations.py`, `startup.py`,
 `smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
 the work-order page/rationale/record caps, selection list/state/reservation/
 retry caps, continuation chain and pointer/run reads, ADR-042 host-relative
@@ -797,6 +799,18 @@ CONFIGURED = {
         'files': ('200', 'configured policy', 'scheduler evidence / diagnostic read window'),
         'scan_seconds': ('2', 'configured policy', 'scheduler evidence / cooperative diagnostic deadline'),
     },
+    'Doctor': {
+        'runtime_version_seconds': (
+            '20', 'configured policy', 'doctor / container-runtime version probe wall deadline'),
+        'namespace_helper_seconds': (
+            '10', 'configured policy', 'doctor / namespace-helper readiness probe wall deadline'),
+        'image_inspect_seconds': (
+            '15', 'configured policy', 'doctor / image-presence inspect wall deadline'),
+        'node_capability_seconds': (
+            '10', 'configured policy', 'doctor / Node capability probe wall deadline'),
+        'sandbox_smoke_seconds': (
+            '30', 'configured policy', 'doctor / sandbox smoke command wall deadline'),
+    },
     'WorkspaceCache': {
         'roots': ('()', 'configured policy', 'workspace cache / opt-in regenerable roots'),
         'max_bytes': ('1073741824', 'configured policy', 'workspace cache / aggregate removal threshold'),
@@ -912,6 +926,8 @@ CONFIG_MODULE_BOUNDS = {
         '31 * 86400', 'format', 'config / event-poll interval schema maximum (31 days)'),
     'MAX_WORKSPACE_CACHE_DEPTH': (
         '64', 'safety', 'workspace cache / traversal depth ceiling; configured max_depth may lower it'),
+    'DOCTOR_TIMEOUT_MAX_SECONDS': (
+        '86400', 'safety', 'doctor / probe deadline safety ceiling; configured values may lower it'),
 }
 
 
@@ -992,22 +1008,12 @@ CALLS = {
             '1000', 'mechanism', 'CLI / fixed legacy insight-list page bound'),
     },
     'doctor.py': {
-        ('container_runtime', 'run', 'timeout', 0): (
-            '20', 'policy', 'doctor / container-runtime version probe wall deadline; host-dependent, current value only'),
         ('container_runtime', 'run', 'maximum', 0): (
             '8192', 'safety', 'doctor / bounded runtime version output read'),
-        ('container_runtime', 'run', 'timeout', 1): (
-            '10', 'policy', 'doctor / namespace-helper probe wall deadline; host-dependent, current value only'),
         ('container_runtime', 'run', 'maximum', 1): (
             '1024', 'safety', 'doctor / bounded namespace-helper output read'),
-        ('sandbox_image', 'run', 'timeout', 0): (
-            '15', 'policy', 'doctor / image-presence inspect wall deadline; host-dependent, current value only'),
-        ('node_capability', 'run', 'timeout', 0): (
-            '10', 'policy', 'doctor / Node capability probe wall deadline; host-dependent, current value only'),
         ('node_capability', 'run', 'maximum', 0): (
             '1024', 'safety', 'doctor / bounded Node capability output read'),
-        ('check.exercise', 'engine.execute', 'timeout', 0): (
-            '30', 'policy', 'doctor / sandbox smoke command wall deadline; host-dependent, current value only'),
     },
     'engine_channel.py': {
         ('Channel._put', 'self.records.put', 'timeout', 0): (

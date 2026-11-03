@@ -78,6 +78,10 @@ MAX_RESOURCES = 64
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
+#: Safety ceiling for configured doctor probe wall bounds; a probe that does
+#: not answer within this bound is reported as bounded, never as a missing
+#: capability.
+DOCTOR_TIMEOUT_MAX_SECONDS = 86400
 #: Free-text state changes are supported as an explicit progress signal but
 #: do not qualify by default because paraphrasing alone is not substantive work.
 DEFAULT_PROGRESS_SIGNALS = ("tool", "code", "decision", "insight", "input")
@@ -300,7 +304,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import"})
+    "project_import", "doctor"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -615,6 +619,17 @@ class Sandbox:
     storage_options: tuple[str, ...] = ()
     cgroup_manager: str = ""
     cgroup_parent: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class Doctor:
+    #: Host-command wall bounds for `mizu doctor` probes. These depend on the
+    #: host, not the product; defaults preserve the previous literals.
+    runtime_version_seconds: int = 20
+    namespace_helper_seconds: int = 10
+    image_inspect_seconds: int = 15
+    node_capability_seconds: int = 10
+    sandbox_smoke_seconds: int = 30
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1147,6 +1162,16 @@ def workspace_cache_policy(raw: dict) -> WorkspaceCache:
     return WorkspaceCache(roots, maximum, interval, **bounds)
 
 
+def doctor_policy(raw: dict) -> Doctor:
+    fields = dataclasses.fields(Doctor)
+    keys(raw, {field.name for field in fields}, "doctor")
+    return Doctor(**{
+        field.name: number(raw.get(field.name, field.default),
+                            f"doctor.{field.name}", 1, DOCTOR_TIMEOUT_MAX_SECONDS)
+        for field in fields
+    })
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     file: Path
@@ -1154,6 +1179,7 @@ class Config:
     engines: dict[str, dict]
     limits: Limits
     sandbox: Sandbox
+    doctor: Doctor
     profiles: dict[str, dict]
     roles: dict[str, Role]
     #: Default answering role for consultation when the caller names none.
@@ -1759,7 +1785,8 @@ def load(file: Path) -> Config:
         number(mat[k], f"materialize.{k}", 1, 16777216)
     number(mat["diagnostic_bytes"], "materialize.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
-                  environments, limits, sandbox, profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
+                  environments, limits, sandbox, doctor_policy(data.get("doctor", {})),
+                  profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records, record_kinds=kinds,

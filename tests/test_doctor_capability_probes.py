@@ -9,6 +9,7 @@ doctor's own surfaces: a child that did not answer is named as such, never
 as a missing capability, so the operator is not sent to install a
 dependency that is present.
 """
+import dataclasses
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from support import Fixture
 from mizu import doctor
+from mizu.config import Doctor
 from mizu.errors import ConfigError
 from mizu.process import Result
 
@@ -31,7 +33,7 @@ def config_for(engine="pi"):
     configuration points it at a temporary directory: a probe never
     writes host state into the product's source tree.
     """
-    return SimpleNamespace(command=lambda name: [engine],
+    return SimpleNamespace(command=lambda name: [engine], doctor=Doctor(),
                             data=Path(tempfile.mkdtemp(prefix="mizu-startup-")))
 
 
@@ -77,6 +79,20 @@ class NodeCapabilityProbeTests(unittest.TestCase):
         self.assertIn("exit 1", message)
         self.assertIn("no such export", message)
         self.assertFalse(message.rstrip().endswith(":"))
+
+    def test_configured_probe_timeout_is_used(self):
+        seen = []
+        original = doctor.run
+        def fake(argv, **kwargs):
+            seen.append(kwargs['timeout'])
+            return Result(0, "module and stream capabilities available\n", "", "exited", 1.0)
+        doctor.run = fake
+        self.addCleanup(setattr, doctor, "run", original)
+        config = config_for("node")
+        config.doctor = Doctor(node_capability_seconds=7)
+        self.assertEqual(doctor.node_capability(config),
+                         "module and stream capabilities available")
+        self.assertEqual(seen, [7])
 
     def test_a_child_that_answered_reports_what_it_holds(self):
         self.assertEqual(self.probe_with(
@@ -147,6 +163,20 @@ class ContainerRuntimeProbeTests(Fixture):
         doctor.run = lambda argv, **kwargs: result
         self.addCleanup(setattr, doctor, "run", original)
         return doctor.container_runtime(self.config)
+
+    def test_configured_version_timeout_is_used(self):
+        seen = []
+        original = doctor.run
+        def fake(argv, **kwargs):
+            seen.append(kwargs['timeout'])
+            return Result(0, "podman version 5.0\n", "", "exited", 0.1)
+        doctor.run = fake
+        self.addCleanup(setattr, doctor, "run", original)
+        config = dataclasses.replace(
+            self.config,
+            doctor=dataclasses.replace(self.config.doctor, runtime_version_seconds=7))
+        self.assertEqual(doctor.container_runtime(config)['version'], "podman version 5.0")
+        self.assertEqual(seen, [7])
 
     def test_a_child_that_outlived_its_bound_names_the_bound(self):
         with self.assertRaises(ConfigError) as caught:

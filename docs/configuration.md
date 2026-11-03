@@ -1073,6 +1073,23 @@ OS before any project runs. With the default `network = "none"` the probe assert
 a networkless namespace; with an operator-enabled network it records the choice
 instead, since exfiltration risk was explicitly accepted.
 
+## Doctor probes
+
+`mizu doctor` starts bounded host commands. Their wall bounds are operator policy,
+because the right value depends on host speed and load; integers are seconds in
+1-86400, and defaults preserve the previous behavior:
+
+| Key | Default | Description |
+|---|---:|---|
+| `runtime_version_seconds` | `20` | Container-runtime `--version` probe |
+| `namespace_helper_seconds` | `10` | Single-mode namespace-helper readiness probe |
+| `image_inspect_seconds` | `15` | Sandbox image-presence inspect |
+| `node_capability_seconds` | `10` | Node module/stream capability probe |
+| `sandbox_smoke_seconds` | `30` | Read-only sandbox smoke command |
+
+A probe that does not answer within its bound reports the timeout and the bound,
+never a missing capability. Output reads remain fixed safety bounds.
+
 ## Profiles and roles
 
 How these settings behave today is mapped in [scheduling](scheduling.md):

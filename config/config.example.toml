@@ -248,6 +248,16 @@ mode = "rootless"                 # rootless on every OS, or single on Linux hos
 # cgroup_manager = "cgroupfs"
 # cgroup_parent = "user.slice/user-1000.slice/user@1000.service/mizucg"
 
+# Host-command wall bounds for `mizu doctor` probes. Integer seconds 1-86400;
+# defaults shown. A probe that does not answer within its bound reports the
+# timeout and bound, never a missing capability.
+# [doctor]
+# runtime_version_seconds = 20
+# namespace_helper_seconds = 10
+# image_inspect_seconds = 15
+# node_capability_seconds = 10
+# sandbox_smoke_seconds = 30
+
 [engines.pi]
 command = ["node"]
 directory = "pi"

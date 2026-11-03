@@ -48,9 +48,11 @@ def container_runtime(config: Config) -> dict:
         raise Denied(f"Container runtime not found: {executable} "
                      "(install Podman or Docker Desktop, or fix sandbox.executable)")
     env = runtime_env(config)
-    versioned = run([*runtime_base(config), "--version"], timeout=20, maximum=8192, env=env)
+    version_timeout = config.doctor.runtime_version_seconds
+    versioned = run([*runtime_base(config), "--version"], timeout=version_timeout,
+                    maximum=8192, env=env)
     probe_outcome(versioned.reason, versioned.exit_code,
-                  stop_note(versioned) or versioned.stderr, "Container runtime probe", 20)
+                  stop_note(versioned) or versioned.stderr, "Container runtime probe", version_timeout)
     if versioned.exit_code != 0:
         # A run reports its exit only after every pipe thread stopped, so a
         # zero exit means the version output was read to its end. A child
@@ -63,10 +65,11 @@ def container_runtime(config: Config) -> dict:
     if config.sandbox.mode == "single":
         # Constrained-host path: Linux user namespaces only.
         prepared = ensure_single(config)
+        helper_timeout = config.doctor.namespace_helper_seconds
         evidence = run([*config.sandbox.namespace_helper, "sh", "-c",
-                        "cat /proc/self/uid_map; id -u"], timeout=10, maximum=1024)
+                        "cat /proc/self/uid_map; id -u"], timeout=helper_timeout, maximum=1024)
         probe_outcome(evidence.reason, evidence.exit_code,
-                      stop_note(evidence) or evidence.stderr, "Namespace helper probe", 10)
+                      stop_note(evidence) or evidence.stderr, "Namespace helper probe", helper_timeout)
         if evidence.exit_code != 0:
             # The helper that answered keeps its own answer, and the
             # message names it rather than ending with an empty detail.
@@ -268,12 +271,13 @@ def sandbox_image(config: Config) -> str:
     # `image inspect` is the portable presence check; `image exists` is Podman-only.
     # A prefix cut can hide the checkpoint marker, so any truncated or
     # failed inspect is unverifiable and must fail, never read as clean.
+    inspect_timeout = config.doctor.image_inspect_seconds
     result = run([*runtime_base(config), "image", "inspect", config.sandbox.image],
-                 timeout=15, maximum=CHECKPOINT_INSPECT_MAXIMUM, env=env)
+                 timeout=inspect_timeout, maximum=CHECKPOINT_INSPECT_MAXIMUM, env=env)
     # The child that inspected the image decides its own outcome: a
     # child a signal stopped never said the image was missing.
     probe_outcome(result.reason, result.exit_code,
-                  stop_note(result) or result.stderr, "Sandbox image inspect probe", 15)
+                  stop_note(result) or result.stderr, "Sandbox image inspect probe", inspect_timeout)
     if result.exit_code != 0:
         raise ConfigError("Configured image is not present locally; automatic pulls are disabled")
     if inspect_text_is_checkpoint(result.stdout):
@@ -302,10 +306,16 @@ def node_capability(config: Config) -> str:
     runtime and the sandbox image, so every capability message the doctor
     publishes is reachable and can be regression-tested on its own.
     """
-    result = run([*config.command('pi'), "--input-type=module", "-e",
-                  "import {createRequire} from 'node:module'; import {ReadableStream} from 'node:stream/web'; if(typeof createRequire!=='function'||typeof ReadableStream!=='function')process.exit(1); console.log('module and stream capabilities available')"], timeout=10, maximum=1024)
+    node_timeout = config.doctor.node_capability_seconds
+    node_script = (
+        "import {createRequire} from 'node:module'; "
+        "import {ReadableStream} from 'node:stream/web'; "
+        "if(typeof createRequire!=='function'||typeof ReadableStream!=='function')process.exit(1); "
+        "console.log('module and stream capabilities available')")
+    result = run([*config.command('pi'), "--input-type=module", "-e", node_script],
+                 timeout=node_timeout, maximum=1024)
     probe_outcome(result.reason, result.exit_code,
-                  stop_note(result) or result.stderr, "Node capability probe", 10)
+                  stop_note(result) or result.stderr, "Node capability probe", node_timeout)
     if result.exit_code:
         # The child answered and reported a failure: name the failure it
         # reported, not a capability it never claimed to be missing.
@@ -408,7 +418,8 @@ RESOURCE
 [ ! -S /run/podman/podman.sock ]
 [ ! -S /var/run/docker.sock ]
 """ + ("test $(id -u) -eq 0\n" if single else "test $(id -u) -ne 0\n") + capability_check + secret_check + net_check + resource_check
-                record = engine.execute(work, script, writable=False, timeout=30)
+                record = engine.execute(work, script, writable=False,
+                                        timeout=config.doctor.sandbox_smoke_seconds)
                 if record.get("exit_code") != 0 or record.get("reason") != "exited":
                     raise Denied("Sandbox smoke failed: " + json.dumps(record))
                 if (work / "probe.txt").read_text(encoding="utf-8") != "readable":
