@@ -37,10 +37,11 @@ The `work_items.py` module-level page, cursor, row and revision bounds are
 fixed mechanism or safety contracts; its page-byte aliases reuse those
 declared bases rather than introducing separate literals.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
-lock-wait and spawn-reap bounds are fixed mechanism or safety. The read-page and
-script-input names are checked through EXTRA_CANDIDATES because the name pattern
-does not match them. Lock waits stay fixed until the scheduled-contention work
-proves a replay-safe boundary.
+lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
+character-count and maximum suffixes match the read-page and script-input names,
+so they are ordinary declarations; `EXTRA_CANDIDATES` currently holds only the
+probe header-pair count, whose name falls outside the pattern. Lock waits stay
+fixed until the scheduled-contention work proves a replay-safe boundary.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
 not-yet-wired single-child delegation pilot. Its 1024-job history cap is
 shared project-state capacity policy pending the pilot's configuration section:
@@ -84,7 +85,9 @@ VCS polling fallback defaults, the retained-check Limits field and ceiling, and 
 listed raw web and VCS settings; the decision-history recovery ceiling is checked alone,
 not as a full work_items.py inventory. Validation is covered
 by focused config tests. Classification records current ownership, not
-approval to leave policy in code; safety ceilings here are defensive read
+approval to leave policy in code. `format` is reserved for intrinsic wire or
+schema ranges; a product-chosen validation maximum for an operator-settable
+value is `safety`; safety classifications here are defensive read or validation
 bounds, not intrinsic format limits.
 """
 import ast
@@ -232,8 +235,8 @@ DECLARATIONS = {
             '1048576', 'safety',
             'storage audit / bounded reference-JSON read; larger records are skipped and counted'),
         'AUTOMATIC_PRUNE_INTERVAL_MAX': (
-            '2678400', 'format',
-            'configuration schema / maximum accepted automatic-prune interval (31 days)'),
+            '2678400', 'safety',
+            'configuration validation / maximum accepted automatic-prune interval (31 days)'),
     },
     'usage.py': {
         'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
@@ -476,8 +479,8 @@ DECLARATIONS = {
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
         'AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX': (
-            '2678400', 'format',
-            'configuration schema / maximum accepted automatic smoke-retention interval (31 days)'),
+            '2678400', 'safety',
+            'configuration validation / maximum accepted automatic smoke-retention interval (31 days)'),
     },
     'check_jobs.py': {
         'PURPOSE_MAX': (
@@ -923,7 +926,7 @@ CONFIG_MODULE_BOUNDS = {
     'TOML_INTEGER_MAX': (
         '(1 << 63) - 1', 'format', 'config / TOML signed-64-bit integer wire range'),
     'EVENT_POLL_SECONDS_MAX': (
-        '31 * 86400', 'format', 'config / event-poll interval schema maximum (31 days)'),
+        '31 * 86400', 'safety', 'config / event-poll interval validation maximum (31 days)'),
     'MAX_WORKSPACE_CACHE_DEPTH': (
         '64', 'safety', 'workspace cache / traversal depth ceiling; configured max_depth may lower it'),
     'DOCTOR_TIMEOUT_MAX_SECONDS': (
