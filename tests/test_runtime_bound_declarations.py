@@ -44,6 +44,9 @@ proves a replay-safe boundary.
 The `delegation_jobs.py` ledger bounds are private format and read ceilings for
 the not-yet-wired single-child delegation pilot: capacity exhaustion refuses new
 starts rather than forgetting keys, and none is scheduling policy.
+The `storage.py` artifact-retention default is CLI-controlled policy, while the
+day conversion and automatic-prune/audit read limits are fixed mechanism or
+safety bounds.
 The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
 `smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
 the work-order page/rationale/record caps, selection list/state/reservation/
@@ -186,6 +189,21 @@ DECLARATIONS = {
         '_SPAWN_REAP_TIMEOUT': (
             '5.0', 'safety',
             'platform / bounded reap of a process that failed secured startup'),
+    },
+    'storage.py': {
+        'DEFAULT_KEEP_ARTIFACTS': (
+            '30', 'configured policy',
+            'storage prune / default artifact retention when --keep-artifacts is omitted; '
+            'an explicit CLI value wins'),
+        '_DAY_SECONDS': (
+            '86400', 'mechanism',
+            'storage retention / seconds-per-day unit conversion, not a retention choice'),
+        '_AUTOMATIC_PRUNE_STATE_BYTES': (
+            '4096', 'safety',
+            'storage automatic prune / bounded due-state read; larger state is unavailable'),
+        '_AUDIT_JSON_BYTES': (
+            '1048576', 'safety',
+            'storage audit / bounded reference-JSON read; larger records are skipped and counted'),
     },
     'usage.py': {
         'MAX_ATTEMPT_USAGE_KEY_CHARS': ('256', 'safety', 'usage / fixed stored-key label length ceiling'),
