@@ -36,6 +36,14 @@ bounds, and the wait-seconds value is the protocol format bound.
 The `work_items.py` module-level page, cursor, row and revision bounds are
 fixed mechanism or safety contracts; its page-byte aliases reuse those
 declared bases rather than introducing separate literals.
+The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
+`smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
+the work-order page/rationale/record caps, selection list/state/retention/
+reservation/retry caps, continuation chain and pointer/run reads, ADR-042
+host-relative startup floor/multiplier/ceiling and probe/record caps, the
+ADR-006/ADR-013 paid smoke wall cap, and the recovery-probe execution
+ceilings. None is a host-cost policy default; selection retention is fixed
+because the state is data-dir shared and has no per-project owner.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -57,7 +65,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1] / 'src' / 'mizu'
 GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
-    r'(?:MAX_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|ENTRIES|BYTES|ROWS|COUNT))\Z'
+    r'(?:MAX_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN))\Z'
 )
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
@@ -170,6 +178,105 @@ DECLARATIONS = {
             '1024 * 1024', 'safety', 'work items / bounded page response'),
         'MAX_CLOSED_PAGE_ROWS': (
             '100', 'mechanism', 'work items / public closed-page row contract'),
+    },
+    'work_order.py': {
+        'MAX_WORK_ORDER_ITEMS': (
+            '100', 'mechanism',
+            'work order / ordered IDs capped by the fixed 100-row work-item page contract'),
+        'MAX_RATIONALE_CHARS': (
+            '1024', 'safety',
+            'work order / bounded operator-readable rationale text; record also byte-capped'),
+        'MAX_WORK_ORDER_BYTES': (
+            '8192', 'safety',
+            'work order / bounded canonical current-record read, write and CAS envelope'),
+    },
+    'smoke.py': {
+        'SMOKE_REQUESTS_PER_RUN': (
+            '4', 'safety',
+            'live smoke / fixed paid-probe request cap clamped below configured limits (ADR-006/ADR-013)'),
+        'SMOKE_TOOLS_PER_RUN': (
+            '5', 'safety',
+            'live smoke / fixed paid-probe tool cap clamped below configured limits (ADR-006/ADR-013)'),
+        'SMOKE_RUN_SECONDS': (
+            '120', 'safety',
+            'live smoke / fixed paid-probe wall cap clamped below configured limits (ADR-006/ADR-013)'),
+    },
+    'probes.py': {
+        'MAX_SECONDS': (
+            '90', 'safety',
+            'recovery probes / fixed execution ceiling; configured budget and smaller limits still win'),
+        'MAX_REQUESTS': (
+            '2', 'safety',
+            'recovery probes / fixed execution ceiling; real sponsor budget still admits'),
+        'MAX_TOOLS': (
+            '1', 'safety',
+            'recovery probes / fixed execution ceiling; configured tool limit still wins'),
+    },
+    'selection.py': {
+        'MAX_BYTES': (
+            '1024 * 1024', 'safety',
+            'selection / bounded configuration, input and shared-state file read'),
+        'MAX_ITEMS': (
+            '64', 'safety',
+            'selection / fixed per-list entry cap that keeps validation and loops bounded'),
+        'MAX_STATE_ITEMS': (
+            '8192', 'safety',
+            'selection / per-table stored-state entry cap'),
+        'MAX_TERMINAL_CONTRIBUTIONS': (
+            '256', 'mechanism',
+            'selection / fixed probe-evidence retention in the shared data-dir state; no per-project owner'),
+        'MAX_PROBE_EVENTS': (
+            '8', 'mechanism',
+            'selection / fixed per-contribution probe-event retention and replay contract'),
+        'INTENT_RESERVE_BYTES': (
+            '512', 'safety',
+            'selection / bounded intent-event reservation in the saved probe ledger'),
+        'INTENT_TERMINAL_RESERVE_BYTES': (
+            '128', 'safety',
+            'selection / minimum terminal-evidence reservation within an intent event'),
+        'MAX_ON_ERROR_RETRIES': (
+            '64', 'mechanism',
+            'selection / fixed per-rule retry ceiling; no unbounded fallback loop'),
+        'MAX_WORK_BYTES': (
+            '131072', 'safety',
+            'selection / bounded assembled classifier work-input document'),
+    },
+    'continuations.py': {
+        'MAX_PENDING': (
+            '64', 'safety',
+            'writer continuations / bounded registry rows fitting the fixed 64 KiB pointer read'),
+        'MAX_PER_ROLE': (
+            '2', 'mechanism',
+            'writer continuations / one reserved root plus its immediate child chain invariant'),
+        'POINTER_BYTES': (
+            '64 * 1024', 'safety',
+            'writer continuations / bounded publication-pointer read'),
+        'RUN_BYTES': (
+            '1024 * 1024', 'safety',
+            'writer continuations / bounded source run-envelope read'),
+    },
+    'startup.py': {
+        'ADAPTER_STARTUP_FLOOR_SECONDS': (
+            '60', 'mechanism',
+            'adapter startup / floor of the published host-relative bound (ADR-042)'),
+        'ADAPTER_STARTUP_MULTIPLIER': (
+            '12', 'mechanism',
+            'adapter startup / published host-relative multiplier (ADR-042)'),
+        'ADAPTER_STARTUP_CEILING_SECONDS': (
+            '150', 'mechanism',
+            'adapter startup / ceiling of the published host-relative bound (ADR-042)'),
+        'ADAPTER_STARTUP_MEASURE_CEILING_SECONDS': (
+            '150', 'safety',
+            'adapter startup / one-shot probe measurement cap; timeout keeps the floor'),
+        'ADAPTER_PROBE_MAXIMUM_BYTES': (
+            '8192', 'safety',
+            'adapter startup / bounded combined probe stdout/stderr capture'),
+        'ADAPTER_CODEX_PROBE_MAXIMUM_BYTES': (
+            '262144', 'safety',
+            'adapter startup / bounded Codex help-probe text capture'),
+        'RECORD_MAX_BYTES': (
+            '8192', 'safety',
+            'adapter startup / bounded host measurement-record read'),
     },
     'vcs.py': {
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
