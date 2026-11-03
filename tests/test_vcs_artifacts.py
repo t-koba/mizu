@@ -129,6 +129,32 @@ class ArtifactValidationTests(unittest.TestCase):
             self.parse(artifact("x" * (vcs.MAX_ARTIFACT_PAGE_BYTES + 1)),
                        offset=0, limit=vcs.MAX_ARTIFACT_PAGE_BYTES)
 
+    def test_shape_denial_names_only_bounded_fields(self):
+        good = artifact("x")
+        cases = [
+            ({k: v for k, v in good.items() if k != "size"}, "missing size"),
+            ({**good, "extra": "secret"}, "unexpected extra"),
+            ({**good, "x" * 100: "secret"}, "unexpected field(s)"),
+        ]
+        for payload, expected in cases:
+            with self.subTest(expected=expected), self.assertRaises(Denied) as caught:
+                self.parse(payload)
+            message = str(caught.exception)
+            self.assertIn(expected, message)
+            self.assertNotIn("secret", message)
+        capped = {**good, **{f"x{index}": 0 for index in range(10)}}
+        with self.assertRaises(Denied) as caught:
+            self.parse(capped)
+        self.assertIn("(+2 more)", str(caught.exception))
+        with self.assertRaises(Denied) as caught:
+            self.parse({**good, 1: "secret"})
+        message = str(caught.exception)
+        self.assertIn("unexpected field(s)", message)
+        self.assertNotIn("secret", message)
+        with self.assertRaises(Denied) as caught:
+            self.parse({"artifact": NAME, "digest": 1, "content": 1})
+        self.assertIn("content, digest", str(caught.exception))
+
     def test_exact_response_shape_name_text_and_digests(self):
         good = artifact("é😀")
         bad = [None, [], {k: v for k, v in good.items() if k != "size"},

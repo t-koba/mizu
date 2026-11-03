@@ -356,7 +356,8 @@ identity and volume layout before deciding whether the bound or the suite shape
 should move. The bound therefore covers the slowest green cell with only 32 s
 of observed margin; whether the child bound or the suite duration should move
 is an operator decision. The retained per-cell timing artifacts are listed, but
-their content reads are currently refused by the adapter response schema, so these
+their content reads are currently refused; the adapter response shape has not
+been observed, so the refusal is not attributed to a particular cause. These
 job walls cannot yet be split into suite and later-phase cost; the status rows
 are the evidence used here. The gate exposes the child bound and the
 later-phase budget as

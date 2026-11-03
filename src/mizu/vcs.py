@@ -579,6 +579,29 @@ MAX_ARTIFACT_CONTENT = 524288
 #: UTF-8 can require four bytes per permitted character.
 MAX_ARTIFACT_BYTES = 4 * MAX_ARTIFACT_CONTENT
 MAX_ARTIFACT_PAGE_BYTES = 8192
+#: Field names disclosed in an artifact-shape denial. Only short lowercase
+#: identifiers are echoed; values, arbitrary keys and response text never are.
+_ARTIFACT_FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+
+
+def _artifact_field_delta(actual: set, expected: set) -> str:
+    """Name bounded missing/unexpected fields without echoing values."""
+    missing = sorted(expected - actual)
+    extra = actual - expected
+    names = sorted(name for name in extra
+                   if isinstance(name, str) and _ARTIFACT_FIELD_NAME.fullmatch(name))
+    parts = []
+    if missing:
+        parts.append("missing " + ", ".join(missing))
+    if names:
+        shown = names[:8]
+        detail = ", ".join(shown)
+        if len(extra) > len(shown):
+            detail += f" (+{len(extra) - len(shown)} more)"
+        parts.append("unexpected " + detail)
+    elif extra:
+        parts.append("unexpected field(s)")
+    return "; ".join(parts)
 
 
 def check_artifact_name(name: str) -> str:
@@ -665,8 +688,10 @@ def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dic
         legacy = data
         content = legacy["content"]
         content_digest = legacy["digest"]
-        if not isinstance(content, str) or not isinstance(content_digest, str):
-            raise Denied("Invalid VCS artifact content entry")
+        bad = [key for key in ("content", "digest")
+               if not isinstance(legacy[key], str)]
+        if bad:
+            raise Denied("Invalid VCS artifact content entry: " + ", ".join(bad))
         try:
             raw = content.encode("utf-8")
         except UnicodeEncodeError as exc:
@@ -676,8 +701,11 @@ def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dic
                 "next_offset": None,
                 "page_digest": hashlib.sha256(raw).hexdigest()}
     keys = {"artifact", "digest", "content", "size", "offset", "next_offset", "page_digest"}
-    if not isinstance(data, dict) or set(data) != keys:
-        raise Denied("Invalid VCS artifact content entry")
+    if not isinstance(data, dict):
+        raise Denied("Invalid VCS artifact content entry: response is not an object")
+    if set(data) != keys:
+        raise Denied("Invalid VCS artifact content entry: "
+                     + _artifact_field_delta(set(data), keys))
     if data["artifact"] != name:
         raise Denied("Artifact content must match the requested file")
     for key in ("digest", "page_digest"):
