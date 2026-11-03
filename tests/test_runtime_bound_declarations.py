@@ -46,12 +46,19 @@ the not-yet-wired single-child delegation pilot: capacity exhaustion refuses new
 starts rather than forgetting keys, and none is scheduling policy.
 The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
 `smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
-the work-order page/rationale/record caps, selection list/state/retention/
-reservation/retry caps, continuation chain and pointer/run reads, ADR-042
-host-relative startup floor/multiplier/ceiling and probe/record caps, the
-ADR-006/ADR-013 paid smoke wall cap, and the recovery-probe execution
-ceilings. None is a host-cost policy default; selection retention is fixed
-because the state is data-dir shared and has no per-project owner.
+the work-order page/rationale/record caps, selection list/state/reservation/
+retry caps, continuation chain and pointer/run reads, ADR-042 host-relative
+startup floor/multiplier/ceiling and probe/record caps, the ADR-006/ADR-013
+paid smoke wall cap, and the recovery-probe execution ceilings. Selection
+retention is the exception: `MAX_TERMINAL_CONTRIBUTIONS` and
+`MAX_PROBE_EVENTS` are `policy`, because the shared data-dir state has no
+per-project owner and the counts depend on history; the current values remain
+the only supported ones until a data-dir-level setting is designed. The
+selection module's `DEFAULT_ON_ERROR_RETRIES` and `DEFAULT_CLASSIFIER_INPUTS`
+are configured schema defaults declared separately; the per-rule and
+per-classifier tables are their owning configuration. The inventory is name-
+and numeric-scoped and therefore partial; absence from the table is not
+evidence that a value is not a decision.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -73,11 +80,22 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1] / 'src' / 'mizu'
 GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
-    r'(?:MAX_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN))\Z'
+    r'(?:MAX_\w+|DEFAULT_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|'
+    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN))\Z'
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
     'fs.py': frozenset({'READ_PAGE_CHARS', 'SCRIPT_MAX'}),
+}
+# Non-numeric module-level policy defaults checked by their exact literal value.
+POLICY_DEFAULTS = {
+    'selection.py': {
+        'DEFAULT_CLASSIFIER_INPUTS': (
+            {'max_proposals': 8, 'max_decisions': 8, 'max_text_bytes': 2048},
+            'configured policy',
+            'selection / per-classifier inputs defaults; operator overrides through the '
+            'classifier inputs table, documented in docs/model-selection.md'),
+    },
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
@@ -285,11 +303,17 @@ DECLARATIONS = {
             '8192', 'safety',
             'selection / per-table stored-state entry cap'),
         'MAX_TERMINAL_CONTRIBUTIONS': (
-            '256', 'mechanism',
-            'selection / fixed probe-evidence retention in the shared data-dir state; no per-project owner'),
+            '256', 'policy',
+            'selection / shared data-dir terminal probe-evidence retention; history-dependent '
+            'budget, current value only until a data-dir-level setting exists'),
         'MAX_PROBE_EVENTS': (
-            '8', 'mechanism',
-            'selection / fixed per-contribution probe-event retention and replay contract'),
+            '8', 'policy',
+            'selection / shared per-contribution probe-event retention; history-dependent '
+            'budget and replay contract, current value only until a data-dir-level setting exists'),
+        'DEFAULT_ON_ERROR_RETRIES': (
+            '2', 'configured policy',
+            'selection / per-rule on_error retry default; rule field retries 0..64, '
+            'documented in docs/model-selection.md'),
         'INTENT_RESERVE_BYTES': (
             '512', 'safety',
             'selection / bounded intent-event reservation in the saved probe ledger'),
@@ -757,6 +781,23 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 self.assertEqual(inventory(tree, EXTRA_CANDIDATES.get(filename, ())), {
                     name: entry[0] for name, entry in declarations.items()
                 })
+
+    def test_policy_defaults_are_declared(self):
+        for filename, declarations in POLICY_DEFAULTS.items():
+            with self.subTest(file=filename):
+                tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+                found = {}
+                for node in tree.body:
+                    if not isinstance(node, ast.Assign):
+                        continue
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id in declarations:
+                            found[target.id] = ast.literal_eval(node.value)
+                self.assertEqual(set(found), set(declarations))
+                for name, (expected, category, rationale) in declarations.items():
+                    self.assertEqual(found[name], expected)
+                    self.assertEqual(category, 'configured policy')
+                    self.assertTrue(rationale.strip())
 
     def test_started_evidence_alias_is_not_a_second_declaration(self):
         evidence = ast.parse((ROOT / 'evidence_records.py').read_text(encoding='utf-8'))

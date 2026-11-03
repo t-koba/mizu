@@ -579,7 +579,11 @@ live runtime guards duplicate selector-failure accounting, and a completed
 While retained, a probe receipt makes identical replay return the original
 action without extending deadlines/revisions or resurrecting a recovered or
 expired contribution; conflicting reports for the same identity are refused.
-Replay after retention pruning is not a supported product path.
+Replay after retention pruning is not a supported product path. The 256/8
+counts are shared data-dir retention policy, not intrinsic format limits; they
+are fixed at these values because no data-dir-level setting exists yet, and
+changing them is a deliberate product decision rather than a project config
+knob.
 
 At most 256 terminal (recovered or expired) contributions and their receipts
 are retained. When another contribution becomes terminal, the oldest terminal
