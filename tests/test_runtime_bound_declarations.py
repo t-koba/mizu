@@ -65,9 +65,11 @@ per-project owner and the counts depend on history; the current values remain
 the only supported ones until a data-dir-level setting is designed. The
 selection module's `DEFAULT_ON_ERROR_RETRIES` and `DEFAULT_CLASSIFIER_INPUTS`
 are configured schema defaults declared separately; the per-rule and
-per-classifier tables are their owning configuration. The inventory is name-
-and numeric-scoped and therefore partial; absence from the table is not
-evidence that a value is not a decision.
+per-classifier tables are their owning configuration. Every current
+`src/mizu` module with a detected candidate is covered here (`config.py` has
+its own field-scoped table), so a new module with such a bound fails until it
+is declared. The inventory remains name- and numeric-scoped and therefore
+partial; absence from the table is not evidence that a value is not a decision.
 Expressions are inventoried without evaluating source. This does not lint
 arbitrary numeric literals, aliases, nested declarations, arbitrary call args,
 local arithmetic or other modules. Expand coverage as the behavior-based
@@ -472,6 +474,213 @@ DECLARATIONS = {
             '2678400', 'format',
             'configuration schema / maximum accepted automatic smoke-retention interval (31 days)'),
     },
+    'check_jobs.py': {
+        'PURPOSE_MAX': (
+            '64', 'format',
+            'check jobs / stored purpose label character bound'),
+    },
+    'delegation_gates.py': {
+        'POLICY_MAX_BYTES': (
+            '65536', 'safety',
+            'delegation gates / bounded policy-document read'),
+    },
+    'distribution.py': {
+        'PUBLIC_SOURCE_ALGORITHM_CHARS': (
+            '128', 'format',
+            'distribution / public-source algorithm label bound'),
+    },
+    'editor.py': {
+        'BUNDLE_MANIFEST_BYTES': (
+            '16 * 1024 * 1024', 'safety',
+            'editor bundle / bounded manifest read'),
+        'BUNDLE_CHANGES_BYTES': (
+            '262144', 'safety',
+            'editor bundle / bounded changed-text read'),
+    },
+    'engine_config.py': {
+        'MAX_SESSION_TOKENS': (
+            '2 ** 63 - 1', 'format',
+            'engine config / signed 64-bit session-token range'),
+    },
+    'explain.py': {
+        'RECORD_BYTES': (
+            '65536', 'safety',
+            'explain / bounded evidence-record read'),
+    },
+    'host_records.py': {
+        'SCHEMA_ENTRIES': (
+            '16', 'format',
+            'host records / fixed schema field count'),
+    },
+    'insight_tools.py': {
+        'INSIGHT_RETRIEVAL_LIMIT': (
+            '1000', 'mechanism',
+            'insight retrieval / fixed public page bound'),
+    },
+    'lineage.py': {
+        'TARGET_VERSION_MAX': (
+            '1073741824', 'format',
+            'lineage / target version integer bound'),
+        'TARGET_BRANCH_MAX': (
+            '256', 'format',
+            'lineage / target branch name character bound'),
+        'TARGET_REMOTE_MAX': (
+            '256', 'format',
+            'lineage / target remote name character bound'),
+    },
+    'materialize.py': {
+        'SPEC_MAX': (
+            '8192', 'safety',
+            'materialize / bounded caller spec text'),
+        'CACHE_ID_MAX': (
+            '256', 'format',
+            'materialize / cache identity character bound'),
+        '_STARTED_MAX': (
+            '65536', 'safety',
+            'materialize / bounded started-marker read'),
+        '_OUTPUT_MAX': (
+            '4096', 'safety',
+            'materialize / bounded adapter output read'),
+    },
+    'model_catalog.py': {
+        'OBSERVATION_BYTES': (
+            '64 * 1024', 'safety',
+            'model catalog / bounded observation text'),
+        'OBSERVATION_COUNT': (
+            '128', 'safety',
+            'model catalog / bounded observation rows'),
+    },
+    'pi_durable.py': {
+        'RESULT_BYTES': (
+            '1024 * 1024', 'safety',
+            'pi-durable / bounded result read'),
+        'MAX_ATTEMPT_ORDINAL': (
+            '64 * 64', 'format',
+            'pi-durable / attempt ordinal schema ceiling'),
+        'COMPACTION_TOKEN_MAX': (
+            '1073741824', 'format',
+            'pi-durable / compaction token integer ceiling'),
+    },
+    'pi_durable_store.py': {
+        'MAX_PAYLOAD_BYTES': (
+            '262144', 'safety',
+            'pi-durable store / bounded payload column'),
+    },
+    'process.py': {
+        'ADAPTER_DIAGNOSTIC_BYTES_MAX': (
+            '8192', 'safety',
+            'process / bounded adapter diagnostic text'),
+        'STOP_IO_TIMEOUT_SECONDS': (
+            '5.0', 'safety',
+            'process / bounded subprocess I/O stop wait'),
+    },
+    'report.py': {
+        'PREVIOUS_REPORT_BYTES': (
+            '8192', 'safety',
+            'report / bounded previous-report read'),
+        'PREVIOUS_REPORT_READ_BYTES': (
+            '262144', 'safety',
+            'report / bounded previous-report evidence read'),
+    },
+    'role_state.py': {
+        'MAX_DEPTH': (
+            '4', 'format',
+            'role state / fixed nested-object depth'),
+        'MAX_KEY_CHARS': (
+            '64', 'format',
+            'role state / key character bound'),
+        'MAX_RUN_CHARS': (
+            '128', 'format',
+            'role state / run identity character bound'),
+        'MAX_RECORD_BYTES': (
+            '65536', 'safety',
+            'role state / bounded record read'),
+    },
+    'routing.py': {
+        'MAX_PROFILE_CHARS': (
+            '63', 'format',
+            'routing / profile label character bound'),
+        'MAX_REASON_CHARS': (
+            '256', 'format',
+            'routing / reason text character bound'),
+        'MAX_RECORD_BYTES': (
+            '1024', 'safety',
+            'routing / bounded routing record'),
+    },
+    'services.py': {
+        'WINDOWS_RESTART_COUNT': (
+            '999', 'mechanism',
+            'service rendering / Windows restart-count schema maximum'),
+    },
+    'shared_records.py': {
+        'RECORD_BYTES': (
+            '1024 * 1024 + 4096', 'safety',
+            'shared records / bounded canonical envelope'),
+        'RECEIPT_BYTES': (
+            '2048', 'safety',
+            'shared records / bounded receipt read'),
+        'MANIFEST_ROWS': (
+            '512', 'mechanism',
+            'shared records / fixed batch row bound'),
+    },
+    'smoke_refs.py': {
+        'MAX_SMOKE_REFS': (
+            '64', 'mechanism',
+            'smoke refs / fixed per-item reference count'),
+    },
+    'snapshot.py': {
+        '_PATH_VALIDATION_CACHE_LIMIT': (
+            '256', 'safety',
+            'snapshot / bounded in-process path-validation cache'),
+        'MAX_MISSING_FINISH_STREAK': (
+            '1073741824', 'format',
+            'snapshot / persisted missing-finish streak counter ceiling'),
+    },
+    'storage_runs.py': {
+        'MAX_ENTRIES': (
+            '100000', 'safety',
+            'storage runs / bounded scan entry ceiling'),
+        'MAX_BYTES': (
+            '64 * 1024 * 1024', 'safety',
+            'storage runs / bounded aggregate scan bytes'),
+        'RECORD_BYTES': (
+            '1024 * 1024', 'safety',
+            'storage runs / bounded record read'),
+        'PREVIEW_ROWS': (
+            '100', 'mechanism',
+            'storage runs / fixed preview row count'),
+        'MAX_DEPTH': (
+            '8', 'mechanism',
+            'storage runs / fixed traversal depth'),
+    },
+    'unit_prompts.py': {
+        'MAX_READY_WORK_AGE_SECONDS': (
+            '2 ** 31 - 1', 'format',
+            'unit prompts / age render clamp'),
+    },
+    'vcs_proposal_poll.py': {
+        'MAX_PROPOSAL_CURSOR': (
+            '256', 'format',
+            'proposal polling / cursor character bound'),
+    },
+    'wait_events.py': {
+        'MAX_ROW_BYTES': (
+            '1024 * 1024', 'safety',
+            'wait events / bounded row read'),
+        'RECEIPT_BYTES': (
+            '4096', 'safety',
+            'wait events / bounded receipt read'),
+    },
+    'work_item_seed.py': {
+        'MAX_DECISION_TASKS': (
+            '16', 'format',
+            'work-item seed / fixed task count'),
+    },
+    'workspace_reads.py': {
+        'MAX_READ_IDENTITIES': (
+            '1024', 'mechanism',
+            'workspace reads / fixed identity page bound'),
+    },
 }
 
 
@@ -481,6 +690,12 @@ DECLARATIONS = {
 # reserves are fixed conservative safety margins, not command bounds, and
 # output/artifact bounds are fixed safety ceilings.
 GATE_DECLARATIONS = {
+    'check_unittest.py': {
+        'TIMING_SIDECAR_MAX_BYTES': (
+            '1000000', 'safety', 'gate timing artifact / bounded sidecar read'),
+        'TIMING_MAX_SECONDS': (
+            '100000.0', 'safety', 'gate timing artifact / accepted timestamp range'),
+    },
     'check.py': {
         'DEFAULT_CHECK_TIMEOUT_SECONDS': (
             '600', 'configured policy',
@@ -844,6 +1059,19 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                     name: entry[0] for name, entry in declarations.items()
                 })
 
+    def test_every_module_with_bounds_is_inventoried(self):
+        # config.py has its own field-scoped inventory; scripts/check.py is the
+        # separate gate inventory. Every other module must be in DECLARATIONS.
+        covered = set(DECLARATIONS) | {'config.py'}
+        missing = {}
+        for path in sorted(ROOT.glob('*.py')):
+            if path.name in covered:
+                continue
+            found = inventory(ast.parse(path.read_text(encoding='utf-8')))
+            if found:
+                missing[path.name] = sorted(found)
+        self.assertEqual(missing, {}, 'Undeclared module bounds: %r' % (missing,))
+
     def test_policy_defaults_are_declared(self):
         for filename, declarations in POLICY_DEFAULTS.items():
             with self.subTest(file=filename):
@@ -889,6 +1117,16 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             for _, category, rationale in declarations.values():
                 self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
+
+    def test_every_gate_module_with_bounds_is_inventoried(self):
+        missing = {}
+        for path in sorted(GATE_ROOT.glob('*.py')):
+            if path.name in GATE_DECLARATIONS:
+                continue
+            found = inventory(ast.parse(path.read_text(encoding='utf-8')))
+            if found:
+                missing[path.name] = sorted(found)
+        self.assertEqual(missing, {}, 'Undeclared gate bounds: %r' % (missing,))
 
     def test_config_module_bounds_are_fully_declared(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
