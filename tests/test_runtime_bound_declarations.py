@@ -41,9 +41,10 @@ lock-wait and spawn-reap bounds are fixed mechanism or safety. The read-page and
 script-input names are checked through EXTRA_CANDIDATES because the name pattern
 does not match them. Lock waits stay fixed until the scheduled-contention work
 proves a replay-safe boundary.
-The `delegation_jobs.py` ledger bounds are private format and read ceilings for
-the not-yet-wired single-child delegation pilot: capacity exhaustion refuses new
-starts rather than forgetting keys, and none is scheduling policy.
+The `delegation_jobs.py` byte ceilings are private format/safety limits for the
+not-yet-wired single-child delegation pilot. Its 1024-job history cap is
+shared project-state capacity policy pending the pilot's configuration section:
+capacity exhaustion refuses new starts rather than forgetting keys.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
 safety bounds. The `drivers.py` event-stream default is the configured
@@ -142,9 +143,9 @@ DECLARATIONS = {
     },
     'delegation_jobs.py': {
         'MAX_JOBS': (
-            '1024', 'mechanism',
-            'async delegation / private ledger history capacity; exhaustion refuses new starts, '
-            'never forgets keys'),
+            '1024', 'policy',
+            'async delegation / shared project-state job-history capacity; lifetime tombstones '
+            'are retained and exhaustion refuses new starts, pending pilot configuration'),
         'MAX_STATE_BYTES': (
             '1024 * 1024', 'safety',
             'async delegation / bounded ledger read; oversized state is refused, never reset'),

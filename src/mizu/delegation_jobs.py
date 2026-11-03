@@ -21,10 +21,12 @@ exactly {role, task, profile, source_snapshot}; profile may be null, and snapsho
 is an immutable SHA256 snapshot ID. The host must pin the rest of the invocation
 authority before using this primitive; these fields grant no execution rights.
 Requests are bounded to 128 KiB canonical UTF-8 (task <= 65536 UTF-8 bytes),
-results to 32 KiB UTF-8, the ledger to 1 MiB and history to 1024 jobs. Only the
-latest terminal result is retained. Old jobs retain small identity/status/result-
-digest tombstones indefinitely; capacity exhaustion refuses new starts, never
-forgets a key. Schema/bounds are private format limits, not scheduling policy.
+results to 32 KiB UTF-8, and the ledger to 1 MiB. Only the latest terminal
+result is retained. Old jobs retain small identity/status/result-digest
+tombstones indefinitely. The 1024-job history cap is shared project-state
+capacity policy pending this pilot's configuration section: capacity exhaustion
+refuses new starts, never forgets a key. The byte ceilings and schema are
+private format/safety limits, not scheduling policy.
 
 Every mutation uses a dedicated file lock and one fsynced atomic replacement.
 Start commits identity AND reservation before returning; an interrupted write
