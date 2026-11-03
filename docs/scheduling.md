@@ -394,9 +394,9 @@ existing publication lock through the work-item append. Caller-supplied digest,
 branch, SHA or publication ID overrides are refused. Stored reads revalidate the
 immutable snapshot/digest and pinned branch, not current configuration or rolling
 history membership. A later snapshot or branch-head change never rebases the wait.
-Because publication captures the current workspace, a snapshot superseded before
-a receipt exists can never produce one: that pin is dead unless the publisher
-records an explicit supersession through the declared host route.
+The wait follows its pinned `code_digest` and `branch`; without a unique matching
+receipt it stays pending, and only a declared host publisher supersession or
+refusal is terminal.
 
 The existing host CI-wait poll searches local completed publication receipts for
 that exact code digest and branch, using the bounded receipt listing in strict
