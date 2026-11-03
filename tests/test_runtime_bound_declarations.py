@@ -46,7 +46,11 @@ the not-yet-wired single-child delegation pilot: capacity exhaustion refuses new
 starts rather than forgetting keys, and none is scheduling policy.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
-safety bounds.
+safety bounds. The `drivers.py` event-stream default is the configured
+`[limits] event_stream_bytes` policy default; its per-record transport ceiling,
+stderr diagnostics tail and error-evidence tail are fixed safety bounds. The
+character-count suffix is part of the inventory so operator-facing text limits
+are classified too, including the publication reference format.
 The `work_order.py`, `selection.py`, `continuations.py`, `startup.py`,
 `smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
 the work-order page/rationale/record caps, selection list/state/reservation/
@@ -84,11 +88,11 @@ ROOT = Path(__file__).resolve().parents[1] / 'src' / 'mizu'
 GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
     r'(?:MAX_\w+|DEFAULT_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|'
-    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN))\Z'
+    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN|CHARS))\Z'
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
-    'fs.py': frozenset({'READ_PAGE_CHARS', 'SCRIPT_MAX'}),
+    'fs.py': frozenset({'SCRIPT_MAX'}),
 }
 # Non-numeric module-level policy defaults checked by their exact literal value.
 POLICY_DEFAULTS = {
@@ -190,6 +194,20 @@ DECLARATIONS = {
             '5.0', 'safety',
             'platform / bounded reap of a process that failed secured startup'),
     },
+    'drivers.py': {
+        'DIAGNOSTICS_TAIL_BYTES': (
+            '256 * 1024', 'safety',
+            'drivers diagnostics / bounded stderr tail retained as failure evidence'),
+        'EVENT_STREAM_BYTES': (
+            '4 * 1024 * 1024', 'configured policy',
+            'drivers event stream / default for [limits] event_stream_bytes; the configured value wins'),
+        'EVENT_RECORD_BYTES': (
+            '1024 * 1024', 'safety',
+            'drivers event stream / one larger JSONL record fails closed instead of exhausting memory'),
+        'ERROR_TAIL_CHARS': (
+            '4000', 'safety',
+            'drivers failure evidence / bounded error-text tail attached to driver errors'),
+    },
     'storage.py': {
         'DEFAULT_KEEP_ARTIFACTS': (
             '30', 'configured policy',
@@ -219,6 +237,9 @@ DECLARATIONS = {
     'publication.py': {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
+        'REFERENCE_CHARS': (
+            '256', 'format',
+            'publication receipt / operator approval and run reference text limit'),
     },
     'run_health.py': {
         'MAX_RATE_FILE_BYTES': ('64 * 1024', 'safety', 'run health / bounded untrusted result-record read'),
