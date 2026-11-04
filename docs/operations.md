@@ -921,7 +921,7 @@ the built-in engine usage contracts: Pi/pi-durable and Claude sum mutually
 exclusive uncached-input, cache-read, and cache-write buckets; Codex input counts
 include cached input, so its reported input total is used directly (see the
 [Codex usage type](https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs)).
-The Pi formula matches the pinned Pi 1.3.0 [cache-stat implementation](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/src/core/cache-stats.ts);
+The Pi formula matches the pinned Pi 1.5.0 [cache-stat implementation](https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/src/core/cache-stats.ts);
 Anthropic documents the same sum for Messages input in its [rate-limit usage
 fields](https://platform.claude.com/docs/en/api/rate-limits). Unsupported
 engines, invalid input totals, nonpositive/overflowed prompt totals, or

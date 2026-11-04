@@ -1373,7 +1373,7 @@ goal's digest. Ordinary Pi applies authority sections live as described below;
 pi-durable preserves its separate live-configured store identity,
 with both resume-authority and turn grants binding the composed system text
 through `policy_text` to refuse stale crash recovery.
-Ordinary Pi (pinned SDK 1.3.0) uses a fixed base prompt plus host-resolved
+Ordinary Pi (version pinned in [upstream contract](upstream.md)) uses a fixed base prompt plus host-resolved
 `mizu_authority_policy_0`, `mizu_authority_policy_1`, … in source order and
 `mizu_authority_charter` for the exact pinned goal. Sources are independently
 read as UTF-8 with the same 64 KiB per-file and 256 KiB aggregate policy bounds
