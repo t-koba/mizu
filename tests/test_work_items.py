@@ -1492,7 +1492,12 @@ class WorkItemTests(Fixture):
         # state: the stored current is compared byte-for-structure with the
         # exact source revision file before use.
         self.change("doing")
-        expected = self.store.page_open_readonly(limit=100)
+        # The row also includes a live doing-age projection. Freeze its clock
+        # across both reads so this source-integrity assertion is not a
+        # one-second wall-clock race on slow or loaded CI runners.
+        frozen_now = work_items_module.now()
+        with patch.object(work_items_module, "now", return_value=frozen_now):
+            expected = self.store.page_open_readonly(limit=100)
         expected_row = next(row for row in expected["items"] if row["id"] == self.item_id)
         self.assertEqual((expected_row["status"], expected_row["rev"]), ("doing", 2))
         sidecar_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
@@ -1511,7 +1516,8 @@ class WorkItemTests(Fixture):
         payload["doing_since"] = None
         write_json(sidecar_path, payload, exclusive=False)
         fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
-        page = fresh.page_open_readonly(limit=100)
+        with patch.object(work_items_module, "now", return_value=frozen_now):
+            page = fresh.page_open_readonly(limit=100)
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         # Falls back to the exact source and returns the true row, not the
         # fabricated blocked data.
