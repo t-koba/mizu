@@ -954,11 +954,12 @@ Each key accepts `1` through the TOML signed-64-bit maximum. The former literal
 is a default, not an eventual maximum: an operator with a larger host or
 history may raise it, and a smaller host may lower it. Manual and automatic
 scans read the loaded `[limits]` values; direct `run(data)` calls keep the
-defaults. The automatic sweep is machine-wide but runs at the invoking
-project's boundary, so its six `smoke_retention_*` budgets come from that
-project's `[limits]`. Projects sharing one `data_dir` must set identical scan
-budgets; a budget refusal records the shared `refused` state and consumes the
-cadence for every project until the interval passes.
+defaults. The automatic sweep is machine-wide but runs at the boundary of
+whichever project triggers it, so its six `smoke_retention_*` budgets come
+from that project's loaded config `[limits]`. Projects sharing one `data_dir`
+must set identical scan budgets; a budget refusal records the shared
+`refused` state and consumes the cadence for every project until the interval
+passes.
 
 `[limits].automatic_smoke_retention_interval_seconds` controls only
 sweep cadence (default 86,400 seconds; range 0–2,678,400), not these budgets or
