@@ -632,6 +632,30 @@ class SmokeRetentionTests(unittest.TestCase):
         with self.assertRaises(LimitExceeded):
             self.run_retention(budgets=retention.Budgets(metadata_bytes=bound - 1))
 
+    def test_published_and_pending_report_bytes_are_charged_once(self):
+        published = self.pair(self.a)
+        pending_source = self.pair(self.b)
+        quarantine = self.data / 'validation' / 'quarantine'
+        quarantine.mkdir()
+        pending = quarantine / (self.b + '.pending')
+        os.rename(pending_source, pending)
+        bound = sum((pair / 'report.json').stat().st_size
+                    for pair in (published, pending))
+        result = self.run_retention(budgets=retention.Budgets(report_bytes=bound))
+        self.assertEqual(result['report_bytes'], bound)
+
+    def test_published_and_committed_quarantine_report_bytes_are_charged_once(self):
+        published = self.pair(self.a)
+        committed_source = self.pair(self.b)
+        quarantine = self.data / 'validation' / 'quarantine'
+        quarantine.mkdir()
+        committed = quarantine / (self.b + '.committed')
+        os.rename(committed_source, committed)
+        bound = sum((pair / 'report.json').stat().st_size
+                    for pair in (published, committed))
+        result = self.run_retention(budgets=retention.Budgets(report_bytes=bound))
+        self.assertEqual(result['report_bytes'], bound)
+
     def test_scan_bounds_all_refuse_before_retirement(self):
         pair = self.pair()
         insights, _ = self.owner()

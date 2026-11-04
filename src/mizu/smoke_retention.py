@@ -111,6 +111,7 @@ class Metadata:
         self.budgets = budgets if budgets is not None else Budgets()
         self.bytes = 0
         self.report_bytes = 0
+        self.report_files = set()
         self.count = 0
         self.entries = 0
         self.cache = {}
@@ -220,10 +221,13 @@ def _manifest(metadata: Metadata, smoke_id: str, pair: Path) -> dict:
 
 def _report(metadata: Metadata, smoke_id: str, pair: Path, manifest: dict) -> dict:
     binding = manifest["report"]
-    raw = safe_read(metadata.data, (pair / "report.json").relative_to(metadata.data).as_posix(), binding["bytes"])
-    metadata.report_bytes += len(raw)
-    if metadata.report_bytes > metadata.budgets.report_bytes:
-        raise LimitExceeded("Smoke retention report byte bound exceeded")
+    report_path = (pair / "report.json").relative_to(metadata.data).as_posix()
+    raw = safe_read(metadata.data, report_path, binding["bytes"])
+    if report_path not in metadata.report_files:
+        if metadata.report_bytes + len(raw) > metadata.budgets.report_bytes:
+            raise LimitExceeded("Smoke retention report byte bound exceeded")
+        metadata.report_bytes += len(raw)
+        metadata.report_files.add(report_path)
     if len(raw) != binding["bytes"] or digest(raw) != binding["sha256"]:
         raise Denied("Smoke report identity mismatch")
     try:
