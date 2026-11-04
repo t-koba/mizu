@@ -34,7 +34,7 @@ function validatedAuthoritySections(value, required) {
   return value;
 }
 
-export function register(pi, Type, config, dependencies = {}) {
+export function register(pi, config, dependencies = {}) {
   const call = dependencies.request || request;
   const authoritySections = validatedAuthoritySections(dependencies.authoritySections, dependencies.requireAuthority === true);
   if (authoritySections) pi.on('before_agent_start', event => {
@@ -52,8 +52,8 @@ export function register(pi, Type, config, dependencies = {}) {
   for (const tool of config.tools) {
     pi.registerTool({
       name: tool.name, label: tool.name, description: tool.description,
-      parameters: typeSchema(Type, tool.inputSchema),
-      outputSchema: Type.Object({}, { additionalProperties: true }),
+      parameters: typeSchema(tool.inputSchema),
+      outputSchema: { type: 'object', additionalProperties: true },
       exposure: tool.operation === 'finish' ? 'model-only' : 'direct',
       executionMode: 'sequential',
       async execute(_id, args, signal) {

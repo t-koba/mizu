@@ -29,9 +29,6 @@ async function server(t, respond, timeout = 5000) {
   const { port } = listener.address();
   return { transport: 'tcp', host: '127.0.0.1', port, token: 'unit-test-token', timeout_ms: timeout };
 }
-const Type = Object.fromEntries(['Union', 'Literal', 'String', 'Integer', 'Boolean', 'Array', 'Object', 'Optional']
-  .map(name => [name, (...args) => ({ name, args })]));
-
 test('LF framing preserves Unicode separators and passes authenticated arguments', async t => {
   const cfg = await server(t, (peer, value) => {
     assert.equal(value.token, 'unit-test-token'); assert.equal(value.operation, 'read');
@@ -118,18 +115,38 @@ test('unix-socket endpoint still connects where the platform serves one', async 
   });
   assert.deepEqual(await request({ transport: "unix", socket, token: 'unit-test-token', timeout_ms: 5000 }, 'read', {}), {text:'unix-ok'});
 });
-test('schema conversion preserves required fields and denies extra properties', () => {
-  const schema = typeSchema(Type, { type: 'object', properties: { x: { type: 'string', maxLength: 4 }, y: { type: 'boolean' } }, required: ['x'] });
-  assert.equal(schema.args[0].x.name, 'String'); assert.equal(schema.args[0].y.name, 'Optional');
-  assert.equal(schema.args[1].additionalProperties, false);
-  assert.equal(typeSchema(Type, { enum: ['wait', 'done'] }).name, 'Union');
-  assert.throws(() => typeSchema(Type, { type: 'unknown' }), /Unsupported/);
+test('plain schema conversion preserves constraints and denies extra properties', () => {
+  const schema = typeSchema({ type: 'object', properties: {
+    x: { type: 'string', minLength: 1, maxLength: 4, pattern: '^[a-z]+$' },
+    y: { type: 'boolean' } }, required: ['x'] });
+  assert.deepEqual(schema, { type: 'object', properties: {
+    x: { type: 'string', minLength: 1, maxLength: 4, pattern: '^[a-z]+$' },
+    y: { type: 'boolean' } }, required: ['x'], additionalProperties: false });
+  assert.deepEqual(typeSchema({ enum: ['wait', 'done'] }), { enum: ['wait', 'done'] });
+  assert.deepEqual(typeSchema({ type: 'string', enum: ['wait', 'done'] }),
+    { type: 'string', enum: ['wait', 'done'] });
+  assert.deepEqual(typeSchema({ type: 'array', items: { type: 'integer', minimum: 1, maximum: 3 },
+    minItems: 1, maxItems: 3, uniqueItems: true }),
+  { type: 'array', items: { type: 'integer', minimum: 1, maximum: 3 },
+    minItems: 1, maxItems: 3, uniqueItems: true });
+  assert.throws(() => typeSchema({ type: 'unknown' }), /Unsupported/);
+  assert.throws(() => typeSchema({ type: 'object', properties: { x: { type: 'string' } },
+    required: ['y'] }), /Unsupported/);
+});
+test('plain schemas compile with pi-schema coercion and refuse extra properties', async () => {
+  const { compile } = await import(
+    '../adapters/pi/node_modules/@earendil-works/pi-schema/dist/index.js');
+  const validator = compile(typeSchema({ type: 'object', properties: {
+    limit: { type: 'integer', minimum: 1, maximum: 3 }, tag: { type: 'string' } },
+  required: ['limit'] }), { coerce: true });
+  assert.deepEqual(validator.parse({ limit: '2', tag: 'ok' }), { ok: true, value: { limit: 2, tag: 'ok' } });
+  assert.equal(validator.parse({ limit: 2, extra: true }).ok, false);
 });
 function registration(overrides = {}) {
   const tools = [], events = {}, active = [], calls = [];
   const pi = { registerTool: tool => tools.push(tool), on: (name, fn) => { events[name] = fn; }, setActiveTools: names => active.push(...names) };
   const cfg = { tools: [{ name: 'mizu_finish', operation: 'finish', description: 'End', inputSchema: { type: 'object', properties: {} } }] };
-  register(pi, Type, cfg, { request: async (_cfg, operation, args) => { calls.push([operation, args]); return { recorded: true }; }, ...overrides });
+  register(pi, cfg, { request: async (_cfg, operation, args) => { calls.push([operation, args]); return { recorded: true }; }, ...overrides });
   return { tools, events, active, calls };
 }
 test('extension authenticates startup and finish has structured model-only output', async () => {
@@ -334,7 +351,7 @@ test('authority sections preserve source order and replace only the Mizu namespa
   const policies = Array.from({ length: 12 }, (_, i) => [`mizu_authority_policy_${i}`, ` exact ${i}\r\n\n`]);
   const authority_sections = [...policies, ['mizu_authority_charter', ' exact charter\n']];
   // Canonical host JSON sorts object keys, but cannot reorder the pair array.
-  register(pi, Type, { tools: [] }, { authoritySections: JSON.parse(JSON.stringify(authority_sections)) });
+  register(pi, { tools: [] }, { authoritySections: JSON.parse(JSON.stringify(authority_sections)) });
   const options = { sections: { unrelated: 'untouched', mizu_authority_policy_99: 'stale',
     mizu_authority_charter: 'old charter' } };
   hook({ systemPromptOptions: options });
@@ -344,7 +361,7 @@ test('authority sections preserve source order and replace only the Mizu namespa
 
 test('production Pi authority registration fails closed on missing or ambiguous sections', () => {
   const pi = { on() {} };
-  assert.throws(() => register(pi, Type, { tools: [] }, { requireAuthority: true }), /authority sections/);
+  assert.throws(() => register(pi, { tools: [] }, { requireAuthority: true }), /authority sections/);
   for (const authority_sections of [
     [],
     [['mizu_authority_policy_0', 'policy']],
@@ -354,12 +371,12 @@ test('production Pi authority registration fails closed on missing or ambiguous 
     [['mizu_authority_policy_0', 'policy'], ['mizu_authority_charter', 'charter'],
       ['mizu_authority_policy_1', 'out of order']],
   ]) {
-    assert.throws(() => register(pi, Type, { tools: [] }, { authoritySections: authority_sections, requireAuthority: true }),
+    assert.throws(() => register(pi, { tools: [] }, { authoritySections: authority_sections, requireAuthority: true }),
       /authority/);
   }
   let hook;
   const valid = [['mizu_authority_policy_0', 'policy'], ['mizu_authority_charter', 'charter']];
-  register({ on: (name, fn) => { if (name === 'before_agent_start') hook = fn; } }, Type,
+  register({ on: (name, fn) => { if (name === 'before_agent_start') hook = fn; } },
     { tools: [] }, { authoritySections: valid, requireAuthority: true });
   assert.equal(typeof hook, 'function');
 });

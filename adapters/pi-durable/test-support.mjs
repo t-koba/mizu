@@ -3,7 +3,7 @@
  * for tests so they never depend on dist-internal file layouts. */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import {
-  Type, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall,
+  createModels, fauxAssistantMessage, fauxProvider, fauxToolCall,
 } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
@@ -12,7 +12,7 @@ import {
 } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 
-export { AssistantEntry, BACKGROUND_CONTEXT, Harness, MemoryStorage, Type,
+export { AssistantEntry, BACKGROUND_CONTEXT, Harness, MemoryStorage,
   builtinModels, createModels, createRegistry, defineExtension, defineTool,
   fauxAssistantMessage, fauxProvider, fauxToolCall, openNodeSqliteStorage,
   openaiProvider };

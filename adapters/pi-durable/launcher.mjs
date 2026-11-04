@@ -4,7 +4,7 @@
  * submission to settlement and prints a single JSON result document to
  * stdout (stderr carries progress only). No RPC, no JSONL event stream.
  *
- * Durable contracts (from @earendil-works/pi-durable 1.4.0):
+ * Durable contracts (from @earendil-works/pi-durable 1.5.0):
  * - openNodeSqliteStorage(file): WAL SQLite; commits survive process crashes.
  * - Harness.open(storage, {models, registry, settings}): one Session line of
  *   commits. `settings.compaction` carries the operator live-context bound
@@ -32,7 +32,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { Type } from '@earendil-works/pi-ai';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { AssistantEntry, createRegistry, defineExtension, defineTool, Harness } from '@earendil-works/pi-durable';
@@ -202,10 +201,10 @@ export function buildBridgeTools(cfg, bridge, { request: call = request, onFinis
   return cfg.tools.map(tool => defineTool({
     name: tool.name,
     description: tool.description,
-    parameters: typeSchema(Type, tool.inputSchema),
+    parameters: typeSchema(tool.inputSchema),
     execute: async (args) => {
       const result = await call(bridge, tool.operation, args);
-      // Pi durable 1.4 uses output for model-facing blocks (coding Pi uses content).
+      // Pi durable uses output for model-facing blocks (coding Pi uses content).
       if (tool.operation === 'finish') {
         onFinish(result);
         return { output: [{ type: 'text', text: JSON.stringify(result) }], details: result,
@@ -483,6 +482,11 @@ async function runOnce(cfg) {
   // every resolution, so retuning keeps the same store). Unset omits the
   // field so the engine/provider default applies (validated above).
   const cacheRetention = cfg.cacheRetention;
+  // progress.persistWithinMs stays unset: Pi's 1,000 ms default batches
+  // partial-answer and running-tool commits. A crash can lose up to about a
+  // second of streamed content, but this one-shot launcher reports provider
+  // usage when a stream completes, so deferral adds no accounting gap beyond
+  // the existing crash boundary. Setting 0 would multiply storage commits.
   let settings = undefined;
   if (compaction !== undefined || cacheRetention !== undefined) {
     settings = {};

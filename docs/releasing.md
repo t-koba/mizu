@@ -60,29 +60,31 @@ cache, and run the Pi SDK gate plus the full check. Make this lockstep adoption
 one reviewed commit; do not claim that Dependabot produces a single
 release-wide PR.
 
-### Pi 1.4.0 durable database migration and rollback
+### Pi durable database migration and rollback
 
 `@earendil-works/pi-durable` 1.4.0 automatically migrates a SQLite database to
-schema version 2 when it is first opened. After that migration, pi-durable
-1.3.0 and earlier cannot open the database. This change does not migrate any
-live state during development or publication; the first 1.4.0 runtime open is
-the migration boundary.
+schema version 2 when it is first opened; 1.5.0 keeps that schema floor. A
+database migrated by 1.4.0 cannot be opened by 1.3.0 or earlier. Separately,
+1.5.0 stores `pi.live` at version 3 and `pi.tool` at version 3, and a 1.4.0 or
+earlier Harness treats the newer tasks as `task_too_old`. A store written by
+1.5.0 is therefore forward-only: do not roll back the runtime without restoring
+a pre-migration backup.
 
-Before installing 1.4.0 on a deployment with existing durable SQLite stores,
-quiesce the affected project and every process that can hold its durable store
-open, then use the deployment's existing SQLite-consistent release backup for
-`<data_dir>/durable/`. Keep that
-pre-migration backup through the rollback window. If a rollback to 1.3.0 is
-needed, stop the 1.4.0 runtime and restore the pre-migration database backup
-before starting 1.3.0; downgrading package files alone cannot reverse schema
-version 2. Use the existing deployment backup/restore process, not a raw copy
-of a live SQLite file. `mizu backup PROJECT` archives project data and does not
+Before installing 1.4.0 or 1.5.0 on a deployment with existing durable SQLite
+stores, quiesce the affected project and every process that can hold its durable
+store open, then use the deployment's existing SQLite-consistent release backup
+for `<data_dir>/durable/`. Keep that pre-migration backup through the rollback
+window. If a rollback is needed, stop the newer runtime and restore the
+pre-migration database backup before starting the older one; downgrading package
+files alone cannot reverse schema version 2 or the newer stored document/task
+versions. Use the existing deployment backup/restore process, not a raw copy of
+a live SQLite file. `mizu backup PROJECT` archives project data and does not
 include the global `<data_dir>/durable/` stores, so it is not this backup.
 
-The Mizu adapter keeps `store_compat` unchanged so 1.4.0 continues the existing
-conversation through its forward migration. That identity choice does not make
-a migrated database readable by 1.3.0. Mizu does not perform the live migration
-or create a durable-store backup automatically.
+The Mizu adapter keeps `store_compat` unchanged so 1.5.0 continues the existing
+conversation through its forward migration. That identity choice does not make a
+migrated database usable by 1.4.0 or earlier. Mizu does not perform the live
+migration or create a durable-store backup automatically.
 
 ## Build distribution
 

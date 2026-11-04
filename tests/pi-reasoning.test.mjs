@@ -210,7 +210,7 @@ test('Pi production registration delivers host result text and replays retained 
     const resourceLoader = new sdk.DefaultResourceLoader({ cwd: directory, agentDir: directory, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       systemPrompt: 'Offline reasoning contract.',
-      extensionFactories: [{ name: 'mizu', factory: pi => register(pi, remote.ai.Type,
+      extensionFactories: [{ name: 'mizu', factory: pi => register(pi,
         { tools: [bridgeTool] }, { request: call }) }] });
     await resourceLoader.reload();
     const sessionManager = sdk.SessionManager.inMemory(directory);
@@ -562,7 +562,7 @@ test('Pi completed tool batch upgrades once, preserves effects/history, and reop
     const resourceLoader = new sdk.DefaultResourceLoader({ cwd: directory, agentDir: directory, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       systemPrompt: 'Offline re-selection contract.',
-      extensionFactories: [{ name: 'mizu', factory: pi => register(pi, remote.ai.Type,
+      extensionFactories: [{ name: 'mizu', factory: pi => register(pi,
         { tools: [bridgeTool] }, { request: call }) }] });
     await resourceLoader.reload();
     manager = sdk.SessionManager.create(directory, directory);
@@ -666,7 +666,7 @@ test('ordinary Pi authority and tools persist as positional deltas across file-b
               // Also prove that Mizu replaces, not merges, its entire owned namespace.
               event.systemPromptOptions.sections.mizu_authority_stale = 'must be removed';
             }) },
-            { name: 'mizu', factory: pi => register(pi, remote.ai.Type,
+            { name: 'mizu', factory: pi => register(pi,
               { tools }, { authoritySections: Object.entries(sections), request: async (_cfg, operation) => {
                 if (operation === '_hello') return {};
                 assert.ok(tools.some(t => t.operation === operation), 'only current host tools may execute');

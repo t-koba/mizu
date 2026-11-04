@@ -1,6 +1,6 @@
 /** pi-durable persistence/tool/recovery and launcher contracts. No inference, no network.
  *
- * Uses the pinned pi-durable 1.4.0 + pi-ai faux provider over file-backed
+ * Uses the pinned pi-durable 1.5.0 + pi-ai faux provider over file-backed
  * SQLite: idempotent requestId submit, exactly-once tool execution across
  * close/reopen with resume, committed usage, and replay-unsafe default.
  */
@@ -20,7 +20,7 @@ import { agentChanges, assertProviderAuth, boundStatusFor, meterModels, resolveC
   from '../adapters/pi-durable/launcher.mjs';
 import { ModelRuntime as PiModelRuntime }
   from '../adapters/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
-import { AssistantEntry, BACKGROUND_CONTEXT, Harness, Type, createModels, createRegistry,
+import { AssistantEntry, BACKGROUND_CONTEXT, Harness, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage, openaiProvider } from '../adapters/pi-durable/test-support.mjs';
 
@@ -129,7 +129,7 @@ function backend(directory) {
   const seen = [];
   const finish = defineTool({
     name: 'finish', description: 'Seal',
-    parameters: Type.Object({}),
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => {
       calls++;
       return { content: [{ type: 'text', text: 'sealed' }], details: { sealed: true }, control: { terminate: true } };
@@ -137,7 +137,7 @@ function backend(directory) {
   });
   const probe = defineTool({
     name: 'probe', description: 'Record one execution',
-    parameters: Type.Object({}),
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => {
       seen.push(Date.now());
       return { content: [{ type: 'text', text: 'seen' }], details: {} };
@@ -955,7 +955,7 @@ test('interrupted unsafe tool intent is not replayed on same-request recovery', 
     // the tool result commit. No mocked tasks or SQLite writes.
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { writeFileSync } from 'node:fs';
-      import { BACKGROUND_CONTEXT as context, Harness, Type, createModels, createRegistry,
+      import { BACKGROUND_CONTEXT as context, Harness, createModels, createRegistry,
         defineExtension, defineTool, fauxProvider, fauxAssistantMessage, fauxToolCall,
         openNodeSqliteStorage } from ${JSON.stringify(support)};
       const models = createModels();
@@ -963,7 +963,8 @@ test('interrupted unsafe tool intent is not replayed on same-request recovery', 
         contextWindow: 32768, maxTokens: 1024 }] });
       models.setProvider(faux.provider);
       const probe = defineTool({ name: 'probe', description: 'Record one execution',
-        parameters: Type.Object({}), execute: async () => {
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => {
           writeFileSync(${JSON.stringify(effect)}, 'executed once');
           process.exit(0);
         } });

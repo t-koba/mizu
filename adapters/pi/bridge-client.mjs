@@ -68,19 +68,59 @@ export function request(config, operation, args, signal) {
   });
 }
 
-/** Rebuild the tiny schema subset with Pi's public TypeBox instance. */
-export function typeSchema(Type, schema) {
-  if (schema.enum) return Type.Union(schema.enum.map(value => Type.Literal(value)));
-  if (schema.type === "string") return Type.String({ maxLength: schema.maxLength });
-  if (schema.type === "integer") return Type.Integer({ minimum: schema.minimum, maximum: schema.maximum });
-  if (schema.type === "boolean") return Type.Boolean();
-  if (schema.type === "array") return Type.Array(typeSchema(Type, schema.items), { maxItems: schema.maxItems });
-  if (schema.type === "object") {
-    const properties = Object.fromEntries(Object.entries(schema.properties).map(([name, child]) => [
-      name, (schema.required || []).includes(name)
-        ? typeSchema(Type, child) : Type.Optional(typeSchema(Type, child)),
-    ]));
-    return Type.Object(properties, { additionalProperties: false });
+/** Validate the tiny schema subset the bridge emits as plain JSON Schema.
+ * Pi compiles it with coercion; anything outside this subset still fails
+ * closed instead of reaching the model as an unchecked schema. */
+const SCHEMA_TYPES = new Set(["string", "integer", "boolean", "array", "object"]);
+
+function unsupportedSchema(schema) {
+  return new Error(`Unsupported tool schema: ${schema?.type ?? "missing type"}`);
+}
+
+export function typeSchema(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw unsupportedSchema(schema);
+  if (schema.type !== undefined && !SCHEMA_TYPES.has(schema.type)) throw unsupportedSchema(schema);
+  if (schema.enum !== undefined) {
+    if (!Array.isArray(schema.enum) || schema.enum.length === 0) throw unsupportedSchema(schema);
+    return { ...(schema.type === undefined ? {} : { type: schema.type }), enum: [...schema.enum] };
   }
-  throw new Error(`Unsupported tool schema: ${schema.type}`);
+  if (schema.type === "string") {
+    const result = { type: "string" };
+    for (const key of ["minLength", "maxLength", "pattern"]) {
+      if (schema[key] !== undefined) result[key] = schema[key];
+    }
+    return result;
+  }
+  if (schema.type === "integer") {
+    const result = { type: "integer" };
+    for (const key of ["minimum", "maximum"]) {
+      if (schema[key] !== undefined) result[key] = schema[key];
+    }
+    return result;
+  }
+  if (schema.type === "boolean") return { type: "boolean" };
+  if (schema.type === "array") {
+    const result = { type: "array", items: typeSchema(schema.items) };
+    for (const key of ["minItems", "maxItems"]) {
+      if (schema[key] !== undefined) result[key] = schema[key];
+    }
+    if (schema.uniqueItems === true) result.uniqueItems = true;
+    return result;
+  }
+  const properties = schema.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) throw unsupportedSchema(schema);
+  const result = { type: "object", properties: Object.fromEntries(Object.entries(properties).map(
+    ([name, child]) => [name, typeSchema(child)])) };
+  if (schema.required !== undefined) {
+    if (!Array.isArray(schema.required)
+        || schema.required.some(name => typeof name !== "string" || !Object.hasOwn(properties, name))) {
+      throw unsupportedSchema(schema);
+    }
+    result.required = [...schema.required];
+  }
+  for (const key of ["minProperties", "maxProperties"]) {
+    if (schema[key] !== undefined) result[key] = schema[key];
+  }
+  result.additionalProperties = false;
+  return result;
 }
