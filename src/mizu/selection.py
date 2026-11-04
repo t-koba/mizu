@@ -410,6 +410,7 @@ class State:
             raise ConfigError('Unreadable or corrupt selection state') from exc
 
     def save(self, state):
+        prune_all_probe_events(state, self.event_limit)
         prune_terminal_contributions(state, self.terminal_limit)
         if any(len(state[key]) > MAX_STATE_ITEMS for key in
                ('observations', 'blocks', 'history', 'contributions', 'receipts', 'events')):

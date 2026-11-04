@@ -147,6 +147,29 @@ class SelectionTests(SelectionFixture):
         self.assertEqual(saved['events'], {})
         self.assertLessEqual(len(canonical(saved)), MAX_BYTES)
 
+    def test_lowered_probe_event_limit_prunes_before_size_drops_terminal_contributions(self):
+        original_store = self._state_policy(terminal=256, events=8192)
+        original = original_store.read()
+        older = self._add_synthetic_contribution(original, 1, event_count=2500)
+        original_store.save(original)
+        self.assertIn(older, original_store.read()['contributions'])
+        latest_older_event = original['contributions'][older]['last_event']
+
+        # Lower the configured ceiling, then grow existing state past the byte
+        # cap before the next save applies that policy.
+        store = self._state_policy(terminal=256, events=1)
+        grown = store.read()
+        newer = self._add_synthetic_contribution(grown, 2, event_count=500)
+        latest_newer_event = grown['contributions'][newer]['last_event']
+        self.assertGreater(len(canonical(grown)), MAX_BYTES)
+
+        store.save(grown)
+        saved = store.read()
+        self.assertEqual(set(saved['contributions']), {older, newer})
+        self.assertEqual(set(saved['receipts']), {older, newer})
+        self.assertEqual(set(saved['events']), {latest_older_event, latest_newer_event})
+        self.assertLessEqual(len(canonical(saved)), MAX_BYTES)
+
     def test_active_only_state_overflow_latches_exhausted_without_pruning_protected_evidence(self):
         store = self._state_policy(terminal=8192, events=8192)
         previous = store.read()
