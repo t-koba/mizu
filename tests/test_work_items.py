@@ -1680,13 +1680,21 @@ class WorkItemTests(Fixture):
     def test_sidecar_unsafe_falls_back_to_exact_replay(self):
         self.require_posix_read_cache()
         self.change("doing")
-        expected = self.store.page_open_readonly(limit=100)
+        # The row includes a live doing-age projection. Keep one read-time
+        # across the fallback comparisons so slow CI cannot cross a second.
+        frozen_now = work_items_module.now()
+
+        def read_page(store):
+            with patch.object(work_items_module, "now", return_value=frozen_now):
+                return store.page_open_readonly(limit=100)
+
+        expected = read_page(self.store)
         expected_row = next(row for row in expected["items"] if row["id"] == self.item_id)
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
         self.assertTrue(sidecar.exists())
         # Malformed sidecar falls back without wrong data.
         sidecar.write_text("{not-json")
-        page = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        page = read_page(WorkItems(self.project.root, self.project.snapshots, self.project.insights))
         self.assertEqual(next(row for row in page["items"] if row["id"] == self.item_id), expected_row)
         # Symlinked sidecar falls back without wrong data.
         sidecar.unlink()
@@ -1696,7 +1704,7 @@ class WorkItemTests(Fixture):
             os.symlink(str(target), str(sidecar))
         except (OSError, NotImplementedError):
             self.skipTest("Symlinks unavailable")
-        page = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        page = read_page(WorkItems(self.project.root, self.project.snapshots, self.project.insights))
         self.assertEqual(next(row for row in page["items"] if row["id"] == self.item_id), expected_row)
         sidecar.unlink(missing_ok=True)
         # Hard-linked sidecar falls back without wrong data.
@@ -1709,7 +1717,7 @@ class WorkItemTests(Fixture):
             sidecar.unlink(missing_ok=True)
             self.skipTest("Hard links unavailable")
         try:
-            page = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+            page = read_page(WorkItems(self.project.root, self.project.snapshots, self.project.insights))
             self.assertEqual(next(row for row in page["items"] if row["id"] == self.item_id), expected_row)
         finally:
             with contextlib.suppress(OSError):
