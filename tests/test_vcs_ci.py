@@ -1218,3 +1218,52 @@ class CiNondeterminismTests(Fixture):
         self.assertEqual(row["nondeterministic"], True)
         self.assertEqual(row["passed_on"], "passed")
         self.assertEqual(row["branch"], "failed")
+
+    def test_shared_failure_refresh_drops_stale_reds_without_a_due_poll(self):
+        from mizu.fs import read_json, write_json
+        from mizu.runtime import current_ci_failures, poll_project_vcs
+
+        config = self._adapter_config({})
+        cases = (
+            ({}, {"main": [{"sha": SHA_A, "check": "unit"}]}),
+            ({"live": [{"sha": SHA_B, "check": "lint"}]}, {}),
+        )
+        for shared_failures, shared_successes in cases:
+            with self.subTest(shared_failures=shared_failures):
+                write_json(self.project.root / "vcs-poll.json", {
+                    "last_fetch": 1100.0, "last_poll": 1100.0,
+                    "last_proposal_poll": 1100.0, "last_ci_wait_poll": 1100.0,
+                    "failures": shared_failures, "successes": shared_successes,
+                })
+                state = {"last_fetch": 1000.0, "ci": {
+                    "last_poll": 1000.0,
+                    "failures": {
+                        "main": [{"sha": SHA_A, "check": "unit"}],
+                        "removed": [{"sha": SHA_A, "check": "old"}],
+                    },
+                }}
+                with (patch("mizu.runtime.poll_upstream", return_value=None),
+                      patch("mizu.runtime.ci_waits.poll", return_value=None),
+                      patch("mizu.runtime.poll_proposals", return_value=None),
+                      patch("mizu.vcs.list_refs",
+                            side_effect=AssertionError("stale daemon must not poll CI")),
+                      patch("mizu.vcs.read_via",
+                            side_effect=AssertionError("stale daemon must not call the adapter"))):
+                    events = poll_project_vcs(config, self.project, state,
+                                              now=1101.0, interval=300.0)
+                self.assertEqual(events, [])
+                stored = read_json(self.project.root / "vcs-poll.json", {})
+                self.assertEqual(stored["failures"], shared_failures)
+                self.assertEqual(current_ci_failures(self.project), [
+                    {"branch": branch, **row}
+                    for branch in sorted(shared_failures)
+                    for row in shared_failures[branch]
+                ])
+
+    def test_invalid_shared_failure_maps_preserve_local_unpersisted_facts(self):
+        from mizu.runtime import refresh_poll_state
+        local = {"local": [{"sha": SHA_A, "check": "unit"}]}
+        for shared in ({}, {"failures": None}, {"failures": []}, []):
+            state = {"ci": {"failures": local}}
+            refresh_poll_state(state, shared)
+            self.assertEqual(state["ci"]["failures"], local)

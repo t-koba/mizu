@@ -4415,9 +4415,11 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
     Schema: ``state`` is daemon in-memory poll state (fetch, CI, proposal
     timestamp/cursor); ``shared`` is the flat ``vcs-poll.json`` mapping.
     Returns the ``ci`` sub-state. The host-only complete proposal inventory is
-    refreshed wholesale (including absence); registration validates its bounds
-    and facts, so stale in-memory membership cannot restore a missing inventory.
-    Bounds: timestamps must be numeric. Trust: local
+    refreshed wholesale (including absence); a valid shared CI failure map is
+    also authoritative and replaces stale in-memory failures, including when
+    empty. An absent, unreadable, or invalid failure map leaves the local map
+    intact. Success evidence has its separate merge policy. Bounds: timestamps
+    must be numeric. Trust: local
     operator state, never model input. Failure: never raises.
     """
     ci_state = state.setdefault("ci", {})
@@ -4444,10 +4446,7 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
             if valid_cursor is not None:
                 state["proposal_cursor"] = valid_cursor
     if isinstance(shared.get("failures"), dict):
-        merged = _clean_ci_failures(ci_state.get("failures"))
-        for branch, rows in _clean_ci_failures(shared.get("failures")).items():
-            merged[branch] = rows
-        ci_state["failures"] = merged
+        ci_state["failures"] = _clean_ci_failures(shared["failures"])
     ci_state["successes"] = _merge_ci_success_maps(
         ci_state.get("successes"), shared.get("successes"))
     return ci_state
