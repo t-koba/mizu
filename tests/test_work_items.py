@@ -231,7 +231,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(status["backpressure"]["open_work_count"], 1)
         self.assertEqual(status["blocked_work"]["total"], 0)
 
-    def test_status_projections_skip_superseded_snapshots_and_check_current_binding(self):
+    def test_status_projections_skip_superseded_snapshots_and_validate_exact_sources(self):
         self.change("doing")
         historical = self.snapshot("valid")
         self.bind(historical)
@@ -259,21 +259,24 @@ class WorkItemTests(Fixture):
             for reader, result in zip(readers, expected):
                 with self.subTest(reader=reader.__name__):
                     self.assertEqual(reader(), result)
-            self.assertEqual(get.call_count, len(readers))
+            # Cached readers use the exact source revision and do not need to
+            # reload the bound snapshot manifest. Any exact replay still checks
+            # the current delivery; superseded deliveries are never reopened.
+            if work_items_module.IS_WINDOWS:
+                # Windows deliberately bypasses the POSIX sidecar cache.
+                self.assertEqual(get.call_count, len(readers))
+            else:
+                self.assertLess(get.call_count, len(readers))
             self.assertTrue(all(call.args == (current_snapshot["id"],)
                                 for call in get.call_args_list))
 
-        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
-            for reader in readers:
-                with self.subTest(unavailable_current=reader.__name__):
-                    if reader == self.store.blocked_liveness_readonly:
-                        result = reader()
-                        self.assertEqual(result["diagnostic"], "unreadable")
-                        self.assertFalse(result["coverage_complete"])
-                    else:
-                        with self.assertRaisesRegex(Denied, "snapshot unavailable"):
-                            reader()
-            self.assertGreater(get.call_count, 0)
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        sidecar.unlink(missing_ok=True)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        with patch.object(fresh.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+            with self.assertRaisesRegex(Denied, "snapshot unavailable"):
+                fresh.page_open_readonly(limit=100)
+            get.assert_called_once_with(current_snapshot["id"])
 
         with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
@@ -1467,6 +1470,21 @@ class WorkItemTests(Fixture):
         self.assertTrue(set(rev_reads) <= {
             f"work-items/{self.item_id}/4.json", f"work-items/{self.item_id}/3.json"})
         self.assertIn(f"work-items/{self.item_id}/4.json", rev_reads)
+
+    def test_sidecar_hit_does_not_revalidate_delivery_snapshot_manifest(self):
+        self.require_posix_read_cache()
+        self.change("doing")
+        snapshot = self.snapshot("valid")
+        self.bind(snapshot)
+        self.change("blocked", expected_rev=3,
+                    wait={"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        with patch.object(fresh.snapshots, "get",
+                          side_effect=AssertionError("sidecar hit revalidated snapshot manifest")) as get:
+            page = fresh.page_open_readonly(limit=100)
+        row = next(row for row in page["items"] if row["id"] == self.item_id)
+        self.assertEqual((row["status"], row["rev"]), ("blocked", 4))
+        get.assert_not_called()
 
     def test_sidecar_fabricated_current_falls_back_to_exact_source(self):
         self.require_posix_read_cache()

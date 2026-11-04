@@ -595,8 +595,12 @@ exact source record at its rev (one revision file read), and the stored
 previous with the seed or its exact source record (one more read at most);
 a retired item also compares the exact retirement file. The exact source
 records are revalidated with the same seed/transition checks as a status-only
-read (including the current delivery binding), and the returned item is
-derived via the existing retirement projection. Normal terminal and retired
+read, including the recorded delivery and scope fields. A valid sidecar hit
+does not reopen the referenced snapshot manifest: the delivery relationship
+was checked when the binding was written, and done transitions still validate
+their exact snapshot and completion proof. A miss or stale sidecar takes exact
+replay, which rechecks the current delivery against the snapshot. The returned
+item is derived via the existing retirement projection. Normal terminal and retired
 items retain their sidecar, so both the open/status scan and the closed page
 classify them without replaying closed history. Origin staleness and hold
 state are recomputed on every call. The identity

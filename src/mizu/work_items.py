@@ -641,10 +641,6 @@ class WorkItems:
                                           decision_task="wait" in exact_previous)
                         self._validate_transition(exact_previous, exact_current,
                                                   verify_snapshots=False)
-                        if (exact_current.get("delivery") is not None
-                                and exact_current.get("status") not in ("done", "dropped")):
-                            self._validate_delivery(exact_previous, exact_current,
-                                                    verify_snapshots=True)
                     except (Denied, LimitExceeded):
                         return None
                     except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
