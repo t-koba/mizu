@@ -95,6 +95,46 @@ class CiRequestTests(Fixture):
         self.assertEqual(second["request_id"], first["request_id"])
         self.assertEqual(second["runs"], first["runs"])
 
+    def test_replay_rejects_a_stored_run_bound_to_another_sha_without_redispatch(self):
+        self.request(self.context(runs()))
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        store = CiRequests(self.project.root)
+        path = store.root / f"{identity}.request.json"
+        record = read_json(path)
+        record["runs"][0]["head_sha"] = OTHER_SHA
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        with self.assertRaises(Denied):
+            store.outcome(identity)
+        item = store.daily()["days"][0]["items"][0]
+        self.assertEqual(item["state"], "unresolved")
+        self.assertEqual(item["runs"], [])
+        with patch("mizu.runtime._vcs.request_runs_via",
+                   side_effect=AssertionError("an existing dispatch must not be retried")):
+            with self.assertRaises(Denied):
+                self.request(self.context(runs()))
+
+    def test_replay_rejects_coverage_not_bound_by_its_dispatch_marker(self):
+        ctx = self.context(runs(), poll_enabled=True)
+        recorded_item = self.covered_item("recorded")
+        other_item = self.covered_item("other")
+        self.request_covered(ctx, [recorded_item])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        store = CiRequests(self.project.root)
+        path = store.root / f"{identity}.request.json"
+        record = read_json(path)
+        record["covered"][0]["id"] = other_item["id"]
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        with patch("mizu.runtime._vcs.request_runs_via",
+                   side_effect=AssertionError("an existing dispatch must not be retried")):
+            with self.assertRaises(Denied):
+                self.request_covered(self.context(runs(), poll_enabled=True), [other_item])
+        self.assertEqual(self.project.work_items.get(other_item["id"])["status"], "open")
+        item = store.daily()["days"][0]["items"][0]
+        self.assertEqual(item["state"], "unresolved")
+        self.assertEqual(item["runs"], [])
+
     def test_an_unresolved_dispatch_is_never_retried_blindly(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
         CiRequests(self.project.root).mark_dispatch(

@@ -65,8 +65,14 @@ class CiRequests:
         return record
 
     def outcome(self, identity: str) -> dict | None:
-        """The recorded outcome of a request, when it is known."""
-        return self._read(identity, "request")
+        """The recorded outcome, after validating it against its dispatch."""
+        record = self._read(identity, "request")
+        if record is None:
+            return None
+        marker = self._read(identity, "dispatch")
+        if marker is None or _validated_outcome(record, identity, marker) is None:
+            raise Denied("Invalid or unbound CI request outcome")
+        return record
 
     def dispatched(self, identity: str) -> dict | None:
         """The dispatch marker of a request, when it was sent to the provider."""
@@ -192,7 +198,7 @@ class CiRequests:
                 # marker is the evidence that names it.
                 rows.append(marker_row)
                 continue
-            row = _summary(record, identity, marker_row)
+            row = _validated_outcome(record, identity, marker, marker_row)
             if row is None:
                 # A readable outcome that cannot be validated is an unknown
                 # outcome, not an absent request: the dispatch marker already
@@ -203,6 +209,17 @@ class CiRequests:
             rows.append(row)
         rows.sort(key=lambda row: (row["date"], row["request_id"]))
         return rows, scan_stopped
+
+
+def _validated_outcome(record: dict, identity: str, marker: dict,
+                        marker_row: dict | None = None) -> dict | None:
+    """Validate an outcome once against the identity and its dispatch marker."""
+    if marker_row is None:
+        marker_row = _unresolved_summary(marker, identity)
+    if (marker_row is None
+            or record.get("covered", []) != marker.get("covered", [])):
+        return None
+    return _summary(record, identity, marker_row)
 
 
 def _summary(record: dict, identity: str, marker: dict) -> dict | None:
