@@ -8,9 +8,10 @@ adapters/pi-durable の3依存を 1.1.0 に固定した。
 adapters/pi-durable の3依存を同じリリースに固定した。2026-10-31 に Pi 1.4.0 へ追随し、
 adapters/pi の2依存と adapters/pi-durable の4依存（Chord を含む）を 1.4.0 に固定した。
 2026-11-02 に Pi 1.5.0 へ追随し、同じ依存を 1.5.0 に固定した。両 lock は既存 lock を
-入力に含めた trusted materialize で再生成した。Pi 1.4.0 の依存グラフに伴う
-`marked-cjk-friendly` の追加と不要になった nested package の削除、および 1.5.0 の
-ツールスキーマ依存への移行を除き、非 Pi パッケージの解決版は変更していない。
+入力に含めた trusted materialize で再生成した。先行する 1.4.0 の両 lock との差分では、
+非 Pi パッケージの解決版は次のみ変更した: pi lock は undici 8.10.2 → 8.12.3、
+minimatch 11.0.3 を追加（`@isaacs/nonrecursive-glob-match` 1.0.3 を伴う）、ws は 8.22.0 のまま;
+pi-durable lock は ws 8.22.0 → 8.21.0、undici 8.10.2 → 8.12.3、minimatch 11.0.3 を追加（同上）。
 実行物のバージョンは証跡であり、
 Mizu が旧実行物を判定・変換・拒否するための条件ではない。内部の設定・bridge・保存記録には
 世代番号を持たせない。

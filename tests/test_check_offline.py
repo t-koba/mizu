@@ -58,9 +58,8 @@ class InstallerStagingWaiverTests(unittest.TestCase):
                          'node-durable-contract-tests,node-pi-sdk-contract-tests,'
                          'node-pi-reasoning-replay-tests')
 
-    def test_pi_staging_runs_pi_sdk_contract_and_waives_only_missing_adapters(self):
-        self.assertEqual(INSTALLER.staging_not_run_checks(core_only=False),
-                         'node-durable-contract-tests,node-pi-reasoning-replay-tests')
+    def test_pi_staging_provisions_both_adapters_and_runs_all_gates_unwaived(self):
+        self.assertEqual(INSTALLER.staging_not_run_checks(core_only=False), '')
 
 
 class CheckTimeoutTests(unittest.TestCase):

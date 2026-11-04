@@ -10,11 +10,13 @@ validation containing code and credentials outside the repository.
 1. Run offline checks and the standalone installation smoke. Review security
    boundaries and the deployment-specific integration/soak evidence.
 2. In a network-enabled environment run `scripts/lock-pi.sh`. Review and commit
-   `adapters/pi/package-lock.json`. Do not fabricate registry integrity hashes.
-   Reinstall with `npm ci` under the supported Node version and repeat Pi smoke.
+   `adapters/pi/package-lock.json` and `adapters/pi-durable/package-lock.json`. Do not fabricate registry integrity hashes.
+   Reinstall both adapters with `npm ci` under the supported Node version and repeat Pi smoke.
 3. Review dependency licenses, advisories and the complete dependency tree.
-   `npm --prefix adapters/pi ls --all --json` can record the installed tree;
-   package-lock plus that tree is inventory, not automatically a complete SBOM.
+   `npm --prefix adapters/pi ls --all --json` and
+   `npm --prefix adapters/pi-durable ls --all --json` can record the installed
+   trees; each package-lock plus its tree is inventory, not automatically a
+   complete SBOM.
 4. Scan staged files for keys, internal paths, hostnames, project data and
    copyrighted/private code. Review `.gitignore`, but do not trust it as DLP.
    Inspect `git diff --cached` before the first push.
@@ -90,7 +92,7 @@ migration or create a durable-store backup automatically.
 
 ```sh
 python3 scripts/package.py --output dist
-# Strict public-release mode requires a reviewed lock:
+# Strict public-release mode requires both reviewed locks:
 python3 scripts/package.py --output dist --release
 ```
 
@@ -103,8 +105,9 @@ identity. Sign tags/artifacts through the maintainer's chosen release process if
 publisher authentication is required. The build also writes `dist/SHA256SUMS`
 (checksums of the archives themselves); `dist/` is local build output, not source.
 
-An offline source archive can be generated without a dependency lock, but it is
-labelled accordingly. `--release` refuses that state. The initial generated
+An offline source archive can be generated without dependency locks, but it is
+labelled accordingly. `--release` refuses that state. `--release` requires both
+adapter locks, and both locks are included with their digests in `DISTRIBUTION.json`. The initial generated
 source bundle is useful for inspection and real-machine validation; it is not a
 claim of byte-reproducible transitive npm resolution.
 

@@ -247,8 +247,8 @@ shows the exact receipt selected for that staging request.
 `--reuse-ci-checks` and the separate existing core-only
 `--reuse-source-checks REPORT` option are mutually exclusive. The local-report
 validator and its environment/schema/waiver checks are unchanged. CI reuse works
-for core-only or Pi staging; full Pi staging still provisions the pinned Pi
-dependencies and runs their installed contract/version checks. It does not waive
+for core-only or Pi staging; full Pi staging still provisions both pinned adapters
+and runs their installed contract/version checks and the durable/replay gates. It does not waive
 the installed-release smoke: the test-install wrapper forwards CI selection to
 both installs and then executes the same version, idempotence, manifest and
 CLI import/report/editor/backup/restore checks as the default path. It does not

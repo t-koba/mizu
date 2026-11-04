@@ -32,6 +32,50 @@ def source_files(output: Path):
         yield relative.as_posix(), path.read_bytes(), 0o755 if path.stat().st_mode & 0o111 else 0o644
 
 
+LOCKS = {'pi': ROOT / 'adapters/pi/package-lock.json',
+         'pi-durable': ROOT / 'adapters/pi-durable/package-lock.json'}
+REQUIRED = {'pi': ('@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'),
+            'pi-durable': ('@earendil-works/chord', '@earendil-works/pi-ai',
+                           '@earendil-works/pi-coding-agent', '@earendil-works/pi-durable')}
+
+
+def validate_locks(locks=LOCKS, required=REQUIRED):
+    """Validate reviewed adapter locks and return each adapter's Pi version."""
+    pinned = {}
+    for adapter, lock in locks.items():
+        if not lock.exists():
+            raise ValueError(f'Strict release requires reviewed adapters/{adapter}/package-lock.json; run scripts/lock-pi.sh first')
+        try:
+            content = json.loads(lock.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f'Dependency lock adapters/{adapter}/package-lock.json is unreadable') from exc
+        version = content.get('lockfileVersion') if isinstance(content, dict) else None
+        if (type(version) is not int or version < 2
+                or not isinstance(content.get('packages'), dict) or not content['packages']):
+            raise ValueError(f'Dependency lock adapters/{adapter}/package-lock.json is incomplete')
+        packages = content['packages']
+        for name in required[adapter]:
+            item = packages.get('node_modules/' + name)
+            if not isinstance(item, dict) or not item.get('version') or not item.get('integrity'):
+                raise ValueError(f'Lock adapters/{adapter}/package-lock.json must pin reviewed Pi packages with registry integrity')
+        versions = set()
+        for key, item in packages.items():
+            installed = (key[len('node_modules/'):]
+                         if key.startswith('node_modules/')
+                         else key.rsplit('/node_modules/', 1)[-1])
+            if installed.startswith('@earendil-works/') and installed.count('/') == 1:
+                version = item.get('version') if isinstance(item, dict) else None
+                if not version or not item.get('integrity'):
+                    raise ValueError(f'Lock adapters/{adapter}/package-lock.json must pin reviewed Pi packages with registry integrity')
+                versions.add(version)
+        if len(versions) != 1:
+            raise ValueError(f'Lock adapters/{adapter}/package-lock.json mixes @earendil-works versions; keep one stable version')
+        pinned[adapter] = next(iter(versions))
+    if len(set(pinned.values())) != 1:
+        raise ValueError('Both adapter locks must use the same @earendil-works version; regenerate them together')
+    return pinned
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=ROOT / 'dist')
@@ -40,23 +84,20 @@ def main():
     output = args.output.resolve()
     if output == ROOT or output in ROOT.parents:
         parser.error('Output must not be the source root or its ancestor')
-    lock = ROOT / 'adapters/pi/package-lock.json'
     if args.release:
-        if not lock.exists():
-            parser.error('Strict release requires reviewed adapters/pi/package-lock.json; run scripts/lock-pi.sh first')
-        content = json.loads(lock.read_text(encoding="utf-8"))
-        if content.get('lockfileVersion', 0) < 2 or not content.get('packages'):
-            parser.error('Dependency lock is incomplete')
-        for name in ('@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'):
-            item = content['packages'].get('node_modules/' + name, {})
-            if not item.get('version') or not item.get('integrity'):
-                parser.error('Lock must pin reviewed Pi packages with registry integrity')
+        try:
+            validate_locks()
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
     epoch = int(os.environ.get('SOURCE_DATE_EPOCH', '0'))
     if epoch < 0:
         parser.error('SOURCE_DATE_EPOCH cannot be negative')
+    present = {adapter: lock for adapter, lock in LOCKS.items() if lock.exists()}
+    both_present = len(present) == len(LOCKS)
     files = list(source_files(output))
-    metadata = {'name': 'mizu', 'version': __version__, 'kind': 'locked-source' if lock.exists() else 'source-unlocked',
-                'node_minimum': NODE_MINIMUM, 'dependency_lock_present': lock.exists(),
+    metadata = {'name': 'mizu', 'version': __version__, 'kind': 'locked-source' if both_present else 'source-unlocked',
+                'node_minimum': NODE_MINIMUM, 'dependency_lock_present': both_present,
+                'dependency_locks': {adapter: sha(lock.read_bytes()) for adapter, lock in sorted(present.items())},
                 'integration_acceptance': 'See docs/VALIDATION.md; no live acceptance implied by packaging'}
     files.append(('DISTRIBUTION.json', (json.dumps(metadata, indent=2) + '\n').encode(), 0o644))
     files.sort(key=lambda x: x[0])

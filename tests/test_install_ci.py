@@ -41,6 +41,8 @@ class InstallCITests(Fixture):
         (self.source / 'src/probe.py').write_bytes(b'VALUE = 1\n')
         (self.source / 'adapters/pi').mkdir(parents=True)
         (self.source / 'adapters/pi/package-lock.json').write_bytes(b'{}\n')
+        (self.source / 'adapters/pi-durable').mkdir(parents=True)
+        (self.source / 'adapters/pi-durable/package-lock.json').write_bytes(b'{}\n')
         for args in (['init', '-q'], ['add', '.'],
                      ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                       '-c', 'commit.gpgsign=false',
@@ -286,15 +288,23 @@ class InstallCITests(Fixture):
 
     def test_ci_mode_still_provisions_pinned_pi_and_runs_contract(self):
         calls = []
+        def record(argv, **kwargs):
+            calls.append((list(map(str, argv)), str(kwargs.get('cwd'))))
         with patch.object(INSTALLER.shutil, 'which', side_effect=lambda name: name), \
-                patch.object(INSTALLER.subprocess, 'check_output', side_effect=['24.0.0', '1.3.0']):
-            release = self.stage(self.args(core_only=False),
-                                 command=lambda argv, **kwargs: calls.append(list(map(str, argv))))
-        self.assertEqual(calls[0], ['npm', 'ci', '--engine-strict', '--no-audit', '--no-fund', '--ignore-scripts'])
-        self.assertIn('--check-contract', calls[1])
-        self.assertEqual(len(calls), 2)  # Neither source suite nor other commands.
+                patch.object(INSTALLER.subprocess, 'check_output', side_effect=['24.0.0', '1.5.0']):
+            release = self.stage(self.args(core_only=False), command=record)
+        self.assertEqual(len(calls), 4)  # Neither source suite nor other commands.
+        self.assertEqual(calls[0][0], ['npm', 'ci', '--engine-strict', '--no-audit', '--no-fund', '--ignore-scripts'])
+        self.assertTrue(calls[0][1].endswith('adapters/pi'))
+        self.assertIn('--check-contract', calls[1][0])
+        self.assertTrue(calls[1][1].endswith('adapters/pi'))
+        self.assertEqual(calls[2][0], ['npm', 'ci', '--engine-strict', '--no-audit', '--no-fund', '--ignore-scripts'])
+        self.assertTrue(calls[2][1].endswith('adapters/pi-durable'))
+        self.assertIn('--check-contract', calls[3][0])
+        self.assertTrue(calls[3][1].endswith('adapters/pi-durable'))
         receipt = json.loads((release / 'installation.json').read_text())
         self.assertEqual(receipt['pi_lock_sha256'], digest(b'{}\n'))
+        self.assertEqual(receipt['pi_durable_lock_sha256'], digest(b'{}\n'))
         self.assertEqual(receipt['checks_provenance'], 'retained-ci-acceptance')
 
     def test_modes_are_explicit_and_mutually_exclusive(self):

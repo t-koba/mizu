@@ -703,13 +703,30 @@ class ConfigTests(Fixture):
     def test_dependency_lock_agrees_with_manifest(self):
         import json
         from mizu import NODE_MINIMUM, __version__
-        package = json.loads((ROOT / "adapters/pi/package.json").read_text())
-        lock = json.loads((ROOT / "adapters/pi/package-lock.json").read_text())
-        self.assertEqual(package["version"], __version__)
-        self.assertIn(NODE_MINIMUM, package["engines"]["node"])
-        for name, declared in package['dependencies'].items():
-            self.assertEqual(lock['packages']['node_modules/'+name]['version'],declared)
-            self.assertTrue(lock['packages']['node_modules/'+name]['integrity'])
+        pinned_versions = set()
+        for adapter in ("pi", "pi-durable"):
+            package = json.loads((ROOT / f"adapters/{adapter}/package.json").read_text())
+            lock = json.loads((ROOT / f"adapters/{adapter}/package-lock.json").read_text())
+            self.assertEqual(package["version"], __version__)
+            self.assertIn(NODE_MINIMUM, package["engines"]["node"])
+            self.assertGreaterEqual(lock.get("lockfileVersion", 0), 2)
+            self.assertTrue(lock.get("packages"))
+            for name, declared in package['dependencies'].items():
+                item = lock['packages']['node_modules/'+name]
+                self.assertEqual(item['version'], declared)
+                self.assertTrue(item['version'])
+                self.assertTrue(item['integrity'])
+            adapter_versions = set()
+            for key, item in lock['packages'].items():
+                installed = (key[len('node_modules/'):]
+                             if key.startswith('node_modules/')
+                             else key.rsplit('/node_modules/', 1)[-1])
+                if installed.startswith('@earendil-works/') and installed.count('/') == 1:
+                    self.assertTrue(item.get('integrity'))
+                    adapter_versions.add(item['version'])
+            self.assertEqual(len(adapter_versions), 1)
+            pinned_versions.update(adapter_versions)
+        self.assertEqual(len(pinned_versions), 1)
         contract=json.loads((ROOT/'adapters/pi/contract.json').read_text())
         self.assertIn('ModelRuntime',contract['exports'])
         self.assertNotIn('schema',contract)

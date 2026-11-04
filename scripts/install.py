@@ -38,13 +38,12 @@ def source_manifest(root=ROOT):
 def staging_not_run_checks(*, core_only: bool) -> str:
     """Return only the SDK gates unavailable in each installer staging mode.
 
-    Both modes omit pi-durable. Core-only also omits the Pi adapter; full Pi
-    staging provisions it and must run its SDK contract gate unwaived.
+    Core-only omits both adapters; full Pi staging provisions both adapters
+    and runs all three SDK gates unwaived.
     """
-    checks = ["node-durable-contract-tests", "node-pi-reasoning-replay-tests"]
     if core_only:
-        checks.insert(1, "node-pi-sdk-contract-tests")
-    return ",".join(checks)
+        return "node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests"
+    return ""
 
 
 def functional_bash_available() -> bool:
@@ -213,7 +212,10 @@ def verify_release(release: Path, *, expected_manifest=None):
         raise Denied("Release source files do not match its installation manifest")
     if receipt.get("pi_lock_sha256"):
         if digest((release / "adapters/pi/package-lock.json").read_bytes()) != receipt["pi_lock_sha256"]:
-            raise Denied("Installed dependency lock changed after validation")
+            raise Denied("Installed Pi dependency lock changed after validation")
+    if receipt.get("pi_durable_lock_sha256"):
+        if digest((release / "adapters/pi-durable/package-lock.json").read_bytes()) != receipt["pi_durable_lock_sha256"]:
+            raise Denied("Installed pi-durable dependency lock changed after validation")
 
 
 def command(argv, *, cwd=None, timeout=600):
@@ -415,20 +417,26 @@ def stage(args):
             if staged_manifest != manifest:
                 raise Denied("Source changed while staging; retry from a stable candidate copy")
             pi_lock = None
+            pi_durable_lock = None
             if not args.core_only:
-                adapter = temporary / "adapters/pi"
                 common = ["--engine-strict", "--no-audit", "--no-fund"]
                 # Permit npm's own script policy when opted in; on npm v12 removing
                 # --ignore-scripts still defers to allowScripts default-deny, so the flag
                 # is requested permission, not proof scripts ran. Default stays deny-all.
                 scripts = [] if args.allow_install_scripts else ["--ignore-scripts"]
-                if not (adapter / "package-lock.json").exists():
-                    command(["npm", "install", "--package-lock-only", *common, "--ignore-scripts"], cwd=adapter)
-                command(["npm", "ci", *common, *scripts], cwd=adapter)
-                pi = adapter / "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
-                result = subprocess.check_output([node, pi, "--version"], text=True, timeout=30).strip()
-                command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
-                pi_lock = digest((adapter / "package-lock.json").read_bytes())
+                for adapter_name in ("pi", "pi-durable"):
+                    adapter = temporary / f"adapters/{adapter_name}"
+                    if not (adapter / "package-lock.json").exists():
+                        command(["npm", "install", "--package-lock-only", *common, "--ignore-scripts"], cwd=adapter)
+                    command(["npm", "ci", *common, *scripts], cwd=adapter)
+                    if adapter_name == "pi":
+                        pi = adapter / "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+                        result = subprocess.check_output([node, pi, "--version"], text=True, timeout=30).strip()
+                    command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
+                    if adapter_name == "pi":
+                        pi_lock = digest((adapter / "package-lock.json").read_bytes())
+                    else:
+                        pi_durable_lock = digest((adapter / "package-lock.json").read_bytes())
             reuse_report = getattr(args, "reuse_source_checks", None)
             if ci_proof is not None:
                 _, ci_receipt = ci_proof
@@ -460,9 +468,9 @@ def stage(args):
                 checks_provenance = "reused-source-gate"
             else:
                 # Offline source tests are a release gate. They do not claim live Pi/Podman validation.
-                # Staging never provisions pi-durable, and core-only staging has no Pi adapter;
-                # record only those unavailable SDK suites as not_run. Full Pi staging must run
-                # the Pi SDK contract gate against the adapter it just provisioned.
+                # Core-only staging provisions neither adapter; record those unavailable
+                # SDK suites as not_run. Full Pi staging provisions both adapters and runs
+                # all three SDK gates unwaived.
                 command([sys.executable, "scripts/check.py", "--report", "installation-checks.json",
                          "--allow-not-run", staging_not_run_checks(core_only=args.core_only)],
                         # The staging call holds the gate's modelled path (3246 s on
@@ -481,6 +489,7 @@ def stage(args):
             write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
                         "installed_at": now(), "mode": "core-only" if args.core_only else "pi",
                         "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
+                        "pi_durable_lock_sha256": pi_durable_lock,
                         "node": node, "install_scripts_enabled": args.allow_install_scripts,  # requested permission, not proof scripts ran (npm v12 may still deny via allowScripts),
                         "validation": "local-install-checks-passed", "checks": check_entries,
                         "checks_provenance": checks_provenance,
