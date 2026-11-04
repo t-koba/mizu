@@ -580,16 +580,20 @@ While retained, a probe receipt makes identical replay return the original
 action without extending deadlines/revisions or resurrecting a recovered or
 expired contribution; conflicting reports for the same identity are refused.
 Replay after retention pruning is not a supported product path. The 256/8
-counts are shared data-dir retention policy, not intrinsic format limits; they
-are fixed at these values because no data-dir-level setting exists yet, and
-changing them is a deliberate product decision rather than a project config
-knob.
+counts are shared data-dir retention policy, not intrinsic format limits. An
+optional `selection/policy.json` in the data dir may set
+`terminal_contributions` and `probe_events`; it is an exact version-1 object
+with both integers in 1..8,192, at most 1 KiB. Absence keeps 256/8; malformed,
+unsafe or oversized policy refuses selection rather than resetting the ledger.
+Changing them is a deliberate data-dir-wide decision rather than a project
+config knob.
 
-At most 256 terminal (recovered or expired) contributions and their receipts
-are retained. When another contribution becomes terminal, the oldest terminal
-contribution is pruned together with its receipt and all its events; active
-contributions and receipts are never pruned. Each contribution keeps at most
-the latest 8 probe events, including an active intent/current claim. Only older
+By default, at most 256 terminal (recovered or expired) contributions and their
+receipts are retained. When another contribution becomes terminal, the oldest
+terminal contribution is pruned together with its receipt and all its events;
+active contributions and receipts are never pruned. Each contribution keeps at
+most the latest 8 probe events by default, including an active intent/current
+claim. Only older
 terminal events may be pruned, and the latest event/status remains visible.
 Each intent event reserves 512 bytes for admission/progress and terminal
 proof; progress consumes that padding while preserving at least 128 bytes for a

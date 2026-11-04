@@ -1028,6 +1028,46 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(saved['contributions'][active_id]['status'], 'recovered')
         self.assertEqual(saved['events'][saved['contributions'][active_id]['last_event']]['status'], 'success')
 
+    def test_selection_retention_policy_file_sets_limits(self):
+        from mizu.selection import (MAX_PROBE_EVENTS, MAX_TERMINAL_CONTRIBUTIONS,
+                                    prune_probe_events, prune_terminal_contributions,
+                                    retention_policy)
+        path = self.config.data / 'selection' / 'policy.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(retention_policy(self.config.data),
+                         (MAX_TERMINAL_CONTRIBUTIONS, MAX_PROBE_EVENTS))
+        write_json(path, {'version': 1, 'terminal_contributions': 2, 'probe_events': 2})
+        store = State(self.config)
+        self.assertEqual((store.terminal_limit, store.event_limit), (2, 2))
+        state = {'contributions': {}, 'receipts': {}, 'events': {}}
+        for index in range(4):
+            identity = f'{index:064x}'
+            state['contributions'][identity] = {'status': 'expired', 'created_at': index,
+                                                'claim': None, 'last_event': None}
+            state['receipts'][identity] = {'action': {}}
+            for event in range(4):
+                state['events'][f'{identity}-{event}'] = {
+                    'contribution': identity, 'status': 'success',
+                    'started_at': index, 'revision': event}
+        prune_terminal_contributions(state, store.terminal_limit)
+        self.assertEqual(len(state['contributions']), 2)
+        identity = next(iter(state['contributions']))
+        prune_probe_events(state, identity, store.event_limit)
+        self.assertEqual(
+            len([event for event in state['events'].values()
+                 if event['contribution'] == identity]), 2)
+        for value in ({'version': 1, 'terminal_contributions': 0, 'probe_events': 8},
+                      {'version': 1, 'terminal_contributions': 256, 'probe_events': 8193},
+                      {'version': 2, 'terminal_contributions': 256, 'probe_events': 8},
+                      {'version': 1, 'terminal_contributions': 256, 'probe_events': 8,
+                       'extra': 1}, []):
+            write_json(path, value)
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                State(self.config)
+        path.write_bytes(b'x' * 1025)
+        with self.assertRaises(ConfigError):
+            State(self.config)
+
     def test_intent_reservation_covers_maximum_terminal_event(self):
         from mizu.probes import _event
         from mizu.selection import INTENT_RESERVE_BYTES, MAX_BYTES, validate_event

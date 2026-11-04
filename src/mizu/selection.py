@@ -5,7 +5,7 @@ import copy
 import math
 import time
 
-from .errors import ConfigError, ModelFailure
+from .errors import ConfigError, Denied, LimitExceeded, ModelFailure
 from .fs import DIGEST, ID, canonical, digest, lock, read_json, text_preview, write_json
 
 MAX_BYTES = 1024 * 1024
@@ -13,6 +13,8 @@ MAX_ITEMS = 64
 MAX_STATE_ITEMS = 8192
 MAX_TERMINAL_CONTRIBUTIONS = 256
 MAX_PROBE_EVENTS = 8
+#: Bound on the optional data-dir selection retention policy file.
+SELECTION_POLICY_BYTES = 1024
 INTENT_RESERVE_BYTES = 512
 INTENT_TERMINAL_RESERVE_BYTES = 128
 #: Default per-rule retry attempts for on_error action="retry" (policy).
@@ -20,6 +22,24 @@ DEFAULT_ON_ERROR_RETRIES = 2
 #: Mechanism bound for per-rule on_error retries (no unbounded loops).
 MAX_ON_ERROR_RETRIES = 64
 UNKNOWN = object()
+
+
+def retention_policy(data):
+    """Read the optional data-dir selection retention policy; absence keeps defaults."""
+    path = data / 'selection' / 'policy.json'
+    try:
+        value = read_json(path, default=None, max_bytes=SELECTION_POLICY_BYTES)
+    except (OSError, ValueError, Denied, LimitExceeded) as exc:
+        raise ConfigError('Unreadable selection retention policy') from exc
+    if value is None:
+        return MAX_TERMINAL_CONTRIBUTIONS, MAX_PROBE_EVENTS
+    if (not isinstance(value, dict)
+            or set(value) != {'version', 'terminal_contributions', 'probe_events'}
+            or type(value['version']) is not int or value['version'] != 1
+            or any(type(value[k]) is not int or not 1 <= value[k] <= MAX_STATE_ITEMS
+                   for k in ('terminal_contributions', 'probe_events'))):
+        raise ConfigError('Invalid selection retention policy')
+    return value['terminal_contributions'], value['probe_events']
 
 #: Default bounds for classifier work inputs (operator policy may override
 #: per classifier through its `inputs` table; 0 disables that input).
@@ -311,6 +331,7 @@ class State:
         self.config = config
         self.root = config.data / 'selection'
         self.path = self.root / 'state.json'
+        self.terminal_limit, self.event_limit = retention_policy(config.data)
 
     def read(self):
         empty = {'version': 2, 'observations': {}, 'blocks': {}, 'history': {},
@@ -389,7 +410,7 @@ class State:
             raise ConfigError('Unreadable or corrupt selection state') from exc
 
     def save(self, state):
-        prune_terminal_contributions(state)
+        prune_terminal_contributions(state, self.terminal_limit)
         if any(len(state[key]) > MAX_STATE_ITEMS for key in
                ('observations', 'blocks', 'history', 'contributions', 'receipts', 'events')):
             raise ConfigError('Selection state table exceeds 8192 entries')
@@ -563,7 +584,7 @@ class State:
                     raise ConfigError('Probe terminal evidence exceeds its intent reservation')
                 state['events'][claim] = event
                 c['last_event'] = claim
-                prune_probe_events(state, identity)
+                prune_probe_events(state, identity, self.event_limit)
                 self.save_or_close(state, previous)
                 return True
             e = state['events'].get(claim)
@@ -579,7 +600,7 @@ class State:
                 c['status'] = 'expired'
             c.update(claim=None, last_event=claim, revision=revision + 1,
                      next_probe_at=at + c['probe_seconds'], reason=reason)
-            prune_probe_events(state, identity)
+            prune_probe_events(state, identity, self.event_limit)
             self.save_or_close(state, previous)
             return True
 
@@ -677,8 +698,8 @@ def terminal_intent(event, updates):
     return updated
 
 
-def prune_probe_events(state, identity):
-    """Keep the latest eight events, without deleting the active or visible result."""
+def prune_probe_events(state, identity, limit=MAX_PROBE_EVENTS):
+    """Keep the latest ``limit`` events, without deleting the active or visible result."""
     contribution = state['contributions'].get(identity)
     if not contribution:
         return
@@ -688,16 +709,16 @@ def prune_probe_events(state, identity):
     protected.update(key for key, event in events if event['status'] == 'intent')
     removable = sorted((event['started_at'], event['revision'], key) for key, event in events
                        if event['status'] != 'intent' and key not in protected)
-    excess = max(0, len(events) - MAX_PROBE_EVENTS)
+    excess = max(0, len(events) - limit)
     for _, _, key in removable[:excess]:
         state['events'].pop(key, None)
 
 
-def prune_terminal_contributions(state):
-    """Retain only the 256 newest terminal probe obligations and their evidence."""
+def prune_terminal_contributions(state, limit=MAX_TERMINAL_CONTRIBUTIONS):
+    """Retain only the ``limit`` newest terminal probe obligations and their evidence."""
     terminal = sorted((c['created_at'], identity) for identity, c in state['contributions'].items()
                       if c['status'] in ('recovered', 'expired'))
-    for _, identity in terminal[:-MAX_TERMINAL_CONTRIBUTIONS]:
+    for _, identity in terminal[:-limit]:
         state['contributions'].pop(identity, None)
         state['receipts'].pop(identity, None)
         for event_id in [key for key, event in state['events'].items()

@@ -65,9 +65,9 @@ retry caps, continuation chain and pointer/run reads, ADR-042 host-relative
 startup floor/multiplier/ceiling and probe/record caps, the ADR-006/ADR-013
 paid smoke wall cap, and the recovery-probe execution ceilings. Selection
 retention is the exception: `MAX_TERMINAL_CONTRIBUTIONS` and
-`MAX_PROBE_EVENTS` are `policy`, because the shared data-dir state has no
-per-project owner and the counts depend on history; the current values remain
-the only supported ones until a data-dir-level setting is designed. The
+`MAX_PROBE_EVENTS` are `configured policy` defaults for the optional
+data-dir `selection/policy.json`; absence keeps 256/8 and malformed values
+refuse selection. The
 selection module's `DEFAULT_ON_ERROR_RETRIES` and `DEFAULT_CLASSIFIER_INPUTS`
 are configured schema defaults declared separately; the per-rule and
 per-classifier tables are their owning configuration. Every current
@@ -372,13 +372,13 @@ DECLARATIONS = {
             '8192', 'safety',
             'selection / per-table stored-state entry cap'),
         'MAX_TERMINAL_CONTRIBUTIONS': (
-            '256', 'policy',
-            'selection / shared data-dir terminal probe-evidence retention; history-dependent '
-            'budget, current value only until a data-dir-level setting exists'),
+            '256', 'configured policy',
+            'selection / data-dir policy default for terminal probe-evidence retention'),
         'MAX_PROBE_EVENTS': (
-            '8', 'policy',
-            'selection / shared per-contribution probe-event retention; history-dependent '
-            'budget and replay contract, current value only until a data-dir-level setting exists'),
+            '8', 'configured policy',
+            'selection / data-dir policy default for per-contribution probe-event retention'),
+        'SELECTION_POLICY_BYTES': (
+            '1024', 'safety', 'selection / bounded data-dir retention policy read'),
         'DEFAULT_ON_ERROR_RETRIES': (
             '2', 'configured policy',
             'selection / per-rule on_error retry default; rule field retries 0..64, '
