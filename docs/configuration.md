@@ -456,7 +456,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `output_bytes` | Maximum captured stdout/stderr per command |
 | `file_bytes` | Maximum complete-file byte size admitted by `read` and retained-evidence records; default 8 MiB. The `started.json` authorization record is additionally capped at 64 KiB. Admitted files are paged in 8,192-character responses, with `content_id` verification across pages. The same bound limits one captured file: a workspace file above it refuses a writable role's `finish` and names the path and the size, so the writer can remove or ignore it and finish again |
 | `snapshot_bytes`, `snapshot_files` | Total visible snapshot size and file-count bounds; a workspace above either bound refuses the finish and names the path, the size or the count that tripped it. The per-file bound is `file_bytes` above |
-| `history_index` | Maximum published snapshot IDs retained in the active immutable history generation and parent-edge bound for merge dependencies (8–1,000,000); older unreferenced manifests follow `snapshot_retention_days` or manual storage reclaim |
+| `history_index` | Maximum published snapshot IDs retained in the active immutable history generation and parent-edge bound for merge dependencies, host supersession and descendant CI waits (8–1,000,000); older unreferenced manifests follow `snapshot_retention_days` or manual storage reclaim |
 | `prompt_snapshots` | Number of recent anchored snapshot summaries offered to prompts (1–64) |
 | `role_state_bytes` | Maximum canonical JSON bytes of a new replacement role-owned current research state record (1,024–65,536; default 4,096); existing records remain readable up to the supported 65,536-byte ceiling |
 | `role_state_prompt_bytes` | Maximum bytes of a role's own research state injected into its prompt (1–65,536; default 4,096); over-bound records inject status/generation/sizes only |
@@ -1965,6 +1965,7 @@ refresh and the best-effort daemon periodic fetch.
 | `max_bytes` | `524288` | Maximum adapter request/response payload, 512 KiB (1–16,777,216) |
 | `diagnostic_bytes` | `2048` | Maximum stderr tail shown on a normally exited nonzero adapter call (0–8192; `0` disables); labelled `external-untrusted` and model-visible |
 | `ci_branch` | `""` | CI/reporting branch exposed only to `vcs_read` roles and included in the default CI wake set when nonempty |
+| `ci_wait_descendants` | `true` | Strict boolean: snapshot-bound `publication_ci` waits may observe retained strict descendants through at most `limits.history_index` immutable parent edges; `false` keeps exact-only matching. Existing receipt-pinned `ci` waits are unchanged; see [CI waits](scheduling.md#exact-sha-work-item-ci-waits) |
 | `ci_wake_extra_branches` | `[]` | Add up to 64 valid branch names to the CI wake set; deduplicated with `ci_branch`; empty preserves existing default behavior |
 | `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new receipt-bound waits |
 | `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations and explicit exact-proposal merge waits; requires `poll_enabled = true` and a configured adapter; does not change CI polling |

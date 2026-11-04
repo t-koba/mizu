@@ -589,8 +589,8 @@ class CiWaitTests(CiWaitFixture):
         result, reader = self.poll()
         reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
         self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
-        self.assertEqual(len(result["errors"]), 1)
-        self.assertIn(bad["id"], result["errors"][0])
+        self.assertEqual(result["errors"], ["denied"])
+        self.assertNotIn(bad["id"], json.dumps(result))
         fresh_context = self.delivery_context()
         self.assertEqual([event["work_item"] for event in fresh_context.wait_events], [third["id"]])
         self.acknowledge_delivery(fresh_context)
@@ -880,3 +880,281 @@ class PublicationCiWaitTests(CiWaitFixture):
         reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
         self.assertEqual([event["work_item"] for event in ci_waits.pending(self.store, "worker")],
                          [old["id"]])
+
+    def descendant(self, label, *, parent=None, publish=True, verified=False):
+        snapshots = self.project.snapshots
+        (self.project.workspace / 'descendant.txt').write_text(label)
+        captured = snapshots.capture_files(self.project.workspace)
+        verification = ({'passed': True, 'code_digest': captured['code_digest'], 'run': 'offline'}
+                        if verified else None)
+        snap = snapshots.create(captured, goal='Goal', state='State', run='offline',
+                                outcome='wait', summary=label, verification=verification,
+                                **({'parent': parent} if parent else {}))
+        if publish:
+            snapshots.publish(snap)
+        return snap
+
+    def publish_descendant(self, snapshot, sha=SHA, **kwargs):
+        return self.receipt_for(code_digest=snapshot['code_digest'], sha=sha, **kwargs)
+
+    def poll_until_observed(self, reader=None, *, ticks=8):
+        for _ in range(ticks):
+            result, adapter = self.poll(reader=reader)
+            self.assertLessEqual(adapter.call_count if isinstance(adapter, Mock) else 0,
+                                 self.config.vcs['poll_max_branches'])
+            if result['observed']:
+                return result
+        self.fail('No terminal candidate observed within bounded rotation')
+
+    def test_descendant_evidence_is_frozen_and_completion_requires_explicit_binding(self):
+        item = self.block()
+        child = self.descendant('verified child', verified=True)
+        receipt = self.publish_descendant(child)
+        self.poll_until_observed()
+        context = self.delivery_context()
+        event = context.wait_events[0]
+        self.assertEqual(event['observed_snapshot'],
+                         {'snapshot_id': child['id'], 'code_digest': child['code_digest']})
+        self.assertEqual(event['snapshot_id'], item['wait']['snapshot_id'])
+        self.assertEqual(event['code_digest'], item['wait']['code_digest'])
+        self.assertEqual(event['publication_id'], receipt['publication_id'])
+        self.assertEqual(event['conclusion'], 'success')
+        # A later completed publication cannot redirect source validation/ack.
+        later = self.descendant('later')
+        self.publish_descendant(later, sha='e' * 40, source='e' * 40)
+        with patch.object(self.project.snapshots, '_history_ids', return_value=[later['id']]):
+            self.assertEqual(self.delivery_context().wait_events, context.wait_events)
+            self.acknowledge_delivery(context)
+        self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
+        self.assertEqual(self.store.get(item['id']), item)
+        doing = self.store.transition(item['id'], expected_rev=item['rev'], status='doing', actor='worker')
+        with self.assertRaisesRegex(Denied, 'prior exact snapshot'):
+            self.store.transition(item['id'], expected_rev=doing['rev'], status='done', actor='worker',
+                                  snapshot_id=child['id'])
+        bound = self.store.transition(item['id'], expected_rev=doing['rev'], status='doing', actor='worker',
+                                      snapshot_id=child['id'])
+        self.assertEqual(bound['scope'], doing['scope'])
+        self.assertEqual(bound['delivery']['snapshot_id'], child['id'])
+        done = self.store.transition(item['id'], expected_rev=bound['rev'], status='done', actor='worker',
+                                     snapshot_id=child['id'])
+        self.assertEqual(done['status'], 'done')
+
+    def test_disabled_descendants_preserve_exact_resolution_and_evidence_shape(self):
+        item = self.block()
+        child = self.descendant('child')
+        self.publish_descendant(child)
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'ci_wait_descendants': False})
+        result, adapter = self.poll()
+        self.assertEqual(result['observed'], 0)
+        adapter.assert_not_called()
+        self.receipt_for()
+        self.poll_until_observed()
+        event = self.delivery_context().wait_events[0]
+        self.assertNotIn('observed_snapshot', event)
+        self.assertEqual(event['snapshot_id'], item['wait']['snapshot_id'])
+        self.assertEqual(set(ci_waits._read(self.store, item)), {
+            'kind', 'trust', 'work_item', 'rev', 'holder', 'publication_id', 'branch', 'sha',
+            'snapshot_id', 'code_digest', 'wait_digest', 'checks', 'conclusion', 'observed_at'})
+
+    def test_descendant_ancestry_is_strict_complete_and_edge_bounded(self):
+        item = self.block()
+        one = self.descendant('one')
+        two = self.descendant('two')
+        three = self.descendant('three')
+        for snap in (one, two, three):
+            self.publish_descendant(snap, source=snap['id'][:40])
+        with patch.object(self.project.snapshots, 'history_index', 2):
+            resolved = ci_waits._candidate_wait(self.store, item['wait'], two['id'])
+            self.assertEqual(resolved['observed_snapshot']['snapshot_id'], two['id'])
+            for sid in (three['id'], self.snapshot['id']):
+                with self.subTest(sid=sid), self.assertRaises(Denied):
+                    ci_waits._candidate_wait(self.store, item['wait'], sid)
+            with patch.object(self.project.snapshots, '_history_ids', return_value=[three['id']]):
+                result, adapter = self.poll()
+                self.assertEqual(result['observed'], 0)
+                adapter.assert_not_called()
+            with patch.object(self.project.snapshots, '_history_ids', return_value=[two['id']]):
+                self.poll_until_observed()
+            self.assertEqual(self.delivery_context().wait_events[0]['observed_snapshot']['snapshot_id'], two['id'])
+        # Losing a middle manifest is not permission to infer ancestry from history order.
+        path = self.project.snapshots.root / 'snapshots' / (one['id'] + '.json')
+        raw = path.read_bytes()
+        path.unlink()
+        with self.assertRaisesRegex(Denied, 'not found'):
+            ci_waits._candidate_wait(self.store, item['wait'], two['id'])
+        path.write_bytes(raw)
+        # A retained-looking legacy root cannot prove the edge, nor can a sibling.
+        legacy = {k: v for k, v in three.items() if k != 'parent'}
+        from mizu.fs import digest
+        legacy['id'] = digest(canonical({k: v for k, v in legacy.items() if k != 'id'}))
+        write_json(self.project.snapshots.root / 'snapshots' / (legacy['id'] + '.json'), legacy)
+        with self.assertRaisesRegex(Denied, 'not a newer descendant'):
+            ci_waits._candidate_wait(self.store, item['wait'], legacy['id'])
+        sibling = self.descendant('sibling', parent=self.snapshot['id'], publish=False)
+        child_wait = {**item['wait'], 'snapshot_id': one['id'], 'code_digest': one['code_digest']}
+        with self.assertRaisesRegex(Denied, 'not a newer descendant'):
+            ci_waits._candidate_wait(self.store, child_wait, sibling['id'])
+        with patch.object(self.project.snapshots, '_history_ids', return_value=[
+                self.snapshot['id'], sibling['id'], legacy['id'], one['id'], two['id']]):
+            # Neither retained-looking siblings/legacy roots nor real ancestors
+            # displace valid status targets. Order alone grants no ancestry.
+            candidates = list(ci_waits._candidates(self.store, {**item, 'wait': child_wait}, True))
+            self.assertEqual(candidates, [(one['id'], None), (two['id'], two['id'])])
+
+    def test_candidate_discovery_reads_linear_manifests_in_any_history_order(self):
+        item = self.block()
+        snapshots = self.project.snapshots
+        children = [self.descendant(str(i))['id'] for i in range(64)]
+        retained = snapshots._history_ids()
+        self.assertTrue(set(children).issubset(retained))
+        orders = [retained, list(reversed(retained)), retained[::2] + retained[1::2]]
+        for history in orders:
+            with self.subTest(history=history[:2]), patch.object(
+                    snapshots, '_history_ids', return_value=history), patch.object(
+                    snapshots, 'validate_manifest', wraps=snapshots.validate_manifest) as reads:
+                candidates = list(ci_waits._candidates(self.store, item, True))
+            self.assertEqual(candidates[0], (self.snapshot['id'], None))
+            self.assertEqual({sid for sid, candidate in candidates if candidate}, set(children))
+            self.assertEqual(len(candidates), 65)
+            self.assertLessEqual(reads.call_count, len(children) + 1)
+
+    def test_candidate_memo_preserves_bounds_branches_duplicates_and_revalidates(self):
+        item = self.block()
+        snapshots = self.project.snapshots
+        one, two, three, four = [self.descendant(str(i)) for i in range(4)]
+        # The first walk runs out of edges. It must not poison the still-eligible
+        # older descendants whose links that walk already validated.
+        with patch.object(snapshots, 'history_index', 3), patch.object(
+                snapshots, '_history_ids', return_value=[four['id'], three['id'], two['id']]):
+            self.assertEqual(list(ci_waits._candidates(self.store, item, True)), [
+                (self.snapshot['id'], None), (three['id'], three['id']), (two['id'], two['id'])])
+        sibling = self.descendant('sibling', parent=self.snapshot['id'], publish=False)
+        child_wait = {**item, 'wait': {**item['wait'], 'snapshot_id': one['id'],
+                                    'code_digest': one['code_digest']}}
+        history = [four['id'], sibling['id'], two['id'], three['id'], two['id'], one['id']]
+        path = snapshots.root / 'snapshots' / (two['id'] + '.json')
+        raw = path.read_bytes()
+        for corrupt in (False, True):
+            if corrupt:
+                write_json(path, {**two, 'parent': self.snapshot['id']})
+            else:
+                path.unlink()
+            with self.subTest(corrupt=corrupt), patch.object(snapshots, '_history_ids', return_value=history):
+                self.assertEqual(list(ci_waits._candidates(self.store, child_wait, True)), [(one['id'], None)])
+                # An unrelated valid branch still qualifies for the original wait.
+                self.assertEqual(list(ci_waits._candidates(self.store, item, True)), [
+                    (self.snapshot['id'], None), (sibling['id'], sibling['id']), (one['id'], one['id'])])
+            path.write_bytes(raw)
+            # No cache survives a discovery call; repaired links are read again.
+            with patch.object(snapshots, '_history_ids', return_value=history):
+                self.assertEqual(list(ci_waits._candidates(self.store, child_wait, True)), [
+                    (one['id'], None), (four['id'], four['id']),
+                    (two['id'], two['id']), (three['id'], three['id'])])
+
+    def test_newer_pending_candidate_does_not_starve_older_red_candidate(self):
+        item = self.block()
+        older = self.descendant('older')
+        newer = self.descendant('newer')
+        self.publish_descendant(older)
+        self.publish_descendant(newer, sha='e' * 40, source='e' * 40)
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'poll_max_branches': 1})
+        self.state['ci_wait_cursor'] = f"{item['id']}:{item['rev']:020d}:{int(newer['id'], 16) - 1:064x}"
+        seen = []
+        def reader(settings, op, params):
+            seen.append(params)
+            return {'checks': self.rows('failure') if params['sha'] == SHA else []}
+        result, _ = self.poll(reader=reader)
+        self.assertEqual(result['observed'], 0)
+        self.assertEqual(seen, [{'branch': 'published', 'sha': 'e' * 40}])
+        self.poll_until_observed(reader)
+        event = self.delivery_context().wait_events[0]
+        self.assertEqual(event['observed_snapshot']['snapshot_id'], older['id'])
+        self.assertEqual(event['conclusion'], 'failure')
+        self.assertEqual(self.store.get(item['id']), item)
+        self.assertTrue(all(p['branch'] == 'published' for p in seen))
+
+    def test_ambiguous_descendant_is_isolated_and_status_still_requires_exact_complete_coverage(self):
+        item = self.block()
+        ambiguous = self.descendant('ambiguous')
+        self.publish_descendant(ambiguous, sha='a' * 40)
+        self.publish_descendant(ambiguous, sha='e' * 40, source='e' * 40)
+        healthy = self.descendant('healthy')
+        self.publish_descendant(healthy, branch='other', sha='f' * 40, source='f' * 40)
+        # Neither a wrong-branch receipt nor the ambiguous pair can query status.
+        for _ in range(2):
+            _, adapter = self.poll()
+            adapter.assert_not_called()
+        receipt = self.publish_descendant(healthy, source='1' * 40)
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'poll_max_branches': 4})
+        bad = [{'checks': self.rows()[:1]}, {'checks': self.rows(sha='e' * 40)},
+               {'checks': self.rows(), 'branch': 'other'}, {'checks': self.rows(), 'sha': 'e' * 40},
+               {'checks': self.rows(), 'complete': False}, {'checks': self.rows(), 'cursor': 'more'}]
+        for response in bad:
+            with self.subTest(response=response):
+                result, adapter = self.poll(reader=Mock(return_value=response))
+                self.assertEqual(result['observed'], 0)
+                adapter.assert_called_once_with(self.config.vcs, 'status', {'branch': 'published', 'sha': SHA})
+        self.poll_until_observed()
+        event = self.delivery_context().wait_events[0]
+        self.assertEqual(event['publication_id'], receipt['publication_id'])
+        self.assertEqual(event['observed_snapshot']['snapshot_id'], healthy['id'])
+        self.assertEqual(event['snapshot_id'], item['wait']['snapshot_id'])
+
+    def test_frozen_descendant_evidence_is_revalidated_for_delivery_and_ack(self):
+        item = self.block()
+        child = self.descendant('child')
+        receipt = self.publish_descendant(child)
+        self.poll_until_observed()
+        context = self.delivery_context()
+        original = ci_waits._read(self.store, item)
+        path = ci_waits._path(self.store, item)
+        for changes in ({'sha': 'e' * 40}, {'publication_id': 'e' * 64},
+                        {'observed_snapshot': {'snapshot_id': child['id'], 'code_digest': 'f' * 64}},
+                        {'observed_snapshot': {'snapshot_id': None, 'code_digest': child['code_digest']}}):
+            with self.subTest(changes=changes):
+                write_json(path, {**original, **changes})
+                self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
+                with self.assertRaises(Denied):
+                    self.acknowledge_delivery(context)
+        write_json(path, original)
+        manifest = self.project.snapshots.root / 'snapshots' / (child['id'] + '.json')
+        raw = manifest.read_bytes()
+        write_json(manifest, {**child, 'parent': None})  # invalid immutable identity
+        with self.assertRaisesRegex(Denied, 'integrity'):
+            self.acknowledge_delivery(context)
+        manifest.write_bytes(raw)
+        # New ambiguity for the frozen digest refuses ack, rather than selecting another descendant.
+        self.publish_descendant(child, source='e' * 40)
+        with self.assertRaisesRegex(Denied, 'unique'):
+            self.acknowledge_delivery(context)
+        self.assertEqual(ci_waits._read(self.store, item), original)
+        self.assertEqual(original['publication_id'], receipt['publication_id'])
+
+    def test_rotation_caps_calls_and_covers_item_revision_candidate_targets_after_errors(self):
+        self.receipt_for()
+        children = [self.descendant(str(i)) for i in range(3)]
+        for i, child in enumerate(children):
+            self.publish_descendant(child, source=str(i + 1) * 40, sha=str(i + 1) * 40)
+        items = [self.block(str(i)) for i in range(2)]
+        seen = []
+        def reader(settings, op, params):
+            seen.append(self.state['ci_wait_cursor'])
+            if len(seen) == 1:
+                raise Denied(f"/tmp/private/path for {items[0]['id']}: arbitrary adapter note")
+            return {'checks': []}
+        for _ in range(4):
+            before = len(seen)
+            result, _ = self.poll(reader=reader)
+            self.assertEqual(result['polled'], 2)
+            self.assertEqual(len(seen) - before, 2)
+            if before == 0:
+                self.assertEqual(result['errors'], ['denied'])
+                rendered = json.dumps(result)
+                self.assertNotIn(items[0]['id'], rendered)
+                self.assertNotIn('/tmp/private/path', rendered)
+                self.assertNotIn('arbitrary adapter note', rendered)
+        self.assertEqual(len(set(seen)), 8)
+        self.assertEqual(set(seen), {f"{item['id']}:{item['rev']:020d}:{snap['id']}"
+                                    for item in items for snap in [self.snapshot, *children]})
+        self.assertEqual(set(self.state), {'last_ci_wait_poll', 'ci_wait_cursor'})
+        self.assertEqual(ci_waits.pending(self.store, 'worker'), [])

@@ -41,3 +41,15 @@ class PublicationConfigTests(Fixture):
         self.file.write_text('include = ["publication.toml"]\n' + original)
         self.assertEqual(load(self.file).publication,
                          PublicationPolicy(source_commit_timeout_seconds=13))
+
+    def test_ci_wait_descendants_is_a_strict_default_true_boolean(self):
+        self.assertIs(self.config.vcs['ci_wait_descendants'], True)
+        original = self.file.read_text()
+        for value in ('true', 'false', '0', '1', '"false"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace('\n[vcs]\n', '\n[vcs]\nci_wait_descendants = ' + value + '\n'))
+                if value in ('true', 'false'):
+                    self.assertIs(load(self.file).vcs['ci_wait_descendants'], value == 'true')
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'vcs.ci_wait_descendants'):
+                        load(self.file)

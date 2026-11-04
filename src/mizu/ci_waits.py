@@ -1,6 +1,6 @@
 """Snapshot- or receipt-pinned work-item CI waits; host-only observation, never publication.
 
-At most poll_max_branches adapter calls per due tick, rotating by item ID.
+At most poll_max_branches adapter calls per due tick, rotating by item/revision/candidate snapshot.
 Ledger scans stream with O(limit) retained rows. Evidence is create-only, bounded
 and no-follow; exact digest acknowledgements follow successful run completion.
 All decisions still belong to the holder: neither observation nor ack transitions
@@ -71,21 +71,32 @@ def normalize_publication(value, *, snapshots, branch=None, stored=False):
     return result
 
 
-def _resolved(store, wait):
+def _resolved(store, wait, observed_snapshot=None):
     if wait["kind"] == "ci":
         return wait
+    target = wait
+    if observed_snapshot is not None:
+        if (not isinstance(observed_snapshot, dict)
+                or set(observed_snapshot) != {"snapshot_id", "code_digest"}):
+            raise Denied("Invalid observed CI snapshot")
+        snapshot = store.snapshots.require_descendant(
+            wait["snapshot_id"], observed_snapshot["snapshot_id"])
+        if snapshot["code_digest"] != observed_snapshot["code_digest"]:
+            raise Denied("Observed CI snapshot digest mismatch")
+        target = {**wait, **observed_snapshot}
     # The ordinary listing intentionally skips corrupt records. This consumer
     # needs complete evidence of uniqueness, so corruption refuses the scan.
-    page = Publication.list_receipts(store.root, code_digest=wait["code_digest"],
+    page = Publication.list_receipts(store.root, code_digest=target["code_digest"],
                                      branch=wait["branch"], limit=2, strict=True,
                                      policy=store.publication_evidence)
     if (page["truncated"] or page["scan_stopped"] or page["total"] != 1
             or len(page["publications"]) != 1):
         return None
     receipt = Publication.read_receipt(store.root, page["publications"][0]["publication_id"])
-    if receipt["code_digest"] != wait["code_digest"] or receipt["branch"] != wait["branch"]:
+    if receipt["code_digest"] != target["code_digest"] or receipt["branch"] != wait["branch"]:
         return None
-    return {**wait, "publication_id": receipt["publication_id"], "sha": receipt["published_sha"]}
+    return {**wait, "publication_id": receipt["publication_id"], "sha": receipt["published_sha"],
+            **({"observed_snapshot": observed_snapshot} if observed_snapshot is not None else {})}
 
 
 def _complete_status(wait, data):
@@ -240,7 +251,7 @@ def _evidence(store, item, *, sync=True):
         return outcome
     if outcome is not None:
         raise Denied("Conflicting publication terminal evidence")
-    wait = _resolved(store, item["wait"])
+    wait = _resolved(store, item["wait"], record.get("observed_snapshot"))
     if wait is None:
         raise Denied("CI evidence has no unique matching publication")
     binding = ("publication_id", "branch", "sha")
@@ -250,6 +261,9 @@ def _evidence(store, item, *, sync=True):
               "wait_digest", "checks", "conclusion", "observed_at"}
     if wait["kind"] == "publication_ci":
         fields |= {"snapshot_id", "code_digest"}
+    if "observed_snapshot" in wait:
+        fields.add("observed_snapshot")
+        binding += ("observed_snapshot",)
     if (set(record) != fields or record["kind"] != "ci"
             or record["trust"] != "external-untrusted"
             or record["work_item"] != item["id"] or record["rev"] != item["rev"]
@@ -440,6 +454,50 @@ def complete(context, finished):
                            manifest=context.ci_wait_manifest)
 
 
+def _candidates(store, item, descendants):
+    wait = item["wait"]
+    if wait["kind"] == "ci":
+        yield "", None
+        return
+    yield wait["snapshot_id"], None
+    if descendants:
+        # History order is not ancestry. Ineligible/corrupt manifests cannot
+        # consume the status window or prevent another candidate's discovery.
+        try:
+            distance = store.snapshots._descendant_distance_from(wait["snapshot_id"])
+        except (Denied, LimitExceeded, OSError, ValueError):
+            return
+        seen = {wait["snapshot_id"]}
+        for sid in store.snapshots._history_ids()[-store.snapshots.history_index:]:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            try:
+                distance(sid)
+            except (Denied, LimitExceeded, OSError, ValueError):
+                continue
+            yield sid, sid
+
+
+def _candidate_wait(store, wait, candidate):
+    observed = None
+    if candidate is not None:
+        snapshot = store.snapshots.get(candidate)
+        observed = {"snapshot_id": snapshot["id"], "code_digest": snapshot["code_digest"]}
+    return _resolved(store, wait, observed)
+
+
+def _poll_error_code(exc):
+    """Return a bounded diagnostic class, never exception text or an item ID."""
+    if isinstance(exc, LimitExceeded):
+        return "limit"
+    if isinstance(exc, Denied):
+        return "denied"
+    if isinstance(exc, OSError):
+        return "io"
+    return "invalid"
+
+
 def poll(config, project, state, *, now, interval, reader=None):
     from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                                   vcs_poll_max_branches, vcs_poll_status_timeout)
@@ -464,23 +522,25 @@ def poll(config, project, state, *, now, interval, reader=None):
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
                 # Never overwrite invalid immutable evidence or spend adapter calls on it.
                 if len(errors) < limit:
-                    errors.append(f"{item['id']}: {exc}"[:512])
+                    errors.append(_poll_error_code(exc))
                 continue
-            bucket = after if item["id"] > cursor else before
-            # IDs are fixed lowercase hex: a negated integer is a max-heap key.
-            key = -int(item["id"][3:], 16)
-            entry = (key, item)
-            if len(bucket) < limit:
-                heapq.heappush(bucket, entry)
-            elif key > bucket[0][0]:
-                heapq.heapreplace(bucket, entry)
-        targets = sorted(after, reverse=True) + sorted(before, reverse=True)
-        targets = [entry[1] for entry in targets[:limit]]
+            for sid, candidate in _candidates(project.work_items, item,
+                    config.vcs.get("ci_wait_descendants", True)):
+                token = f"{item['id']}:{item['rev']:020d}:{sid}"
+                bucket = after if token > cursor else before
+                # Negated numeric identity tuple gives a bounded max-heap.
+                key = (-int(item["id"][3:], 16), -item["rev"], -int(sid or "0", 16))
+                entry = (key, token, item, candidate)
+                if len(bucket) < limit:
+                    heapq.heappush(bucket, entry)
+                elif key > bucket[0][0]:
+                    heapq.heapreplace(bucket, entry)
+        targets = (sorted(after, reverse=True) + sorted(before, reverse=True))[:limit]
         observed = 0
-        for item in targets:
-            state["ci_wait_cursor"] = item["id"]  # advance even if the adapter fails
+        for _, token, item, candidate in targets:
+            state["ci_wait_cursor"] = token  # advance even if the adapter fails
             try:
-                wait = _resolved(project.work_items, item["wait"])
+                wait = _candidate_wait(project.work_items, item["wait"], candidate)
                 if wait is None:
                     continue
                 # Preserve mismatched rows for fail-closed declared-set evaluation.
@@ -500,11 +560,13 @@ def poll(config, project, state, *, now, interval, reader=None):
                         project.work_items._history_revisions(item["id"], recover=False))
                     if current != item or _evidence(project.work_items, current) is not None:
                         continue
-                    if _resolved(project.work_items, current["wait"]) != wait:
+                    if _candidate_wait(project.work_items, current["wait"], candidate) != wait:
                         continue
                     binding = ("publication_id", "branch", "sha")
                     if wait["kind"] == "publication_ci":
                         binding += ("snapshot_id", "code_digest")
+                    if "observed_snapshot" in wait:
+                        binding += ("observed_snapshot",)
                     record = {"kind": "ci", "trust": "external-untrusted",
                               "work_item": item["id"], "rev": item["rev"],
                               "holder": item["holder"],
@@ -529,8 +591,8 @@ def poll(config, project, state, *, now, interval, reader=None):
                         os.utime(directory, None, follow_symlinks=False)
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
                 if len(errors) < limit:
-                    errors.append(f"{item['id']}: {exc}"[:512])
+                    errors.append(_poll_error_code(exc))
         return {"event": "ci_wait_poll", "ok": not errors, "polled": len(targets),
                 "observed": observed, "errors": errors}
     except (Denied, LimitExceeded, OSError, ValueError) as exc:
-        return {"event": "ci_wait_poll", "ok": False, "error": str(exc)[:512]}
+        return {"event": "ci_wait_poll", "ok": False, "error": _poll_error_code(exc)}

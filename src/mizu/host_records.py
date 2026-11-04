@@ -89,19 +89,8 @@ def _validate(snapshots, policy, subject, payload):
             if not isinstance(value, str) or not value.strip() or len(value) > spec['maximum']:
                 raise Denied('Host record text is blank or exceeds declared bound')
         else:
-            replacement = _snapshot(snapshots, value)
-            if value == subject:
-                raise Denied('Replacement must be a newer snapshot')
-            # Bound ancestry work by the existing configured snapshot history budget.
-            for _ in range(snapshots.history_index):
-                parent = replacement.get('parent')
-                if parent == subject['snapshot_id']:
-                    break
-                if parent is None:
-                    raise Denied('Replacement is not a newer descendant')
-                replacement = snapshots.get(parent)
-            else:
-                raise Denied('Replacement ancestry is incomplete within history budget')
+            _snapshot(snapshots, value)
+            snapshots.require_descendant(subject['snapshot_id'], value['snapshot_id'])
 
 
 def store(root, snapshots, policies):

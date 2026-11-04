@@ -654,6 +654,54 @@ class Snapshots:
                 f"Snapshot byte limit exceeded: {total} > {self.max_bytes} bytes")
         return total
 
+    def _descendant_distance_from(self, ancestor_id: str):
+        """Return a call-local checker sharing validated parent links/distances.
+
+        Only exact immutable links prove ancestry. Cache parent IDs, not full
+        manifests; an unfinished bounded walk is not proof of non-ancestry.
+        Never retain this checker across discovery calls or evidence validation.
+        """
+        if not isinstance(ancestor_id, str) or not DIGEST.fullmatch(ancestor_id):
+            raise Denied("Ancestry requires exact snapshot IDs")
+        self.get(ancestor_id)
+        parents, distances = {}, {ancestor_id: 0}
+
+        def distance(descendant_id):
+            if not isinstance(descendant_id, str) or not DIGEST.fullmatch(descendant_id):
+                raise Denied("Ancestry requires exact snapshot IDs")
+            if ancestor_id == descendant_id:
+                raise Denied("Replacement must be a newer snapshot")
+            current, path = descendant_id, []
+            while current is not None and current not in distances:
+                if len(path) >= self.history_index:
+                    raise Denied("Replacement ancestry is incomplete within history budget")
+                if current not in parents:
+                    parents[current] = self.get(current).get("parent")
+                path.append(current)
+                current = parents[current]
+            steps = distances.get(current)
+            for sid in reversed(path):
+                steps = None if steps is None else steps + 1
+                distances[sid] = steps
+            steps = distances[descendant_id]
+            if steps is None:
+                raise Denied("Replacement is not a newer descendant")
+            if steps > self.history_index:
+                raise Denied("Replacement ancestry is incomplete within history budget")
+            return steps
+
+        return distance
+
+    def require_descendant(self, ancestor_id: str, descendant_id: str) -> dict:
+        """Validate a strict immutable parent chain within history_index edges.
+
+        History order is not ancestry. Missing/legacy parents and an overlong
+        chain refuse the claim, even if the endpoint is retained or current.
+        Return the validated descendant manifest, independent of moving history.
+        """
+        self._descendant_distance_from(ancestor_id)(descendant_id)
+        return self.get(descendant_id)
+
     def get(self, snapshot_id: str | None = None) -> dict:
         if snapshot_id is None:
             pointer = read_json(self.root / "current.json")

@@ -394,13 +394,20 @@ existing publication lock through the work-item append. Caller-supplied digest,
 branch, SHA or publication ID overrides are refused. Stored reads revalidate the
 immutable snapshot/digest and pinned branch, not current configuration or rolling
 history membership. A later snapshot or branch-head change never rebases the wait.
-The wait follows its pinned `code_digest` and `branch`; without a unique matching
-receipt it stays pending, and only a declared host publisher supersession or
-refusal is terminal.
+With `vcs.ci_wait_descendants = true` (the default), the host may also
+observe a retained published snapshot that is a **strict descendant** of the
+pinned snapshot. It validates the exact immutable manifests and every `parent`
+link, allowing at most `limits.history_index` edges, using the same ancestry
+contract as host publisher supersession. History order alone proves nothing;
+missing/legacy parents, incomplete chains and over-budget ancestry cannot
+resolve a wait. `false` preserves exact-only observation. Receipt-pinned `ci`
+waits do not use descendants. Neither policy nor a later publication changes the
+original wait, its branch, or its delivery binding.
 
-The existing host CI-wait poll searches local completed publication receipts for
-that exact code digest and branch, using the bounded receipt listing in strict
-mode. Exactly one validated match is required: none, multiple matches (even at
+For each exact or descendant target, the host CI-wait poll searches local
+completed publication receipts for that snapshot's whole code digest and the
+wait's immutable branch, using the bounded receipt listing in strict mode.
+Exactly one validated match is required: none, multiple matches (even at
 the same SHA), truncated/scan-stopped enumeration, unsafe or corrupt candidate
 records remain pending. Ordinary publication listings still skip invalid records;
 this uniqueness consumer cannot use a skipped record as proof of absence. Both
@@ -499,10 +506,14 @@ observe new results; disabling polling later leaves existing waits unresolved
 until polling resumes (already retained evidence remains deliverable).
 
 On each due VCS polling tick, the host observes at most `poll_max_branches`
-work-item waits, in addition to the existing branch/proposal polling budgets.
-It uses `poll_interval_seconds` and `poll_status_timeout_seconds`, rotates by
-item ID with a durable cursor in `vcs-poll.json`, and advances even on adapter
-failure. Selection scans the ledger with O(limit) retained rows, not an
+work-item CI status targets, in addition to the existing branch/proposal polling
+budgets. It uses `poll_interval_seconds` and `poll_status_timeout_seconds`,
+rotating over logical `(item ID, blocked revision, candidate snapshot ID)` targets
+with one durable cursor in `vcs-poll.json`. Exact and retained descendant targets
+share this budget; there is no newest/nearest-only selection. Pending, unknown,
+ambiguous or failed targets advance the cursor too, so one unresolved publication
+cannot starve another. Selection streams the ledger with O(limit) retained rows
+and discovers candidates within the configured snapshot history, not an
 unbounded queue. Adapter status responses retain their existing 1024-row and
 byte limits. Every query names the receipt's **recorded branch and exact
 published SHA**; a moved branch never substitutes its new head.
@@ -519,15 +530,25 @@ create-only record under `evidence/ci-waits/<item>.<rev>.result.json` (128 KiB,
 bounded no-follow reads). It binds the item ID, blocked revision, holder,
 publication ID, branch, SHA, normalized wait digest, declared check states and
 available run IDs; `publication_ci` results also bind the snapshot ID and code
-digest. The result retains `kind:"ci"` and the same shared event/ack route. It
-includes conclusion and observation time. When the provider reports
+digest of the original pinned wait. Descendant results additionally carry
+`observed_snapshot:{snapshot_id,code_digest}` for the exact observed descendant;
+the publication ID, branch and SHA name that descendant's unique receipt. Exact
+results keep their existing field shape. Delivery and explicit acknowledgement
+revalidate this **frozen** manifest, ancestry, receipt uniqueness and exact-SHA
+check binding, never reselecting a later descendant or querying a moving head.
+Already retained evidence remains readable after history rolls forward or the
+policy is disabled. The result retains `kind:"ci"` and the same shared event/ack
+route. It includes conclusion and observation time. When the provider reports
 them, each declared check also keeps its start, its completion and the derived
 job time: the product recomputes that job time from the two instants and never
 takes it from the provider, and the stored record fails closed on the same
 rules as the status row. Facts remain
 external-untrusted. Receipt files are never modified and polling never
 publishes. Both green and red **only wake**: neither reopens, completes, drops,
-nor otherwise transitions the item.
+nor otherwise transitions the item. Before `done`, the holder must explicitly
+record a same-scope `doing` → `doing` delivery binding to the observed descendant
+and satisfy the normal exact snapshot acceptance checks; CI evidence alone is
+not completion proof.
 
 Only the matching current blocked holder receives this evidence, in full and
 delta prompt `wait_events` and the run's `wait-events.json` (at most ten CI
