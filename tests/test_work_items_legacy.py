@@ -6,6 +6,7 @@ import os
 from unittest.mock import patch
 
 from support import Fixture
+from mizu import work_items as work_items_module
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
 
@@ -76,6 +77,28 @@ class LegacyWorkItemTests(Fixture):
             self.assertEqual(p.read_bytes(), content)
         with self.assertRaises(Denied):
             self.store.get(f"wi_{dropped}")
+
+    def test_backfill_legacy_sidecars_converges_across_bounded_calls(self):
+        if work_items_module.IS_WINDOWS:
+            self.skipTest("POSIX-only current-state sidecar cache")
+        item_ids = []
+        for _ in range(25):
+            event_id, _, _ = self.legacy()
+            self.resolve(event_id)
+            item_ids.append(f"wi_{event_id}")
+
+        sidecar_dir = self.project.root / "work-item-state"
+        previous = set()
+        for completed, expected_new in ((10, 10), (20, 10), (25, 5)):
+            result = self.store.backfill_current_states(limit=10)
+            self.assertEqual(result, {"checked": completed, "backfilled": expected_new})
+            present = {path.stem for path in sidecar_dir.glob("*.json")}
+            self.assertTrue(previous <= present)
+            self.assertEqual(len(present), completed)
+            previous = present
+        self.assertEqual(self.store.backfill_current_states(limit=10),
+                         {"checked": 25, "backfilled": 0})
+        self.assertEqual(previous, set(item_ids))
 
     def test_by_id_history_reads_open_reconciliation_sidecar_seed(self):
         event_id, _, _ = self.legacy()

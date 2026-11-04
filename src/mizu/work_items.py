@@ -494,7 +494,7 @@ class WorkItems:
                     return False
                 names.append(entry[0])
             for name in names:
-                if name in ("create.json", "retirement.json"):
+                if name in ("create.json", "legacy.json", "retirement.json"):
                     continue
                 if _REVISION_NAME.fullmatch(name) is None:
                     return False
@@ -719,16 +719,17 @@ class WorkItems:
             return None
 
     def backfill_current_states(self, *, limit=MAX_OPEN_PAGE_ROWS) -> dict:
-        """Build at most ``limit`` missing current-state sidecars.
+        """Build at most ``limit`` missing or invalid current-state sidecars.
 
         The caller must be a writable project operation: this method holds the
         record lock, validates each selected item's exact source chain, and
         writes only the disposable sidecar cache. A valid sidecar costs at most
         its source-identity and current/previous/retirement reads; an item that
-        still lacks one pays the existing exact replay once. Normal terminal
-        items and retirement are cached too, so later open/status scans can skip
-        their history. Unsafe or ambiguous sources are left alone. The return
-        value reports checked items and sidecars written.
+        still lacks a valid sidecar pays the existing exact replay once. Normal
+        terminal items and retirement are cached too, so later open/status scans
+        can skip their history. Unsafe or ambiguous sources are left alone. The
+        return value reports eligible items checked and sidecars written or
+        rebuilt.
         """
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item state backfill limit must be an integer in [1, 100]")
