@@ -133,15 +133,6 @@ test('plain schema conversion preserves constraints and denies extra properties'
   assert.throws(() => typeSchema({ type: 'object', properties: { x: { type: 'string' } },
     required: ['y'] }), /Unsupported/);
 });
-test('plain schemas compile with pi-schema coercion and refuse extra properties', async () => {
-  const { compile } = await import(
-    '../adapters/pi/node_modules/@earendil-works/pi-schema/dist/index.js');
-  const validator = compile(typeSchema({ type: 'object', properties: {
-    limit: { type: 'integer', minimum: 1, maximum: 3 }, tag: { type: 'string' } },
-  required: ['limit'] }), { coerce: true });
-  assert.deepEqual(validator.parse({ limit: '2', tag: 'ok' }), { ok: true, value: { limit: 2, tag: 'ok' } });
-  assert.equal(validator.parse({ limit: 2, extra: true }).ok, false);
-});
 function registration(overrides = {}) {
   const tools = [], events = {}, active = [], calls = [];
   const pi = { registerTool: tool => tools.push(tool), on: (name, fn) => { events[name] = fn; }, setActiveTools: names => active.push(...names) };

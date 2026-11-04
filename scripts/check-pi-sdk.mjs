@@ -8,6 +8,15 @@ import { ModelRuntime, createAgentSession, DefaultResourceLoader, SettingsManage
 import { fauxProvider, fauxAssistantMessage, fauxToolCall }
   from '../adapters/pi/node_modules/@earendil-works/pi-ai/dist/index.js';
 import { meterRuntime } from '../adapters/pi/model-runtime.mjs';
+import { compile } from '../adapters/pi/node_modules/@earendil-works/pi-schema/dist/index.js';
+import { typeSchema } from '../adapters/pi/bridge-client.mjs';
+
+// Compile adapter schemas with the installed SDK: coerce integers and refuse extras.
+const validator = compile(typeSchema({ type: 'object', properties: {
+  limit: { type: 'integer', minimum: 1, maximum: 3 }, tag: { type: 'string' } },
+required: ['limit'] }), { coerce: true });
+assert.deepEqual(validator.parse({ limit: '2', tag: 'ok' }), { ok: true, value: { limit: 2, tag: 'ok' } });
+assert.equal(validator.parse({ limit: 2, extra: true }).ok, false);
 
 const directory=await mkdtemp(join(tmpdir(),'mizu-sdk-contract-'));
 try {
