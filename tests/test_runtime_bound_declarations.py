@@ -91,8 +91,9 @@ approval to leave policy in code. `format` is reserved for intrinsic wire or
 schema ranges; `safety` is a defensive ceiling on untrusted or oversized input,
 including a product-chosen validation maximum; `mechanism` is a fixed internal
 or public contract, including a retry-loop bound; `policy` is an operator
-decision not yet configurable. Safety classifications here are defensive read
-or validation bounds, not intrinsic format limits.
+decision not yet configurable; once migrated to its owning configuration section
+it is recorded as `configured policy`. Safety classifications here are defensive
+read or validation bounds, not intrinsic format limits.
 """
 import ast
 from pathlib import Path
