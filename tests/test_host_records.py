@@ -138,7 +138,10 @@ class HostRecordTests(CiWaitFixture):
             ci_waits.validate_selection(foreign, [event['ack_token']])
         self.acknowledge_delivery(context)
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
-        self.assertFalse(should_run(self.project, snap, role_name='worker'))
+        self.assertTrue(should_run(self.project, snap, role_name='worker'))
+        ready = self.store.page_ready(role_name='worker')
+        self.assertEqual(ready['items'][0]['wait_liveness']['outcome'], 'refused')
+        self.assertEqual(self.store.page_ready(role_name='reviewer')['total'], 0)
         self.assertEqual(self.store.get(item['id']), item)
         second = self.block('another-wait')
         self.assertEqual(ci_waits.pending(self.store, 'worker')[0]['work_item'], second['id'])
@@ -204,6 +207,7 @@ class HostRecordTests(CiWaitFixture):
                 patch.object(self.store, 'record_kinds', kinds), \
                 patch('mizu.host_records.os.utime') as wake_hint:
             self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
+            self.assertEqual(self.store.page_ready(role_name='worker')['total'], 0)
             self.write()
             wake_hint.assert_not_called()
         context = self.delivery_context()

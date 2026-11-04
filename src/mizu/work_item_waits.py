@@ -5,7 +5,7 @@ import datetime as dt
 
 from .errors import Denied, LimitExceeded
 from .smoke_refs import validate_refs
-from .fs import DIGEST, identifier
+from .fs import DIGEST, canonical, digest, identifier
 
 #: Locally observable defer/task conditions, reevaluated from recorded state.
 WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
@@ -112,15 +112,15 @@ def stored_wait(value):
     return result
 
 
-def liveness(store, wait, snapshot) -> dict:
+def liveness(store, wait, snapshot, *, item=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Insight-decided waits follow the current revision; dependency waits bind an
     exact revision/action and use pure satisfaction evidence for due checks.
     Missing/withdrawn targets and superseded/conflicting dependencies are impossible;
     unavailable bodies or unsafe/inconsistent observations are unknown. CI and
-    proposal merge waits are deliberately not evaluated here: only their
-    receipt-bound routes can release them.
+    proposal merge waits use only their receipt-bound routes when a current
+    item is supplied (readiness); generic diagnostics leave them receipt_bound.
     """
     def result(state, reason):
         return {"state": state, "reason": reason,
@@ -132,7 +132,22 @@ def liveness(store, wait, snapshot) -> dict:
         wait = store._stored_wait(wait)
         kind = wait["kind"]
         if kind in ("ci", "publication_ci", "proposal_merged"):
-            return result("receipt_bound", f"{kind}_receipt_route")
+            if item is None:
+                return result("receipt_bound", f"{kind}_receipt_route")
+            if item["status"] != "blocked" or not item["holder"] or item["wait"] != wait:
+                raise Denied("Terminal readiness requires the current held waiter")
+            from . import ci_waits, proposal_waits
+            route = proposal_waits if kind == "proposal_merged" else ci_waits
+            observed = route.evidence(store, item)
+            if observed is None:
+                return result("pending", "terminal_evidence_absent")
+            envelope, computed = observed
+            event = envelope["payload"]
+            outcome = (event["state"] if kind == "proposal_merged" else
+                       event["conclusion"] if event["kind"] == "ci" else
+                       event["outcome"]["outcome"])
+            return {**result("terminal", "receipt_route_terminal"), "outcome": outcome,
+                    "evidence": {"record_digest": computed or digest(canonical(envelope))}}
         if kind == "deadline":
             due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])
         elif kind == "code_change":
@@ -144,7 +159,7 @@ def liveness(store, wait, snapshot) -> dict:
             due = current != wait["digest"]
         else:
             from . import insight_archive
-            from .fs import PREVIEW_BYTES, canonical
+            from .fs import PREVIEW_BYTES
             target = wait["target"] if kind == "insight_decided" else wait["requires"]["insight"]
             item = store._optional_record(f"inbox/{target}.json")
             if item is None:

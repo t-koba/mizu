@@ -188,6 +188,7 @@ class ProposalWaitTests(Fixture):
         self.row["state"] = "merged"
         self.poll(complete=False, cursor="next")
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
+        self.assertNotIn(blocked["id"], [row["id"] for row in self.store.page_ready(role_name="worker")["items"]])
         self.poll()
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
         self.assertEqual(self.store.get(blocked["id"]), blocked)
@@ -253,7 +254,14 @@ class ProposalWaitTests(Fixture):
         blocked = self.block()
         self.row["state"] = "merged"
         self.poll()
+        ready = self.store.page_ready(role_name="worker")
+        self.assertEqual(ready["total"], 1)
+        live = ready["items"][0]["wait_liveness"]
+        self.assertEqual((live["state"], live["outcome"]), ("terminal", "merged"))
+        self.assertLess(len(canonical(live)), 512)
+        self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
         ctx = self.context()
+        self.assertEqual(live["evidence"], {"record_digest": ctx.proposal_wait_manifest[0].record_digest})
         tokens = [ctx.wait_events[0]["ack_token"]]
         original = ctx.wait_events
         self.poll()
@@ -267,17 +275,50 @@ class ProposalWaitTests(Fixture):
         proposal_waits.complete(ctx, {"outcome": "wait", "ack_events": tokens})
         proposal_waits.complete(ctx, {"outcome": "wait", "ack_events": tokens})
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
+        self.assertEqual(self.store.page_ready(role_name="worker"), ready)
         self.assertEqual(self.store.get(blocked["id"]), blocked)
         # A newly registered revision is a different event, not suppressed by the old receipt.
         opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"],
                                        status="open", actor="worker")
         new = self.block(seed=opened)
+        self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
         self.poll()
         self.assertEqual(proposal_waits.pending(self.store, "worker")[0]["rev"], new["rev"])
         with self.assertRaises(Denied):
             proposal_waits.validate_selection(ctx, tokens)
         self.store.transition(new["id"], expected_rev=new["rev"], status="open", actor="worker")
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
+
+    def test_ready_requires_exact_complete_route_not_proposal_facts(self):
+        self.poll()
+        blocked = self.block()
+        pending = self.store.page_ready(role_name="worker")
+        # Terminal facts without the complete route's envelope cannot release.
+        self.row["state"] = "merged"
+        with patch("mizu.proposal_waits.observe"):
+            self.poll()
+        self.assertEqual(self.store.page_ready(role_name="worker"), pending)
+        self.poll()
+        ready = self.store.page_ready(role_name="worker")
+        self.assertNotEqual(ready["signature"], pending["signature"])
+        shared = proposal_waits.shared_store(self.store)
+        record_id = proposal_waits._record_id(blocked)
+        envelope, _ = shared.get(record_id)
+        path = self.project.root / shared._record_names(record_id)[0]
+        for changes in ({"holder": "reviewer"}, {"rev": blocked["rev"] + 1},
+                        {"wait": {**blocked["wait"], "proposal_id": "forge:owner/repo#2"}},
+                        {"state": "open"}):
+            with self.subTest(changes=changes):
+                write_json(path, {**envelope, "payload": {**envelope["payload"], **changes}})
+                page = self.store.page_ready(role_name="worker")
+                self.assertEqual(page["total"], 0)
+                self.assertEqual(page["unknown_blocked"], 1)
+        path.write_text("not JSON")
+        self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
+        write_json(path, envelope)
+        with patch("mizu.proposal_waits.evidence", side_effect=OSError("unavailable")):
+            self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
+        self.assertEqual(self.store.page_ready(role_name="worker"), ready)
 
     def test_unsafe_receipt_and_publication_fail_closed(self):
         self.poll()

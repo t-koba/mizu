@@ -2220,17 +2220,17 @@ class WorkItems:
         Same bounds, ordering, recovery, lock and fail-closed contract as
         page_open. Filter before selection/counting, scanning the ledger with
         O(limit) retained rows: blocked rows cannot hide ready work. ``signature``
-        is a fixed 64-hex fingerprint of the full eligible ID set (not just the
-        selected page), after role filtering. It is independent of scan order,
-        row metadata and limit, with constant extra memory. It is change
-        detection evidence, not authorization or a collision-free set proof. No state
+        is a fixed 64-hex fingerprint of the full eligible ID set and terminal
+        evidence bindings (not just the selected page), after role filtering.
+        It is independent of scan order, other row metadata and limit, with
+        constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
         and that role's held doing/blocked items are eligible. Authorization
         to transition is checked by the caller. Satisfied generic waits re-enter
         this page for reassessment, as do absent or confidently impossible
-        releasers; they never imply completion. CI waits retain
-        their receipt-bound event path. Legacy unseeded decisions
-        remain explicit coverage gaps, never inferred ready work. Unreadable
+        releasers; they never imply completion. CI/proposal waits become ready only
+        from their validated local terminal route, independent of event ack.
+        Legacy unseeded decisions remain explicit coverage gaps, never inferred ready work. Unreadable
         liveness (``unknown``) excludes only that blocked item and never
         releases it; known ready rows are still returned with
         ``coverage_complete`` false and a bounded ``unknown_blocked`` count,
@@ -2484,23 +2484,26 @@ class WorkItems:
                 wait = item.get("wait")
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
-                state = liveness(self, wait, published_snapshot)
+                state = liveness(self, wait, published_snapshot,
+                                 item=item if ready_only else None)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
                         continue
-                    if state["state"] not in ("due", "impossible", "absent"):
+                    if state["state"] not in ("due", "impossible", "absent", "terminal"):
                         continue
                 if blocked_only:
                     counts[state["state"]] += 1
             elif blocked_only or (ready_only and item.get("wait") is not None):
                 continue
             if ready_only:
-                # Order-independent set fingerprint: unique seeded IDs, no sort
-                # or retained ID list. Domain-separated SHA-256 leaves summed
+                # Order-independent fingerprint of IDs and terminal bindings,
+                # with no retained ID list. Domain-separated SHA-256 leaves summed
                 # modulo 2**256, then hashed with scope and cardinality.
-                ready_sum = (ready_sum + int(digest(
-                    b"ready-item-v1\0" + item["id"].encode()), 16)) % (1 << 256)
+                leaf = b"ready-item-v1\0" + item["id"].encode()
+                if item["status"] == "blocked" and state["state"] == "terminal":
+                    leaf += canonical(state["evidence"])
+                ready_sum = (ready_sum + int(digest(leaf), 16)) % (1 << 256)
             total += 1
             sort_key, row = self._open_row(item, view, wait_liveness=(
                 state if ready_only and item["status"] == "blocked" else None))

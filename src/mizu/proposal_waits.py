@@ -151,6 +151,25 @@ def observe(project, rows):
                 shared.put(_envelope(item), writer="host.vcs")
 
 
+def evidence(store, item):
+    """Read the complete host-observed merge route, before receipt filtering.
+
+    Only the validated complete-enumeration poll writes this envelope. Callers
+    hold the item lock; neither proposal facts alone nor an ack proves a merge.
+    """
+    shared = shared_store(store)
+    record_id = _record_id(item)
+    # Distinguish absence from unsafe or corrupt evidence; never repair it.
+    if not any(shared._read(name, 8192) is not None for name in shared._record_names(record_id)):
+        if shared._read(shared._receipt_name(item["holder"], record_id), 2048) is not None:
+            raise Denied("Proposal receipt has no record")
+        return None
+    envelope, computed = shared.get(record_id)
+    if envelope != _envelope(item):
+        raise Denied("Proposal evidence binding changed")
+    return envelope, computed
+
+
 def delivery(store, role, *, limit=10):
     """Read-only bounded oldest-first delivery from current blocked revisions.
 
@@ -167,17 +186,11 @@ def delivery(store, role, *, limit=10):
         for item in _items(store):
             if item["holder"] != role:
                 continue
-            record_id = _record_id(item)
-            # Distinguish absence from unsafe or corrupt evidence; never repair it.
-            names = shared._record_names(record_id)
-            if not any(shared._read(name, 8192) is not None for name in names):
-                if shared._read(shared._receipt_name(role, record_id), 2048) is not None:
-                    raise Denied("Proposal receipt has no record")
+            observed = evidence(store, item)
+            if observed is None:
                 continue
-            envelope, computed = shared.get(record_id)
-            if envelope != _envelope(item):
-                raise Denied("Proposal evidence binding changed")
-            if shared.received(role, record_id, computed):
+            envelope, computed = observed
+            if shared.received(role, envelope["id"], computed):
                 continue
             selected.append(((_timestamp_order(item["updated_at"]), item["id"]), envelope))
             selected = heapq.nsmallest(limit, selected, key=lambda pair: pair[0])

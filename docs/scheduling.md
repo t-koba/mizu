@@ -66,18 +66,20 @@ Ready work for a named role requires the `work_items_transition` capability. The
 It means an unheld `open` item the role can claim, or a `doing` item held by
 that role, with no structured wait. Satisfied or dead blocked waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.
-Another role's held work never admits it. A changed eligible ID set admits the writer
+Another role's held work never admits it. A changed eligible set (including terminal
+evidence bindings below) admits the writer
 even after `done`, an unexpired run-level `wait`, or a no-progress park. This
 is independent of terminal-event subscriptions, but filtered by role/holder
 before page selection and counting. Unnamed diagnostic callers retain the
 aggregate project view. Workspace mode is not a ready-work capability.
 
 Ready work is a change signal, not standing admission. The existing locked
-full-ledger scan computes a fixed 64-hex fingerprint of **all** eligible IDs,
-including rows beyond the prompt limit. Unique domain-separated SHA-256 ID
-hashes are summed modulo 2**256, then hashed with cardinality; the validated progress role binds the comparison,
-scan order, metadata changes, prompt size and equal totals cannot substitute
-for membership. This probabilistic fingerprint is change evidence, not an
+full-ledger scan computes a fixed 64-hex fingerprint of **all** eligible IDs
+and receipt-route terminal evidence bindings, including rows beyond the prompt
+limit. Unique domain-separated SHA-256 leaves (ID plus the terminal record
+reference when present) are summed modulo 2**256, then hashed with cardinality; the validated progress role binds the comparison,
+scan order, other metadata changes, prompt size and equal totals cannot substitute
+for membership or exact terminal evidence. This probabilistic fingerprint is change evidence, not an
 authorization or collision-free set proof, and retains constant extra memory.
 Full and resumed/delta inputs capture that scan's signature when the ready
 projection is built. Successful writer snapshots and observer completion
@@ -91,7 +93,8 @@ another genuine wake; unchanged ready work does not bypass the existing
 requirement for new actionable input or a writer handoff for `continue`/`bounded`. Additions, removals
 (including the last item), replacements with equal totals, and blocked-wait
 satisfaction change membership and wake once after delivery. Claiming the same
-ID or rewriting its metadata does not. Legacy schema 1/2 or absent signatures
+ID or rewriting its other metadata does not. A new terminal evidence binding
+for the same ID is new input; acknowledging its notification is not. Legacy schema 1/2 or absent signatures
 admit nonempty current sets for reassessment, but empty sets create no event.
 Malformed progress or unreadable current ledgers fail closed for this signal;
 control/goal/operator short-circuit behavior and other wake sources are unchanged.
@@ -253,10 +256,22 @@ work, and the page reports `coverage_complete: false` with the bounded
 `unknown_blocked` count so a zero `total` never reads as an exhaustive claim.
 The ledger stays
 blocked at the same revision until the writer decides what work or evidence
-remains. An ordinary pending wait is not ready. CI
-waits keep their existing receipt-bound result notifications. Re-evaluation
-uses current local time, published code and exact-revision decisions; it
-neither imports acceptance nor closes work automatically.
+remains. An ordinary pending wait is not ready. A holder-owned blocked `ci`,
+`publication_ci`, or `proposal_merged` item also re-enters when its existing
+receipt-bound route validates local terminal evidence for its exact current
+revision, holder and wait. CI reuses the exact source/publication/check validators
+(including declared host publication outcomes); proposals require the immutable
+merge envelope written only after a complete validated enumeration, not proposal
+facts alone. Readiness makes no adapter calls or evidence writes. Its bounded
+`wait_liveness` has `state: "terminal"`, `reason: "receipt_route_terminal"`,
+`wait_kind`, `outcome` (`success`/`failure`, `merged`, or a declared publication
+outcome), and `evidence: {record_digest}`; no logs or proposal body
+are copied. The digest binds the same envelope as notification delivery without exposing its record ID.
+Missing evidence stays pending; corrupt, ambiguous, mismatched or unavailable
+evidence is unknown and non-ready. Notification acknowledgements stay one-shot
+and do not remove readiness or cause a new ready-set wake. Re-evaluation neither
+imports acceptance nor closes work automatically; terminal evidence is input
+for the holder, not completion authority (`wait_satisfied` remains false).
 
 The store's internal `page_ready(limit=..., role_name=...)` shares the
 open-page validation, recovery and locking contract. It filters before bounded selection across the
@@ -277,7 +292,8 @@ live view; admission and prompt reads are not a frozen transaction.
 
 New transitions to `blocked` require a supported observable wait; historical
 no-wait events remain readable and replayable, without rewriting history.
-Exact-SHA CI wait evidence is a separate holder-routed wake, not ready work.
+CI/proposal notifications remain separate holder-routed wakes; validated terminal
+evidence also keeps the blocked item ready after notification acknowledgement.
 A run-level `wait` does not block unrelated ready ledger work: record a work
 item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
 while finishing `wait` or `done` intentionally allows another writer unit at

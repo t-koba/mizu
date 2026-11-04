@@ -334,15 +334,27 @@ def _existing(shared, envelope):
     return None
 
 
-def _shared_ack_corrupt(store, item):
-    event = _evidence(store, item, sync=False)
+def evidence(store, item, *, sync=False):
+    """Current terminal envelope, independent of notification acknowledgement.
+
+    Callers hold the item lock. Readiness uses the read-only path; delivery
+    also recovers source directory sync and persists the envelope separately.
+    """
+    event = _evidence(store, item, sync=sync)
     if event is None:
-        return False
+        return None
     shared = shared_store(store)
     envelope = _envelope(item, event)
-    computed = _existing(shared, envelope)
-    if computed is None:
+    shared._validate(envelope)
+    return envelope, _existing(shared, envelope)
+
+
+def _shared_ack_corrupt(store, item):
+    observed = evidence(store, item)
+    if observed is None or observed[1] is None:
         return False
+    envelope, computed = observed
+    shared = shared_store(store)
     shared._read(shared._receipt_name(item["holder"], envelope["id"]), RECEIPT_BYTES)
     try:
         shared.received(item["holder"], envelope["id"], computed)
@@ -369,12 +381,10 @@ def _shared_page(store, role, *, limit=10, persist):
         if item["holder"] != role:
             continue
         try:
-            event = _evidence(store, item, sync=persist)
-            if event is None:
+            observed = evidence(store, item, sync=persist)
+            if observed is None:
                 continue
-            envelope = _envelope(item, event)
-            shared._validate(envelope)
-            computed = _existing(shared, envelope)
+            envelope, computed = observed
             if computed is not None and shared.received(role, envelope["id"], computed):
                 continue
         except (Denied, LimitExceeded, OSError, ValueError):

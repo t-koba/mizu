@@ -76,19 +76,95 @@ class CiWaitFixture(Fixture):
 
 
 class CiWaitTests(CiWaitFixture):
-    def test_blocked_liveness_never_releases_receipt_bound_ci(self):
+    def test_terminal_readiness_survives_ack_without_repeated_admission(self):
         blocked = self.block()
-        def check():
-            view = self.store.blocked_liveness_readonly()
-            self.assertTrue(view["coverage_complete"])
-            self.assertEqual(view["items"][0]["state"], "receipt_bound")
-            self.assertEqual(self.store.page_ready()["total"], 0)
-            self.assertEqual(self.store.get(blocked["id"]), blocked)
-        with patch("mizu.ci_waits.poll", side_effect=AssertionError("no diagnostic polling")):
-            check()
+        self.config.roles["worker"] = dataclasses.replace(self.config.roles["worker"], on_change=True)
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        snapshot = self.project.snapshots.get()
+        pending = self.store.page_ready(role_name="worker")
+        self.assertEqual(pending["total"], 0)
+        self.poll(self.rows(state="pending"))
+        self.assertEqual(self.store.page_ready(role_name="worker")["signature"], pending["signature"])
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        self.poll(self.rows(state="failure"))
+        # Readiness validates local source evidence, never polls, syncs or writes.
+        before = sorted(p.relative_to(self.project.root) for p in self.project.root.rglob("*") if p.is_file())
+        with (patch("mizu.ci_waits.poll", side_effect=AssertionError("no polling")),
+              patch("mizu.ci_waits.sync_dir", side_effect=AssertionError("no sync")),
+              patch("mizu.ci_waits.write_json", side_effect=AssertionError("no writes"))):
+            terminal = self.store.page_ready(role_name="worker")
+        self.assertEqual(before, sorted(p.relative_to(self.project.root) for p in self.project.root.rglob("*") if p.is_file()))
+        self.assertNotEqual(terminal["signature"], pending["signature"])
+        row = terminal["items"][0]
+        self.assertEqual((row["id"], row["rev"], row["holder"]),
+                         (blocked["id"], blocked["rev"], "worker"))
+        live = row["wait_liveness"]
+        self.assertEqual(live["state"], "terminal")
+        self.assertEqual(live["outcome"], "failure")
+        self.assertEqual(set(live["evidence"]), {"record_digest"})
+        self.assertLess(len(canonical(live)), 512)
+        with patch("mizu.ci_waits.evidence", side_effect=AssertionError("other holder")):
+            self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
+        context = self.delivery_context()
+        self.assertEqual(live["evidence"], {"record_digest": context.wait_events[0]["record_digest"]})
+        self.acknowledge_delivery(context)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        self.assertEqual(self.store.page_ready(role_name="worker"), terminal)
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        projected = json.loads(engine.driver.calls[-1][1])["ready_work"]["items"][0]
+        self.assertEqual(projected["wait_liveness"], live)
+        self.assertFalse(projected["wait_satisfied"])  # Terminal input is not completion.
+        for _ in range(2):
+            self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
+            self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
+            self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
+        self.assertEqual(self.store.get(blocked["id"]), blocked)
+        # Generic blocked diagnostics still defer to the receipt-bound route.
+        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "receipt_bound")
+
+    def test_ready_refuses_invalid_or_unavailable_terminal_source(self):
+        blocked = self.block()
         self.poll()
-        self.assertEqual(len(ci_waits.pending(self.store, "worker")), 1)
-        check()  # Even a recorded terminal result is not generic ready work.
+        path = ci_waits._path(self.store, blocked)
+        original = read_json(path)
+        original_signature = self.store.page_ready()["signature"]
+        for changes in ({"holder": "reviewer"}, {"rev": blocked["rev"] + 1},
+                        {"wait_digest": "0" * 64}, {"sha": "e" * 40},
+                        {"conclusion": "failure"}, {"checks": self.rows("pending")},
+                        {"checks": self.rows() + self.rows()}):
+            with self.subTest(changes=changes):
+                write_json(path, {**original, **changes})
+                page = self.store.page_ready(role_name="worker")
+                self.assertEqual(page["total"], 0)
+                self.assertEqual(page["unknown_blocked"], 1)
+                self.assertFalse(page["coverage_complete"])
+        path.write_text("not JSON")
+        self.assertEqual(self.store.page_ready()["total"], 0)
+        write_json(path, original)
+        with patch("mizu.ci_waits._read", side_effect=OSError("unavailable")):
+            self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
+        self.assertEqual(self.store.page_ready()["total"], 1)
+        context = self.delivery_context()
+        shared = ci_waits.shared_store(self.store)
+        envelope, _ = shared.get(context.ci_wait_manifest[0].record_id)
+        shared_path = self.project.root / shared._record_names(envelope["id"])[0]
+        write_json(shared_path, {**envelope, "payload": {**envelope["payload"], "wait_digest": "0" * 64}})
+        self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
+        write_json(shared_path, envelope)
+        opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="open", actor="worker")
+        current = self.store.transition(opened["id"], expected_rev=opened["rev"], status="blocked",
+                                        actor="worker", wait=self.wait)
+        # Old evidence is not reused by a later revision of the same wait.
+        self.assertEqual(self.store.page_ready()["total"], 0)
+        current_path = ci_waits._path(self.store, current)
+        write_json(current_path, original)
+        self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
+        current_path.unlink()
+        self.poll()
+        self.assertEqual(self.store.page_ready()["total"], 1)
+        self.assertNotEqual(self.store.page_ready()["signature"], original_signature)
 
     def test_blocked_problem_rows_precede_pending_and_receipt_bound_rows(self):
         with patch("mizu.work_items.now", return_value="2000-01-01T00:00:00+00:00"):
@@ -484,7 +560,8 @@ class CiWaitTests(CiWaitFixture):
         self.project.set_control(armed=True, paused=False, draining=False)
         context = self.delivery_context()
         self.acknowledge_delivery(context)
-        self.assertFalse(should_run(self.project, snap, role_name="worker"))
+        self.assertFalse(_role_events_due(self.project, snap, "worker"))
+        self.assertTrue(should_run(self.project, snap, role_name="worker"))  # Unhandled blocked work stays ready.
 
     def test_poll_project_persists_ci_wait_state(self):
         self.block()
@@ -746,7 +823,9 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.assertEqual(self.delivery_context().wait_events, context.wait_events)
         self.acknowledge_delivery(context)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
-        self.assertFalse(should_run(self.project, snap, role_name="worker"))
+        self.assertFalse(_role_events_due(self.project, snap, "worker"))
+        self.assertTrue(should_run(self.project, snap, role_name="worker"))
+        self.assertEqual(self.store.page_ready(role_name="worker")["items"][0]["wait_liveness"]["outcome"], "failure")
         result, reader = self.poll()
         self.assertEqual(result["observed"], 0)
         reader.assert_not_called()
@@ -846,8 +925,10 @@ class PublicationCiWaitTests(CiWaitFixture):
         context = self.delivery_context()
         # Later ambiguity refuses delivery and acknowledgement rather than
         # trusting the previously stored terminal payload in isolation.
+        self.assertEqual(self.store.page_ready(role_name="worker")["total"], 1)
         self.receipt_for(source="e" * 40)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+        self.assertEqual(self.store.page_ready(role_name="worker")["unknown_blocked"], 1)
         with self.assertRaises(Denied):
             self.acknowledge_delivery(context)
         opened = self.store.transition(item["id"], expected_rev=2, status="open", actor="worker")
@@ -926,6 +1007,7 @@ class PublicationCiWaitTests(CiWaitFixture):
             self.assertEqual(self.delivery_context().wait_events, context.wait_events)
             self.acknowledge_delivery(context)
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
+        self.assertEqual(self.store.page_ready(role_name='worker')['items'][0]['wait_liveness']['outcome'], 'success')
         self.assertEqual(self.store.get(item['id']), item)
         doing = self.store.transition(item['id'], expected_rev=item['rev'], status='doing', actor='worker')
         with self.assertRaisesRegex(Denied, 'prior exact snapshot'):
