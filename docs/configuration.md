@@ -755,7 +755,8 @@ refusal). A refused plan consumes the interval to bound retry cost; busy does no
 `disabled`, `not-due`, `busy` and `unavailable` are return-only statuses and leave cadence
 unchanged. State reads are limited to 4 KiB, reject duplicate/unknown fields and future
 or non-integer timestamps, and require either a `completed` record with integer `days`
-(0–36,500) and both counts (0–5,000), or a `refused` record with a bounded error-class
+(0–36,500) and both counts (non-negative integers within TOML's signed-64-bit range,
+further bounded by the 4 KiB state read), or a `refused` record with a bounded error-class
 name (1–64 characters, never an exception message). Unsafe linked directories, linked
 or special state files refuse before expiry; reads/writes use the no-follow safe-file
 primitives (POSIX component pinning; portable reparse/identity checks, not a claim of
@@ -953,7 +954,13 @@ Each key accepts `1` through the TOML signed-64-bit maximum. The former literal
 is a default, not an eventual maximum: an operator with a larger host or
 history may raise it, and a smaller host may lower it. Manual and automatic
 scans read the loaded `[limits]` values; direct `run(data)` calls keep the
-defaults. `[limits].automatic_smoke_retention_interval_seconds` controls only
+defaults. The automatic sweep is machine-wide but runs at the invoking
+project's boundary, so its six `smoke_retention_*` budgets come from that
+project's `[limits]`. Projects sharing one `data_dir` must set identical scan
+budgets; a budget refusal records the shared `refused` state and consumes the
+cadence for every project until the interval passes.
+
+`[limits].automatic_smoke_retention_interval_seconds` controls only
 sweep cadence (default 86,400 seconds; range 0–2,678,400), not these budgets or
 the data-dir `days` policy.
 
@@ -961,7 +968,9 @@ Fixed bounds remain: each metadata record is at most 128 KiB (`MAX_RECORD`, a
 per-record safety read bound); the stored expiry age is validated at 0–36,500
 days (`MAX_DAYS`, a data-dir policy validation maximum); and the maintenance
 audit keeps at most 128 events (`AUDIT_LIMIT`, with no measured host-cost need
-for a knob). The automatic due-state read is at most 4 KiB.
+for a knob). The automatic due-state read is at most 4 KiB; its `days` is
+0–36,500 and its `retired_total`/`recovered_total` are non-negative integers
+within TOML's signed-64-bit range.
 
 The pair manifest (4 KiB), policy file (1 KiB), report payload (16 MiB), and
 per-WorkItem directory (260 entries, derived from the existing 256-revision

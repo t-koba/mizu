@@ -91,6 +91,24 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
         with mock.patch.object(retention.time, "time", return_value=CLOCK + DAY):
             self.assertEqual(self.maintain()["status"], "completed")
 
+    def test_shared_budget_refusal_consumes_cadence_for_other_projects(self):
+        first, second = self.pair("a"), self.pair("b")
+        self.project.config.limits.smoke_retention_pairs = 1
+        self.assertEqual(self.maintain(), {"checked_at": CLOCK, "status": "refused",
+                                           "error": "LimitExceeded"})
+        self.assertEqual(json.loads(self.state.read_bytes()),
+                         {"checked_at": CLOCK, "status": "refused",
+                          "error": "LimitExceeded"})
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+        other = SimpleNamespace(config=SimpleNamespace(data=self.data, limits=SimpleNamespace(
+            automatic_smoke_retention_interval_seconds=DAY)))
+        with mock.patch.object(retention, "_run_locked", side_effect=AssertionError("not due")):
+            self.assertEqual(retention.maintain_automatic_smoke_retention(other),
+                             {"status": "not-due"})
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
     def test_disabled_touches_nothing_and_manual_apply_still_works(self):
         old = self.pair()
         setattr(self.project.config.limits, SETTING, 0)
