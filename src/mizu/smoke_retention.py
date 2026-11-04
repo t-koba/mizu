@@ -11,6 +11,7 @@ expiry plan before any rename.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime as dt
 import json
 import os
@@ -20,18 +21,43 @@ import stat
 import time
 from pathlib import Path
 
+from .config import (DEFAULT_SMOKE_RETENTION_ENTRIES, DEFAULT_SMOKE_RETENTION_METADATA_BYTES,
+                     DEFAULT_SMOKE_RETENTION_PAIRS, DEFAULT_SMOKE_RETENTION_PROJECTS,
+                     DEFAULT_SMOKE_RETENTION_REFS, TOML_INTEGER_MAX)
 from .errors import Busy, Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
 from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
 
-MAX_PROJECTS = 5000
-MAX_PAIRS = 5000
-MAX_REFS = 20000
-MAX_METADATA = 64 * 1024 * 1024
 MAX_RECORD = 128 * 1024
-MAX_ENTRIES = 100000  # Includes empty directories and records, not payloads.
 MAX_DAYS = 36500
 AUDIT_LIMIT = 128
+_BUDGET_SETTINGS = (("projects", "smoke_retention_projects", DEFAULT_SMOKE_RETENTION_PROJECTS),
+                    ("pairs", "smoke_retention_pairs", DEFAULT_SMOKE_RETENTION_PAIRS),
+                    ("refs", "smoke_retention_refs", DEFAULT_SMOKE_RETENTION_REFS),
+                    ("entries", "smoke_retention_entries", DEFAULT_SMOKE_RETENTION_ENTRIES),
+                    ("metadata_bytes", "smoke_retention_metadata_bytes",
+                     DEFAULT_SMOKE_RETENTION_METADATA_BYTES))
+
+
+@dataclasses.dataclass(frozen=True)
+class Budgets:
+    """Machine-wide scan budgets; the ``[limits]`` owner supplies operator values."""
+    projects: int = DEFAULT_SMOKE_RETENTION_PROJECTS
+    pairs: int = DEFAULT_SMOKE_RETENTION_PAIRS
+    refs: int = DEFAULT_SMOKE_RETENTION_REFS
+    entries: int = DEFAULT_SMOKE_RETENTION_ENTRIES
+    metadata_bytes: int = DEFAULT_SMOKE_RETENTION_METADATA_BYTES
+
+    @classmethod
+    def from_limits(cls, limits) -> "Budgets":
+        values = {}
+        for field, setting, default in _BUDGET_SETTINGS:
+            value = getattr(limits, setting, default)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"limits.{setting} must be a positive integer")
+            values[field] = value
+        return cls(**values)
+
 
 #: In-progress atomic writes (mkstemp prefix `.new-` plus eight name chars).
 ATOMIC_TEMPORARY = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
@@ -76,8 +102,9 @@ def entries(path: Path, maximum: int, *, optional=False):
 
 
 class Metadata:
-    def __init__(self, data: Path):
+    def __init__(self, data: Path, *, budgets: Budgets | None = None):
         self.data = data
+        self.budgets = budgets if budgets is not None else Budgets()
         self.bytes = 0
         self.count = 0
         self.entries = 0
@@ -91,7 +118,7 @@ class Metadata:
         raw = safe_read(self.data, name, maximum)
         self.bytes += len(raw)
         self.count += 1
-        if self.bytes > MAX_METADATA or self.count > MAX_ENTRIES:
+        if self.bytes > self.budgets.metadata_bytes or self.count > self.budgets.entries:
             raise LimitExceeded("Smoke retention metadata bound exceeded")
         try:
             loads_finite(raw)  # Depth and finite-number guard before the hook.
@@ -401,7 +428,7 @@ def _preflight(metadata, root, names):
     """Bound enumeration before store replay (including permanent seed history)."""
     for name in names:
         base = root / name
-        for path in entries(base, MAX_ENTRIES, optional=True):
+        for path in entries(base, metadata.budgets.entries, optional=True):
             metadata.entries += 1
             if ATOMIC_TEMPORARY.fullmatch(path.name):
                 # A writer's unpublished atomic file is not a store record.
@@ -436,13 +463,13 @@ def _preflight(metadata, root, names):
                             raise Denied("Malformed wait registration identity")
                         fields.add("registration_id")
                     stored_wait({key: value for key, value in record.items() if key not in fields})
-            if metadata.entries + metadata.count > MAX_ENTRIES:
+            if metadata.entries + metadata.count > metadata.budgets.entries:
                 raise LimitExceeded("Smoke reference store entry bound exceeded")
 
 
-def _store_entries(base: Path):
+def _store_entries(base: Path, metadata: Metadata):
     """Yield committed record names, never a writer's atomic temporary."""
-    return (path for path in entries(base, MAX_ENTRIES, optional=True)
+    return (path for path in entries(base, metadata.budgets.entries, optional=True)
             if not ATOMIC_TEMPORARY.fullmatch(path.name))
 
 
@@ -451,7 +478,8 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
                            MAX_EVIDENCE_CHARS, INSIGHT_METADATA_DEFAULTS, insight_metadata)
     from .work_items import WorkItems
     explicit_roots = roots is not None
-    roots = entries(metadata.data / "projects", MAX_PROJECTS, optional=True) if roots is None else roots
+    roots = (entries(metadata.data / "projects", metadata.budgets.projects, optional=True)
+             if roots is None else roots)
     pinned = set()
     ref_count = 0
 
@@ -459,7 +487,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
         nonlocal ref_count
         validate_refs(refs)
         ref_count += len(refs)
-        if ref_count > MAX_REFS:
+        if ref_count > metadata.budgets.refs:
             raise LimitExceeded("Smoke live reference bound exceeded")
         if any(ref not in pairs for ref in refs):
             raise Denied("Live smoke reference has no complete pair")
@@ -485,7 +513,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
             identifier(root.name)
         directory(root)
         _preflight(metadata, root, ("inbox", "insight-ids", "decisions", "waits", "decision-history", "work-items"))
-        for path in _store_entries(root / "insight-ids"):
+        for path in _store_entries(root / "insight-ids", metadata):
             identity = metadata.read(path)
             if (set(identity) != {"id", "sha256", "created_at"} or identity["id"] != path.stem
                     or not isinstance(identity["sha256"], str)
@@ -499,9 +527,10 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
                     raise Denied("Current Insight identity has no retained owner")
         insights = Insights(root)
         snapshots = ReferenceSnapshots(root, excludes=(), max_file=2**63-1,
-                                       max_bytes=2**63-1, max_files=MAX_ENTRIES, create_dirs=False)
+                                       max_bytes=2**63-1, max_files=metadata.budgets.entries,
+                                       create_dirs=False)
         store = ReferenceItems(root, snapshots, insights)
-        for path in _store_entries(root / "inbox"):
+        for path in _store_entries(root / "inbox", metadata):
             record = metadata.read(path)
             if (set(record) - {"id", "source", "title", "body", "base_snapshot", "run", "origin", "created_at", "updated_at", "rev", "evidence", *INSIGHT_METADATA_DEFAULTS}
                     or path.suffix != ".json" or record.get("id") != path.stem
@@ -546,7 +575,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
                     raise Denied("Smoke wait owner/revision mismatch")
                 if active and effective is not None and effective["action"] == "defer" and wait.get("rev") == rev:
                     add(refs)
-        for path in _store_entries(root / "waits"):
+        for path in _store_entries(root / "waits", metadata):
             wait = metadata.read(path)
             if wait.get("smoke_refs") and not (root / "inbox" / path.name).exists():
                 # Terminal archived waits may remain, but must have a current
@@ -581,7 +610,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
 def plan(data: Path, days: int, moment: dt.datetime, recovery=(), metadata: Metadata | None = None):
     metadata = metadata or Metadata(data)
     pairs = {}
-    for path in entries(data / "validation" / "pairs", MAX_PAIRS, optional=True):
+    for path in entries(data / "validation" / "pairs", metadata.budgets.pairs, optional=True):
         if not SMOKE_ID.fullmatch(path.name):
             raise Denied("Unknown smoke pair entry")
         pairs[path.name] = read_pair(metadata, path.name)
@@ -589,7 +618,7 @@ def plan(data: Path, days: int, moment: dt.datetime, recovery=(), metadata: Meta
     for path, smoke_id, state in recovery:
         if state == "pending":
             pairs[smoke_id] = read_pair(metadata, smoke_id, path=path)
-    if len(pairs) > MAX_PAIRS:
+    if len(pairs) > metadata.budgets.pairs:
         raise LimitExceeded("Smoke pair bound exceeded including pending recovery")
     pinned = collect_refs(metadata, pairs)
     cutoff = moment - dt.timedelta(days=days)
@@ -603,7 +632,7 @@ def quarantine(data: Path, metadata: Metadata | None = None):
     directory(data / "validation" / "pairs", optional=True)
     result = []
     seen = set()
-    for path in entries(data / "validation" / "quarantine", MAX_PAIRS, optional=True):
+    for path in entries(data / "validation" / "quarantine", metadata.budgets.pairs, optional=True):
         parts = path.name.split(".")
         if len(parts) != 2 or not SMOKE_ID.fullmatch(parts[0]) or parts[1] not in ("pending", "committed"):
             raise Denied("Unknown smoke quarantine state")
@@ -651,18 +680,19 @@ def audit(data: Path, smoke_id: str, action: str):
     write_json(path, {"version": 1, "events": (rows + [{"smoke_id": smoke_id, "action": action, "at": now()}])[-AUDIT_LIMIT:]})
 
 
-def run(data: Path, *, apply=False, moment=None) -> dict:
+def run(data: Path, *, apply=False, moment=None, budgets: Budgets | None = None) -> dict:
     moment = moment or dt.datetime.now(dt.timezone.utc)
     timestamp(moment.isoformat())
     # Preview is advisory and strictly read-only, including lock inodes.
     # Apply always recomputes the complete plan under the global lock.
     with shared_lock(data) if apply else contextlib.nullcontext():
-        return _run_locked(data, apply=apply, moment=moment)
+        return _run_locked(data, apply=apply, moment=moment, budgets=budgets)
 
 
-def _run_locked(data: Path, *, apply: bool, moment: dt.datetime) -> dict:
+def _run_locked(data: Path, *, apply: bool, moment: dt.datetime,
+                budgets: Budgets | None = None) -> dict:
     """Shared implementation; applying callers must already hold shared_lock."""
-    metadata = Metadata(data)
+    metadata = Metadata(data, budgets=budgets)
     days = policy(data, metadata)
     recovery = quarantine(data, metadata)
     result = {"days": days, "apply": apply, "candidates": [], "pinned": [],
@@ -742,7 +772,7 @@ def _automatic_smoke_due(data: Path, instant: int, interval: int) -> bool:
     if record.get("status") == "completed":
         valid = (valid and set(record) == {"checked_at", "status", "days", "retired_total", "recovered_total"}
                  and type(record.get("days")) is int and 0 <= record["days"] <= MAX_DAYS
-                 and all(type(record.get(k)) is int and 0 <= record[k] <= MAX_PAIRS
+                 and all(type(record.get(k)) is int and 0 <= record[k] <= TOML_INTEGER_MAX
                          for k in ("retired_total", "recovered_total")))
     elif record.get("status") == "refused":
         valid = (valid and set(record) == {"checked_at", "status", "error"}
@@ -772,6 +802,7 @@ def maintain_automatic_smoke_retention(project) -> dict:
             return {"status": "unavailable"}
         if interval == 0:
             return {"status": "disabled"}
+        budgets = Budgets.from_limits(project.config.limits)
         data = Path(project.config.data)
         directory(data)  # Validate before any path-following lock/directory creation.
         instant = int(time.time())
@@ -787,7 +818,8 @@ def maintain_automatic_smoke_retention(project) -> dict:
             directory(parent)
             result = {"checked_at": instant, "status": "refused"}
             try:
-                outcome = _run_locked(data, apply=True, moment=dt.datetime.now(dt.timezone.utc))
+                outcome = _run_locked(data, apply=True,
+                                      moment=dt.datetime.now(dt.timezone.utc), budgets=budgets)
                 if outcome.get("complete") is True:
                     result.update(status="completed", days=outcome["days"],
                                   retired_total=outcome["retired_total"],
@@ -807,9 +839,9 @@ def maintain_automatic_smoke_retention(project) -> dict:
         return {"status": "unavailable"}
 
 
-def validate_restored_refs(data: Path, root: Path):
+def validate_restored_refs(data: Path, root: Path, *, budgets: Budgets | None = None):
     """Caller holds the global lock through publication of the restored root."""
-    metadata = Metadata(data)
+    metadata = Metadata(data, budgets=budgets)
     _preflight(metadata, root, ("inbox", "insight-ids", "decisions", "waits", "decision-history", "work-items"))
     # Importing no smoke references must not change legacy restore semantics
     # (notably identity-only tombstones whose bodies predate archival). Such
@@ -817,5 +849,5 @@ def validate_restored_refs(data: Path, root: Path):
     if not metadata.has_refs:
         return
     pairs = {path.name: read_pair(metadata, path.name)
-             for path in entries(data / "validation/pairs", MAX_PAIRS, optional=True)}
+             for path in entries(data / "validation/pairs", metadata.budgets.pairs, optional=True)}
     collect_refs(metadata, pairs, roots=[root])

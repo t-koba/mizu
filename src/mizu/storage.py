@@ -1492,9 +1492,10 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
             store.publish(checkpoint)
             from .smoke_refs import shared_lock
-            from .smoke_retention import validate_restored_refs
+            from .smoke_retention import Budgets, validate_restored_refs
             with shared_lock(config.data, blocking=True):
-                validate_restored_refs(config.data, stage)
+                validate_restored_refs(config.data, stage,
+                                       budgets=Budgets.from_limits(config.limits))
                 _check_project_paths(identities)
                 os.rename(stage, destination)
                 sync_dir(staging)

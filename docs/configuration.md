@@ -465,6 +465,11 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `snapshot_retention_days` | Automatic retention for unreferenced snapshot manifests and superseded immutable history generations (default 31 days; integer 0–3,650; 0 disables snapshot GC). The current pointer/history window and durable citations never expire by this clock. See [automatic snapshot retention](#automatic-snapshot-retention) |
 | `automatic_prune_interval_seconds` | Shared per-project cadence for automatic run pruning and snapshot GC at safe execution boundaries (default 86,400 seconds / one day; integer 0–2,678,400; 0 disables both automatic passes while manual commands stay available). No background timer; busy contention does not consume the cadence. Latest bounded result: `maintenance/automatic-prune.json`. Run pruning still uses `prune(project, apply=True, keep_artifacts=0)`; count-based artifact deletion is never enabled implicitly. Shared smoke expiry has its own cadence |
 | `automatic_smoke_retention_interval_seconds` | Opt-out cadence applying the shared smoke retention at safe execution boundaries (default 86,400 seconds / one day; 0 disables automatic sweeps while manual `mizu smoke-retention` stays; integer 0–2,678,400). Due checks run before a top-level execution acquires admission/execution locks, alongside workspace-cache and run-retention maintenance; there is no background timer. On due the same validated implementation as `run(data, apply=True)` runs under the shared smoke lock, so only expired unpinned pairs retire and snapshots/objects stay untouched. Cadence state is global per `data_dir` (`maintenance/automatic-smoke-retention.json`) serialized with expiry under the existing nonblocking shared smoke lock, so at most one best-effort sweep runs due across projects. Busy contention never consumes the cadence; malformed due state returns `unavailable`; malformed/incomplete references refuse the whole plan without deleting uncertain state and without failing the requested run. Latest bounded result is `maintenance/automatic-smoke-retention.json` under `data_dir` |
+| `smoke_retention_projects` | Shared smoke-retention scan budget for project roots (1–9,223,372,036,854,775,807; default 5,000). A bounded synthetic scan measured ~0.6 ms per root; lower it for a smaller host or project set |
+| `smoke_retention_pairs` | Shared smoke-retention scan budget for published-plus-pending pairs and quarantine entries, each (1–9,223,372,036,854,775,807; default 5,000). Report payloads are validated separately and not charged to the metadata budget |
+| `smoke_retention_refs` | Shared smoke-retention scan budget for live reference occurrences (1–9,223,372,036,854,775,807; default 20,000); exceeding it refuses the whole expiry apply |
+| `smoke_retention_entries` | Shared smoke-retention scan budget for metadata entries plus record reads, including empty directories (1–9,223,372,036,854,775,807; default 100,000). Enumeration is bounded before sorting |
+| `smoke_retention_metadata_bytes` | Shared smoke-retention scan budget for cumulative reference, manifest, policy and audit metadata bytes (1–9,223,372,036,854,775,807; default 67,108,864 / 64 MiB). Report payloads are not charged |
 | `event_log_compress_days` | Compress per-run engine logs and bounded dispatch measurements (`*-events.jsonl`, `diagnostics.txt`, `dispatch-attempts.json`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
 | `event_log_retention_days` | Drop those raw/compressed logs and dispatch measurements at or beyond M days old (0 disables; 0–3,650; default 31). Lifecycle records are not candidates for this log clock; whole runs use `run_retention_days`. Snapshot/object GC uses `snapshot_retention_days`, not this log clock; sessions and permanent ledgers are never pruned |
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
@@ -924,32 +929,37 @@ A direct creation that inherits extra refs stores `requested_smoke_refs` (the
 original optional request, null for omission) beside its seed. This provenance
 field is not a pin; it preserves exact retry identity after the origin changes.
 
-The shared `data_dir` smoke-retention owner currently has these hard-coded
-operational budgets; they are not configuration keys or format ceilings:
+The shared `data_dir` smoke-retention scan is linear in the project roots and
+metadata records it traverses. A bounded synthetic run at the former constants
+measured about 0.6 ms per root, 0.6 ms per record read, and 4.8 KiB retained
+per insight record in the parsed-record cache; 500 and 5,000 one-KiB pair
+reports took 0.25 s and 2.8 s. Those dimensions are host/history policy, so
+they live in `[limits]` and the defaults preserve the former constants:
 
-| Behavior | Current code value | Owner and current range |
-|---|---:|---|
-| Project roots (`MAX_PROJECTS`) | 5,000 | Shared smoke retention; no configurable range |
-| Published-plus-pending pairs and quarantine entries (`MAX_PAIRS`, each) | 5,000 | Shared smoke retention; no configurable range |
-| Live reference occurrences (`MAX_REFS`) | 20,000 | Shared smoke retention; no configurable range |
-| Cumulative reference, manifest, policy and audit metadata (`MAX_METADATA`) | 64 MiB | Shared smoke retention; no configurable range |
-| Reference-store metadata entries (`MAX_ENTRIES`) | 100,000 | Shared smoke retention; no configurable range |
-| Retained maintenance-audit events (`AUDIT_LIMIT`) | 128 | Shared smoke retention; no configurable range |
-| Stored expiry age (`MAX_DAYS`) | 31-day default; 0–36,500 days | Data-dir retention policy; 0 keeps indefinitely, and 36,500 is the current hard-coded validation ceiling |
+| Dimension | Former constant | `[limits]` default |
+|---|---:|---:|
+| Project roots | `MAX_PROJECTS` | 5,000 |
+| Published-plus-pending pairs and quarantine entries (each) | `MAX_PAIRS` | 5,000 |
+| Live reference occurrences | `MAX_REFS` | 20,000 |
+| Metadata entries plus record reads | `MAX_ENTRIES` | 100,000 |
+| Cumulative metadata bytes | `MAX_METADATA` | 64 MiB |
 
-The count/byte ceilings, audit retention, and expiry-age validation ceiling
-are behavior-dependent policy candidates, not intrinsic record limits. Their
-current constants are the only supported values today; a configurable range
-is intentionally not selected
-until the shared owner measures realistic stores and chooses safe validation
-semantics. Do not treat a current default as an eventual maximum. The existing
-`[limits].automatic_smoke_retention_interval_seconds` controls only sweep
-cadence (default 86,400 seconds; range 0–2,678,400), not these global budgets or
+Each key accepts `1` through the TOML signed-64-bit maximum. The former literal
+is a default, not an eventual maximum: an operator with a larger host or
+history may raise it, and a smaller host may lower it. Manual and automatic
+scans read the loaded `[limits]` values; direct `run(data)` calls keep the
+defaults. `[limits].automatic_smoke_retention_interval_seconds` controls only
+sweep cadence (default 86,400 seconds; range 0–2,678,400), not these budgets or
 the data-dir `days` policy.
 
-Separate defensive bounds remain fixed: each metadata record is at most 128
-KiB and the automatic due-state read is at most 4 KiB. The pair manifest (4
-KiB), policy file (1 KiB), report payload (16 MiB), and per-WorkItem directory
+Fixed bounds remain: each metadata record is at most 128 KiB (`MAX_RECORD`, a
+per-record safety read bound); the stored expiry age is validated at 0–36,500
+days (`MAX_DAYS`, a data-dir policy validation maximum); and the maintenance
+audit keeps at most 128 events (`AUDIT_LIMIT`, with no measured host-cost need
+for a knob). The automatic due-state read is at most 4 KiB.
+
+The pair manifest (4 KiB), policy file (1 KiB), report payload (16 MiB), and
+per-WorkItem directory
 (260 entries, derived from the existing 256-revision history bound plus its
 record files) are individual record/history bounds, not scan-budget settings.
 Enumeration is bounded before sorting; no links are followed. Linked metadata,

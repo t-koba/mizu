@@ -8,7 +8,7 @@ from support import Fixture
 from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
                          MAX_DECISION_RECEIPT_DIAGNOSTICS, MAX_HISTORY_TEMPORARIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
-                         Limits, ROOT_KEYS, _LIMIT_RANGES, load)
+                         TOML_INTEGER_MAX, Limits, ROOT_KEYS, _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
 
@@ -95,6 +95,40 @@ class HistoryTemporariesConfigTests(Fixture):
                 else:
                     with self.assertRaisesRegex(ConfigError, 'limits.history_temporaries'):
                         load(self.file)
+
+
+class SmokeRetentionScanConfigTests(Fixture):
+    DEFAULTS = {
+        "smoke_retention_projects": 5000,
+        "smoke_retention_pairs": 5000,
+        "smoke_retention_refs": 20000,
+        "smoke_retention_entries": 100000,
+        "smoke_retention_metadata_bytes": 64 * 1024 * 1024,
+    }
+
+    def test_defaults_and_format_bound_ranges(self):
+        self.assertEqual(TOML_INTEGER_MAX, (1 << 63) - 1)
+        self.assertEqual({name: getattr(Limits(), name) for name in self.DEFAULTS},
+                         self.DEFAULTS)
+        for name in self.DEFAULTS:
+            self.assertEqual(_LIMIT_RANGES[name], (1, TOML_INTEGER_MAX))
+        base = self.file.read_text()
+        for name, default in self.DEFAULTS.items():
+            with self.subTest(name=name):
+                original = re.sub(rf'(?m)^{name} = .*\n', '', base)
+                self.file.write_text(original)
+                self.assertEqual(getattr(load(self.file).limits, name), default)
+                for value in ('1', str(default), str(TOML_INTEGER_MAX),
+                              '0', '-1', 'true', 'false', '1.5', '"1"', '[]', '{}'):
+                    with self.subTest(value=value):
+                        self.file.write_text(original.replace(
+                            '\n[limits]\n', f'\n[limits]\n{name} = {value}\n'))
+                        if value in ('1', str(default), str(TOML_INTEGER_MAX)):
+                            self.assertEqual(getattr(load(self.file).limits, name), int(value))
+                        else:
+                            with self.assertRaisesRegex(ConfigError, f'limits.{name}'):
+                                load(self.file)
+                self.file.write_text(base)
 
 
 class DecisionProjectionConfigTests(Fixture):

@@ -472,14 +472,9 @@ DECLARATIONS = {
         'POLL_FETCH_TIMEOUT_CAP': ('30', 'configured policy', 'VCS polling / fail-closed fallback for poll_fetch_timeout_seconds'),
     },
     'smoke_retention.py': {
-        'MAX_PROJECTS': ('5000', 'policy', 'smoke retention / project scan budget'),
-        'MAX_PAIRS': ('5000', 'policy', 'smoke retention / pair scan budget'),
-        'MAX_REFS': ('20000', 'policy', 'smoke retention / reference scan budget'),
-        'MAX_METADATA': ('64 * 1024 * 1024', 'policy', 'smoke retention / cumulative metadata byte budget'),
         'MAX_RECORD': ('128 * 1024', 'safety', 'smoke retention / bounded metadata-record read'),
-        'MAX_ENTRIES': ('100000', 'policy', 'smoke retention / metadata entry budget'),
-        'MAX_DAYS': ('36500', 'policy', 'smoke retention / allowed retention-age range'),
-        'AUDIT_LIMIT': ('128', 'policy', 'smoke retention / retained audit-event count'),
+        'MAX_DAYS': ('36500', 'safety', 'smoke retention / stored expiry-age validation maximum (100 years)'),
+        'AUDIT_LIMIT': ('128', 'policy', 'smoke retention / retained audit-event count; no measured host-cost need for a knob'),
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
         'AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX': (
@@ -847,6 +842,38 @@ HISTORY_TEMPORARIES = {
                                     'config / unchanged decision-history recovery default'),
     'MAX_HISTORY_TEMPORARIES': ('4096', 'safety',
                                 'config / absolute untrusted temporary-metadata ceiling'),
+}
+
+
+# The shared scan traverses the machine-wide data dir. A bounded synthetic
+# measurement found ~0.6 ms per project root and per metadata record and
+# ~4.8 KiB retained per insight, so these dimensions are host/history policy.
+SMOKE_RETENTION_SCAN = {
+    'smoke_retention_projects': (
+        'DEFAULT_SMOKE_RETENTION_PROJECTS', 'configured policy',
+        'Limits / shared scan project roots'),
+    'smoke_retention_pairs': (
+        'DEFAULT_SMOKE_RETENTION_PAIRS', 'configured policy',
+        'Limits / shared scan pairs and quarantine entries'),
+    'smoke_retention_refs': (
+        'DEFAULT_SMOKE_RETENTION_REFS', 'configured policy',
+        'Limits / shared scan live reference occurrences'),
+    'smoke_retention_entries': (
+        'DEFAULT_SMOKE_RETENTION_ENTRIES', 'configured policy',
+        'Limits / shared scan metadata entries plus record reads'),
+    'smoke_retention_metadata_bytes': (
+        'DEFAULT_SMOKE_RETENTION_METADATA_BYTES', 'configured policy',
+        'Limits / shared scan cumulative metadata bytes'),
+    'DEFAULT_SMOKE_RETENTION_PROJECTS': (
+        '5000', 'configured policy', 'config / shared scan root default'),
+    'DEFAULT_SMOKE_RETENTION_PAIRS': (
+        '5000', 'configured policy', 'config / shared scan pair default'),
+    'DEFAULT_SMOKE_RETENTION_REFS': (
+        '20000', 'configured policy', 'config / shared scan reference default'),
+    'DEFAULT_SMOKE_RETENTION_ENTRIES': (
+        '100000', 'configured policy', 'config / shared scan entry default'),
+    'DEFAULT_SMOKE_RETENTION_METADATA_BYTES': (
+        '64 * 1024 * 1024', 'configured policy', 'config / shared scan byte default'),
 }
 
 
@@ -1258,7 +1285,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         found = inventory(tree)
         declared = set(CONFIG_MODULE_BOUNDS)
         for special in (CHECK_RETENTION, HISTORY_TEMPORARIES, DECISION_PROJECTION,
-                        DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION):
+                        DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION, SMOKE_RETENTION_SCAN):
             declared.update(name for name in special if name in found)
         self.assertEqual(set(found), declared)
         categories = {'mechanism', 'format', 'safety'}
@@ -1319,6 +1346,25 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                                       'MAX_HISTORY_TEMPORARIES')],
                          ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in HISTORY_TEMPORARIES.values()))
+
+    def test_smoke_retention_scan_budget_declarations(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        fields = {node.target.id: ast.unparse(node.value) for node in limits.body
+                  if isinstance(node, ast.AnnAssign)}
+        modules = {target.id: ast.unparse(node.value) for node in tree.body
+                   if isinstance(node, ast.Assign)
+                   for target in node.targets if isinstance(target, ast.Name)}
+        for name, (expression, category, rationale) in SMOKE_RETENTION_SCAN.items():
+            with self.subTest(bound=name):
+                self.assertEqual(fields.get(name, modules.get(name)), expression)
+                self.assertEqual(category, 'configured policy')
+                self.assertTrue(rationale.strip())
+        self.assertEqual(
+            {name for name in SMOKE_RETENTION_SCAN if name.startswith('smoke_')},
+            {'smoke_retention_projects', 'smoke_retention_pairs', 'smoke_retention_refs',
+             'smoke_retention_entries', 'smoke_retention_metadata_bytes'} & set(fields))
 
     def test_decision_projection_policy_and_safety_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

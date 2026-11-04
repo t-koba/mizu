@@ -320,11 +320,11 @@ class RestoreTests(Fixture):
         entered, release = threading.Event(), threading.Event()
         attempted = threading.Event()
         original_validate, original_shared = retention.validate_restored_refs, retention.shared_lock
-        def pause_validation(root_data, root):
+        def pause_validation(root_data, root, **kwargs):
             self.assertTrue(held(root_data / "locks/smoke-retention.lock"))
             entered.set()
             self.assertTrue(release.wait(10), "Restore validation was not released")
-            return original_validate(root_data, root)
+            return original_validate(root_data, root, **kwargs)
         @contextmanager
         def observe_retention_lock(root_data, *, blocking=False):
             attempted.set()

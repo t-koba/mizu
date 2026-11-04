@@ -110,6 +110,14 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
                 setattr(self.project.config.limits, SETTING, value)
                 self.assertEqual(self.maintain(), {"status": "unavailable"})
                 check.assert_not_called()
+        setattr(self.project.config.limits, SETTING, DAY)
+        for name in ("smoke_retention_projects", "smoke_retention_pairs", "smoke_retention_refs",
+                     "smoke_retention_entries", "smoke_retention_metadata_bytes"):
+            with self.subTest(budget=name), mock.patch.object(retention, "directory") as check:
+                setattr(self.project.config.limits, name, 0)
+                self.assertEqual(self.maintain(), {"status": "unavailable"})
+                check.assert_not_called()
+                setattr(self.project.config.limits, name, 1)
 
     def test_zero_day_policy_keeps_pairs(self):
         old = self.pair()
@@ -170,7 +178,7 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
             {}, {"checked_at": CLOCK}, dict(self.completed(), checked_at=True),
             dict(self.completed(), checked_at=CLOCK + 1), dict(self.completed(), checked_at=-1),
             dict(self.completed(), status="unknown"), dict(self.completed(), unexpected=1),
-            dict(self.completed(), days=31.0), dict(self.completed(), retired_total=5001)))
+            dict(self.completed(), days=31.0), dict(self.completed(), retired_total=1 << 63)))
         for raw in invalid:
             with self.subTest(raw=raw[:100]), \
                  mock.patch.object(retention, "_run_locked", side_effect=AssertionError):
@@ -190,8 +198,9 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
         self.assertEqual(self.maintain(), {"status": "not-due"})
         bad.unlink()
         self.state.unlink()
-        with mock.patch.object(retention, "MAX_PROJECTS", 0):
-            self.assertEqual(self.maintain()["error"], "LimitExceeded")
+        (self.data / "projects/second").mkdir()
+        self.project.config.limits.smoke_retention_projects = 1
+        self.assertEqual(self.maintain()["error"], "LimitExceeded")
         self.assertTrue(old.is_dir())
 
     def test_failures_are_bounded_best_effort_but_cancellation_propagates(self):

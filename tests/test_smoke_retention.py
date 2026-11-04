@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -615,18 +616,34 @@ class SmokeRetentionTests(unittest.TestCase):
         manifest_size = (pair / 'manifest.json').stat().st_size
         bound = max(policy_size, manifest_size)
         self.assertGreater(policy_size + manifest_size, bound)
-        with patch.object(retention, 'MAX_METADATA', bound), self.assertRaises(LimitExceeded):
-            self.run_retention(apply=True)
+        with self.assertRaises(LimitExceeded):
+            self.run_retention(apply=True, budgets=retention.Budgets(metadata_bytes=bound))
         self.assertTrue(pair.exists())
 
     def test_scan_bounds_all_refuse_before_retirement(self):
         pair = self.pair()
         insights, _ = self.owner()
         self.insight(insights, [self.a])
-        for key, limit in [('MAX_PROJECTS', 0), ('MAX_PAIRS', 0), ('MAX_REFS', 0), ('MAX_METADATA', 1), ('MAX_ENTRIES', 0)]:
-            with self.subTest(key=key), patch.object(retention, key, limit), self.assertRaises(LimitExceeded):
-                self.run_retention(apply=True)
+        for key, limit in [('projects', 0), ('pairs', 0), ('refs', 0),
+                           ('metadata_bytes', 1), ('entries', 0)]:
+            with self.subTest(key=key), self.assertRaises(LimitExceeded):
+                self.run_retention(apply=True, budgets=retention.Budgets(**{key: limit}))
             self.assertTrue(pair.exists())
+
+    def test_scan_budgets_follow_limits_and_default_to_current_values(self):
+        from mizu.config import Limits
+        self.assertEqual(retention.Budgets.from_limits(Limits()), retention.Budgets())
+        self.assertEqual(retention.Budgets.from_limits(None), retention.Budgets())
+        self.assertEqual(retention.Budgets().projects, 5000)
+        self.assertEqual(retention.Budgets().pairs, 5000)
+        self.assertEqual(retention.Budgets().refs, 20000)
+        self.assertEqual(retention.Budgets().entries, 100000)
+        self.assertEqual(retention.Budgets().metadata_bytes, 64 * 1024 * 1024)
+        for limits in (SimpleNamespace(smoke_retention_pairs=0),
+                       SimpleNamespace(smoke_retention_entries=True),
+                       SimpleNamespace(smoke_retention_metadata_bytes='1')):
+            with self.subTest(limits=limits), self.assertRaises(ValueError):
+                retention.Budgets.from_limits(limits)
 
     def test_malformed_missing_oversized_and_unknown_manifests(self):
         pair = self.pair()

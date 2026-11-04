@@ -63,6 +63,18 @@ MAX_DECISION_RECEIPT_DIAGNOSTICS = 100
 #: counting every dropped row in `omitted` instead of growing the record.
 DEFAULT_QUEUE_OBSERVATIONS = 8
 MAX_QUEUE_OBSERVATIONS = 100
+
+#: Shared smoke-retention scan budgets. A bounded synthetic scan measured
+#: ~0.6 ms per project root and per metadata record, and ~4.8 KiB retained
+#: per insight record in the parsed-record cache, so the project/record
+#: dimensions are host/history policy. The defaults preserve the former
+#: module literals; ranges use the TOML signed-64-bit format bound.
+DEFAULT_SMOKE_RETENTION_PROJECTS = 5000
+DEFAULT_SMOKE_RETENTION_PAIRS = 5000
+DEFAULT_SMOKE_RETENTION_REFS = 20000
+DEFAULT_SMOKE_RETENTION_ENTRIES = 100000
+DEFAULT_SMOKE_RETENTION_METADATA_BYTES = 64 * 1024 * 1024
+
 #: Host-only activation plans/reports are local evidence, not transport
 #: frames, and grow with the complete current decision/pending source set.
 #: A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan and a
@@ -471,6 +483,15 @@ class Limits:
     #: (0–2678400; default 86400). Per-project state must not drive
     #: this global sweep; cadence lives under ``data_dir``.
     automatic_smoke_retention_interval_seconds: int = 86400
+    #: Shared smoke-retention scan budgets. The scan traverses the
+    #: machine-wide data dir, so its project, pair, reference, entry and
+    #: metadata-byte ceilings are host/history policy, not format limits.
+    #: Defaults preserve the former literals; 1 is the smallest budget.
+    smoke_retention_projects: int = DEFAULT_SMOKE_RETENTION_PROJECTS
+    smoke_retention_pairs: int = DEFAULT_SMOKE_RETENTION_PAIRS
+    smoke_retention_refs: int = DEFAULT_SMOKE_RETENTION_REFS
+    smoke_retention_entries: int = DEFAULT_SMOKE_RETENTION_ENTRIES
+    smoke_retention_metadata_bytes: int = DEFAULT_SMOKE_RETENTION_METADATA_BYTES
     #: Operator-selected retention (days) for per-run diagnostics and dispatch
     #: measurements (``*-events.jsonl``, ``diagnostics.txt``, and
     #: ``dispatch-attempts.json``). Files older than
@@ -536,7 +557,13 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
                  "insight_cursor_ttl_seconds": (60, 604800),
-                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400), "pending_insights": (1, 1000),
+                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
+                 "smoke_retention_projects": (1, TOML_INTEGER_MAX),
+                 "smoke_retention_pairs": (1, TOML_INTEGER_MAX),
+                 "smoke_retention_refs": (1, TOML_INTEGER_MAX),
+                 "smoke_retention_entries": (1, TOML_INTEGER_MAX),
+                 "smoke_retention_metadata_bytes": (1, TOML_INTEGER_MAX),
+                 "pending_insights": (1, 1000),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000), "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),

@@ -657,8 +657,11 @@ def execute(args):
         from .doctor import check
         return check(_with_sandbox_image(config, getattr(args, "sandbox_image", None)), sandbox=args.sandbox)
     if args.command == "smoke-retention":
-        from .smoke_retention import run, set_days
-        return set_days(config.data, args.set_days) if args.set_days is not None else run(config.data, apply=args.apply)
+        from .smoke_retention import Budgets, run, set_days
+        if args.set_days is not None:
+            return set_days(config.data, args.set_days)
+        limits = getattr(config, "limits", None)
+        return run(config.data, apply=args.apply, budgets=Budgets.from_limits(limits))
     if args.command == "smoke":
         from .smoke import live
         return live(config, args.profile, _resolve_role(config, args.role, probe=True))
