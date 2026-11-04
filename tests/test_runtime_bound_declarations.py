@@ -478,7 +478,9 @@ DECLARATIONS = {
     'smoke_retention.py': {
         'MAX_RECORD': ('128 * 1024', 'safety', 'smoke retention / bounded metadata-record read'),
         'MAX_DAYS': ('36500', 'safety', 'smoke retention / stored expiry-age validation maximum (100 years)'),
-        'AUDIT_LIMIT': ('128', 'policy', 'smoke retention / retained audit-event count; no measured host-cost need for a knob'),
+        'AUDIT_LIMIT': (
+            '128', 'safety',
+            'smoke retention / bounded maintenance-audit record read and retained event count'),
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
         'AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX': (

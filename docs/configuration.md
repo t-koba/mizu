@@ -968,8 +968,9 @@ the data-dir `days` policy.
 Fixed bounds remain: each metadata record is at most 128 KiB (`MAX_RECORD`, a
 per-record safety read bound); the stored expiry age is validated at 0–36,500
 days (`MAX_DAYS`, a data-dir policy validation maximum); and the maintenance
-audit keeps at most 128 events (`AUDIT_LIMIT`, with no measured host-cost need
-for a knob). The automatic due-state read is at most 4 KiB; its `days` is
+audit keeps at most 128 events (`AUDIT_LIMIT`, the bound of its validated
+record read; a larger history is not part of the maintenance-audit contract).
+The automatic due-state read is at most 4 KiB; its `days` is
 0–36,500 and its `retired_total`/`recovered_total` are non-negative integers
 within TOML's signed-64-bit range.
 
