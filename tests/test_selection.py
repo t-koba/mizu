@@ -15,9 +15,9 @@ from mizu.config import load
 from mizu.engine_config import effective, session_record
 from mizu.errors import (Busy, Cancelled, ConfigError, Denied, InfraExceeded, ModelFailure,
                          ProtocolError, RunDeadlineExceeded)
-from mizu.fs import canonical, read_json, write_json
+from mizu.fs import canonical, digest, read_json, write_json
 from mizu.runtime import Engine
-from mizu.selection import (State, UNKNOWN, attributes, base_facts, evaluate,
+from mizu.selection import (MAX_BYTES, State, UNKNOWN, attributes, base_facts, evaluate,
                             rule_attributes, select, validate_condition, validate_selectors)
 from mizu.usage import summarize
 
@@ -74,6 +74,99 @@ class SelectionFixture(Fixture):
 
 
 class SelectionTests(SelectionFixture):
+    def _state_policy(self, terminal=256, events=8):
+        path = self.config.data / 'selection' / 'policy.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, {'version': 1, 'terminal_contributions': terminal,
+                          'probe_events': events})
+        return State(self.config)
+
+    def _add_synthetic_contribution(self, state, index, *, status='expired', event_count=0,
+                                    protected_intent=False):
+        identity = digest(canonical({'synthetic_contribution': index}))
+        target = digest(canonical({'synthetic_target': index}))
+        created = index + 1
+        claim = None
+        if protected_intent:
+            claim = digest(canonical({'synthetic_claim': index}))
+        contribution = {
+            'key': 'profile:primary', 'profile': 'primary', 'sponsor': 'project',
+            'role': 'worker', 'sponsor_binding': digest(canonical({'sponsor': index})),
+            'target': target, 'selector': 'dynamic', 'rule': 0, 'error_rule': 0,
+            'created_at': created, 'until': None, 'probe_seconds': 1,
+            'next_probe_at': created + 1, 'status': status, 'revision': 1,
+            'claim': claim, 'last_event': claim, 'reason': None}
+        state['contributions'][identity] = contribution
+        state['receipts'][identity] = {
+            'payload': digest(canonical({'synthetic_payload': index})),
+            'action': {'rule': 0, 'until': None, 'scope': 'profile',
+                       'probe_seconds': 1, 'contribution': identity}}
+        if protected_intent:
+            state['events'][claim] = {
+                'contribution': identity, 'revision': 1, 'target': target,
+                'started_at': created, 'finished_at': None, 'status': 'intent',
+                'admitted': False, 'settled': False, 'challenge_ok': False,
+                'requests': 0, 'model': None, 'reason': None, 'reserve': ' ' * 128}
+        for ordinal in range(event_count):
+            event_id = digest(canonical({'synthetic_event': [index, ordinal]}))
+            state['events'][event_id] = {
+                'contribution': identity, 'revision': 1, 'target': target,
+                'started_at': ordinal + 1, 'finished_at': ordinal + 2,
+                'status': 'failure', 'admitted': False, 'settled': False,
+                'challenge_ok': False, 'requests': 0, 'model': None, 'reason': None}
+            contribution['last_event'] = event_id
+        return identity
+
+    def test_terminal_contribution_policy_maximum_remains_bounded_and_readable(self):
+        store = self._state_policy(terminal=8192, events=8)
+        state = store.read()
+        identities = [self._add_synthetic_contribution(state, i) for i in range(8192)]
+        self.assertEqual(len(state['contributions']), 8192)
+        self.assertGreater(len(canonical(state)), MAX_BYTES)
+        store.save(state)
+        saved = store.read()
+        retained = sorted((item['created_at'], identity)
+                          for identity, item in saved['contributions'].items())
+        self.assertGreater(len(retained), 0)
+        self.assertLess(len(retained), 8192)
+        self.assertEqual([identity for _, identity in retained],
+                         identities[-len(retained):])
+        self.assertLessEqual(len(canonical(saved)), MAX_BYTES)
+
+    def test_probe_event_policy_maximum_prunes_oldest_terminal_history_for_size(self):
+        store = self._state_policy(terminal=256, events=8192)
+        state = store.read()
+        oldest = self._add_synthetic_contribution(state, 1, event_count=8192)
+        newest = self._add_synthetic_contribution(state, 2)
+        self.assertEqual(len(state['events']), 8192)
+        self.assertGreater(len(canonical(state)), MAX_BYTES)
+        store.save(state)
+        saved = store.read()
+        self.assertNotIn(oldest, saved['contributions'])
+        self.assertIn(newest, saved['contributions'])
+        self.assertEqual(saved['events'], {})
+        self.assertLessEqual(len(canonical(saved)), MAX_BYTES)
+
+    def test_active_only_state_overflow_latches_exhausted_without_pruning_protected_evidence(self):
+        store = self._state_policy(terminal=8192, events=8192)
+        previous = store.read()
+        preserved = self._add_synthetic_contribution(
+            previous, 0, status='active', protected_intent=True)
+        store.save(previous)
+        previous = store.read()
+        oversized = copy.deepcopy(previous)
+        for index in range(1, 8192):
+            self._add_synthetic_contribution(oversized, index, status='active')
+        self.assertGreater(len(canonical(oversized)), MAX_BYTES)
+        with self.assertRaises(ConfigError):
+            store.save_or_close(oversized, previous)
+        saved = store.read()
+        self.assertTrue(saved['exhausted'])
+        self.assertEqual(set(saved['contributions']), {preserved})
+        self.assertIn(preserved, saved['receipts'])
+        claim = saved['contributions'][preserved]['claim']
+        self.assertEqual(saved['events'][claim]['status'], 'intent')
+
     def test_on_error_failure_brake_policy_defaults_false_and_is_strict_boolean(self):
         defaulted = specification()
         validate_selectors({'dynamic': defaulted}, self.config.profiles, self.file.parent)

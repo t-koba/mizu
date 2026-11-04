@@ -414,6 +414,20 @@ class State:
         if any(len(state[key]) > MAX_STATE_ITEMS for key in
                ('observations', 'blocks', 'history', 'contributions', 'receipts', 'events')):
             raise ConfigError('Selection state table exceeds 8192 entries')
+
+        def size():
+            try:
+                return len(canonical({**state, 'exhausted': False}))
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ConfigError('Selection data must be bounded finite JSON') from exc
+
+        # Keep the fixed 1 MiB format bound; configured counts are upper bounds.
+        # Remove complete oldest terminal obligations, never active evidence.
+        state_bytes = size()
+        if state_bytes > MAX_BYTES:
+            state_bytes = prune_terminal_contributions_to_size(state, state_bytes, MAX_BYTES)
+            if state_bytes > MAX_BYTES:
+                raise ConfigError('Selection state exceeds 1 MiB without prunable terminal evidence')
         # Reserve room for a capacity latch even when the next write cannot fit.
         bounded({**state, 'exhausted': False})
         write_json(self.path, bounded(state))
@@ -698,13 +712,11 @@ def terminal_intent(event, updates):
     return updated
 
 
-def prune_probe_events(state, identity, limit=MAX_PROBE_EVENTS):
-    """Keep the latest ``limit`` events, without deleting the active or visible result."""
+def _prune_events(state, identity, limit, event_ids):
     contribution = state['contributions'].get(identity)
-    if not contribution:
+    if not contribution or len(event_ids) <= limit:
         return
-    events = [(key, event) for key, event in state['events'].items()
-              if event['contribution'] == identity]
+    events = [(key, state['events'][key]) for key in event_ids]
     protected = {key for key in (contribution['claim'], contribution['last_event']) if key}
     protected.update(key for key, event in events if event['status'] == 'intent')
     removable = sorted((event['started_at'], event['revision'], key) for key, event in events
@@ -714,16 +726,88 @@ def prune_probe_events(state, identity, limit=MAX_PROBE_EVENTS):
         state['events'].pop(key, None)
 
 
+def prune_probe_events(state, identity, limit=MAX_PROBE_EVENTS):
+    """Keep the latest ``limit`` events, without deleting the active or visible result."""
+    event_ids = [key for key, event in state['events'].items()
+                 if event['contribution'] == identity]
+    _prune_events(state, identity, limit, event_ids)
+
+
+def prune_all_probe_events(state, limit):
+    """Apply the configured per-contribution event ceiling to a whole state."""
+    for identity, event_ids in _events_by_contribution(state).items():
+        _prune_events(state, identity, limit, event_ids)
+
+
+def _terminal_contributions(state):
+    return sorted((c['created_at'], identity) for identity, c in state['contributions'].items()
+                  if c['status'] in ('recovered', 'expired'))
+
+
+def _events_by_contribution(state):
+    result = {}
+    for event_id, event in state['events'].items():
+        result.setdefault(event['contribution'], []).append(event_id)
+    return result
+
+
+def _drop_terminal_contribution(state, identity, event_ids):
+    state['contributions'].pop(identity, None)
+    state['receipts'].pop(identity, None)
+    for event_id in event_ids:
+        state['events'].pop(event_id, None)
+
+
+def _mapping_entry_sizes(mapping, keys):
+    empty_object_bytes = len(canonical({}))
+    return {key: len(canonical({key: mapping[key]})) - empty_object_bytes
+            for key in keys if key in mapping}
+
+
+def _mapping_removal_bytes(mapping, entry_sizes, keys):
+    removed = [key for key in keys if key in mapping]
+    if not removed:
+        return 0
+    separators = len(removed) if len(removed) < len(mapping) else len(mapping) - 1
+    return sum(entry_sizes[key] for key in removed) + separators
+
+
+def prune_terminal_contributions_to_size(state, state_bytes, maximum_bytes):
+    """Drop oldest whole terminal obligations until the canonical state fits."""
+    terminal = _terminal_contributions(state)
+    if not terminal:
+        return state_bytes
+    events_by_contribution = _events_by_contribution(state)
+    terminal_ids = [identity for _, identity in terminal]
+    terminal_event_ids = (event_id for identity in terminal_ids
+                          for event_id in events_by_contribution.get(identity, []))
+    contribution_sizes = _mapping_entry_sizes(state['contributions'], terminal_ids)
+    receipt_sizes = _mapping_entry_sizes(state['receipts'], terminal_ids)
+    event_sizes = _mapping_entry_sizes(state['events'], terminal_event_ids)
+    for _, identity in terminal:
+        if state_bytes <= maximum_bytes:
+            break
+        event_ids = events_by_contribution.get(identity, [])
+        state_bytes -= _mapping_removal_bytes(
+            state['contributions'], contribution_sizes, (identity,))
+        state_bytes -= _mapping_removal_bytes(
+            state['receipts'], receipt_sizes, (identity,))
+        state_bytes -= _mapping_removal_bytes(
+            state['events'], event_sizes, event_ids)
+        _drop_terminal_contribution(state, identity, event_ids)
+    return state_bytes
+
+
 def prune_terminal_contributions(state, limit=MAX_TERMINAL_CONTRIBUTIONS):
     """Retain only the ``limit`` newest terminal probe obligations and their evidence."""
-    terminal = sorted((c['created_at'], identity) for identity, c in state['contributions'].items()
-                      if c['status'] in ('recovered', 'expired'))
-    for _, identity in terminal[:-limit]:
-        state['contributions'].pop(identity, None)
-        state['receipts'].pop(identity, None)
-        for event_id in [key for key, event in state['events'].items()
-                         if event['contribution'] == identity]:
-            state['events'].pop(event_id, None)
+    terminal = _terminal_contributions(state)
+    removed = terminal[:-limit]
+    if not removed:
+        return
+    events_by_contribution = _events_by_contribution(state)
+    for _, identity in removed:
+        _drop_terminal_contribution(state, identity,
+                                    events_by_contribution.get(identity, []))
 
 
 def active(contribution, at):

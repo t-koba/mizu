@@ -586,23 +586,26 @@ optional `selection/policy.json` in the data dir may set
 with both integers in 1..8,192, at most 1 KiB. Absence keeps 256/8; malformed,
 unsafe or oversized policy refuses selection rather than resetting the ledger.
 Changing them is a deliberate data-dir-wide decision rather than a project
-config knob.
+config knob. Both counts are upper bounds, not guaranteed retention: the whole
+canonical state has a fixed 1 MiB cap, so it can retain fewer terminal
+contributions or probe events than either configured count permits.
 
 By default, at most 256 terminal (recovered or expired) contributions and their
 receipts are retained. When another contribution becomes terminal, the oldest
 terminal contribution is pruned together with its receipt and all its events;
 active contributions and receipts are never pruned. Each contribution keeps at
 most the latest 8 probe events by default, including an active intent/current
-claim. Only older
-terminal events may be pruned, and the latest event/status remains visible.
-Each intent event reserves 512 bytes for admission/progress and terminal
-proof; progress consumes that padding while preserving at least 128 bytes for a
-terminal result, and the terminal transition removes any remainder. Each state table still has at most 8192 entries, each probe event is
-at most 4 KiB, and the whole state remains at most 1 MiB. At true active-obligation
-capacity overflow, existing active evidence is retained and a visible
-`exhausted` latch closes selector admission and new probes rather than dropping
+claim. Only older terminal events may be pruned, and the latest event/status remains
+visible. After the configured terminal-contribution and per-contribution
+event count limits are applied, size overflow removes complete oldest terminal
+contributions and their receipts/events as needed to fit the 1 MiB cap.
+Active contributions, their receipts and protected events are never removed
+for size. If irreducible active evidence cannot fit, the
+update fails closed; probe transitions preserve the prior ledger and set the
+`exhausted` latch, closing selector admission and new probes rather than dropping
 an active obligation. A full legacy file exposes the same latch without
-rewriting it. Back up the global selection directory separately from project
+rewriting it. Each state table still has at most 8192 entries, each probe event
+is at most 4 KiB. Back up the global selection directory separately from project
 backups; project backups include project-local classification caches and run
 evidence.
 
