@@ -257,7 +257,7 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
                 c['last_event'] = claim
                 shutil.rmtree(store.root / 'work' / claim, ignore_errors=True)
             c.update(status='expired', revision=c['revision'] + 1, claim=None, reason='upper_expiry')
-            prune_probe_events(state, identity)
+            prune_probe_events(state, identity, store.event_limit)
             store.save_or_close(state, previous)
             return {'event': 'recovery_probe', 'status': 'expired', 'contribution': identity}
         if c['claim']:
@@ -279,7 +279,7 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
             shutil.rmtree(store.root / 'work' / c['claim'], ignore_errors=True)
             c.update(claim=None, last_event=c['claim'], revision=c['revision'] + 1,
                      next_probe_at=at + c['probe_seconds'], reason='uncertain_event')
-            prune_probe_events(state, identity)
+            prune_probe_events(state, identity, store.event_limit)
             store.save_or_close(state, previous)
             return {'event': 'recovery_probe', 'status': 'unknown', 'contribution': identity}
         if c['next_probe_at'] > at:
@@ -290,7 +290,7 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
         c.update(claim=claim, revision=c['revision'] + 1, next_probe_at=at + MAX_SECONDS)
         event = _event(identity, c, at)
         state['events'][claim] = event
-        prune_probe_events(state, identity)
+        prune_probe_events(state, identity, store.event_limit)
         # Intent is durable before locks, admission or driver launch.
         store.save_or_close(state, previous)
         c = copy.deepcopy(c)

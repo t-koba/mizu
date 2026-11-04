@@ -969,6 +969,38 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertLessEqual(self.store.path.stat().st_size, before + 256)
         self.assertLess(self.store.path.stat().st_size, 32768)
 
+    def set_selection_policy(self, probe_events):
+        path = self.config.data / 'selection' / 'policy.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, {'version': 1, 'terminal_contributions': 256,
+                          'probe_events': probe_events})
+
+    def test_service_uses_configured_probe_event_limit_above_default(self):
+        self.set_selection_policy(12)
+        action = self.setup_probe()
+        for index in range(9):
+            result, _ = self.service(ProbeDriver(admitted=False, challenge=False),
+                                     at=1010 + index * 10)
+            self.assertEqual(result['status'], 'failure')
+        state = self.store.read()
+        events = [event for event in state['events'].values()
+                  if event['contribution'] == action['contribution']]
+        self.assertEqual(len(events), 9)
+
+    def test_service_uses_configured_probe_event_limit_below_default(self):
+        self.set_selection_policy(4)
+        action = self.setup_probe()
+        for index in range(6):
+            result, _ = self.service(ProbeDriver(admitted=False, challenge=False),
+                                     at=1010 + index * 10)
+            self.assertEqual(result['status'], 'failure')
+        state = self.store.read()
+        contribution = state['contributions'][action['contribution']]
+        events = [event for event in state['events'].values()
+                  if event['contribution'] == action['contribution']]
+        self.assertEqual(len(events), 4)
+        self.assertIn(contribution['last_event'], state['events'])
+
     def test_terminal_contribution_retention_keeps_active_and_latest_receipts(self):
         from mizu.selection import MAX_TERMINAL_CONTRIBUTIONS
         action = self.setup_probe()
