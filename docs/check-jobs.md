@@ -239,17 +239,19 @@ waiting for ownership consumes no compute slot. The live writer's
 build tree is never accessed. Environment changes select a separate cache, and
 interrupted jobs discard their private artifacts. Cache storage requires ordinary
 operator disk maintenance and remains subject to the free-space admission reserve.
-While that exclusion is held, cache-sensitive proof lookup does not wait: the
-status `effective_verification` is null and its separate
-`effective_verification_diagnostic` is `{status: "uncomputable", reason:
-"cache_owned", owner_job: null}`. Null owner means unknown, not an assertion
-about which job owns the lock; this diagnostic is not proof or authority. Full
-and delta prompts expose the same null effective proof and separate diagnostic
-in `published_snapshot`; the diagnostic is null when proof lookup is computable. Historical snapshot
-`verification` remains unchanged and distinct. Selection and completion cannot
-use a stale retained receipt. After the lock is released, a retry recomputes the
-exact current cache input; unsafe paths, malformed evidence and I/O errors still
-fail closed rather than becoming a busy diagnosis. Cache-aware validated listing
+While that exclusion is held, cache-sensitive effective-proof lookup does not
+wait: full and delta prompt `published_snapshot` headers expose null
+`effective_verification` and a separate `effective_verification_diagnostic` of
+`{status: "uncomputable", reason: "cache_owned", owner_job: null}`. Null owner
+means unknown, not an assertion about which job owns the lock; this diagnostic
+is not proof or authority. The diagnostic is null when lookup is computable.
+Historical snapshot `verification` remains unchanged and distinct. Selection
+and completion cannot use a stale retained receipt. After the lock is released,
+a retry recomputes the exact current cache input; unsafe paths, malformed
+evidence and I/O errors still fail closed rather than becoming a busy diagnosis.
+Read-only project status instead reports retained evidence with applicability
+unassessed: it never takes this lock or fingerprints mounts/cache inputs, even
+when the cache is free. Cache-aware validated listing
 and join return a `Busy` error promptly while owned; verification submission
 queues unbound demand as described below. Custom checks without selected scratch
 and configurations without caches are unaffected. The exclusive lock remains
@@ -596,17 +598,36 @@ resolve it exactly; they never substitute a newer scope lookup for a recorded
 ID. Reads validate schema, digests, bindings and regular non-hardlinked paths;
 unsafe directories, malformed records and dangling indexes fail closed.
 
-`Project.status` and both full and delta prompt `published_snapshot` headers
-carry **separate** fields:
+Read-only `Project.status` (also the CLI status JSON) keeps three notions separate:
 
 - `verification`: unchanged raw verification embedded at snapshot publication;
-- `effective_verification`: `null`, or `{passed: true, code_digest,
-  source: "retained_acceptance", receipt_id}` for a matching representable tree
-  and the current exact configured scope.
+- `retained_verification`: `null`, or `{passed: true, code_digest,
+  source: "retained_acceptance", receipt_id, applicability: "unassessed"}` for
+  one validated receipt indexed for the snapshot code digest;
+- `effective_verification`: always `null`, with
+  `effective_verification_diagnostic: {status: "unassessed", reason: "read_only_status"}`.
 
-The latter is a read projection, not a manifest rewrite or a current-workspace
-import. Selector work inputs likewise keep their publication-time `verified`
-verdict separate from `retained_verification` (the exact projected reference).
+Status enumerates only that code digest's existing scope-index filenames and
+selects the first in lexical scope-digest order, validating the selected index,
+receipt identity, code and scope bindings and safe paths. This receipt lookup
+does not inspect producer history, acquire the cache lock, fingerprint configured
+mounts/cache inputs, compare current commands/image, or write acceptance evidence. This is
+neither a latest/best verdict nor currently reusable proof. Late receipts in
+existing stores remain visible without migration. In-flight `.new-*` staging
+files are not evidence; interrupted object/index publication is repaired by the
+existing recovery path. A missing index yields no retained summary; corrupt or
+unsafe selected evidence refuses status, not a passing claim. Whole-store
+validation remains the job of audit/restore.
+
+Full and delta prompt `published_snapshot` headers still compute
+`effective_verification`: `null`, or `{passed: true, code_digest,
+source: "retained_acceptance", receipt_id}` for a representable tree and the
+current exact configured scope, plus the separate diagnostic described above.
+Execution/reuse, selector work inputs and completion likewise still fingerprint
+fresh inputs and fail closed on changes or unavailable inputs. Work inputs keep
+their publication-time `verified` verdict separate from `retained_verification`
+(the exact effective reference, unlike the unassessed status summary).
+These projections never rewrite manifests or import current-workspace proof.
 Immutable report artifact evidence continues to describe its publication-time
 snapshot verification; it is not retroactively rewritten by late results.
 An A check completing after the workspace moves to B can therefore become

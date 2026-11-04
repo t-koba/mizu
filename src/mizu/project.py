@@ -367,8 +367,8 @@ class Project:
         from .selection import project_status
         from .run_health import finish_only_rates
         snapshot = self.snapshots.get()
-        from .acceptance import effective_projection
-        effective, effective_diagnostic = effective_projection(self, snapshot)
+        from .acceptance import retained_projection
+        retained = retained_projection(self, snapshot)
         budget = Budget(self.config.data / "budget", self.config.limits.daily_requests,
                         self.config.limits.retention_days,
                         self.config.limits.shared_daily_requests, self.config.timezone,
@@ -397,8 +397,11 @@ class Project:
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
                 "outcome": snapshot["outcome"], "summary": snapshot["summary"],
                 "verification": snapshot["verification"],
-                "effective_verification": effective,
-                "effective_verification_diagnostic": effective_diagnostic, "state": snapshot["state"],
+                "retained_verification": retained,
+                "effective_verification": None,
+                "effective_verification_diagnostic": {"status": "unassessed",
+                                                     "reason": "read_only_status"},
+                "state": snapshot["state"],
                 "progress": {"status": "current" if progress is not None else "legacy",
                              "record": progress_projection(progress),
                              "disposition": progress_disposition_value,

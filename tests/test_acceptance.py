@@ -64,7 +64,10 @@ class AcceptanceTests(Fixture):
         self.assertIsNone(ctx.verification)
         self.assertEqual(manifest.read_bytes(), raw)
         self.assertIsNone(self.project.snapshots.get()['verification'])
-        proof = self.project.status()['effective_verification']
+        status = self.project.status()
+        self.assertIsNone(status['effective_verification'])
+        proof = dict(status['retained_verification'])
+        self.assertEqual(proof.pop('applicability'), 'unassessed')
         self.assertEqual(proof['code_digest'], snapshot['code_digest'])
         self.assertEqual(proof['source'], 'retained_acceptance')
         receipt = acceptance.get(self.project.root, proof['receipt_id'])
@@ -382,12 +385,16 @@ class AcceptanceTests(Fixture):
                 with self.assertRaises((Denied, LimitExceeded)):
                     acceptance.effective(self.project, ctx.snapshot)
                 with self.assertRaises((Denied, LimitExceeded)):
+                    self.project.status()
+                with self.assertRaises((Denied, LimitExceeded)):
                     storage.audit(self.project)
         path.write_bytes(raw)
         for value in ({'schema': 1, 'receipt_id': '../outside'}, {'schema': 1, 'receipt_id': 'b' * 64}, {'schema': True, 'receipt_id': proof['receipt_id']}):
             write_json(index, value)
             with self.assertRaises(Denied):
                 acceptance.effective(self.project, ctx.snapshot)
+            with self.assertRaises(Denied):
+                self.project.status()
             with self.assertRaises(Denied):
                 acceptance.audit(self.project.root)
         index.write_bytes(index_raw)
@@ -458,11 +465,15 @@ class AcceptanceTests(Fixture):
         with self.assertRaises(Denied):
             acceptance.effective(self.project, ctx.snapshot)
         with self.assertRaises(Denied):
+            self.project.status()
+        with self.assertRaises(Denied):
             acceptance.audit(self.project.root)
         path.unlink()
         os.link(outside, path)
         with self.assertRaises(Denied):
             acceptance.get(self.project.root, proof['receipt_id'])
+        with self.assertRaises(Denied):
+            self.project.status()
         path.unlink()
         outside.replace(path)
         store = self.project.root / 'evidence/acceptance'
@@ -470,6 +481,8 @@ class AcceptanceTests(Fixture):
         self.symlink(self.root / 'moved-store', store, target_is_directory=True)
         with self.assertRaises(Denied):
             acceptance.effective(self.project, ctx.snapshot)
+        with self.assertRaises(Denied):
+            self.project.status()
         with self.assertRaises(Denied):
             acceptance.recover_producers(self.project)
 
@@ -1016,6 +1029,67 @@ class AcceptanceTests(Fixture):
         with self.assertRaises(Denied):
             acceptance.audit(self.project.root)
 
+    def test_status_retains_evidence_without_execution_inputs_or_writes(self):
+        self.configure_cache()
+        ctx, _, proof = self.produce()
+        base = self.project.root / 'evidence/acceptance'
+        before = {p.relative_to(base): p.read_bytes() for p in base.rglob('*.json')}
+        # Even accepted proof must not make status prepare execution, take a
+        # cache lock or inspect configured mounts/cache trees. No new selector
+        # is needed for late proofs on a pre-existing indexed store.
+        with patch.object(acceptance, 'effective_projection', side_effect=AssertionError('effective')), \
+             patch.object(acceptance, 'atomic_write', side_effect=AssertionError('write')), \
+             patch.object(check_jobs, 'environment', side_effect=AssertionError('mount traversal')), \
+             patch.object(check_jobs, 'cache_input', side_effect=AssertionError('cache traversal')), \
+             patch.object(check_jobs, 'cache_guard', side_effect=AssertionError('cache lock')):
+            status = self.project.status()
+        self.assertEqual(status['retained_verification'], {**proof, 'applicability': 'unassessed'})
+        self.assertIsNone(status['verification'])
+        self.assertIsNone(status['effective_verification'])
+        self.assertEqual(status['effective_verification_diagnostic'],
+                         {'status': 'unassessed', 'reason': 'read_only_status'})
+        self.assertEqual({p.relative_to(base): p.read_bytes() for p in base.rglob('*.json')}, before)
+        # Fresh execution/reuse still fingerprints and refuses both changed
+        # and unrepresentable inputs. Retention is not current authority.
+        for function in ('environment', 'cache_input'):
+            for value in ('f' * 64, None):
+                with self.subTest(function=function, value=value), patch.object(
+                        check_jobs, function, return_value=value) as fingerprint:
+                    self.assertEqual(self.project.status()['retained_verification'],
+                                     {**proof, 'applicability': 'unassessed'})
+                    fingerprint.assert_not_called()
+                    self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+                    if function == 'cache_input' and value is None:
+                        with self.assertRaisesRegex(Denied, 'Cannot bind configured check cache'):
+                            check_jobs.submit(self.context())
+                    else:
+                        self.assertNotIn('shared_job', check_jobs.submit(self.context()))
+                    self.assertTrue(fingerprint.called)
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
+        self.assertIsNone(acceptance.retained_projection(self.project, {'code_digest': 'b' * 64}))
+
+    def test_status_validates_code_and_scope_index_bindings(self):
+        ctx, _, proof = self.produce()
+        index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
+        # A valid object selected from the wrong scope or code directory must
+        # not become a retained summary. No fresh input can excuse corruption.
+        wrong_scope = index.with_name(('f' * 64) + '.json')
+        index.rename(wrong_scope)
+        with self.assertRaisesRegex(Denied, 'scope mismatch'):
+            self.project.status()
+        with self.assertRaises(Denied):
+            acceptance.audit(self.project.root)
+        wrong_scope.rename(index)
+        other_code = index.parent.with_name('b' * 64)
+        index.parent.rename(other_code)
+        with self.assertRaisesRegex(Denied, 'scope mismatch'):
+            acceptance.retained_projection(self.project, {'code_digest': 'b' * 64})
+        other_code.rename(index.parent)
+        # Atomic-write staging names are not published receipt indexes.
+        (index.parent / '.new-staging').write_text('incomplete')
+        self.assertEqual(self.project.status()['retained_verification'],
+                         {**proof, 'applicability': 'unassessed'})
+
     def configure_cache(self):
         self.configure(check_cache_paths=('target',))
         self.config = dataclasses.replace(self.config, exclude=(*self.config.exclude, 'target'))
@@ -1058,8 +1132,10 @@ class AcceptanceTests(Fixture):
                 try:
                     status = self.project.status()
                     self.assertIsNone(status['effective_verification'])
+                    self.assertEqual(status['retained_verification'],
+                        {**proof, 'applicability': 'unassessed'})
                     self.assertEqual(status['effective_verification_diagnostic'],
-                        {'status': 'uncomputable', 'reason': 'cache_owned', 'owner_job': None})
+                        {'status': 'unassessed', 'reason': 'read_only_status'})
                     for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
                         header = json.loads(text)['published_snapshot']
                         self.assertIsNone(header['effective_verification'])
@@ -1112,7 +1188,7 @@ class AcceptanceTests(Fixture):
                 acceptance.effective(self.project, ctx.snapshot)
         with patch('mizu.check_jobs.cache_input', side_effect=OSError('cache I/O')):
             with self.assertRaisesRegex(OSError, 'cache I/O'):
-                self.project.status()
+                acceptance.effective(self.project, ctx.snapshot)
 
     def test_scope_has_no_caller_controlled_cache_lock_bypass(self):
         self.configure_cache()

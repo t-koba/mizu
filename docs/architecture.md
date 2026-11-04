@@ -252,6 +252,20 @@ the code digest. Symlinks, hardlinks and special files are not materialized as
 ordinary source. Plain-directory import refuses unsupported skipped entries;
 verification cannot pass if the captured tree contains them.
 
+Read-only `Project.status()` separates immutable snapshot `verification` from
+`retained_verification`: one validated acceptance receipt for that code digest,
+with `applicability: "unassessed"`. For acceptance it reads existing per-code scope
+indexes (lexical selection, not a latest verdict) and the selected receipt; it
+neither fingerprints configured mounts/cache inputs nor takes `cache_guard`.
+No new selector, migration or acceptance write is required for existing late
+proofs. Status leaves `effective_verification` null with an explicit
+`unassessed`/`read_only_status` diagnostic. `acceptance.effective_projection`
+remains the fresh scope/fingerprint path for execution/reuse, unit prompts,
+selector evidence and completion; retained status evidence cannot authorize
+those decisions. Index/receipt code and scope bindings and safe paths fail
+closed, while whole-store audit and existing crash recovery remain authoritative.
+See [check jobs](check-jobs.md) for the status and effective-proof schemas.
+
 Snapshot retention is storage-owned policy, not a publication side effect.
 At the existing per-project automatic-prune boundary, `snapshot_retention_days`
 (default 31; 0 disables) permits removal of old superseded history generations

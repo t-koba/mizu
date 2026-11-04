@@ -1200,15 +1200,26 @@ primitives. No new configuration or external provider call is introduced.
 
 ### Shared check cache and status
 
-A running check may hold the configured shared check-cache lock across checkout,
-execution and return. Status then reports `effective_verification: null` and
-`effective_verification_diagnostic: {status: "uncomputable", reason:
-"cache_owned", owner_job: null}`. The null owner is unknown, not proof of a
-particular owner. Historical snapshot verification is separate. Retry status or
-cache-aware joins after the lock is released; they do not wait for the running
-check.
-Malformed evidence, unsafe paths and I/O errors are not cache-busy results.
-See [check jobs](check-jobs.md) for the cache and proof contract.
+Read-only status does not prepare execution: it never takes the shared
+check-cache lock or fingerprints configured mounts/cache inputs. It reports
+`retained_verification` for the published snapshot's code digest when an indexed
+receipt exists, including `applicability: "unassessed"`. This is retained evidence,
+not currently reusable proof; it may describe different commands, environment or
+cache inputs. Status always reports `effective_verification: null` and
+`effective_verification_diagnostic: {status: "unassessed", reason: "read_only_status"}`,
+whether the cache is owned or free. Historical snapshot `verification` is separate.
+Existing late receipts need no migration or status-time write. Selection is
+lexical scope-digest order, not newest/best; malformed or unsafe selected evidence
+still refuses status. See [check jobs](check-jobs.md) for the exact lookup contract.
+
+A running check may hold the shared cache lock across checkout, execution and
+return. Effective-proof consumers (including unit prompts and work-item
+completion), unlike status, still fingerprint fresh inputs. While the cache is
+owned, prompts report null effective proof with a `cache_owned`/`uncomputable`
+diagnostic and unknown `owner_job: null`; completion cannot use that receipt.
+Retry cache-aware joins or other effective-proof decisions after release. Changed
+or unavailable inputs still prevent reuse; unsafe paths, malformed evidence and
+I/O errors are not cache-busy results.
 
 Verification requests made while the configured check cache is owned queue as
 explicit unbound demand, never as proof or a shared result. The runner binds the

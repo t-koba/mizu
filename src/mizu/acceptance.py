@@ -389,12 +389,13 @@ def _index(root, code, bound):
     return f'{_BASE}/index/{code}/{_scope(bound)}.json'
 
 
-def _selected(root, name, code, bound):
+def _selected(root, name, code, bound=None):
     value = _read(root, name)
     if not isinstance(value, dict) or set(value) != {'schema', 'receipt_id'} or type(value['schema']) is not int or value['schema'] != 1:
         raise Denied('Invalid acceptance index')
     receipt = get(root, value['receipt_id'])
-    if receipt['code_digest'] != code or receipt['scope'] != bound:
+    if (receipt['code_digest'] != code or _scope(receipt['scope']) != Path(name).stem
+            or bound is not None and receipt['scope'] != bound):
         raise Denied('Acceptance index scope mismatch')
     return value['receipt_id']
 
@@ -423,6 +424,35 @@ def _retain(root, value):
             return _selected(root, name, value['code_digest'], value['scope'])
         atomic_write(root / name, canonical({'schema': 1, 'receipt_id': receipt_id}), exclusive=True)
     return receipt_id
+
+
+def retained_projection(project, snapshot):
+    """Summarize one indexed receipt for this code, without assessing applicability.
+
+    Only this code's scope-index names are enumerated (not producer history or
+    execution inputs). Lexical scope order is deterministic, not a latest/best
+    verdict. Existing stores need no migration or status-time writes.
+    """
+    code = snapshot['code_digest']
+    if not _digest(code):
+        raise Denied('Invalid acceptance source digest')
+    name = f'{_BASE}/index/{code}'
+    if not _present(project.root, name):
+        return None
+    directory = project.root / name
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise Denied('Unsafe acceptance evidence directory')
+    for path in sorted(directory.iterdir()):
+        # In-flight atomic-write staging is never evidence. Audit/recovery
+        # still validate the whole store under the acceptance writer lock.
+        if path.name.startswith('.new-'):
+            continue
+        if not path.name.endswith('.json') or not _digest(path.stem):
+            raise Denied('Invalid acceptance index name')
+        receipt_id = _selected(project.root, f'{name}/{path.name}', code)
+        return {'passed': True, 'code_digest': code, 'source': 'retained_acceptance',
+                'receipt_id': receipt_id, 'applicability': 'unassessed'}
+    return None
 
 
 def effective_projection(project, snapshot):
@@ -489,11 +519,7 @@ def _audit(root):
         for path in children(f'{_BASE}/index/{directory.name}'):
             if not path.name.endswith('.json') or not _digest(path.stem):
                 raise Denied('Invalid acceptance index name')
-            value = _read(root, path.relative_to(root).as_posix())
-            receipt = get(root, value.get('receipt_id') if isinstance(value, dict) else None)
-            if _scope(receipt['scope']) != path.stem:
-                raise Denied('Acceptance index scope mismatch')
-            _selected(root, path.relative_to(root).as_posix(), directory.name, receipt['scope'])
+            _selected(root, path.relative_to(root).as_posix(), directory.name)
     return count
 
 
