@@ -112,7 +112,8 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
                 check.assert_not_called()
         setattr(self.project.config.limits, SETTING, DAY)
         for name in ("smoke_retention_projects", "smoke_retention_pairs", "smoke_retention_refs",
-                     "smoke_retention_entries", "smoke_retention_metadata_bytes"):
+                     "smoke_retention_entries", "smoke_retention_metadata_bytes",
+                     "smoke_retention_report_bytes"):
             with self.subTest(budget=name), mock.patch.object(retention, "directory") as check:
                 setattr(self.project.config.limits, name, 0)
                 self.assertEqual(self.maintain(), {"status": "unavailable"})

@@ -74,6 +74,11 @@ DEFAULT_SMOKE_RETENTION_PAIRS = 5000
 DEFAULT_SMOKE_RETENTION_REFS = 20000
 DEFAULT_SMOKE_RETENTION_ENTRIES = 100000
 DEFAULT_SMOKE_RETENTION_METADATA_BYTES = 64 * 1024 * 1024
+#: Aggregate report payload per shared sweep; the former implicit bound was
+#: the default pair count times the 16 MiB per-report safety cap. A measured
+#: sweep read 16 MiB reports at about 11.5 s/GiB, so this default preserves
+#: the existing ~15-minute worst case while letting the operator lower it.
+DEFAULT_SMOKE_RETENTION_REPORT_BYTES = 5000 * 16 * 1024 * 1024
 
 #: Host-only activation plans/reports are local evidence, not transport
 #: frames, and grow with the complete current decision/pending source set.
@@ -484,14 +489,16 @@ class Limits:
     #: this global sweep; cadence lives under ``data_dir``.
     automatic_smoke_retention_interval_seconds: int = 86400
     #: Shared smoke-retention scan budgets. The scan traverses the
-    #: machine-wide data dir, so its project, pair, reference, entry and
-    #: metadata-byte ceilings are host/history policy, not format limits.
+    #: machine-wide data dir, so its project, pair, reference, entry,
+    #: metadata-byte and report-byte ceilings are host/history policy, not
+    #: format limits.
     #: Defaults preserve the former literals; 1 is the smallest budget.
     smoke_retention_projects: int = DEFAULT_SMOKE_RETENTION_PROJECTS
     smoke_retention_pairs: int = DEFAULT_SMOKE_RETENTION_PAIRS
     smoke_retention_refs: int = DEFAULT_SMOKE_RETENTION_REFS
     smoke_retention_entries: int = DEFAULT_SMOKE_RETENTION_ENTRIES
     smoke_retention_metadata_bytes: int = DEFAULT_SMOKE_RETENTION_METADATA_BYTES
+    smoke_retention_report_bytes: int = DEFAULT_SMOKE_RETENTION_REPORT_BYTES
     #: Operator-selected retention (days) for per-run diagnostics and dispatch
     #: measurements (``*-events.jsonl``, ``diagnostics.txt``, and
     #: ``dispatch-attempts.json``). Files older than
@@ -563,6 +570,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "smoke_retention_refs": (1, TOML_INTEGER_MAX),
                  "smoke_retention_entries": (1, TOML_INTEGER_MAX),
                  "smoke_retention_metadata_bytes": (1, TOML_INTEGER_MAX),
+                 "smoke_retention_report_bytes": (1, TOML_INTEGER_MAX),
                  "pending_insights": (1, 1000),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000), "decision_events_limit": (1, 100),

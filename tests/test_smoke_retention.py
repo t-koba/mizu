@@ -620,12 +620,24 @@ class SmokeRetentionTests(unittest.TestCase):
             self.run_retention(apply=True, budgets=retention.Budgets(metadata_bytes=bound))
         self.assertTrue(pair.exists())
 
+    def test_report_payload_is_not_charged_to_metadata_budget(self):
+        self.pair()
+        retention.set_days(self.data, 31)
+        preview = self.run_retention()
+        self.assertGreater(preview["report_bytes"], 0)
+        bound = preview["metadata_bytes"]
+        self.assertEqual(
+            self.run_retention(budgets=retention.Budgets(metadata_bytes=bound))["candidates"],
+            [self.a])
+        with self.assertRaises(LimitExceeded):
+            self.run_retention(budgets=retention.Budgets(metadata_bytes=bound - 1))
+
     def test_scan_bounds_all_refuse_before_retirement(self):
         pair = self.pair()
         insights, _ = self.owner()
         self.insight(insights, [self.a])
         for key, limit in [('projects', 0), ('pairs', 0), ('refs', 0),
-                           ('metadata_bytes', 1), ('entries', 0)]:
+                           ('metadata_bytes', 1), ('report_bytes', 1), ('entries', 0)]:
             with self.subTest(key=key), self.assertRaises(LimitExceeded):
                 self.run_retention(apply=True, budgets=retention.Budgets(**{key: limit}))
             self.assertTrue(pair.exists())
@@ -639,9 +651,11 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(retention.Budgets().refs, 20000)
         self.assertEqual(retention.Budgets().entries, 100000)
         self.assertEqual(retention.Budgets().metadata_bytes, 64 * 1024 * 1024)
+        self.assertEqual(retention.Budgets().report_bytes, 5000 * 16 * 1024 * 1024)
         for limits in (SimpleNamespace(smoke_retention_pairs=0),
                        SimpleNamespace(smoke_retention_entries=True),
-                       SimpleNamespace(smoke_retention_metadata_bytes='1')):
+                       SimpleNamespace(smoke_retention_metadata_bytes='1'),
+                       SimpleNamespace(smoke_retention_report_bytes=0)):
             with self.subTest(limits=limits), self.assertRaises(ValueError):
                 retention.Budgets.from_limits(limits)
 

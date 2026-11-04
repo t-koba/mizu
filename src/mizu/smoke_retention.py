@@ -23,7 +23,8 @@ from pathlib import Path
 
 from .config import (DEFAULT_SMOKE_RETENTION_ENTRIES, DEFAULT_SMOKE_RETENTION_METADATA_BYTES,
                      DEFAULT_SMOKE_RETENTION_PAIRS, DEFAULT_SMOKE_RETENTION_PROJECTS,
-                     DEFAULT_SMOKE_RETENTION_REFS, TOML_INTEGER_MAX)
+                     DEFAULT_SMOKE_RETENTION_REFS, DEFAULT_SMOKE_RETENTION_REPORT_BYTES,
+                     TOML_INTEGER_MAX)
 from .errors import Busy, Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
 from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
@@ -36,7 +37,9 @@ _BUDGET_SETTINGS = (("projects", "smoke_retention_projects", DEFAULT_SMOKE_RETEN
                     ("refs", "smoke_retention_refs", DEFAULT_SMOKE_RETENTION_REFS),
                     ("entries", "smoke_retention_entries", DEFAULT_SMOKE_RETENTION_ENTRIES),
                     ("metadata_bytes", "smoke_retention_metadata_bytes",
-                     DEFAULT_SMOKE_RETENTION_METADATA_BYTES))
+                     DEFAULT_SMOKE_RETENTION_METADATA_BYTES),
+                    ("report_bytes", "smoke_retention_report_bytes",
+                     DEFAULT_SMOKE_RETENTION_REPORT_BYTES))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,6 +50,7 @@ class Budgets:
     refs: int = DEFAULT_SMOKE_RETENTION_REFS
     entries: int = DEFAULT_SMOKE_RETENTION_ENTRIES
     metadata_bytes: int = DEFAULT_SMOKE_RETENTION_METADATA_BYTES
+    report_bytes: int = DEFAULT_SMOKE_RETENTION_REPORT_BYTES
 
     @classmethod
     def from_limits(cls, limits) -> "Budgets":
@@ -106,6 +110,7 @@ class Metadata:
         self.data = data
         self.budgets = budgets if budgets is not None else Budgets()
         self.bytes = 0
+        self.report_bytes = 0
         self.count = 0
         self.entries = 0
         self.cache = {}
@@ -216,6 +221,9 @@ def _manifest(metadata: Metadata, smoke_id: str, pair: Path) -> dict:
 def _report(metadata: Metadata, smoke_id: str, pair: Path, manifest: dict) -> dict:
     binding = manifest["report"]
     raw = safe_read(metadata.data, (pair / "report.json").relative_to(metadata.data).as_posix(), binding["bytes"])
+    metadata.report_bytes += len(raw)
+    if metadata.report_bytes > metadata.budgets.report_bytes:
+        raise LimitExceeded("Smoke retention report byte bound exceeded")
     if len(raw) != binding["bytes"] or digest(raw) != binding["sha256"]:
         raise Denied("Smoke report identity mismatch")
     try:
@@ -271,10 +279,9 @@ def read_committed(metadata: Metadata, smoke_id: str, path: Path) -> dict | None
     return manifest
 
 
-def _delete_committed(data: Path, path: Path, smoke_id: str) -> None:
+def _delete_committed(data: Path, path: Path, smoke_id: str, budgets: Budgets | None = None) -> None:
     """Resume only a validated commit; retain manifest.json until last."""
-    metadata = Metadata(data)
-    read_committed(metadata, smoke_id, path)
+    read_committed(Metadata(data, budgets=budgets), smoke_id, path)
     names = {p.name for p in entries(path, 3)}
     if "project" in names:
         shutil.rmtree(path / "project")
@@ -624,7 +631,8 @@ def plan(data: Path, days: int, moment: dt.datetime, recovery=(), metadata: Meta
     cutoff = moment - dt.timedelta(days=days)
     candidates = [key for key, manifest in pairs.items()
                   if key in published and key not in pinned and timestamp(manifest["completed_at"]) < cutoff]
-    return {"candidates": candidates, "pinned": sorted(pinned), "metadata_bytes": metadata.bytes}
+    return {"candidates": candidates, "pinned": sorted(pinned),
+            "metadata_bytes": metadata.bytes, "report_bytes": metadata.report_bytes}
 
 
 def quarantine(data: Path, metadata: Metadata | None = None):
@@ -712,7 +720,7 @@ def _run_locked(data: Path, *, apply: bool, moment: dt.datetime,
                 sync_dir(data / "validation" / "pairs")
                 action = "rollback"
             else:
-                _delete_committed(data, path, smoke_id)
+                _delete_committed(data, path, smoke_id, metadata.budgets)
                 action = "recovered-deletion"
             result["recovered"].append(smoke_id)
             audit(data, smoke_id, action)
@@ -728,7 +736,7 @@ def _run_locked(data: Path, *, apply: bool, moment: dt.datetime,
             sync_dir(qroot)
             os.rename(pending, committed)  # irreversible deletion commit
             sync_dir(qroot)
-            _delete_committed(data, committed, smoke_id)
+            _delete_committed(data, committed, smoke_id, metadata.budgets)
             result["retired"].append(smoke_id)
             audit(data, smoke_id, "deleted")
     except (OSError, Denied, LimitExceeded) as exc:

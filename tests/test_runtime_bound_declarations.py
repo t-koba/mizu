@@ -865,6 +865,9 @@ SMOKE_RETENTION_SCAN = {
     'smoke_retention_metadata_bytes': (
         'DEFAULT_SMOKE_RETENTION_METADATA_BYTES', 'configured policy',
         'Limits / shared scan cumulative metadata bytes'),
+    'smoke_retention_report_bytes': (
+        'DEFAULT_SMOKE_RETENTION_REPORT_BYTES', 'configured policy',
+        'Limits / shared scan cumulative report payload bytes'),
     'DEFAULT_SMOKE_RETENTION_PROJECTS': (
         '5000', 'configured policy', 'config / shared scan root default'),
     'DEFAULT_SMOKE_RETENTION_PAIRS': (
@@ -875,6 +878,9 @@ SMOKE_RETENTION_SCAN = {
         '100000', 'configured policy', 'config / shared scan entry default'),
     'DEFAULT_SMOKE_RETENTION_METADATA_BYTES': (
         '64 * 1024 * 1024', 'configured policy', 'config / shared scan byte default'),
+    'DEFAULT_SMOKE_RETENTION_REPORT_BYTES': (
+        '5000 * 16 * 1024 * 1024', 'configured policy',
+        'config / shared scan report-byte default'),
 }
 
 
@@ -1365,7 +1371,8 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         self.assertEqual(
             {name for name in SMOKE_RETENTION_SCAN if name.startswith('smoke_')},
             {'smoke_retention_projects', 'smoke_retention_pairs', 'smoke_retention_refs',
-             'smoke_retention_entries', 'smoke_retention_metadata_bytes'} & set(fields))
+             'smoke_retention_entries', 'smoke_retention_metadata_bytes',
+             'smoke_retention_report_bytes'} & set(fields))
 
     def test_decision_projection_policy_and_safety_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

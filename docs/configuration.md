@@ -466,10 +466,11 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `automatic_prune_interval_seconds` | Shared per-project cadence for automatic run pruning and snapshot GC at safe execution boundaries (default 86,400 seconds / one day; integer 0–2,678,400; 0 disables both automatic passes while manual commands stay available). No background timer; busy contention does not consume the cadence. Latest bounded result: `maintenance/automatic-prune.json`. Run pruning still uses `prune(project, apply=True, keep_artifacts=0)`; count-based artifact deletion is never enabled implicitly. Shared smoke expiry has its own cadence |
 | `automatic_smoke_retention_interval_seconds` | Opt-out cadence applying the shared smoke retention at safe execution boundaries (default 86,400 seconds / one day; 0 disables automatic sweeps while manual `mizu smoke-retention` stays; integer 0–2,678,400). Due checks run before a top-level execution acquires admission/execution locks, alongside workspace-cache and run-retention maintenance; there is no background timer. On due the same validated implementation as `run(data, apply=True)` runs under the shared smoke lock, so only expired unpinned pairs retire and snapshots/objects stay untouched. Cadence state is global per `data_dir` (`maintenance/automatic-smoke-retention.json`) serialized with expiry under the existing nonblocking shared smoke lock, so at most one best-effort sweep runs due across projects. Busy contention never consumes the cadence; malformed due state returns `unavailable`; malformed/incomplete references refuse the whole plan without deleting uncertain state and without failing the requested run. Latest bounded result is `maintenance/automatic-smoke-retention.json` under `data_dir` |
 | `smoke_retention_projects` | Shared smoke-retention scan budget for project roots (1–9,223,372,036,854,775,807; default 5,000). A bounded synthetic scan measured ~0.6 ms per root; lower it for a smaller host or project set |
-| `smoke_retention_pairs` | Shared smoke-retention scan budget for published-plus-pending pairs and quarantine entries, each (1–9,223,372,036,854,775,807; default 5,000). Report payloads are validated separately and not charged to the metadata budget |
+| `smoke_retention_pairs` | Shared smoke-retention scan budget for published-plus-pending pairs and quarantine entries, each (1–9,223,372,036,854,775,807; default 5,000). Report payloads are validated separately, charged to the report-byte budget and not charged to the metadata budget |
 | `smoke_retention_refs` | Shared smoke-retention scan budget for live reference occurrences (1–9,223,372,036,854,775,807; default 20,000); exceeding it refuses the whole expiry apply |
 | `smoke_retention_entries` | Shared smoke-retention scan budget for metadata entries plus record reads, including empty directories (1–9,223,372,036,854,775,807; default 100,000). Enumeration is bounded before sorting |
-| `smoke_retention_metadata_bytes` | Shared smoke-retention scan budget for cumulative reference, manifest, policy and audit metadata bytes (1–9,223,372,036,854,775,807; default 67,108,864 / 64 MiB). Report payloads are not charged |
+| `smoke_retention_metadata_bytes` | Shared smoke-retention scan budget for cumulative reference, manifest, policy and audit metadata bytes (1–9,223,372,036,854,775,807; default 67,108,864 / 64 MiB). Report payloads are charged to the separate report-byte budget |
+| `smoke_retention_report_bytes` | Shared smoke-retention scan budget for cumulative report payload bytes (1–9,223,372,036,854,775,807; default 83,886,080,000 / 80,000 MiB, the former implicit bound of 5,000 pairs × the 16 MiB per-report safety cap). A measured scan read near-16 MiB reports at about 11.5 s/GiB; lower it for histories with large reports |
 | `event_log_compress_days` | Compress per-run engine logs and bounded dispatch measurements (`*-events.jsonl`, `diagnostics.txt`, `dispatch-attempts.json`) at or beyond N days old to `.gz` (0 disables; 0–3,650; default 7) |
 | `event_log_retention_days` | Drop those raw/compressed logs and dispatch measurements at or beyond M days old (0 disables; 0–3,650; default 31). Lifecycle records are not candidates for this log clock; whole runs use `run_retention_days`. Snapshot/object GC uses `snapshot_retention_days`, not this log clock; sessions and permanent ledgers are never pruned |
 | `event_stream_bytes` | Per-run engine event-stream retention in bytes (1 MiB–256 MiB; default 4 MiB). Bytes past the budget are dropped from `*-events.jsonl` with an explicit `*-events-truncated.json` marker while parsing and the run continue, so diagnostic volume can never discard sealed work. The per-record transport bound stays fixed mechanism |
@@ -929,12 +930,15 @@ A direct creation that inherits extra refs stores `requested_smoke_refs` (the
 original optional request, null for omission) beside its seed. This provenance
 field is not a pin; it preserves exact retry identity after the origin changes.
 
-The shared `data_dir` smoke-retention scan is linear in the project roots and
-metadata records it traverses. A bounded synthetic run at the former constants
-measured about 0.6 ms per root, 0.6 ms per record read, and 4.8 KiB retained
-per insight record in the parsed-record cache; 500 and 5,000 one-KiB pair
-reports took 0.25 s and 2.8 s. Those dimensions are host/history policy, so
-they live in `[limits]` and the defaults preserve the former constants:
+The shared `data_dir` smoke-retention scan is linear in the project roots,
+metadata records and report payload bytes it traverses. A bounded synthetic
+run at the former constants measured about 0.6 ms per root, 0.6 ms per record
+read, and 4.8 KiB retained per insight record in the parsed-record cache; 500
+and 5,000 one-KiB pair reports took 0.25 s and 2.8 s. A second run read
+near-16 MiB reports at about 11.5 s/GiB warm (33.5 MB in 0.41 s, 67.1 MB in
+0.77 s, 100.6 MB in 1.12 s). Those dimensions are host/history policy, so they
+live in `[limits]` and the defaults preserve the former constants and the
+former implicit report bound:
 
 | Dimension | Former constant | `[limits]` default |
 |---|---:|---:|
@@ -943,6 +947,7 @@ they live in `[limits]` and the defaults preserve the former constants:
 | Live reference occurrences | `MAX_REFS` | 20,000 |
 | Metadata entries plus record reads | `MAX_ENTRIES` | 100,000 |
 | Cumulative metadata bytes | `MAX_METADATA` | 64 MiB |
+| Cumulative report payload bytes | 5,000 pairs × 16 MiB (implicit) | 80,000 MiB |
 
 Each key accepts `1` through the TOML signed-64-bit maximum. The former literal
 is a default, not an eventual maximum: an operator with a larger host or
@@ -959,16 +964,16 @@ audit keeps at most 128 events (`AUDIT_LIMIT`, with no measured host-cost need
 for a knob). The automatic due-state read is at most 4 KiB.
 
 The pair manifest (4 KiB), policy file (1 KiB), report payload (16 MiB), and
-per-WorkItem directory
-(260 entries, derived from the existing 256-revision history bound plus its
-record files) are individual record/history bounds, not scan-budget settings.
+per-WorkItem directory (260 entries, derived from the existing 256-revision
+history bound plus its record files) are individual record/history bounds,
+not scan-budget settings.
 Enumeration is bounded before sorting; no links are followed. Linked metadata,
 unknown schemas, missing live owners/pairs and exhausted budgets refuse the
-entire new-expiry apply. Report payload bytes are validated separately and are
-not charged to the metadata budget. Scans do not take project workspace/role
-locks. Apply recomputes under the shared lock; dry-run is strictly read-only
-and never performs recovery. With 0 days, only policy, audit and recognized
-quarantine recovery are examined.
+entire new-expiry apply. Report payload bytes are validated separately, charged
+to the report-byte budget and not charged to the metadata budget. Scans do not
+take project workspace/role locks. Apply recomputes under the shared lock;
+dry-run is strictly read-only and never performs recovery. With 0 days, only
+policy, audit and recognized quarantine recovery are examined.
 
 See [operations](operations.md#shared-smoke-evidence-retention) for commands,
 quarantine recovery, partial-failure results and bounded maintenance audit.

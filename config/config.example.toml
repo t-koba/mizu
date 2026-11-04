@@ -195,6 +195,7 @@ smoke_retention_pairs = 5000           # Shared scan budget on published/pending
 smoke_retention_refs = 20000           # Shared scan budget on live reference occurrences (default 20000).
 smoke_retention_entries = 100000       # Shared scan budget on metadata entries plus record reads, including empty directories (default 100000).
 smoke_retention_metadata_bytes = 67108864 # Cumulative reference, manifest, policy and audit metadata read budget (default 64 MiB).
+smoke_retention_report_bytes = 83886080000 # Cumulative report payload read budget; defaults to the former 5,000 pairs x 16 MiB bound (80,000 MiB).
 event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.jsonl, diagnostics.txt) older than N days to .gz (0 disables).
 event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); Lifecycle records follow run_retention_days, not this log clock.
 event_stream_bytes = 4194304  # Per-run engine event-stream retention in bytes (1 MiB-256 MiB); past-budget bytes are dropped with an explicit *-events-truncated.json marker while the run continues.

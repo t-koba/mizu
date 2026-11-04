@@ -104,6 +104,7 @@ class SmokeRetentionScanConfigTests(Fixture):
         "smoke_retention_refs": 20000,
         "smoke_retention_entries": 100000,
         "smoke_retention_metadata_bytes": 64 * 1024 * 1024,
+        "smoke_retention_report_bytes": 5000 * 16 * 1024 * 1024,
     }
 
     def test_defaults_and_format_bound_ranges(self):
