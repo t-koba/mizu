@@ -718,9 +718,7 @@ class ConfigTests(Fixture):
                 self.assertTrue(item['integrity'])
             adapter_versions = set()
             for key, item in lock['packages'].items():
-                installed = (key[len('node_modules/'):]
-                             if key.startswith('node_modules/')
-                             else key.rsplit('/node_modules/', 1)[-1])
+                installed = key.rsplit('node_modules/', 1)[-1]
                 if installed.startswith('@earendil-works/') and installed.count('/') == 1:
                     self.assertTrue(item.get('integrity'))
                     adapter_versions.add(item['version'])

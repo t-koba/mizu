@@ -60,9 +60,7 @@ def validate_locks(locks=LOCKS, required=REQUIRED):
                 raise ValueError(f'Lock adapters/{adapter}/package-lock.json must pin reviewed Pi packages with registry integrity')
         versions = set()
         for key, item in packages.items():
-            installed = (key[len('node_modules/'):]
-                         if key.startswith('node_modules/')
-                         else key.rsplit('/node_modules/', 1)[-1])
+            installed = key.rsplit('node_modules/', 1)[-1]
             if installed.startswith('@earendil-works/') and installed.count('/') == 1:
                 version = item.get('version') if isinstance(item, dict) else None
                 if not version or not item.get('integrity'):

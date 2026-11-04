@@ -53,6 +53,23 @@ class PackageLockTests(unittest.TestCase):
         self.assertEqual(PACKAGE.validate_locks(self.paths, REQUIRED),
                          {'pi': '1.5.0', 'pi-durable': '1.5.0'})
 
+    def test_nested_pi_version_mismatch_refuses(self):
+        self.valid()
+        value = json.loads(self.paths['pi-durable'].read_text())
+        value['packages']['node_modules/@earendil-works/chord/node_modules/@earendil-works/pi-ai'] = package('1.4.0')
+        self.write('pi-durable', value)
+        with self.assertRaisesRegex(ValueError, 'mixes'):
+            PACKAGE.validate_locks(self.paths, REQUIRED)
+
+    def test_nested_pi_missing_integrity_refuses(self):
+        self.valid()
+        value = json.loads(self.paths['pi-durable'].read_text())
+        value['packages']['node_modules/@earendil-works/chord/node_modules/@earendil-works/pi-ai'] = {
+            'version': '1.5.0'}
+        self.write('pi-durable', value)
+        with self.assertRaisesRegex(ValueError, 'registry integrity'):
+            PACKAGE.validate_locks(self.paths, REQUIRED)
+
     def test_missing_lock_refuses(self):
         self.valid()
         self.paths['pi-durable'].unlink()
