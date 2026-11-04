@@ -27,7 +27,7 @@ from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
                  sync_dir, write_json, relative_parts)
-from . import acceptance, insight_archive
+from . import acceptance, insight_archive, lock_diagnostics
 from .project import (Project, _check_project_paths, _directory_identity,
                       _discard_project_stage, _project_parents, check_project_settings, read_goal)
 from .snapshot import open_store
@@ -616,9 +616,10 @@ def maintain_automatic_prune(project: Project) -> dict:
                 return {"status": "not-due"}
             result: dict = {"checked_at": instant, "status": "refused"}
             try:
-                prune(project, apply=True, keep_artifacts=0)
-                result["status"] = "pruned"
-                result["snapshots"] = _automatic_snapshot_gc(project, instant)
+                with lock_diagnostics.operation("write"):
+                    prune(project, apply=True, keep_artifacts=0)
+                    result["status"] = "pruned"
+                    result["snapshots"] = _automatic_snapshot_gc(project, instant)
             except Busy:
                 return {"status": "busy"}
             except (Denied, LimitExceeded, OSError, ValueError) as exc:

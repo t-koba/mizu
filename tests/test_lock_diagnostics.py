@@ -16,8 +16,9 @@ from mizu.smoke_refs import record_lock
 
 class LockDiagnosticsTests(Fixture):
     def enable(self, enabled=True):
+        current = "lock_diagnostics = false" if enabled else "lock_diagnostics = true"
         text = self.file.read_text().replace(
-            "lock_diagnostics = false", f"lock_diagnostics = {str(enabled).lower()}", 1)
+            current, f"lock_diagnostics = {str(enabled).lower()}", 1)
         self.file.write_text(text)
 
     def invoke(self):
@@ -201,13 +202,18 @@ class LockDiagnosticsTests(Fixture):
             return {"skip": {"skipped": "fixture"}}
 
         with patch.object(Engine, "_dispatch_state", dispatch):
-            disabled = self.invoke()
             self.enable()
             enabled = self.invoke()
+            self.enable(False)
+            disabled = self.invoke()
         self.assertEqual(disabled, (0, '{\n  "skipped": "fixture"\n}\n', ""))
         self.assertEqual(enabled[:2], disabled[:2])
         rows = self.summary(enabled[2])["observations"]
         self.assertTrue(any(r["phase"] == "editor-ingestion" for r in rows))
+        startup_writes = [r for r in rows if r["phase"] == "pre-admission-startup"
+                          and r["operation"] == "write"]
+        self.assertTrue(any(r["lock"] == "project-record" for r in startup_writes))
+        self.assertTrue(any(r["lock"] == "shared-smoke" for r in startup_writes))
         self.assertEqual((rows[-1]["phase"], rows[-1]["outcome"]),
                          ("pre-admission-dispatch", "success"))
 

@@ -26,6 +26,7 @@ from .config import (DEFAULT_SMOKE_RETENTION_ENTRIES, DEFAULT_SMOKE_RETENTION_ME
                      DEFAULT_SMOKE_RETENTION_REFS, DEFAULT_SMOKE_RETENTION_REPORT_BYTES,
                      TOML_INTEGER_MAX)
 from .errors import Busy, Denied, LimitExceeded
+from . import lock_diagnostics
 from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
 from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
 
@@ -820,7 +821,7 @@ def maintain_automatic_smoke_retention(project) -> dict:
         instant = int(time.time())
         if not _automatic_smoke_due(data, instant, interval):
             return {"status": "not-due"}
-        with shared_lock(data):
+        with lock_diagnostics.operation("write"), shared_lock(data):
             # Another project may have run since the fast check.
             instant = int(time.time())
             if not _automatic_smoke_due(data, instant, interval):
