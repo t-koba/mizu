@@ -76,6 +76,62 @@ class CiWaitFixture(Fixture):
 
 
 class CiWaitTests(CiWaitFixture):
+    def _idle_writer_snapshot(self):
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        return self.project.snapshots.get()
+
+    def test_should_run_reuses_successful_negative_wait_probes(self):
+        snapshot = self._idle_writer_snapshot()
+        worker = self.config.roles["worker"]
+        self.config.roles["worker"] = dataclasses.replace(
+            worker, capabilities=tuple(worker.capabilities) + ("check_job",))
+        with (patch("mizu.runtime.check_jobs.wake_ready", return_value=False) as check_ready,
+              patch("mizu.runtime.ci_waits.pending", return_value=[]) as ci_pending,
+              patch("mizu.runtime.proposal_waits.pending", return_value=[]) as proposal_pending):
+            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        self.assertEqual(check_ready.call_count, 1)
+        self.assertEqual(ci_pending.call_count, 1)
+        self.assertEqual(proposal_pending.call_count, 1)
+
+    def test_should_run_retries_wait_probes_after_a_source_error(self):
+        snapshot = self._idle_writer_snapshot()
+        with (patch("mizu.runtime.check_jobs.wake_ready", return_value=False) as check_ready,
+              patch("mizu.runtime.ci_waits.pending", side_effect=[OSError("transient"), []]) as ci_pending,
+              patch("mizu.runtime.proposal_waits.pending", return_value=[]) as proposal_pending):
+            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        # A failed first probe is not memoized; routed-event evaluation retries.
+        self.assertEqual(check_ready.call_count, 1)
+        self.assertEqual(ci_pending.call_count, 2)
+        self.assertEqual(proposal_pending.call_count, 1)
+
+    def test_wait_arriving_between_probes_is_seen_on_next_evaluation(self):
+        self.block()
+        snapshot = self._idle_writer_snapshot()
+        original_pending = ci_waits.pending
+        calls = 0
+
+        def pending_then_publish(store, role, *, limit=10):
+            nonlocal calls
+            calls += 1
+            events = original_pending(store, role, limit=limit)
+            if calls == 1:
+                # Publish durable CI evidence after the first successful empty
+                # probe, at the point the old second scan would have seen it.
+                self.poll()
+            return events
+
+        with (patch("mizu.runtime._ready_work_changed", return_value=False),
+              patch("mizu.runtime.check_jobs.wake_ready", return_value=False),
+              patch("mizu.runtime.ci_waits.pending", side_effect=pending_then_publish) as ci_pending,
+              patch("mizu.runtime.proposal_waits.pending", return_value=[])):
+            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+            self.assertEqual(ci_pending.call_count, 1)
+            # The negative result is local to the first evaluation. The new
+            # durable receipt is found by the next call, not lost in a cache.
+            self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
+            self.assertEqual(ci_pending.call_count, 2)
+
     def test_terminal_readiness_survives_ack_without_repeated_admission(self):
         blocked = self.block()
         self.config.roles["worker"] = dataclasses.replace(self.config.roles["worker"], on_change=True)

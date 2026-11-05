@@ -4164,21 +4164,29 @@ def _decision_delivery_state(project, role_name, role):
     return state
 
 
-def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
+def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
+                     completed_wait_probes=None) -> bool:
     """Routed decisions/insight attention, terminal events or waits due to a role.
 
     Inspect the named role, else project write roles. Exact decision/attention
     authority, route, budget and store failures propagate: never suppress a wake
     by treating invalid delivery as an empty queue. Legacy decision-history
     isolation remains in its source scanner; terminal/wait probing is unchanged.
+    ``completed_wait_probes`` names roles whose check-job/CI/proposal probes
+    completed empty earlier in this same ``should_run`` evaluation. An omitted
+    role (or ``None``) is probed here; errors never populate the set.
     """
     decision_delivery.authority(project.insights.root)
     names = [role_name] if role_name in project.roles else [
         name for name in project.roles
         if name in project.config.roles and project.config.roles[name].workspace == "write"]
     for name in names:
+        wait_probes_completed = (completed_wait_probes is not None
+                                 and name in completed_wait_probes)
         try:
-            if "check_job" in project.config.roles[name].capabilities and check_jobs.wake_ready(project, name):
+            if (not wait_probes_completed
+                    and "check_job" in project.config.roles[name].capabilities
+                    and check_jobs.wake_ready(project, name)):
                 return True
             terminal_triggers = project.config.roles[name].work_item_events
             if terminal_triggers and work_item_events.pending(
@@ -4206,8 +4214,9 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None) -> bool:
             return True
         try:
             if (project.insights.due_waits(name, snapshot)
-                    or ci_waits.pending(project.work_items, name, limit=1)
-                    or proposal_waits.pending(project.work_items, name, limit=1)):
+                    or (not wait_probes_completed
+                        and (ci_waits.pending(project.work_items, name, limit=1)
+                             or proposal_waits.pending(project.work_items, name, limit=1)))):
                 return True
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
             pass
@@ -4322,6 +4331,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         if continuation_ready(project.snapshots, role_name) is not None:
             facts = dataclasses.replace(facts, continuation_ready=True)
             decision = _scheduling.evaluate(facts)
+    completed_wait_probes = None
     while decision.ready is None:
         needed = decision.needed
         if needed == "goal_changed":
@@ -4336,8 +4346,18 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 name for name in project.roles
                 if project.config.roles[name].workspace == "write"]
             try:
-                value = any(check_jobs.wake_ready(project, name) or ci_waits.pending(project.work_items, name, limit=1) or proposal_waits.pending(project.work_items, name, limit=1) for name in names)
+                value = any(check_jobs.wake_ready(project, name)
+                            or ci_waits.pending(project.work_items, name, limit=1)
+                            or proposal_waits.pending(project.work_items, name, limit=1)
+                            for name in names)
+                if not value:
+                    # The identical role set is examined again later by
+                    # _role_events_due. Reuse only a fully completed negative
+                    # scan; an error leaves it unset so that route retains its
+                    # independent retry behavior.
+                    completed_wait_probes = frozenset(names)
             except (Denied, LimitExceeded, OSError, ValueError):
+                completed_wait_probes = None
                 value = False
         elif needed == "operator_records_due":
             # A code-change/wait evaluation may name a placeholder role (for
@@ -4354,7 +4374,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         elif needed == "inbox_changed":
             value = not observer and project.insights.generation() != snapshot.get("inbox_seen", "")
         elif needed == "routed_events_due":
-            value = _role_events_due(project, snapshot, role_name)
+            value = _role_events_due(project, snapshot, role_name,
+                                     completed_wait_probes=completed_wait_probes)
         elif needed == "ci_due":
             try:
                 effective = config if config is not None else getattr(project, "config", None)
