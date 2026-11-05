@@ -70,8 +70,8 @@ class SmokeRetentionTests(unittest.TestCase):
         first, _ = self.owner('first')
         second, _ = self.owner('second')
         self.insight(second)
-        # Project A holds the real global-before-project locks. Project B's
-        # read-only scan must finish before A releases them.
+        # Project A holds only its project record lock. Project B's read-only
+        # scan must finish without waiting for that unrelated lock.
         with ThreadPoolExecutor(max_workers=1) as pool:
             with record_lock(first.root):
                 future = pool.submit(second.unresolved_counts, ['worker', 'reviewer'])

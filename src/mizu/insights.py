@@ -35,13 +35,15 @@ grants operator approval. Model ``submit_insight`` exposes no origin field
 and is stored with ``origin`` None; the Editor outbox accepts only
 ``title``/``body``/``base_snapshot`` so capsule content cannot forge origin.
 
-A ref-free inbox write (a new Insight submission) takes the project record
-lock alone; retention skips the recognized atomic-write temporaries it
-creates. Writes that can add or remove smoke references hold the shared
-retention lock before the project record lock, keeping their pins serialized
-with retention's pair deletion. The read-only unresolved-count and
-pending-insight scans also use the project lock alone, remaining serialized
-with same-project writers.
+Managed record writes, including Insight changes that add or remove smoke
+references, take only their project's record lock; reference-bearing writes
+validate pairs while holding that lock. Cross-project retention uses the shared
+gate to serialize candidate admission/commit, restore, and pair publication,
+then scans each project under lifecycle and record locks. A writer that
+validated before admission is observed by the scan; a later writer refuses a
+missing pair. Read-only unresolved-count and pending-insight scans also use
+only the project record lock. Retention ignores recognized atomic-write
+temporaries.
 """
 from __future__ import annotations
 
