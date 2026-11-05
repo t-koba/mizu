@@ -164,9 +164,13 @@ DECLARATIONS = {
             '1024', 'policy',
             'async delegation / shared project-state job-history capacity; lifetime tombstones '
             'are retained and exhaustion refuses new starts, pending pilot configuration'),
+        'MAX_BINDING_BYTES': (
+            '8192', 'safety',
+            'async delegation / bounded active binding and provisioning-intent inventory'),
         'MAX_STATE_BYTES': (
-            '1024 * 1024', 'safety',
-            'async delegation / bounded ledger read; oversized state is refused, never reset'),
+            '1024 * 1024 + MAX_BINDING_BYTES + _INTENT_NULL_OVERHEAD * MAX_JOBS', 'safety',
+            'async delegation / bounded ledger read including one active inventory and the '
+            'per-job serialized intent slot; oversized state is refused, never reset'),
         'MAX_REQUEST_BYTES': (
             '128 * 1024', 'safety',
             'async delegation / bounded canonical request record'),
@@ -1139,18 +1143,26 @@ CALLS = {
 }
 
 
-def numeric(node):
+def numeric(node, symbolic=()):
     if isinstance(node, ast.Constant):
         return type(node.value) in (int, float)
     if isinstance(node, ast.UnaryOp):
-        return numeric(node.operand)
+        return numeric(node.operand, symbolic)
     if isinstance(node, ast.BinOp):
-        return numeric(node.left) and numeric(node.right)
-    return False
+        return numeric(node.left, symbolic) and numeric(node.right, symbolic)
+    return isinstance(node, ast.Name) and node.id in symbolic
 
 
-def inventory(tree, extras=()):
+SYMBOLIC_BOUNDS = {
+    'delegation_jobs.py': {
+        'MAX_STATE_BYTES': frozenset({'MAX_BINDING_BYTES', '_INTENT_NULL_OVERHEAD', 'MAX_JOBS'}),
+    },
+}
+
+
+def inventory(tree, extras=(), symbolic_bounds=None):
     found = {}
+    symbolic_bounds = symbolic_bounds or {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
@@ -1159,9 +1171,11 @@ def inventory(tree, extras=()):
         else:
             continue
         for target in targets:
-            if (isinstance(target, ast.Name)
-                    and (target.id in extras or CANDIDATE.fullmatch(target.id))
-                    and numeric(value)):
+            if not isinstance(target, ast.Name):
+                continue
+            symbolic = symbolic_bounds.get(target.id, ())
+            if ((target.id in extras or CANDIDATE.fullmatch(target.id))
+                    and (numeric(value) or (symbolic and numeric(value, symbolic)))):
                 if target.id in found:
                     raise AssertionError(f'Duplicate bound declaration: {target.id}')
                 found[target.id] = ast.unparse(value)
@@ -1215,9 +1229,10 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                     self.assertIn(category, categories)
                     self.assertTrue(rationale.strip())
                 tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-                self.assertEqual(inventory(tree, EXTRA_CANDIDATES.get(filename, ())), {
-                    name: entry[0] for name, entry in declarations.items()
-                })
+                self.assertEqual(
+                    inventory(tree, EXTRA_CANDIDATES.get(filename, ()),
+                              SYMBOLIC_BOUNDS.get(filename)),
+                    {name: entry[0] for name, entry in declarations.items()})
 
     def test_every_module_with_bounds_is_inventoried(self):
         # config.py has its own field-scoped inventory; scripts/check.py is the

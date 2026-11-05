@@ -134,5 +134,33 @@ automatic_prune = "Called before run admission; prune/snapshot collection enters
 driver_channel = "EngineChannel.close terminates the spawned process group/Job Object, joins pipe readers, and attempts normal MCP cleanup; Channel.quiescent checks direct process exit and reader threads, not descendant or container membership."
 mcp_containers = "connected_servers generates random container names and holds cleanup names in memory; adapter effective configuration records the generated command before driver execution, but no supervisor-death reaper was found."
 sandbox_containers = "One-shot and persistent exec write command-start evidence with generated container names before launch; sandbox labels include project/role/run. Normal teardown removes by name, but no reservation-bound crash reconciler was found."
-job_store = "DelegationJobs schema v3 has a bounded supervisor-only run-directory and exact systemd/rootless-Podman resource binding, cleared atomically on successful handback. Its module documents the schema, trust, retry and cleanup-proof contract. The isolated recovery fixture uses this ledger; normal execution does not import the binding into Engine.run. Runner integration remains disabled, and this is not real-adapter, production-quiescence, authority, handoff or pilot proof."
+job_store = """
+DelegationJobs schema v4 adds a single-container provisioning intent beside the
+supervisor-only directory/resource binding. Both share the 8 KiB
+active-inventory allowance plus 14 bytes per job for the explicit intent field
+and clear atomically on terminal handback; older
+ledgers are refused, not migrated or reset. The module documents the contract.
+The synthetic fixture persists a bounded safe name, UID, run-id marker,
+immutable image ID and expected inspection config before Podman create; only the
+persisted intent is recovery authority and the marker alone pins run_id. The
+normal path then verifies exactly one name/label candidate and its exact
+image/config/prelaunch state before binding its ID and claiming the runner, so a
+retagged or substituted image cannot be claimed. Unbound or unclaimed-bound
+recovery first durably fences bind/claim/finish; a claim bit survives cancellation.
+It requires an unstarted systemd scope, identical singleton name/label inventories,
+exact ID/name/label/image/config and never-started container state. The validated
+ID is persisted before non-force removal; positive name/ID/marker absence permits
+handback, including after an interrupted removal. Missing initial candidates,
+renames, duplicates, malformed, mismatched, wrong-UID or unobservable evidence
+retain the hold without removing a substitute. Bounded command errors/overflow
+are unknown, never absence. The live smoke proves both a real pre-binding
+interruption (prepare plus create, then a separate recovery CLI seals cleanup
+and terminalization under its own key and exact ledger IDs) and the existing
+bound supervisor-death path. The fixture provisioner must be stopped and external
+create commands settled before recovery; this is not a fence against unrelated
+Podman clients. Normal execution does not import the binding into Engine.run;
+Engine/CLI/adapter launch integration remains disabled.
+This is synthetic fixture recovery only, not real-adapter, production-quiescence,
+authority, handoff or pilot proof.
+"""
 process_group_experiment = "A bounded Linux sandbox reproduction observed a setsid descendant survive SIGTERM to its parent's process group; a direct signal then stopped it. This is not a systemd/cgroup, OCI, or Windows recovery smoke."

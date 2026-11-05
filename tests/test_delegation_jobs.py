@@ -47,8 +47,11 @@ class DelegationJobTests(unittest.TestCase):
         # Cleanup proves the binding is no longer referenced; retain only the
         # bounded idempotency and execution-outcome tombstone.
         self.assertIsNone(tombstone['binding'])
+        self.assertIsNone(tombstone['intent'])
         self.assertLess(len(canonical(tombstone)), 600)
-        self.assertEqual(jobs.MAX_STATE_BYTES, 1024 * 1024 + jobs.MAX_BINDING_BYTES)
+        self.assertEqual(jobs._INTENT_NULL_OVERHEAD, 14)
+        self.assertEqual(jobs.MAX_STATE_BYTES,
+                         1024 * 1024 + jobs.MAX_BINDING_BYTES + 14 * jobs.MAX_JOBS)
 
     def complete(self, text='Retained child evidence'):
         job_id, token = self.runner()
@@ -317,7 +320,7 @@ class DelegationJobTests(unittest.TestCase):
         job_id = state['active']
         variants = [b'{', b'null', b'{"version":NaN}', b'[' * 65 + b']' * 65,
                     b' ' * (jobs.MAX_STATE_BYTES + 1),
-                    valid[:-2], valid + b' ', valid.replace(b'"version":3', b'"version":3,"version":3')]
+                    valid[:-2], valid + b' ', valid.replace(b'"version":4', b'"version":4,"version":4')]
         for field, value in [('status', 'lost'), ('request_digest', '0' * 64),
                              ('token', None), ('run_id', None), ('execution', []),
                              ('request', None), ('result', 'premature'), ('owner', 'editor')]:
@@ -680,6 +683,143 @@ class DelegationJobTests(unittest.TestCase):
                 jobs.DelegationJobs(self.root)
             self.path.parent.unlink()
             alternate.rename(self.path.parent)
+
+    def prepare(self):
+        job_id = self.start()
+        reservation = self.store.reservation()
+        directory = self.root / reservation['run_id']
+        directory.mkdir()
+        scope = {'unit': 'prepared.service', 'cgroup': '/system.slice/prepared.service'}
+        container = {'name': 'mizu-recovery-' + reservation['run_id'], 'uid': 1000,
+                     'marker': reservation['run_id'], 'image': 'b' * 64,
+                     'config': {'Cmd': ['/bin/sleep', '90']}}
+        credentials = job_id, reservation['token']
+        intent = self.store.runner_prepare(*credentials, str(directory), scope, container)
+        return credentials, intent
+
+    def test_preparation_is_durable_bounded_private_and_exactly_retryable(self):
+        credentials, intent = self.prepare()
+        def retry(container):
+            return self.store.runner_prepare(*credentials, intent['directory']['path'],
+                                             intent['scope'], container)
+        self.assertEqual(retry(intent['container']), intent)
+        self.assertEqual(jobs.DelegationJobs(self.root).reservation()['intent'], intent)
+        self.assertNotIn('intent', self.store.status('worker', credentials[0]))
+        for key, value in [('name', '../evil'), ('name', ''), ('marker', 'c' * 32), ('uid', True),
+                           ('image', 'tag'), ('config', {}),
+                           ('config', {'large': 'x' * jobs.MAX_BINDING_BYTES})]:
+            with self.subTest(key=key), self.assertRaises(Denied):
+                retry({**intent['container'], key: value})
+        with self.assertRaises(Denied):
+            self.store.runner_started(*credentials)
+        # A schema-v3 ledger is not silently upgraded or reset.
+        raw = self.path.read_bytes()
+        self.path.write_bytes(raw.replace(b'"version":4', b'"version":3'))
+        with self.assertRaises(Denied):
+            self.store.reservation()
+        self.path.write_bytes(raw)
+
+    def test_prepared_recovery_fences_bind_claim_and_requires_exact_cleanup(self):
+        credentials, intent = self.prepare()
+        container = intent['container']
+        saved = [{'name': container['name'], 'id': 'd' * 64, 'uid': container['uid']}]
+        def bind():
+            return self.store.runner_bind(*credentials, intent['directory']['path'], intent['scope'], saved)
+        fenced = self.store.runner_recover_prepared(*credentials)
+        self.assertTrue(fenced['recovering'])
+        self.assertFalse(fenced['claimed'])
+        self.assertEqual(self.store.runner_recover_prepared(*credentials), fenced)
+        for operation in (bind, lambda: self.store.runner_started(*credentials),
+                          lambda: self.store.runner_finished(*credentials, 'failed'),
+                          lambda: self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup={})):
+            with self.assertRaises(Denied):
+                operation()
+        fenced = self.store.runner_recover_prepared(*credentials, container_id='d' * 64)
+        proof = {'intent': fenced, 'scope_unstarted': True, 'container_absent': 'd' * 64}
+        for wrong in ({}, {**proof, 'scope_unstarted': 1}, {**proof, 'container_absent': 'e' * 64},
+                      {**proof, 'intent': intent},
+                      {**proof, 'intent': {**fenced, 'claimed': 0}}):
+            with self.assertRaises(Denied):
+                self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup=wrong)
+        with self.assertRaises(Denied):
+            self.store.runner_recover_prepared(*credentials, container_id='e' * 64)
+        self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup=proof)
+        self.assertIsNone(self.store.reservation())
+        self.assert_tombstone(loads_finite(self.path.read_bytes())['jobs'][credentials[0]])
+        self.assertEqual(self.start(), credentials[0])
+
+    def test_intent_accepts_any_bounded_safe_name_but_pins_marker(self):
+        # Names are persisted in the intent, not reconstructed during recovery;
+        # the marker remains bound to the stable run identity.
+        scope = {'unit': 'custom.service', 'cgroup': '/system.slice/custom.service'}
+        base = {'uid': 1000, 'image': 'b' * 64, 'config': {'Cmd': ['/bin/sleep', '90']}}
+        for name in ('custom-safe.name_1', 'fixture-0', 'a'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                store = jobs.DelegationJobs(root)
+                store.start('worker', 'k-' + name.replace('.', '-'), self.request)
+                reservation = store.reservation()
+                directory = root / reservation['run_id']
+                directory.mkdir()
+                container = {**base, 'name': name, 'marker': reservation['run_id']}
+                intent = store.runner_prepare(reservation['id'], reservation['token'],
+                                              str(directory), scope, container)
+                self.assertEqual(intent['container'], container)
+                self.assertEqual(store.runner_prepare(
+                    reservation['id'], reservation['token'], str(directory), scope, container),
+                    intent)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            store = jobs.DelegationJobs(root)
+            store.start('worker', 'unsafe', self.request)
+            reservation = store.reservation()
+            directory = root / reservation['run_id']
+            directory.mkdir()
+            for bad in ('', '../evil', '/abs', 'a/b', 'a:b', 'x' * 9000):
+                with self.subTest(bad=bad), self.assertRaises(Denied):
+                    store.runner_prepare(
+                        reservation['id'], reservation['token'], str(directory), scope,
+                        {**base, 'name': bad, 'marker': reservation['run_id']})
+            with self.assertRaises(Denied):
+                store.runner_prepare(
+                    reservation['id'], reservation['token'], str(directory), scope,
+                    {**base, 'name': 'valid-name', 'marker': 'c' * 32})
+
+    def test_intent_null_overhead_preserves_tombstone_capacity(self):
+        # Schema v4 adds one explicit intent field to every job. Terminal
+        # tombstones carry `"intent":null` (14 bytes: comma + `"intent":null`),
+        # so the ledger ceiling adds exactly that per-record overhead to keep
+        # the prior 1024-tombstone capacity.
+        self.assertEqual(jobs._INTENT_NULL_OVERHEAD, len(b',\"intent\":null'))
+        self.assertEqual(jobs.MAX_STATE_BYTES,
+                         1024 * 1024 + jobs.MAX_BINDING_BYTES + 14 * jobs.MAX_JOBS)
+        base = {'owner': 'w', 'key': 'k', 'request_digest': 'a' * 64, 'status': 'terminal',
+                'token': None, 'run_id': 'b' * 32, 'execution': 'failed', 'request': None,
+                'result': None, 'result_digest': 'c' * 64, 'binding': None}
+        from mizu.fs import canonical as _canon
+        without = dict(base)
+        with_intent = dict(base, intent=None)
+        self.assertEqual(len(_canon(with_intent)) - len(_canon(without)), 14)
+        # A full tombstone stays well under the per-record budget and the new
+        # ceiling still admits 1024 minimal tombstones plus the active allowance.
+        self.assertLess(len(_canon(with_intent)), 600)
+        self.assertLessEqual(1024 * len(_canon(with_intent)) + jobs.MAX_BINDING_BYTES,
+                             jobs.MAX_STATE_BYTES)
+
+    def test_claimed_then_cancelled_preparation_can_never_use_prelaunch_proof(self):
+        credentials, intent = self.prepare()
+        container = intent['container']
+        saved = [{'name': container['name'], 'id': 'd' * 64, 'uid': container['uid']}]
+        self.store.runner_bind(*credentials, intent['directory']['path'], intent['scope'], saved)
+        self.store.runner_started(*credentials)
+        self.store.cancel('worker', credentials[0])
+        self.assertTrue(self.store.reservation()['intent']['claimed'])
+        with self.assertRaises(Denied):
+            self.store.runner_recover_prepared(*credentials)
+        self.assertIsNotNone(self.store.reservation())
+        self.store.runner_finished(*credentials, 'cancelled')
+        self.store.runner_quiescent(*credentials, 'normal bound teardown', cleanup=self.cleanup())
+        self.assert_tombstone(loads_finite(self.path.read_bytes())['jobs'][credentials[0]])
 
 
 if __name__ == '__main__':

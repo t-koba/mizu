@@ -10,24 +10,32 @@ ancestors must be protected from concurrent untrusted host mutation. Symlink,
 hardlink, special-file, invalid-schema and oversized state is refused, never
 repaired or treated as an empty queue. This module alone launches nothing.
 
-Schema v3: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
+Schema v4: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
 SHA256([owner, key]); each contains owner/key, immutable request digest, status,
 runner token, stable child run identity, execution outcome, request, result and
 result digest. The run identity is a random lowercase 32-hex string generated
 once on first start, retained in terminal tombstones for crash reconciliation,
-and never exposed in owner views. The supervisor-only binding is null until
-explicitly bound, then immutable while active; successful handback clears it
-atomically because recovery no longer references it. It pins the exact
+and never exposed in owner views. The supervisor-only binding pins the exact
 run-directory path/device/inode, systemd unit/cgroup and full rootless-Podman
-name/64-hex-ID/UID inventory. It is not launch authority. Older ledgers are
-refused, never migrated or reset. A request is exactly
+name/64-hex-ID/UID inventory. A provisioning intent pins one synthetic fixture
+container's expected bounded safe name/UID/run-id marker/image/config before
+creation; the marker must equal run_id while the name is any bounded safe name,
+and only the persisted intent is recovery authority. Intent
+and binding share the 8 KiB inventory allowance and clear at terminal handback.
+Recovery fences bind/claim/finish before inspection and persists a validated ID
+before removal. Independent unstarted-scope and name/ID/marker absence proofs
+are required. A durable claim bit survives cancellation: uncertain binds can be
+recovered, but claimed runners never take this prelaunch path. Neither record
+is launch authority. Older ledgers are refused, never migrated or reset.
+A request is exactly
 {role, task, profile, source_snapshot}; profile may be null, and snapshot is an
 immutable SHA256 snapshot ID. The host must pin the rest of the invocation
 authority before using this primitive; these fields grant no execution rights.
 Requests are bounded to 128 KiB canonical UTF-8 (task <= 65536 UTF-8 bytes),
-results to 32 KiB UTF-8, and the ledger to 1 MiB plus one maximum active
-binding. The ledger holds at most one active job, so the binding allowance does
-not accumulate across history. Only the latest terminal result is retained; old
+results to 32 KiB UTF-8, and the ledger to 1 MiB plus 14 bytes per job for the
+explicit intent field plus one maximum active
+binding/intent inventory. At most one job is active, so the allowance does not
+accumulate across history. Only the latest terminal result is retained; old
 jobs retain small identity/status/result-digest tombstones indefinitely. The 1024-job history cap is shared project-state
 capacity policy pending this pilot's configuration section: capacity exhaustion
 refuses new starts, never forgets a key. The byte ceilings and schema are
@@ -44,8 +52,10 @@ queued -> running (one successful runner claim only), queued/running ->
 cancel-requested, and any nonterminal state -> terminal only after two reports:
 terminal child execution, THEN quiescent driver/bridge/process teardown. Even a
 queued cancellation or failed/dead runner retains the reservation until the
-supervisor proves no child can still access the tree. Cancellation is a durable
-request, not a kill acknowledgement. Recovery is inspection only: running jobs
+supervisor proves no child can still access the tree. The synthetic prepared
+path instead seals a failed outcome atomically after fencing all claims and
+proving the scope unstarted and the intended container absent. Cancellation is
+a durable request, not a kill acknowledgement. Recovery is inspection only: running jobs
 are NEVER requeued, claimed twice, or automatically replayed. A supervisor must
 reconcile uncertain execution and prove quiescence before handback. Result
 text is untrusted evidence, not verification or publication authority. Missing
@@ -64,16 +74,20 @@ from .fs import (DIGEST, canonical, digest, identifier, loads_finite, lock,
                  safe_read, safe_write, sync_dir, write_json)
 
 MAX_JOBS = 1024
-# One active job can add one bounded binding; terminal handback removes it.
+# One active job has one bounded intent/binding inventory; handback clears it.
 MAX_BINDING_BYTES = 8192
-MAX_STATE_BYTES = 1024 * 1024 + MAX_BINDING_BYTES
+# Every job carries an explicit `"intent":null` (14 serialized bytes: comma +
+# `"intent":null`) even in terminal tombstones, so the 1024-tombstone ceiling
+# preserves the prior capacity above the 1 MiB base.
+_INTENT_NULL_OVERHEAD = 14
+MAX_STATE_BYTES = 1024 * 1024 + MAX_BINDING_BYTES + _INTENT_NULL_OVERHEAD * MAX_JOBS
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 32768
 MAX_TASK_BYTES = 65536
 _STATES = {'queued', 'running', 'cancel-requested', 'terminal'}
 _OUTCOMES = {'succeeded', 'failed', 'cancelled'}
 _FIELDS = {'owner', 'key', 'request_digest', 'status', 'token', 'run_id', 'execution',
-           'request', 'result', 'result_digest', 'binding'}
+           'request', 'result', 'result_digest', 'binding', 'intent'}
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
@@ -165,6 +179,32 @@ def _binding(value, run_id):
         ids.add(container['id'])
 
 
+def _intent(value, run_id):
+    """Private, single-container provisioning format; no launch authority.
+
+    config is a nonempty bounded JSON inspection projection owned by the trusted
+    supervisor. It must include every fixture launch option, not model input.
+    Only the persisted intent is recovery authority: the bounded safe name is
+    never derived post hoc, while the marker must equal run_id.
+    """
+    if (type(value) is not dict or set(value) != {
+            'run_id', 'directory', 'scope', 'container', 'recovering', 'claimed', 'id'}
+            or type(value['recovering']) is not bool or type(value['claimed']) is not bool
+            or (value['recovering'] and value['claimed'])
+            or (value['id'] is not None and (not value['recovering'] or not _sha(value['id'])))
+            or type(value['container']) is not dict
+            or set(value['container']) != {'name', 'uid', 'marker', 'image', 'config'}):
+        raise Denied('Invalid delegation provisioning intent')
+    container = value['container']
+    _binding({k: value[k] for k in ('run_id', 'directory', 'scope')} | {
+        'containers': [{'name': container['name'], 'uid': container['uid'], 'id': '0' * 64}]}, run_id)
+    # Safe bounded name is validated by _binding above; only the marker pins run_id.
+    if (container['marker'] != run_id
+            or not _sha(container['image']) or type(container['config']) is not dict
+            or not container['config'] or len(canonical(value)) > MAX_BINDING_BYTES):
+        raise Denied('Invalid delegation provisioning identity or config')
+
+
 def _bound(job):
     binding = job['binding']
     if (binding is None
@@ -194,7 +234,7 @@ class DelegationJobs:
 
     ``start/status/result/cancel`` require the authenticated owner role from the
     host, not a model-supplied identity. Owner views omit runner tokens/requests,
-    the stable run identity and binding. ``reservation`` is internal recovery
+    the stable run identity, intent and binding. ``reservation`` is internal recovery
     evidence, including the pinned request, token, run identity and binding;
     it is NOT permission to replay it. All returned values are fresh decoded copies. OS/durability
     errors propagate: an error after replacement has uncertain acknowledgement,
@@ -212,7 +252,7 @@ class DelegationJobs:
             # Directory existence is the initialization marker. If interrupted
             # here, absence of state is an error, not permission for a new start.
             sync_dir(self.root.parent)
-            write_json(self.root / 'state.json', {'version': 3, 'active': None, 'jobs': {}},
+            write_json(self.root / 'state.json', {'version': 4, 'active': None, 'jobs': {}},
                        exclusive=True)
         with self._locked():
             self._load()
@@ -276,7 +316,7 @@ class DelegationJobs:
     @staticmethod
     def _validate(state):
         if (type(state) is not dict or set(state) != {'version', 'active', 'jobs'}
-                or type(state['version']) is not int or state['version'] != 3
+                or type(state['version']) is not int or state['version'] != 4
                 or type(state['jobs']) is not dict or len(state['jobs']) > MAX_JOBS):
             raise Denied('Invalid delegation ledger')
         active = []
@@ -294,6 +334,24 @@ class DelegationJobs:
             seen_runs.add(job['run_id'])
             if job['binding'] is not None:
                 _binding(job['binding'], job['run_id'])
+            if job['intent'] is not None:
+                _intent(job['intent'], job['run_id'])
+                if len(canonical([job['intent'], job['binding']])) > MAX_BINDING_BYTES:
+                    raise Denied('Delegation resource inventory exceeds byte bound')
+                intent, binding = job['intent'], job['binding']
+                if binding is not None and (binding['directory'] != intent['directory']
+                        or binding['scope'] != intent['scope'] or len(binding['containers']) != 1
+                        or binding['containers'][0]['name'] != intent['container']['name']
+                        or binding['containers'][0]['uid'] != intent['container']['uid']
+                        or (intent['recovering'] and binding['containers'][0]['id'] != intent['id'])):
+                    raise Denied('Delegation binding differs from provisioning intent')
+                if (intent['claimed'] and (binding is None or job['status'] == 'queued')
+                        or (job['status'] == 'running' and job['execution'] is None
+                            and not intent['claimed'])):
+                    raise Denied('Invalid delegation provisioning claim')
+                if intent['recovering'] and (job['status'] != 'cancel-requested'
+                        or job['execution'] is not None):
+                    raise Denied('Invalid delegation provisioning recovery')
             execution = job['execution']
             if execution is not None and (not isinstance(execution, str) or execution not in _OUTCOMES):
                 raise Denied('Invalid delegation execution outcome')
@@ -304,7 +362,7 @@ class DelegationJobs:
                         or (job['status'] == 'queued' and execution is not None)):
                     raise Denied('Invalid active delegation reservation')
             else:
-                if (job['binding'] is not None or execution is None
+                if (job['binding'] is not None or job['intent'] is not None or execution is None
                         or job['token'] is not None or job['request'] is not None
                         or not _sha(job['result_digest'])):
                     raise Denied('Invalid delegation tombstone')
@@ -363,7 +421,7 @@ class DelegationJobs:
             job = {'owner': owner, 'key': key, 'request_digest': fingerprint,
                    'status': 'queued', 'token': secrets.token_hex(32), 'run_id': run_id,
                    'execution': None, 'request': request, 'result': None, 'result_digest': None,
-                   'binding': None}
+                   'binding': None, 'intent': None}
             state['jobs'][job_id] = job
             state['active'] = job_id
             self._save(state)
@@ -408,6 +466,91 @@ class DelegationJobs:
             raise Denied('Delegation runner does not own reservation')
         return job
 
+    def runner_prepare(self, job_id, token, run_directory, scope, container):
+        """Commit a bounded synthetic provisioning intent BEFORE external create.
+
+        Exact retry returns the original; uncertainty must be inspected, never
+        interpreted as permission to create again. The marker pins run_id and the
+        persisted intent alone is recovery authority; the bounded safe name is
+        never derived post hoc. Only the trusted supervisor defines the
+        expected image/config projection.
+        """
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            intent = loads_finite(canonical({
+                'run_id': job['run_id'], 'directory': _directory_identity(run_directory),
+                'scope': scope, 'container': container, 'recovering': False, 'claimed': False, 'id': None}))
+            _intent(intent, job['run_id'])
+            if job['intent'] == intent:
+                return intent
+            if (job['intent'] is not None or job['binding'] is not None
+                    or job['status'] != 'queued' or job['execution'] is not None):
+                raise Denied('Conflicting or late delegation provisioning intent')
+            job['intent'] = intent
+            self._save(state)
+            return intent
+
+    def runner_recover_prepared(self, job_id, token, *, container_id=None):
+        """Fence provisioning/claim before inspection; never infer OS absence.
+
+        Once fenced, no new bind/claim/finish can race cleanup. After validating a
+        unique prelaunch candidate, persist its ID here BEFORE removal. A retry
+        can then prove exact name/ID/marker absence even after uncertain removal.
+        Missing initial candidate evidence cannot release the reservation.
+        """
+        if container_id is not None and not _sha(container_id):
+            raise Denied('Invalid delegation provisioning container ID')
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            intent = job['intent']
+            if (intent is None or intent['claimed']
+                    or job['status'] not in {'queued', 'cancel-requested'}
+                    or job['execution'] is not None
+                    or _directory_identity(intent['directory']['path']) != intent['directory']):
+                raise Denied('Delegation provisioning cannot be recovered')
+            if intent['id'] is not None and container_id not in (None, intent['id']):
+                raise Denied('Conflicting delegation provisioning container ID')
+            if job['binding'] is not None:
+                saved_id = _bound(job)['containers'][0]['id']
+                if container_id not in (None, saved_id):
+                    raise Denied('Provisioning recovery differs from bound container ID')
+                container_id = saved_id
+            if intent['recovering'] and container_id in (None, intent['id']):
+                return intent
+            intent['recovering'] = True
+            if container_id is not None:
+                intent['id'] = container_id
+            job['status'] = 'cancel-requested'
+            self._save(state)
+            return intent
+
+    def runner_prepared_quiescent(self, job_id, token, result, *, cleanup):
+        """Seal only fenced, never-claimed provisioning after independent proof.
+
+        The supervisor proves scope never started and name, exact saved ID and
+        marker all absent in the pinned UID's namespace. This is synthetic
+        fixture evidence, not production execution/driver quiescence.
+        """
+        _text(result, MAX_RESULT_BYTES)
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            intent = job['intent']
+            if (intent is None or not intent['recovering'] or intent['id'] is None
+                    or intent['claimed'] or job['status'] != 'cancel-requested'
+                    or job['execution'] is not None
+                    or _directory_identity(intent['directory']['path']) != intent['directory']
+                    or type(cleanup) is not dict
+                    or set(cleanup) != {'intent', 'scope_unstarted', 'container_absent'}
+                    or canonical(cleanup['intent']) != canonical(intent)
+                    or cleanup['container_absent'] != intent['id']
+                    or cleanup['scope_unstarted'] is not True):
+                raise Denied('Delegation provisioning cleanup proof missing or mismatched')
+            self._terminal(state, job, result, 'failed')
+            self._save(state)
+
     def runner_bind(self, job_id, token, run_directory, scope, containers):
         """Persist exact execution identities before launch; never launch or discover.
 
@@ -415,13 +558,15 @@ class DelegationJobs:
         Scope is {unit, cgroup}; containers are exact rootless-Podman {name, id,
         uid} records, including every writable MCP/execution container (empty
         only when none can exist). Directory identity is captured without links.
-        The canonical binding is capped at 8 KiB within the unchanged 1 MiB
-        ledger. While reserved, exact retries return the original; conflicting or
+        The binding and any intent share an 8 KiB inventory allowance above
+        the 1 MiB base plus per-record intent overhead. While reserved, exact retries return the original; conflicting or
         late binds refuse. Failed/uncertain writes require inspection, not another launch.
         """
         with self._locked():
             state = self._load()
             job = self._runner(state, job_id, token)
+            if job['intent'] is not None and job['intent']['recovering']:
+                raise Denied('Delegation provisioning recovery is fenced')
             binding = loads_finite(canonical({
                 'run_id': job['run_id'], 'directory': _directory_identity(run_directory),
                 'scope': scope, 'containers': containers}))
@@ -460,6 +605,8 @@ class DelegationJobs:
             if job['status'] != 'queued' or job['binding'] is None:
                 raise Denied('Delegation is unbound or not queued; do not replay execution')
             _bound(job)
+            if job['intent'] is not None:
+                job['intent']['claimed'] = True
             job['status'] = 'running'
             self._save(state)
 
@@ -474,6 +621,8 @@ class DelegationJobs:
         with self._locked():
             state = self._load()
             job = self._runner(state, job_id, token)
+            if job['intent'] is not None and job['intent']['recovering']:
+                raise Denied('Delegation provisioning recovery is fenced')
             if job['execution'] is not None:
                 if job['execution'] != outcome:
                     raise Denied('Conflicting delegation execution outcome')
@@ -518,9 +667,13 @@ class DelegationJobs:
                     or cleanup['scope_clean'] is not True
                     or cleanup['containers_absent'] != [c['id'] for c in binding['containers']]):
                 raise Denied('Delegation cleanup proof missing or mismatched')
-            for old in state['jobs'].values():
-                old['result'] = None
-            job.update(status='terminal', token=None, request=None, binding=None, result=result,
-                       result_digest=digest(result.encode()))
-            state['active'] = None
+            self._terminal(state, job, result, job['execution'])
             self._save(state)
+
+    @staticmethod
+    def _terminal(state, job, result, outcome):
+        for old in state['jobs'].values():
+            old['result'] = None
+        job.update(status='terminal', token=None, request=None, binding=None, intent=None,
+                   execution=outcome, result=result, result_digest=digest(result.encode()))
+        state['active'] = None

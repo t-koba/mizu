@@ -4,6 +4,7 @@ Ordinary discovery runs only the offline tests. Live commands require explicit
 CLI opt-in and Ubuntu 24.04; no unavailable-evidence path is a successful skip.
 """
 import argparse
+import copy
 import json
 import os
 from pathlib import Path
@@ -21,8 +22,10 @@ if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 from mizu.delegation_jobs import DelegationJobs
 from mizu.errors import Denied
+from mizu.fs import canonical, loads_finite
 CGROOT = Path('/sys/fs/cgroup')
 IMAGE = 'docker.io/library/busybox:1.37.0'
+MARKER = 'io.mizu.recovery.run'
 COMMAND_DIAGNOSTIC_BYTES_MAX = 1024
 
 
@@ -69,7 +72,8 @@ def atomic_json(path, value):
 
 def ledger(path):
     # Recovery never initializes a missing store or reconstructs identities from
-    # names, labels, fixture files, process memory, or the current branch.
+    # fixture files, process memory, or the current branch. Prepared recovery
+    # discovers only through the exact name/marker intent already in this ledger.
     root = path.parent / 'delegation-jobs'
     for target, mode in ((path.parent, 0o700), (root, 0o700),
                          (root / 'state.json', 0o600), (root / 'store.lock', 0o600)):
@@ -80,9 +84,9 @@ def ledger(path):
     return DelegationJobs(path.parent)
 
 
-def create_job(path):
+def create_job(path, key='smoke'):
     store = DelegationJobs(path.parent)
-    store.start('worker', 'smoke', {'role': 'helper', 'task': 'Synthetic recovery fixture',
+    store.start('worker', key, {'role': 'helper', 'task': 'Synthetic recovery fixture',
                                   'profile': None, 'source_snapshot': 'a' * 64})
     reservation = store.reservation()
     directory = path.parent / reservation['run_id']
@@ -153,12 +157,125 @@ def clean_container(container):
     return absent_name and absent_id
 
 
+def fixture_container(reservation, image):
+    """Expected inspection projection, persisted before create, not learned after."""
+    name, marker = 'mizu-recovery-' + reservation['run_id'], reservation['run_id']
+    argv = ['podman', 'create', '--pull=never', '--name', name, '--label', MARKER + '=' + marker,
+            '--network=none', '--read-only', '--read-only-tmpfs=false', '--cap-drop=ALL',
+            '--security-opt=no-new-privileges', '--user=65534:65534', '--pids-limit=16',
+            '--cpus=0.1', '--memory=32m', '--timeout=90', '--log-driver=none',
+            image, '/bin/sleep', '90']
+    return {'name': name, 'uid': os.getuid(), 'marker': marker, 'image': image,
+            'config': {'CreateCommand': argv, 'Cmd': ['/bin/sleep', '90'], 'Entrypoint': [],
+                       'EffectiveCaps': [], 'BoundingCaps': [],
+                       'User': '65534:65534', 'Labels': {MARKER: marker},
+                       'NetworkMode': 'none', 'ReadonlyRootfs': True, 'Privileged': False,
+                       'Binds': [], 'Mounts': [], 'CapAdd': [],
+                       'SecurityOpt': ['no-new-privileges'], 'PidsLimit': 16,
+                       'Memory': 33554432, 'CpuPeriod': 100000, 'CpuQuota': 10000,
+                       'LogDriver': 'none'}}
+
+
+def intent_candidates(container):
+    """Two bounded exact selectors; unknown or truncated inventories raise."""
+    if container['uid'] != os.getuid():
+        raise RuntimeError('OCI runtime namespace mismatch')
+    found = []
+    for selector in ('name=^/?' + container['name'] + '$',
+                     'label=' + MARKER + '=' + container['marker']):
+        ids = command('podman', 'ps', '--all', '--no-trunc', '--filter', selector,
+                      '--format', '{{.ID}}').stdout.splitlines()
+        if (len(ids) > 1 or any(re.fullmatch(r'[0-9a-f]{64}', cid) is None for cid in ids)):
+            raise RuntimeError('ambiguous or malformed provisioning inventory')
+        found.append(ids)
+    if found[0] != found[1]:
+        raise RuntimeError('missing, renamed or substituted provisioning container')
+    return found[0]
+
+
+def inspection_object(pairs):
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise RuntimeError('ambiguous duplicate inspection field')
+    return value
+
+
+def inspect_prepared(container, cid):
+    """Validate both exact selectors before removal; never remove a substitute."""
+    for selector in (container['name'], cid):
+        observed = loads_finite(command('podman', 'inspect', '--format', '{{json .}}', selector,
+                                        maximum=32768).stdout, object_pairs_hook=inspection_object)
+        config, host, state = observed['Config'], observed['HostConfig'], observed['State']
+        projection = {k: config[k] for k in ('CreateCommand', 'Cmd', 'User', 'Labels')}
+        projection.update({k: host[k] for k in ('NetworkMode', 'ReadonlyRootfs', 'Privileged',
+                          'SecurityOpt', 'PidsLimit', 'Memory', 'CpuPeriod', 'CpuQuota')})
+        # Podman versions encode empty optional lists as either null or [].
+        projection.update({k: [] if host[k] is None else host[k] for k in ('Binds', 'CapAdd')})
+        entrypoint = config['Entrypoint']
+        projection.update(Entrypoint=[] if entrypoint in (None, '', []) else entrypoint,
+                          LogDriver=host['LogConfig']['Type'])
+        for field in ('EffectiveCaps', 'BoundingCaps', 'Mounts'):
+            projection[field] = [] if observed[field] is None else observed[field]
+        if (observed['Id'] != cid or observed['Name'] not in (container['name'], '/' + container['name'])
+                or observed['Image'].removeprefix('sha256:') != container['image']
+                or canonical(projection) != canonical(container['config'])
+                or state['Status'] not in {'configured', 'created'}
+                or state['Running'] is not False or type(state['Pid']) is not int or state['Pid'] != 0
+                or state['StartedAt'] != '0001-01-01T00:00:00Z'
+                or state['FinishedAt'] != '0001-01-01T00:00:00Z'
+                or type(observed['RestartCount']) is not int or observed['RestartCount'] != 0):
+            raise RuntimeError('provisioning identity, configuration or prelaunch state mismatch')
+
+
+def recover_prepared(store, credentials):
+    # The trusted fixture controller/provisioner must have stopped and all create
+    # commands settled. The durable fence prevents a later bind/runner claim; it
+    # is not a distributed fence against an unrelated external Podman client.
+    intent = store.runner_recover_prepared(*credentials)
+    require_host()
+    scope, container = intent['scope'], intent['container']
+    fields = unit_state(scope)
+    try:
+        (CGROOT / scope['cgroup'].lstrip('/')).lstat()
+    except FileNotFoundError:
+        scope_absent = True
+    else:
+        scope_absent = False
+    if (fields != {'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}
+            or not scope_absent):
+        raise RuntimeError('prepared child scope may have started')
+    candidates = intent_candidates(container)
+    cid = intent['id']
+    if candidates:
+        candidate = candidates[0]
+        if cid is not None and candidate != cid:
+            raise RuntimeError('provisioning container ID mismatch')
+        inspect_prepared(container, candidate)
+        # Write uncertainty MUST abort before rm; retry inspects the persisted ID.
+        intent = store.runner_recover_prepared(*credentials, container_id=candidate)
+        cid = intent['id']
+        command('podman', 'rm', cid)  # never force a running or raced candidate
+    elif cid is None:
+        raise RuntimeError('initial provisioning container evidence missing')
+    absent_name = not container_exists(container['name'])
+    absent_id = not container_exists(cid)
+    if not absent_name or not absent_id or intent_candidates(container):
+        raise RuntimeError('provisioning container absence unproven')
+    store.runner_prepared_quiescent(*credentials, 'Synthetic prelaunch fixture cleanup verified',
+                                   cleanup={'intent': intent, 'scope_unstarted': True,
+                                            'container_absent': cid})
+
+
 def recover(path):
     store = ledger(path)
     reservation = store.reservation()
     if reservation is None:
         return  # Already sealed by an earlier, acknowledged or uncertain commit.
     credentials = reservation['id'], reservation['token']
+    if (reservation['binding'] is None or (reservation['intent'] is not None
+            and not reservation['intent']['claimed'] and reservation['execution'] is None)):
+        recover_prepared(store, credentials)
+        return
     binding = store.runner_binding(*credentials)
     scope = binding['scope']
     cgroup_clean, absent = None, []
@@ -198,6 +315,10 @@ def supervise(path):
     # socket, credentials, or production IDs enter this synthetic unit.
     store = ledger(path)
     reservation = store.reservation()
+    if (reservation is None or reservation['status'] != 'running'
+            or reservation['execution'] is not None or reservation['intent'] is None
+            or not reservation['intent']['claimed']):
+        raise RuntimeError('synthetic supervisor requires a durable runner claim')
     binding = store.runner_binding(reservation['id'], reservation['token'])
     child = subprocess.Popen(['/usr/bin/setsid', '/usr/bin/sleep', '90'],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -207,24 +328,68 @@ def supervise(path):
     time.sleep(90)
 
 
+def provision(store, reservation, directory, scope):
+    """The fixture's create/bind boundary; every external create has an intent."""
+    credentials = reservation['id'], reservation['token']
+    image = command('podman', 'image', 'inspect', '--format', '{{.Id}}', IMAGE).stdout.strip()
+    container = fixture_container(reservation, image.removeprefix('sha256:'))
+    store.runner_prepare(*credentials, str(directory), scope, container)
+    cid = command(*container['config']['CreateCommand']).stdout.strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', cid):
+        raise RuntimeError('missing container ID')
+    # Never claim the stdout ID post hoc: the durable intent alone selects the
+    # candidate, and inspection must confirm its exact image/config/prelaunch
+    # state before the ID is bound and claimed. A retagged or substituted image
+    # fails here and retains the hold without binding.
+    candidates = intent_candidates(container)
+    if candidates != [cid]:
+        raise RuntimeError('provisioning container identity mismatch')
+    inspect_prepared(container, cid)
+    store.runner_bind(*credentials, str(directory), scope,
+                      [{'name': container['name'], 'id': cid, 'uid': container['uid']}])
+    return cid
+
+
 def live(path):
     path.parent.mkdir(mode=0o700)  # refuse reuse; CI owns this disposable directory
-    store, reservation, directory = create_job(path)
+    require_host()
+    command('podman', 'pull', '--quiet', IMAGE, seconds=60)
+    # Phase 1: bounded real pre-binding recovery. A fixture container is durably
+    # prepared and created, then this controller simulates interruption before ID
+    # binding; a separate recovery process must fence, validate the singleton
+    # intent candidate, persist its ID before removal, and seal the failed
+    # outcome. Uses its own idempotency key and exact ledger IDs; no production
+    # integration.
+    store, reservation, directory = create_job(path, key='smoke-prepared')
+    credentials = reservation['id'], reservation['token']
+    name = 'mizu-recovery-' + reservation['run_id']
+    scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+    image = command('podman', 'image', 'inspect', '--format', '{{.Id}}', IMAGE).stdout.strip()
+    container = fixture_container(reservation, image.removeprefix('sha256:'))
+    store.runner_prepare(*credentials, str(directory), scope, container)
+    cid_prepared = command(*container['config']['CreateCommand']).stdout.strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', cid_prepared):
+        raise RuntimeError('missing prepared container ID')
+    # Simulated crash before runner_bind/runner_started: no binding or claim.
+    if ledger(path).reservation()['id'] != reservation['id']:
+        raise RuntimeError('pre-binding ledger identity mismatch')
+    command(sys.executable, str(Path(__file__).resolve()), '--recover', str(path), seconds=75)
+    if ledger(path).reservation() is not None:
+        raise RuntimeError('pre-binding recovery did not release the synthetic reservation')
+    if store.status('worker', reservation['id'])['execution'] != 'failed':
+        raise RuntimeError('pre-binding terminal outcome missing')
+    if container_exists(container['name']) or container_exists(cid_prepared):
+        raise RuntimeError('pre-binding container absence unproven')
+    if intent_candidates(container):
+        raise RuntimeError('pre-binding marker absence unproven')
+    print('Synthetic pre-binding fixture recovery proven; reservation released.')
+    # Phase 2: existing systemd/descendant/bound-OCI recovery with its own key.
+    store, reservation, directory = create_job(path, key='smoke-bound')
     credentials = reservation['id'], reservation['token']
     name = 'mizu-recovery-' + reservation['run_id']
     scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
     try:
-        require_host()
-        command('podman', 'pull', '--quiet', IMAGE, seconds=60)
-        cid = command('podman', 'create', '--pull=never', '--name', name, '--network=none',
-                      '--read-only', '--read-only-tmpfs=false', '--cap-drop=ALL',
-                      '--security-opt=no-new-privileges', '--user=65534:65534',
-                      '--pids-limit=16', '--cpus=0.1', '--memory=32m', '--timeout=90',
-                      '--log-driver=none', IMAGE, '/bin/sleep', '90').stdout.strip()
-        if not re.fullmatch(r'[0-9a-f]{64}', cid):
-            raise RuntimeError('missing container ID')
-        store.runner_bind(*credentials, str(directory), scope,
-                          [{'name': name, 'id': cid, 'uid': os.getuid()}])
+        cid = provision(store, reservation, directory, scope)
         store.runner_started(*credentials)  # durable identities AND claim precede execution
         command('sudo', '-n', 'systemd-run', '--unit=' + scope['unit'],
                 '--slice=system.slice', '--service-type=exec',
@@ -268,7 +433,8 @@ def live(path):
     finally:
         # Separate process uses ONLY the actual durable job ledger. CI repeats
         # recovery in always() if the controller dies. Unsettled execution or
-        # incomplete binding retains the hold even if cleanup is attempted.
+        # unknown evidence retains the hold; a prepared fixture needs its own
+        # positive prelaunch and absence proofs.
         command(sys.executable, str(Path(__file__).resolve()), '--recover', str(path), seconds=75)
     if ledger(path).reservation() is not None:
         raise RuntimeError('recovery did not release the synthetic reservation')
@@ -439,6 +605,266 @@ class RecoveryReservationTests(unittest.TestCase):
                 scope.assert_called_with(binding['scope'])
                 cleanup.assert_called_once_with(binding['containers'][0])
             self.assertIsNone(store.reservation())
+
+    def prepared_fixture(self, path, uid_offset=0, prepared=True):
+        store, reservation, directory = create_job(path)
+        credentials = reservation['id'], reservation['token']
+        container = fixture_container(reservation, 'a' * 64)
+        container['uid'] += uid_offset
+        name = container['name']
+        scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+        if prepared:
+            store.runner_prepare(*credentials, str(directory), scope, container)
+        cid = 'b' * 64
+        config = copy.deepcopy(container['config'])
+        observed = {'Id': cid, 'Name': name, 'Image': container['image'], 'RestartCount': 0,
+                    'Config': {k: config[k] for k in ('CreateCommand', 'Cmd', 'Entrypoint', 'User', 'Labels')},
+                    'EffectiveCaps': [], 'BoundingCaps': [],
+                    'HostConfig': {k: config[k] for k in ('NetworkMode', 'ReadonlyRootfs', 'Privileged',
+                        'Binds', 'CapAdd', 'SecurityOpt', 'PidsLimit', 'Memory', 'CpuPeriod', 'CpuQuota')},
+                    'Mounts': [], 'State': {'Status': 'configured', 'Running': False, 'Pid': 0,
+                        'StartedAt': '0001-01-01T00:00:00Z', 'FinishedAt': '0001-01-01T00:00:00Z'}}
+        observed['HostConfig']['LogConfig'] = {'Type': 'none'}
+        runtime = {'name': [cid], 'marker': [cid], 'observed': observed}
+        def invoke(*argv, **kwargs):
+            if argv[:3] == ('podman', 'image', 'inspect'):
+                return mock.Mock(stdout=container['image'])
+            if argv[:2] == ('podman', 'create'):
+                current = ledger(path).reservation()
+                self.assertEqual(current['intent']['container'], container)
+                self.assertIsNone(current['binding'])
+                self.assertFalse(current['intent']['claimed'])
+                self.assertEqual(list(argv), container['config']['CreateCommand'])
+                return mock.Mock(stdout=cid)
+            if argv[:2] == ('podman', 'ps'):
+                selector = argv[argv.index('--filter') + 1]
+                expected = ('name=^/?' + name + '$' if selector.startswith('name=')
+                            else 'label=' + MARKER + '=' + container['marker'])
+                self.assertEqual(selector, expected)
+                ids = runtime['name' if selector.startswith('name=') else 'marker']
+                return mock.Mock(stdout='\n'.join(ids))
+            if argv[:2] == ('podman', 'inspect'):
+                self.assertIn(argv[-1], (name, cid))
+                if isinstance(runtime['observed'], Exception):
+                    raise runtime['observed']
+                return mock.Mock(stdout=(runtime['observed'] if isinstance(runtime['observed'], str)
+                                         else json.dumps(runtime['observed'])))
+            if argv[:2] == ('podman', 'rm'):
+                self.assertEqual(argv, ('podman', 'rm', cid))
+                current = ledger(path).reservation()
+                self.assertIsNotNone(current)
+                self.assertEqual(current['intent']['id'], cid)  # durable BEFORE rm
+                self.assertTrue(current['intent']['recovering'])
+                runtime.update(name=[], marker=[])
+                return mock.Mock(stdout=cid)
+            if argv[:3] == ('podman', 'container', 'exists'):
+                self.assertIn(argv[-1], (name, cid))
+                return mock.Mock(exit_code=0 if runtime['name'] else 1)
+            raise AssertionError(argv)
+        return store, credentials, runtime, invoke
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_supervisor_cannot_start_a_prepared_or_recovering_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'state.json'
+            store, credentials, runtime, invoke = self.prepared_fixture(path)
+            intent = store.reservation()['intent']
+            with mock.patch.object(subprocess, 'Popen') as launch:
+                for stage in ('unbound', 'bound', 'recovering'):
+                    if stage == 'bound':
+                        store.runner_bind(*credentials, intent['directory']['path'], intent['scope'],
+                            [{'name': intent['container']['name'], 'id': 'b' * 64, 'uid': os.getuid()}])
+                    elif stage == 'recovering':
+                        store.runner_recover_prepared(*credentials)
+                    with self.assertRaisesRegex(RuntimeError, 'durable runner claim'):
+                        supervise(path)
+                launch.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_created_before_bind_and_uncertain_bind_write_recover_without_launch(self):
+        module = sys.modules[__name__]
+        # No bind, failed pre-replace bind, and committed-but-unacknowledged bind.
+        for failure in ('interrupted', 'before', 'after'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store, credentials, runtime, invoke = self.prepared_fixture(path, prepared=False)
+                reservation = store.reservation()
+                directory = path.parent / reservation['run_id']
+                name = runtime['observed']['Name']
+                scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+                save = store._save
+                def uncertain(state):
+                    binding = state['jobs'][credentials[0]]['binding']
+                    if binding is not None:
+                        if failure == 'after':
+                            save(state)
+                        raise OSError('injected bind acknowledgement loss')
+                    save(state)
+                def interrupted(*argv, **kwargs):
+                    result = invoke(*argv, **kwargs)
+                    if failure == 'interrupted' and argv[:2] == ('podman', 'create'):
+                        raise OSError('injected interruption after external create')
+                    return result
+                with (mock.patch.object(store, '_save', side_effect=uncertain),
+                      mock.patch.object(module, 'command', side_effect=interrupted)):
+                    with self.assertRaises(OSError):
+                        provision(store, reservation, directory, scope)
+                self.assertEqual(store.reservation()['binding'] is not None, failure == 'after')
+                with (mock.patch.object(module, 'require_host'),
+                      mock.patch.object(module, 'unit_state', return_value={
+                          'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
+                      mock.patch.object(module, 'command', side_effect=invoke) as commands):
+                    recover(path)
+                    recover(path)
+                    self.assertEqual(sum(c.args[:2] == ('podman', 'rm') for c in commands.call_args_list), 1)
+                self.assertIsNone(store.reservation())
+                self.assertEqual(store.status('worker', credentials[0])['execution'], 'failed')
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_provision_verifies_singleton_identity_before_bind(self):
+        # The stdout ID is never claimed post hoc: provision must find exactly
+        # the durable intent candidate and confirm its image/config/prelaunch
+        # state before runner_bind. Any mismatch retains the hold unbound.
+        module = sys.modules[__name__]
+        for failure in ('mismatch-id', 'duplicate', 'wrong-image', 'wrong-command', 'running'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store, credentials, runtime, invoke = self.prepared_fixture(path, prepared=False)
+                reservation = store.reservation()
+                directory = path.parent / reservation['run_id']
+                name = runtime['observed']['Name']
+                scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+                observed = runtime['observed']
+                if failure == 'mismatch-id':
+                    runtime.update(name=['b' * 64], marker=['c' * 64])
+                elif failure == 'duplicate':
+                    runtime['marker'] = ['b' * 64, 'c' * 64]
+                elif failure == 'wrong-image':
+                    observed['Image'] = 'c' * 64
+                elif failure == 'wrong-command':
+                    observed['Config']['Cmd'] = ['substitute']
+                elif failure == 'running':
+                    observed['State']['Running'] = True
+                with mock.patch.object(module, 'command', side_effect=invoke):
+                    with self.assertRaises(RuntimeError):
+                        provision(store, reservation, directory, scope)
+                current = store.reservation()
+                self.assertIsNotNone(current)
+                self.assertIsNotNone(current['intent'])
+                self.assertIsNone(current['binding'])
+                self.assertEqual(current['intent']['container']['marker'], reservation['run_id'])
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_prepared_unknown_candidates_never_remove_or_release(self):
+        module = sys.modules[__name__]
+        mutations = ['missing', 'renamed', 'duplicate', 'malformed-id', 'unobservable', 'malformed', 'duplicate-json', 'nonfinite',
+                     'wrong-id', 'wrong-name', 'wrong-label', 'wrong-image', 'wrong-command',
+                     'wrong-entrypoint', 'wrong-caps',
+                     'writable', 'running', 'started', 'scope', 'namespace']
+        for failure in mutations:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store, credentials, runtime, invoke = self.prepared_fixture(
+                    path, uid_offset=1 if failure == 'namespace' else 0)
+                observed = runtime['observed']
+                fields = {'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}
+                if failure == 'missing':
+                    runtime.update(name=[], marker=[])
+                elif failure == 'renamed':
+                    runtime['name'] = []
+                elif failure == 'duplicate':
+                    runtime['marker'] = ['b' * 64, 'c' * 64]
+                elif failure == 'malformed-id':
+                    runtime.update(name=['short'], marker=['short'])
+                elif failure == 'unobservable':
+                    runtime['observed'] = OSError('runtime unavailable')
+                elif failure == 'malformed':
+                    runtime['observed'] = {}
+                elif failure == 'duplicate-json':
+                    runtime['observed'] = '{"Id":"' + 'c' * 64 + '",' + json.dumps(observed)[1:]
+                elif failure == 'nonfinite':
+                    observed['Unknown'] = float('nan')
+                elif failure == 'wrong-id':
+                    observed['Id'] = 'c' * 64
+                elif failure == 'wrong-name':
+                    observed['Name'] = 'substitute'
+                elif failure == 'wrong-label':
+                    observed['Config']['Labels'] = {MARKER: 'c' * 32}
+                elif failure == 'wrong-image':
+                    observed['Image'] = 'c' * 64
+                elif failure == 'wrong-command':
+                    observed['Config']['Cmd'] = ['substitute']
+                elif failure == 'wrong-entrypoint':
+                    observed['Config']['Entrypoint'] = '/bin/sh'
+                elif failure == 'wrong-caps':
+                    observed['BoundingCaps'] = ['CAP_CHOWN']
+                elif failure == 'writable':
+                    observed['HostConfig']['ReadonlyRootfs'] = False
+                elif failure == 'running':
+                    observed['State']['Running'] = True
+                elif failure == 'started':
+                    observed['State']['StartedAt'] = '2026-01-01T00:00:00Z'
+                elif failure == 'scope':
+                    fields['LoadState'] = 'loaded'
+                with (mock.patch.object(module, 'require_host'),
+                      mock.patch.object(module, 'unit_state', return_value=fields),
+                      mock.patch.object(module, 'command', side_effect=invoke) as commands):
+                    with self.assertRaises((RuntimeError, OSError, KeyError, ValueError)):
+                        recover(path)
+                    self.assertFalse(any(c.args[:2] == ('podman', 'rm') for c in commands.call_args_list))
+                self.assertIsNotNone(store.reservation())
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_prepared_removal_and_cleanup_write_uncertainty_are_retryable(self):
+        module = sys.modules[__name__]
+        for failure in ('id-before', 'id-after', 'remove', 'proof', 'name-survivor',
+                        'id-survivor', 'marker-survivor', 'seal-after'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store, credentials, runtime, invoke = self.prepared_fixture(path)
+                real_save = DelegationJobs._save
+                def save(instance, state):
+                    active = state['active']
+                    candidate = state['jobs'][credentials[0]]['intent']
+                    if failure in ('id-before', 'id-after') and candidate is not None and candidate['id'] is not None:
+                        if failure == 'id-after':
+                            real_save(instance, state)
+                        raise OSError('injected ID write uncertainty')
+                    real_save(instance, state)
+                    if failure == 'seal-after' and active is None:
+                        raise OSError('injected seal acknowledgement loss')
+                def interrupted(*argv, **kwargs):
+                    result = invoke(*argv, **kwargs)
+                    if failure == 'remove' and argv[:2] == ('podman', 'rm'):
+                        raise OSError('injected removal acknowledgement loss')
+                    if failure == 'proof' and argv[:3] == ('podman', 'container', 'exists'):
+                        raise OSError('injected absence uncertainty')
+                    if argv[:3] == ('podman', 'container', 'exists'):
+                        if ((failure == 'id-survivor' and argv[-1] == 'b' * 64)
+                                or (failure == 'name-survivor' and argv[-1] != 'b' * 64)):
+                            return mock.Mock(exit_code=0)
+                    if (failure == 'marker-survivor' and not runtime['name']
+                            and argv[:2] == ('podman', 'ps')
+                            and argv[argv.index('--filter') + 1].startswith('label=')):
+                        return mock.Mock(stdout='b' * 64)
+                    return result
+                with (mock.patch.object(module, 'require_host'),
+                      mock.patch.object(module, 'unit_state', return_value={
+                          'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
+                      mock.patch.object(DelegationJobs, '_save', new=save),
+                      mock.patch.object(module, 'command', side_effect=interrupted) as commands):
+                    with self.assertRaises((OSError, RuntimeError)):
+                        recover(path)
+                    if failure in ('id-before', 'id-after'):
+                        self.assertFalse(any(c.args[:2] == ('podman', 'rm') for c in commands.call_args_list))
+                self.assertEqual(store.reservation() is None, failure == 'seal-after')
+                with (mock.patch.object(module, 'require_host'),
+                      mock.patch.object(module, 'unit_state', return_value={
+                          'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
+                      mock.patch.object(module, 'command', side_effect=invoke)):
+                    recover(path)
+                    recover(path)
+                self.assertIsNone(store.reservation())
 
 
 if __name__ == '__main__':
