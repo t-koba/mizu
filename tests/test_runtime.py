@@ -1671,7 +1671,7 @@ class PromptOrderTests(Fixture):
         from mizu.runtime import prompt_for, prompt_delta_for
         ctx = self.context("worker")
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
-                         ["unit", "unit_tool_surface", "goal_digest", "published_snapshot", "recent_snapshots",
+                         ["unit", "unit_tool_surface", "goal_digest", "admission", "published_snapshot", "recent_snapshots",
                           "workspace", "workspace_mode", "pending_insights",
                           "open_insights", "open_work_items", "operator_records",
                           "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
@@ -1680,7 +1680,7 @@ class PromptOrderTests(Fixture):
                           "previous_report", "ready_work", "work_order", "run", "now", "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
-            ["unit", "unit_tool_surface", "goal_digest", "published_snapshot", "snapshot_delta",
+            ["unit", "unit_tool_surface", "goal_digest", "admission", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "operator_records", "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
              "research_state", "capture_limit", "workspace", "workspace_mode",
              "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "ci_branch", "ci_failures",
