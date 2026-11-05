@@ -418,6 +418,50 @@ class WebSeparationTests(Fixture):
         self.assertEqual(len(out["results"]), SEARCH_RESULT_LIMIT)
         self.assertTrue(out["truncated"])
 
+    def test_search_adapter_receives_whole_invocation_budget(self):
+        from mizu.web import Web
+        from mizu.process import Result
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        web = Web({"hosts": [], "feeds": [], "search_feed_item_limit": 200,
+                   "cache_seconds": 0, "timeout_seconds": 17,
+                   "max_bytes": 4096, "search_command": ["adapter"],
+                   "intranet": False}, tmp / "c", tmp / "r")
+        with patch("mizu.web.run", return_value=Result(0, '{"results":[]}', "", "exited", 0.01)) as run:
+            result = web.search("fallback query")
+        self.assertEqual(result["results"], [])
+        self.assertEqual(json.loads(run.call_args.kwargs["input_data"]),
+                         {"query": "fallback query", "budget_seconds": 17})
+        self.assertEqual(run.call_args.kwargs["timeout"], 17)
+        self.assertEqual(run.call_args.kwargs["maximum"], 4096)
+
+    def test_search_adapter_cannot_extend_host_timeout(self):
+        import sys
+        from mizu.web import Web
+        from mizu.process import run as real_run
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        web = Web({"hosts": [], "feeds": [], "search_feed_item_limit": 200,
+                   "cache_seconds": 0, "timeout_seconds": 1,
+                   "max_bytes": 4096,
+                   "search_command": [sys.executable, "-c", "import time; time.sleep(5)"],
+                   "intranet": False}, tmp / "c", tmp / "r")
+        observed = []
+
+        def run_adapter(command, **kwargs):
+            result = real_run(command, **kwargs)
+            observed.append((kwargs, result))
+            return result
+
+        with patch("mizu.web.run", side_effect=run_adapter):
+            with self.assertRaisesRegex(Denied, "Configured search program failed"):
+                web.search("slow adapter")
+        kwargs, result = observed[0]
+        self.assertEqual(json.loads(kwargs["input_data"]),
+                         {"query": "slow adapter", "budget_seconds": 1})
+        self.assertEqual(kwargs["timeout"], 1)
+        self.assertEqual(result.reason, "timeout")
+
     def test_adapter_fields_follow_search_bounds_and_keep_metadata(self):
         from mizu.web import Web
         import json

@@ -1857,12 +1857,12 @@ Configures outbound retrieval for `fetch` and `search`:
 | `probe_methods` | `[]` | Allowlisted `probe` methods (uppercase tokens, e.g. `GET`, `POST`); empty disables `probe` |
 | `feeds` | `[]` | Allowed RSS/Atom feed URLs for discovery |
 | `search_feed_item_limit` | `200` | RSS/Atom candidates retained per feed (1–1000); a lower value can reduce one feed's contribution relative to the other configured sources. The existing global 1,000-candidate search/page ceiling and overflow signaling remain separate; this does not affect `search_command` results |
-| `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON |
+| `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON; request contains `query` and `budget_seconds` (seconds, the configured whole-command upper bound; see [extensions](extensions.md#search-adapter)) |
 | `diagnostic_bytes` | `2048` | Maximum stderr tail shown on a configured program's nonzero exit (0–8192; `0` disables). The excerpt is labelled `external-untrusted` and is model-visible; it may contain host paths or other private adapter output |
 | `destination_command` | `[]` | Trusted argv owning the destination decision per request (`url`, `host`, `role`, `capability` fetch/probe, redirect `hop`, `method`); stdin bounded JSON, stdout must be `{"allow": bool}`. Unset keeps the `hosts`/`probe_hosts` lists; when set the decider decides authoritatively per hop and anything but explicit `true` denies (fail closed). While set, `fetch` bypasses the response cache so every hop is decided live; `probe` never caches. HTTPS-only, port 443, DNS pinning, bounds and receipts stay in mechanism |
 | `intranet` | `false` | When true, permits any private unicast IP (`ip.is_private`); multicast, link-local, loopback, unspecified, and transition addresses stay refused |
 | `cache_seconds` | `1800` | Response cache TTL: reuse window and expired-entry reclamation age (`retrieved_epoch` vs now; epoch-less entries use mtime for reclamation only). Static-cache hits require the current fetch-policy digest (canonical sorted `hosts`, `intranet`, `max_bytes`, and receipt-schema version); changes to these settings or the receipt schema invalidate reuse and re-run live redirect checks. Legacy, prior-schema or incomplete receipts without the current digest miss. Unused for `fetch` while `destination_command` is set (cache bypassed); still ages already-stored entries for reclamation |
-| `timeout_seconds`| `20` | Request timeout |
+| `timeout_seconds`| `20` | Per-request timeout in seconds (1–16,777,216). `search_command` receives this value as the upper-bound `budget_seconds` for its whole invocation; the host still enforces this subprocess deadline |
 | `max_bytes` | `524288` | Maximum raw response payload (512 KiB; 1–16,777,216); worker JSON expansion does not enlarge the raw response cap |
 
 The `fetch`/`probe` worker IPC ceiling accounts for JSON expansion and metadata

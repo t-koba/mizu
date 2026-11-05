@@ -69,8 +69,17 @@ The executable receives one JSON request on stdin and returns one JSON object on
 stdout. stderr is diagnostic. The request is:
 
 ```json
-{"query":"question chosen from current project context"}
+{"query":"question chosen from current project context","budget_seconds":20}
 ```
+
+`query` is a string of 1–1,000 characters. `budget_seconds` is a positive
+integer in seconds, exactly the configured `web.timeout_seconds` value. It is
+the upper bound for one whole adapter invocation, letting the adapter divide
+time among sequential fallbacks; it is not a fresh allowance for each provider
+or a promise that all of that time remains when the request arrives. The host
+independently enforces the same subprocess timeout and does not let the adapter
+extend or reset it; an enclosing worker or run deadline can end it earlier. A
+timeout or output-limit failure remains a host failure, not an adapter retry.
 
 The response is:
 

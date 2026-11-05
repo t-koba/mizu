@@ -575,7 +575,12 @@ class Web:
         True when the adapter overflows, any feed holds an eligible item beyond
         its per-feed bound, or feed matches exceed the remaining slots. The
         adapter keeps ranking priority: its results come first, then feed
-        matches fill the remaining slots. Trust: external-untrusted. Retry: per-feed
+        matches fill the remaining slots. The operator adapter receives
+        ``{"query": str, "budget_seconds": int}``; the latter is the configured
+        ``timeout_seconds`` value in seconds as an upper bound for the whole
+        adapter invocation, not a per-fallback allowance. The host still
+        enforces that subprocess deadline and output cap; the enclosing worker
+        or run deadline may end it earlier. Trust: external-untrusted. Retry: per-feed
         best-effort, errors listed. A normally exited nonzero search command may
         include the configured bounded stderr tail, labelled external-untrusted.
         Evidence: source_receipt per feed result. Failure: Denied for bad
@@ -588,9 +593,11 @@ class Web:
             raise Denied("Search query must be 1–1000 characters")
         command = self.settings["search_command"]
         if command:
-            result = run(command, timeout=self.settings["timeout_seconds"],
+            budget_seconds = self.settings["timeout_seconds"]
+            request = {"query": query, "budget_seconds": budget_seconds}
+            result = run(command, timeout=budget_seconds,
                          maximum=self.settings["max_bytes"],
-                         input_data=json.dumps({"query": query}).encode() + b"\n")
+                         input_data=json.dumps(request).encode() + b"\n")
             if result.exit_code != 0 or result.reason != "exited":
                 diagnostic = adapter_failure_diagnostic(
                     result, source="web search", maximum_bytes=self.settings.get(
