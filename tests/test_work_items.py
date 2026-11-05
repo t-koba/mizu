@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from support import Fixture
-from mizu import work_items as work_items_module
+from mizu import acceptance, work_items as work_items_module
 from mizu.config import MAX_HISTORY_TEMPORARIES
 from mizu.errors import Denied, LimitExceeded, SnapshotConflict
 from mizu.fs import PREVIEW_BYTES, canonical, write_json
@@ -319,7 +319,32 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.count_open_readonly()
 
-    def test_done_sidecar_skips_manifests_but_exact_status_replay_stays_strict(self):
+    def assert_done_proof_required(self, store, path, corrupt):
+        raw = path.read_bytes()
+        for corruption in (None, canonical(corrupt)):
+            with self.subTest(proof=path.parent.name, missing=corruption is None):
+                if corruption is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(corruption)
+                try:
+                    for reader in (store.count_open, store.count_open_readonly, store.page_open,
+                                   store.page_open_readonly, store.page_closed_readonly,
+                                   lambda: store.get(self.item_id),
+                                   lambda: store.explain(self.item_id, limit=1)):
+                        with self.subTest(reader=reader), self.assertRaises(Denied):
+                            reader()
+                    liveness = store.blocked_liveness_readonly()
+                    self.assertIsNone(liveness["total"])
+                    self.assertIsNone(liveness["counts"])
+                    self.assertFalse(liveness["coverage_complete"])
+                    self.assertEqual(liveness["diagnostic"], "unreadable")
+                finally:
+                    path.write_bytes(raw)
+                self.assertEqual(store.page_open_readonly()["total"], 0)
+                self.assertEqual(store.blocked_liveness_readonly()["total"], 0)
+
+    def test_done_sidecar_validates_current_manifest_without_replaying_history(self):
         self.change("doing")
         historical = self.snapshot("valid")
         self.bind(historical)
@@ -332,25 +357,21 @@ class WorkItemTests(Fixture):
         legacy["rev"] = 2
         legacy["transition"] = {"from": "open", "to": "done"}
         fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
-        with self.assertRaisesRegex(Denied, "Legacy completion requires exact replay"):
-            fresh._validate_transition(self.seed, legacy, source_only_completion=True)
-        # The legacy event remains valid through the original manifest-backed path.
+        # Legacy events remain valid through the manifest-backed path.
         fresh._validate_transition(self.seed, legacy)
         if not work_items_module.IS_WINDOWS:
             with patch.object(fresh.snapshots, "get",
-                              side_effect=AssertionError("done sidecar reloaded manifest")) as get, \
+                              wraps=fresh.snapshots.get) as get, \
                     patch.object(fresh, "_current_hold",
                                  side_effect=AssertionError("done sidecar replayed history")):
                 self.assertEqual(fresh.page_open_readonly()["total"], 0)
                 self.assertEqual(fresh.blocked_liveness_readonly()["total"], 0)
-                get.assert_not_called()
-        # Counts, locked reads, closed pages and explicit evidence stay strict.
+                self.assertEqual(get.call_count, 2)
+                self.assertTrue(all(call.args == (snapshot["id"],) for call in get.call_args_list))
+        # Missing/corrupt current proof must fail closed, even after valid reads.
+        manifest = self.project.root / "snapshots" / f"{snapshot['id']}.json"
+        self.assert_done_proof_required(fresh, manifest, {**snapshot, "summary": "tampered"})
         with patch.object(fresh.snapshots, "get", side_effect=Denied("snapshot unavailable")):
-            for reader in (fresh.count_open, fresh.count_open_readonly, fresh.page_open,
-                           fresh.page_closed_readonly, lambda: fresh.get(self.item_id),
-                           lambda: fresh.explain(self.item_id, limit=1)):
-                with self.subTest(reader=reader), self.assertRaisesRegex(Denied, "snapshot unavailable"):
-                    reader()
             # A miss still performs exact replay, including current done evidence.
             (self.project.root / "work-item-state" / f"{self.item_id}.json").unlink(missing_ok=True)
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
@@ -363,27 +384,35 @@ class WorkItemTests(Fixture):
         with self.assertRaisesRegex(Denied, "Completion evidence"):
             fresh.page_open_readonly()
 
-    def test_done_sidecar_retained_proof_is_structural_but_explicit_reads_verify_receipt(self):
+    def test_done_sidecar_validates_exact_retained_receipt(self):
         self.require_posix_read_cache()
         self.change("doing")
         snapshot = self.snapshot()
         self.bind(snapshot)
-        proof = {"source": "retained_acceptance", "receipt_id": "a" * 64,
+        bound = {"commands": ["true"], "execution": "a" * 64, "environment": "b" * 64,
+                 "image": "sha256:" + "c" * 64}
+        receipt_id = acceptance.retain(self.project, {
+            "passed": True, "snapshot_representable": True, "unchanged_during_verification": True,
+            "dependencies_unchanged": True, "code_digest": snapshot["code_digest"],
+            "image": bound["image"], "run": "d" * 32,
+            "commands": [{"id": "e" * 32, "exit_code": 0, "reason": "exited"}]},
+            bound, producer={"kind": "verify", "id": "d" * 32, "run": "d" * 32})
+        proof = {"source": "retained_acceptance", "receipt_id": receipt_id,
                  "passed": True, "code_digest": snapshot["code_digest"]}
         self.store.effective_verification = lambda _: proof
-        # Offline receipt stub isolates the work-item validation boundary.
-        receipt = {"schema": 1, "code_digest": snapshot["code_digest"], "scope": {}}
-        with patch("mizu.acceptance.get", return_value=receipt):
-            done = self.change("done", expected_rev=3, snapshot_id=snapshot["id"])
-            self.assertEqual(self.store.get(self.item_id), done)
+        done = self.change("done", expected_rev=3, snapshot_id=snapshot["id"])
+        self.assertEqual(self.store.get(self.item_id), done)
         fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
-        with patch.object(fresh.snapshots, "get", side_effect=AssertionError("manifest reload")), \
-                patch("mizu.acceptance.get", side_effect=AssertionError("receipt reload")):
+        with patch.object(fresh, "_current_hold", side_effect=AssertionError("history replay")), \
+                patch("mizu.acceptance.get", wraps=acceptance.get) as get:
             self.assertEqual(fresh.page_open_readonly()["total"], 0)
-        with patch("mizu.acceptance.get", side_effect=Denied("receipt unavailable")):
-            for reader in (lambda: fresh.get(self.item_id), lambda: fresh.explain(self.item_id, limit=1)):
-                with self.subTest(reader=reader), self.assertRaisesRegex(Denied, "receipt unavailable"):
-                    reader()
+            self.assertEqual(fresh.blocked_liveness_readonly()["total"], 0)
+            self.assertEqual(get.call_count, 2)
+            self.assertTrue(all(call.args == (self.project.root, receipt_id)
+                                for call in get.call_args_list))
+        receipt_path = self.project.root / "evidence/acceptance/objects" / f"{receipt_id}.json"
+        receipt = acceptance.get(self.project.root, receipt_id)
+        self.assert_done_proof_required(fresh, receipt_path, {**receipt, "code_digest": "0" * 64})
         # Even matching source/sidecar records must have well-formed proof bindings.
         sidecar_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
         payload = json.loads(sidecar_path.read_text())
@@ -399,10 +428,8 @@ class WorkItemTests(Fixture):
             write_json(self.directory / "4.json", corrupt)
             identity = fresh._history_identity(self.item_id)
             write_json(sidecar_path, {**payload, "current": corrupt, "history_identity": identity})
-            with self.subTest(corruption=index), \
-                    patch.object(fresh.snapshots, "get", side_effect=AssertionError("manifest reload")):
-                self.assertIsNone(fresh._sidecar_load(self.item_id, self.seed, identity,
-                                                     source_only_completion=True))
+            with self.subTest(corruption=index):
+                self.assertIsNone(fresh._sidecar_load(self.item_id, self.seed, identity))
 
     def test_status_snapshot_reads_do_not_grow_with_delivery_history(self):
         self.change("doing")
@@ -1528,7 +1555,7 @@ class WorkItemTests(Fixture):
             f"work-items/{self.item_id}/4.json", f"work-items/{self.item_id}/3.json"})
         self.assertIn(f"work-items/{self.item_id}/4.json", rev_reads)
 
-    def test_sidecar_hit_does_not_revalidate_delivery_snapshot_manifest(self):
+    def test_nonterminal_sidecar_hit_skips_delivery_snapshot_manifest(self):
         self.require_posix_read_cache()
         self.change("doing")
         snapshot = self.snapshot("valid")
