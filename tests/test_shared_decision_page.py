@@ -8,10 +8,11 @@ import shutil
 import tempfile
 import threading
 import unittest
+import uuid
 from unittest.mock import patch
 
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import MAX_FRAME, READ_PAGE_CHARS, canonical, digest
+from mizu.fs import (MAX_FRAME, READ_PAGE_CHARS, canonical, digest, read_json, write_json)
 from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY
 import mizu.insights as insights_module
 from mizu.shared_records import SharedRecords
@@ -36,6 +37,41 @@ class SharedDecisionPageTests(unittest.TestCase):
                              expected_rev=1, **({"work_item_intent": "none"}
                                                if action in ("accept", "modify") else {}))
         return item
+
+    def seed_decision_batch(self, count, stamps):
+        """Seed one real example per action/source/time pattern, then clone valid rows."""
+        inbox = self.root / "inbox"
+        decisions = self.root / "decisions"
+        history = self.root / "decision-history"
+        templates = {}
+        for index in range(4):
+            insight_id = f"{index:032x}"
+            action = ACTIONS[index]
+            source = "reviewer" if index % 2 else "searcher"
+            with patch("mizu.insights.now", return_value=stamps[index]):
+                self.decide(index, insight_id=insight_id, action=action, source=source)
+            key = insights_module._decision_key(insight_id, 1)
+            if action == "defer":
+                event_path = next(path for path in history.glob("*.json")
+                                  if read_json(path)["id"] == insight_id)
+            else:
+                event_path = history / f"{key}.json"
+            templates[index] = (read_json(inbox / f"{insight_id}.json"),
+                                read_json(decisions / f"{insight_id}.json"),
+                                read_json(event_path), action)
+        for index in range(4, count):
+            template_index = index % 4
+            item, decision, event, action = templates[template_index]
+            insight_id = f"{index:032x}"
+            key = insights_module._decision_key(insight_id, 1)
+            event_id = key if action != "defer" else uuid.uuid4().hex
+            write_json(inbox / f"{insight_id}.json",
+                       {**item, "id": insight_id, "title": f"Finding {index}",
+                        "body": f"Exact body {index}"}, exclusive=True)
+            write_json(decisions / f"{insight_id}.json",
+                       {**decision, "id": insight_id, "decision_key": key}, exclusive=True)
+            write_json(history / f"{event_id}.json",
+                       {**event, "id": insight_id, "decision_key": key}, exclusive=True)
 
     def page(self, role="reviewer", actions=ACTIONS, *, max_bytes=MAX_FRAME,
              limit=100, sources="any"):
@@ -73,10 +109,9 @@ class SharedDecisionPageTests(unittest.TestCase):
         stamps = ("2026-01-01T01:00:00+01:00", "2025-12-31T19:00:00-05:00",
                   "2026-01-01T00:00:01+00:00", "2026-01-01T00:00:00+00:00")
         # These fixtures target page behavior; auto-ID dedup is covered separately in test_insight_archive.
-        for i in range(205):
-            with patch("mizu.insights.now", return_value=stamps[i % len(stamps)]):
-                self.decide(i, insight_id=f"{i:032x}", action=ACTIONS[i % 4],
-                            source="reviewer" if i % 2 else "searcher")
+        # Four real records cover the four repeating action/source/time patterns;
+        # clone their correctly keyed rev-1 files to avoid 201 redundant submissions.
+        self.seed_decision_batch(205, stamps)
         projected = self.insights.project_decision_records()
         expected = sorted(projected, key=lambda key: (
             dt.datetime.fromisoformat(self.store.get(key)[0]["created_at"]).astimezone(dt.timezone.utc), key))
