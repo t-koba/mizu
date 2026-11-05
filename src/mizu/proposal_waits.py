@@ -204,6 +204,73 @@ def pending(store, role, *, limit=10):
     return delivery(store, role, limit=limit)[0]
 
 
+def readiness_init(store, role, *, limit=10):
+    """Start a read-only readiness accumulator for the shared wait scan.
+
+    Validates the role and limit exactly like delivery, retains only
+    O(limit) candidates plus at most the first deferred route failure,
+    and performs no reads, writes or recovery until fed. The caller holds
+    ``insights.lock`` for the traversal and finalization.
+    """
+    identifier(role)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise Denied("Invalid proposal wait delivery limit")
+    return {"role": role, "limit": limit, "shared": shared_store(store),
+            "selected": [], "deferred": None}
+
+
+def readiness_feed(state, store, item):
+    """Feed one fully reconstructed work item to the proposal accumulator.
+
+    Items that are not blocked proposal waiters for this holder are
+    ignored. The first ordinary route exception is deferred so a CI
+    positive can still win the current CI-first short circuit; if CI is
+    empty, finalization re-raises it unchanged. Later proposal evidence is
+    not inspected after that failure. Iterator, seed and full-chain
+    reconstruction failures are never caught here and abort the shared
+    traversal. No recovery or writes.
+    """
+    if state["deferred"] is not None:
+        return
+    if item["status"] != "blocked":
+        return
+    if (item.get("wait") or {}).get("kind") != KIND:
+        return
+    if item["holder"] != state["role"]:
+        return
+    try:
+        observed = evidence(store, item)
+        if observed is None:
+            return
+        envelope, computed = observed
+        if state["shared"].received(state["role"], envelope["id"], computed):
+            return
+        key = ((_timestamp_order(item["updated_at"]), item["id"]), envelope)
+    except Exception as exc:
+        # Match the old CI-first short circuit without retaining an
+        # inventory-sized traceback: re-raise unless CI finalizes nonempty.
+        state["deferred"] = exc.with_traceback(None)
+        return
+    state["selected"].append(key)
+    state["selected"] = heapq.nsmallest(state["limit"], state["selected"],
+                                        key=lambda pair: pair[0])
+
+
+def readiness_events(state):
+    """Finalize the proposal readiness accumulator without polling or writes.
+
+    The caller finalizes CI first and calls this only when CI is empty, so
+    the deferred route failure takes precedence and the freeze is skipped
+    when CI already woke. On success freezes the manifest exactly like
+    delivery and returns its events.
+    """
+    if state["deferred"] is not None:
+        raise state["deferred"]
+    manifest = state["shared"].freeze(state["role"], [e["id"] for _, e in state["selected"]])
+    return [{**e["payload"], "ack_token": entry.ack_token}
+            for (_, e), entry in zip(state["selected"], manifest)]
+
+
 def _selected(context, tokens):
     store = context.project.work_items
     shared = shared_store(store)

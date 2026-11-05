@@ -292,6 +292,77 @@ def pending(store, role, *, limit=10):
         return _shared_page(store, role, limit=limit, persist=False)[0]
 
 
+def readiness_init(store, role, *, limit=10):
+    """Start a read-only readiness accumulator for the shared wait scan.
+
+    Validates the role and limit exactly like the read-only page, retains
+    only O(limit) candidates and performs no reads, writes, syncs or
+    recovery. The caller holds ``insights.lock`` for the traversal and
+    finalization.
+    """
+    identifier(role)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise Denied("Invalid CI wait delivery limit")
+    return {"role": role, "limit": limit, "shared": shared_store(store),
+            "selected": []}
+
+
+def readiness_feed(state, store, item):
+    """Feed one fully reconstructed work item to the CI readiness accumulator.
+
+    Items that are not blocked CI waiters for this holder are ignored.
+    Per-item route failures use the exact read-only page contract
+    ``(Denied, LimitExceeded, OSError, ValueError)`` and skip only that
+    waiter so another holder's evidence is still found. Iterator, seed and
+    full-chain reconstruction failures are never caught here; they abort
+    the shared traversal. No recovery, writes or syncs are performed.
+    """
+    if item["status"] != "blocked":
+        return
+    if (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci"):
+        return
+    if item["holder"] != state["role"]:
+        return
+    try:
+        observed = evidence(store, item, sync=False)
+        if observed is None:
+            return
+        envelope, computed = observed
+        if (computed is not None
+                and state["shared"].received(state["role"], envelope["id"], computed)):
+            return
+    except (Denied, LimitExceeded, OSError, ValueError):
+        return  # one broken waiter cannot hide another holder's evidence
+    state["selected"].append((item["updated_at"], item["id"], envelope))
+    state["selected"].sort(key=lambda row: row[:2])
+    del state["selected"][state["limit"]:]
+
+
+def readiness_events(state):
+    """Finalize the CI readiness accumulator without writes or syncs.
+
+    Preserves the read-only page ordering and generic-frame byte checks.
+    Raises ``LimitExceeded`` exactly like the read-only page when a single
+    valid row cannot fit the frame.
+    """
+    selected = state["selected"]
+    role = state["role"]
+    if _page_bytes([]) > MAX_FRAME:
+        raise LimitExceeded("CI wait page metadata exceeds byte bound")
+    events = []
+    for _, _, envelope in selected:
+        computed = digest(canonical(envelope))
+        event = {**envelope["payload"], "record_id": envelope["id"],
+                 "record_digest": computed,
+                 "ack_token": _token(role, envelope["id"], computed)}
+        if _page_bytes(events + [event]) > MAX_FRAME:
+            if not events:
+                raise LimitExceeded("CI wait event exceeds the generic prompt frame bound")
+            break
+        events.append(event)
+    return events
+
+
 # CI and declared host publication outcomes remain source authorities.
 # SharedRecords owns only immutable envelopes,
 # manifests and explicit per-role receipts; legacy auto-acks are never imported.

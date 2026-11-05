@@ -4164,6 +4164,36 @@ def _decision_delivery_state(project, role_name, role):
     return state
 
 
+def _receipt_wait_due(store, role, *, limit=1) -> bool:
+    """Share one authoritative work-item traversal for CI/proposal readiness.
+
+    Holds ``insights.lock`` once, reconstructs each item exactly like the
+    route-owned scans (``recover=False``/``readonly=True``, full-chain
+    replay) and dispatches it to the route-owned read-only accumulators.
+    Retains only O(limit) candidates plus the first deferred proposal
+    failure; iterator, seed and full-chain failures abort even after an
+    earlier candidate. Finalizes CI first: a CI event returns True and
+    discards the deferred proposal failure, otherwise the deferred failure
+    propagates or the proposal accumulator finalizes. No recovery, writes,
+    syncs or delivery/ack observation; ready-work validation is untouched.
+    """
+    ci_state = ci_waits.readiness_init(store, role, limit=limit)
+    proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
+    with lock(store.root / "locks" / "insights.lock"):
+        for event_id, event in store._iter_item_events(recover=False):
+            kind, seed = store._seed_for_event(event_id, event, readonly=True)
+            if kind != "seed":
+                continue
+            item = store._get(seed["id"], seed_event=event,
+                              history_revisions=store._history_revisions(
+                                  seed["id"], recover=False))
+            ci_waits.readiness_feed(ci_state, store, item)
+            proposal_waits.readiness_feed(proposal_state, store, item)
+        if ci_waits.readiness_events(ci_state):
+            return True
+        return bool(proposal_waits.readiness_events(proposal_state))
+
+
 def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
                      completed_wait_probes=None) -> bool:
     """Routed decisions/insight attention, terminal events or waits due to a role.
@@ -4215,8 +4245,7 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
         try:
             if (project.insights.due_waits(name, snapshot)
                     or (not wait_probes_completed
-                        and (ci_waits.pending(project.work_items, name, limit=1)
-                             or proposal_waits.pending(project.work_items, name, limit=1)))):
+                        and _receipt_wait_due(project.work_items, name, limit=1))):
                 return True
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
             pass
@@ -4347,8 +4376,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 if project.config.roles[name].workspace == "write"]
             try:
                 value = any(check_jobs.wake_ready(project, name)
-                            or ci_waits.pending(project.work_items, name, limit=1)
-                            or proposal_waits.pending(project.work_items, name, limit=1)
+                            or _receipt_wait_due(project.work_items, name, limit=1)
                             for name in names)
                 if not value:
                     # The identical role set is examined again later by

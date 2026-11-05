@@ -1013,14 +1013,10 @@ CALLS = {
             '1', 'mechanism', 'runtime / one-row work-item event check'),
         ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row decision-delivery check'),
-        ('_role_events_due', 'ci_waits.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row CI-wait check'),
-        ('_role_events_due', 'proposal_waits.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row proposal-wait check'),
-        ('should_run', 'ci_waits.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row CI-wait scheduling check'),
-        ('should_run', 'proposal_waits.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row proposal-wait scheduling check'),
+        ('_role_events_due', '_receipt_wait_due', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row combined receipt-wait check'),
+        ('should_run', '_receipt_wait_due', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row combined receipt-wait scheduling check'),
     },
     'project.py': {
         ('config_managed_repo', 'run', 'maximum', 0): (
