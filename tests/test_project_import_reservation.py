@@ -14,7 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
-from support import Fixture
+from support import Fixture, bind_delegation_fixture
 from mizu import fs as fs_module
 from mizu import project as lifecycle
 from mizu import snapshot as snapshot_module
@@ -294,6 +294,7 @@ class ProjectImportReservationTests(Fixture):
         self.start(store)
         reservation = store.reservation()
         binding = reservation['id'], reservation['token']
+        cleanup = bind_delegation_fixture(store)
         for phase in ('queued', 'running', 'cancel-requested', 'finished'):
             with self.subTest(phase=phase):
                 if phase == 'running':
@@ -305,7 +306,7 @@ class ProjectImportReservationTests(Fixture):
                 for source in (self.project.workspace, self.project.root):
                     self.denied_import(source)
         # Terminal ledger entries permit imports without rewriting the store.
-        store.runner_quiescent(*binding, 'Fixture state only; no child launched')
+        store.runner_quiescent(*binding, 'Fixture state only; no child launched', cleanup=cleanup)
         before = (store.root / 'state.json').read_bytes()
         self.import_source()
         self.assertEqual((store.root / 'state.json').read_bytes(), before)

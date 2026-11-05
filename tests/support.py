@@ -50,6 +50,16 @@ def host_child_cost() -> float:
     return time.monotonic() - started
 
 
+def bind_delegation_fixture(store):
+    """Bind fake resources for gate tests; NOT process/OCI cleanup evidence."""
+    reservation = store.reservation()
+    directory = (store.root.parent / reservation['run_id']).resolve()
+    directory.mkdir(exist_ok=True)
+    binding = store.runner_bind(reservation['id'], reservation['token'], str(directory),
+                                {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [])
+    return {'binding': binding, 'scope_clean': True, 'containers_absent': []}
+
+
 def bind_delivery(project, item_id, snapshot_id, *, expected_rev=1):
     """Record the two explicit lifecycle revisions needed by completion fixtures."""
     store = project.work_items

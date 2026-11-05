@@ -10,19 +10,22 @@ ancestors must be protected from concurrent untrusted host mutation. Symlink,
 hardlink, special-file, invalid-schema and oversized state is refused, never
 repaired or treated as an empty queue. This module alone launches nothing.
 
-Schema v2: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
+Schema v3: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
 SHA256([owner, key]); each contains owner/key, immutable request digest, status,
 runner token, stable child run identity, execution outcome, request, result and
 result digest. The run identity is a random lowercase 32-hex string generated
 once on first start, retained in terminal tombstones for crash reconciliation,
-and never exposed in owner views. Version 1 ledgers lack the run identity and
-are refused, never migrated or reset. A request is
-exactly {role, task, profile, source_snapshot}; profile may be null, and snapshot
-is an immutable SHA256 snapshot ID. The host must pin the rest of the invocation
+and never exposed in owner views. The supervisor-only binding is null until
+explicitly bound, then immutable and retained in terminal tombstones; it pins
+the exact run-directory path/device/inode, systemd unit/cgroup and the full
+rootless-Podman name/64-hex-ID/UID inventory. It is not launch authority. Older
+ledgers are refused, never migrated or reset. A request is exactly
+{role, task, profile, source_snapshot}; profile may be null, and snapshot is an
+immutable SHA256 snapshot ID. The host must pin the rest of the invocation
 authority before using this primitive; these fields grant no execution rights.
 Requests are bounded to 128 KiB canonical UTF-8 (task <= 65536 UTF-8 bytes),
 results to 32 KiB UTF-8, and the ledger to 1 MiB. Only the latest terminal
-result is retained. Old jobs retain small identity/status/result-digest
+result is retained. Old jobs retain identity/status/result-digest/binding
 tombstones indefinitely. The 1024-job history cap is shared project-state
 capacity policy pending this pilot's configuration section: capacity exhaustion
 refuses new starts, never forgets a key. The byte ceilings and schema are
@@ -63,10 +66,12 @@ MAX_STATE_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 32768
 MAX_TASK_BYTES = 65536
+# Private serialization/safety ceiling, not a resource-admission policy.
+MAX_BINDING_BYTES = 8192
 _STATES = {'queued', 'running', 'cancel-requested', 'terminal'}
 _OUTCOMES = {'succeeded', 'failed', 'cancelled'}
 _FIELDS = {'owner', 'key', 'request_digest', 'status', 'token', 'run_id', 'execution',
-           'request', 'result', 'result_digest'}
+           'request', 'result', 'result_digest', 'binding'}
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
@@ -103,6 +108,69 @@ def _request(value):
     return digest(raw)
 
 
+def _directory_identity(path):
+    """Exact absolute directory, no symlink components or lexical aliases.
+
+    The supervisor must protect its ancestors against concurrent mutation, just
+    like the ledger root. No directory content is trusted or executed here.
+    """
+    if (not isinstance(path, str) or '\x00' in path
+            or not Path(path).is_absolute() or str(Path(path)) != path):
+        raise Denied('Invalid delegation run directory')
+    target = Path(path)
+    if '..' in target.parts:
+        raise Denied('Invalid delegation run directory')
+    for component in (*reversed(target.parents), target):
+        info = component.lstat()
+        if not stat.S_ISDIR(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise Denied('Unsafe delegation run directory')
+    info = target.lstat()
+    if info.st_ino <= 0:
+        raise Denied('Unobservable delegation directory identity')
+    return {'path': path, 'device': info.st_dev, 'inode': info.st_ino}
+
+
+def _binding(value, run_id):
+    """Validate the bounded supervisor-only systemd/rootless-Podman format."""
+    if (type(value) is not dict
+            or set(value) != {'run_id', 'directory', 'scope', 'containers'}
+            or value['run_id'] != run_id or len(canonical(value)) > MAX_BINDING_BYTES):
+        raise Denied('Invalid delegation execution binding')
+    directory, scope, containers = value['directory'], value['scope'], value['containers']
+    if (type(directory) is not dict or set(directory) != {'path', 'device', 'inode'}
+            or not isinstance(directory['path'], str) or '\x00' in directory['path']
+            or not Path(directory['path']).is_absolute()
+            or str(Path(directory['path'])) != directory['path']
+            or '..' in Path(directory['path']).parts
+            or any(type(directory[k]) is not int or directory[k] < 0 for k in ('device', 'inode'))
+            or directory['inode'] == 0
+            or type(scope) is not dict or set(scope) != {'unit', 'cgroup'}
+            or not isinstance(scope['unit'], str)
+            or re.fullmatch(r'[A-Za-z0-9_-]+\.service', scope['unit']) is None
+            or scope['cgroup'] != '/system.slice/' + scope['unit']
+            or type(containers) is not list):
+        raise Denied('Invalid delegation directory or scope binding')
+    names, ids = set(), set()
+    for container in containers:
+        if (type(container) is not dict or set(container) != {'name', 'id', 'uid'}
+                or not isinstance(container['name'], str)
+                or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', container['name']) is None
+                or not _sha(container['id'])
+                or type(container['uid']) is not int or container['uid'] < 0
+                or container['id'] in ids or container['name'] in names):
+            raise Denied('Invalid or ambiguous delegation OCI binding')
+        names.add(container['name'])
+        ids.add(container['id'])
+
+
+def _bound(job):
+    binding = job['binding']
+    if (binding is None
+            or _directory_identity(binding['directory']['path']) != binding['directory']):
+        raise Denied('Delegation execution binding unavailable or mismatched')
+    return binding
+
+
 def _identity(owner, key):
     identifier(owner)
     identifier(key)
@@ -123,10 +191,10 @@ class DelegationJobs:
     """One project's durable reservation. Construction/recovery never starts work.
 
     ``start/status/result/cancel`` require the authenticated owner role from the
-    host, not a model-supplied identity. Owner views omit runner tokens/requests
-    and the stable run identity. ``reservation`` is internal recovery evidence,
-    including the pinned request, token and run identity; it is NOT permission
-    to replay it. All returned values are fresh decoded copies. OS/durability
+    host, not a model-supplied identity. Owner views omit runner tokens/requests,
+    the stable run identity and binding. ``reservation`` is internal recovery
+    evidence, including the pinned request, token, run identity and binding;
+    it is NOT permission to replay it. All returned values are fresh decoded copies. OS/durability
     errors propagate: an error after replacement has uncertain acknowledgement,
     so inspect/retry, never launch from the error.
     """
@@ -142,7 +210,7 @@ class DelegationJobs:
             # Directory existence is the initialization marker. If interrupted
             # here, absence of state is an error, not permission for a new start.
             sync_dir(self.root.parent)
-            write_json(self.root / 'state.json', {'version': 2, 'active': None, 'jobs': {}},
+            write_json(self.root / 'state.json', {'version': 3, 'active': None, 'jobs': {}},
                        exclusive=True)
         with self._locked():
             self._load()
@@ -206,7 +274,7 @@ class DelegationJobs:
     @staticmethod
     def _validate(state):
         if (type(state) is not dict or set(state) != {'version', 'active', 'jobs'}
-                or type(state['version']) is not int or state['version'] != 2
+                or type(state['version']) is not int or state['version'] != 3
                 or type(state['jobs']) is not dict or len(state['jobs']) > MAX_JOBS):
             raise Denied('Invalid delegation ledger')
         active = []
@@ -222,6 +290,8 @@ class DelegationJobs:
             if job['run_id'] in seen_runs:
                 raise Denied('Duplicate delegation run identity')
             seen_runs.add(job['run_id'])
+            if job['binding'] is not None:
+                _binding(job['binding'], job['run_id'])
             execution = job['execution']
             if execution is not None and (not isinstance(execution, str) or execution not in _OUTCOMES):
                 raise Denied('Invalid delegation execution outcome')
@@ -232,7 +302,8 @@ class DelegationJobs:
                         or (job['status'] == 'queued' and execution is not None)):
                     raise Denied('Invalid active delegation reservation')
             else:
-                if (execution is None or job['token'] is not None or job['request'] is not None
+                if (job['binding'] is None or execution is None
+                        or job['token'] is not None or job['request'] is not None
                         or not _sha(job['result_digest'])):
                     raise Denied('Invalid delegation tombstone')
                 if job['result'] is not None:
@@ -289,7 +360,8 @@ class DelegationJobs:
                 run_id = secrets.token_hex(16)
             job = {'owner': owner, 'key': key, 'request_digest': fingerprint,
                    'status': 'queued', 'token': secrets.token_hex(32), 'run_id': run_id,
-                   'execution': None, 'request': request, 'result': None, 'result_digest': None}
+                   'execution': None, 'request': request, 'result': None, 'result_digest': None,
+                   'binding': None}
             state['jobs'][job_id] = job
             state['active'] = job_id
             self._save(state)
@@ -334,18 +406,58 @@ class DelegationJobs:
             raise Denied('Delegation runner does not own reservation')
         return job
 
-    def runner_started(self, job_id, token):
-        """Consume the queued claim once BEFORE launch; uncertain claim never replays.
+    def runner_bind(self, job_id, token, run_directory, scope, containers):
+        """Persist exact execution identities before launch; never launch or discover.
 
-        A failed acknowledgement requires reconciliation, not a second launch.
-        A queued cancellation cannot be claimed; supervisor reports no-execution
-        cancellation then quiescence instead.
+        Only the trusted supervisor may supply the complete resource inventory.
+        Scope is {unit, cgroup}; containers are exact rootless-Podman {name, id,
+        uid} records, including every writable MCP/execution container (empty
+        only when none can exist). Directory identity is captured without links.
+        The canonical binding is capped at 8 KiB within the unchanged 1 MiB
+        ledger. While reserved, exact retries return the original; conflicting or
+        late binds refuse. Failed/uncertain writes require inspection, not another launch.
         """
         with self._locked():
             state = self._load()
             job = self._runner(state, job_id, token)
-            if job['status'] != 'queued':
-                raise Denied('Delegation is not queued; do not replay execution')
+            binding = loads_finite(canonical({
+                'run_id': job['run_id'], 'directory': _directory_identity(run_directory),
+                'scope': scope, 'containers': containers}))
+            _binding(binding, job['run_id'])
+            if job['binding'] is not None:
+                if job['binding'] != binding:
+                    raise Denied('Conflicting delegation execution binding')
+                return job['binding']
+            if (job['status'] not in {'queued', 'cancel-requested'}
+                    or job['execution'] is not None):
+                raise Denied('Delegation binding must precede runner claim')
+            job['binding'] = binding
+            self._save(state)
+            return binding
+
+    def runner_binding(self, job_id, token):
+        """Read ONLY persisted recovery identities; unknown directory retains hold.
+
+        This does not discover resources, rebind paths, or assert quiescence.
+        The supervisor must still independently inspect every saved resource.
+        """
+        with self._locked():
+            return _bound(self._runner(self._load(), job_id, token))
+
+    def runner_started(self, job_id, token):
+        """Consume the queued claim once BEFORE launch; uncertain claim never replays.
+
+        A failed acknowledgement requires reconciliation, not a second launch.
+        The complete binding must precede the claim. A queued cancellation cannot
+        be claimed; supervisor reports no-execution cancellation then quiescence
+        instead. An unbound cancellation remains held for reconciliation.
+        """
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            if job['status'] != 'queued' or job['binding'] is None:
+                raise Denied('Delegation is unbound or not queued; do not replay execution')
+            _bound(job)
             job['status'] = 'running'
             self._save(state)
 
@@ -371,11 +483,21 @@ class DelegationJobs:
             job['execution'] = outcome
             self._save(state)
 
-    def runner_quiescent(self, job_id, token, result):
+    def runner_quiescent(self, job_id, token, result, *, cleanup=None):
         """Seal bounded evidence and hand back tree ONLY after proven teardown.
 
-        The trusted supervisor asserts all child, driver, bridge and subprocess
-        access has ceased. No PID/timeout/owner cancellation implies this fact.
+        The trusted supervisor supplies independent positive teardown evidence:
+        cleanup is exactly {binding: the saved binding, scope_clean: True,
+        containers_absent: [every saved container ID in inventory order]}.
+        scope_clean covers child, driver, bridge and ALL descendants. The
+        supervisor must inspect each exact OCI name AND ID in the local default
+        rootless-Podman namespace for the saved uid. A different runtime/store,
+        renamed/mismatched or unobservable resource is unknown, never absent;
+        the supervisor must not query a substitute namespace. This module
+        checks evidence identity, not the OS.
+        Directory identity is independently rechecked here. Missing binding or
+        any unknown proof retains the reservation, including a queued failure.
+        No PID/timeout/owner cancellation implies quiescence.
         An uncertain acknowledgement is resolved by owner status/result, not by
         rerunning the child. Oversized evidence refuses handback; submit a bounded
         summary after teardown instead. Old retained result text is evicted in
@@ -387,6 +509,13 @@ class DelegationJobs:
             job = self._runner(state, job_id, token)
             if job['execution'] is None:
                 raise Denied('Delegation execution is not terminal')
+            binding = _bound(job)
+            if (type(cleanup) is not dict
+                    or set(cleanup) != {'binding', 'scope_clean', 'containers_absent'}
+                    or canonical(cleanup['binding']) != canonical(binding)
+                    or cleanup['scope_clean'] is not True
+                    or cleanup['containers_absent'] != [c['id'] for c in binding['containers']]):
+                raise Denied('Delegation cleanup proof missing or mismatched')
             for old in state['jobs'].values():
                 old['result'] = None
             job.update(status='terminal', token=None, request=None, result=result,

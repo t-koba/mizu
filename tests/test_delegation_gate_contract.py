@@ -3,7 +3,7 @@ import dataclasses
 import tomllib
 from unittest.mock import Mock, patch
 
-from support import Fixture
+from support import Fixture, bind_delegation_fixture
 from mizu import delegation_gates, delegation_jobs
 from mizu.errors import Denied
 from mizu.runtime import Context
@@ -224,6 +224,7 @@ class DelegationGateContractTests(Fixture):
         job_id = store.start("worker", "key", request)["id"]
         self.ctx._reservation_view = store.reservation()
         token = self.ctx._reservation_view["token"]
+        cleanup = bind_delegation_fixture(store)
         for transition in (lambda: None, lambda: store.runner_started(job_id, token),
                            lambda: store.cancel("worker", job_id),
                            lambda: store.runner_finished(job_id, token, "cancelled")):
@@ -232,7 +233,7 @@ class DelegationGateContractTests(Fixture):
             self.assertIn(self.ctx._reservation_view["status"], MATRIX["reserved_statuses"])
             self.assertIsInstance(self.ctx.handle("work_items_read", {}), dict)
             self.assert_refused_without_effects("exec", {})
-        store.runner_quiescent(job_id, token, "Fixture proof only")
+        store.runner_quiescent(job_id, token, "Fixture proof only", cleanup=cleanup)
         self.ctx._reservation_view = store.reservation()
         self.assertIsNone(self.ctx._reservation_view)
         self.assertIsInstance(self.ctx.handle("files", {}), dict)

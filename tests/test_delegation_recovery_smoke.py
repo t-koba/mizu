@@ -1,4 +1,4 @@
-"""Synthetic trusted-CI recovery probe; no delegation/runtime integration.
+"""Synthetic trusted-CI job-ledger recovery probe; no runtime/adapter integration.
 
 Ordinary discovery runs only the offline tests. Live commands require explicit
 CLI opt-in and Ubuntu 24.04; no unavailable-evidence path is a successful skip.
@@ -15,9 +15,12 @@ import tempfile
 import time
 import unittest
 from unittest import mock
-import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'src'))
+from mizu.delegation_jobs import DelegationJobs
+from mizu.errors import Denied
 CGROOT = Path('/sys/fs/cgroup')
 IMAGE = 'docker.io/library/busybox:1.37.0'
 COMMAND_DIAGNOSTIC_BYTES_MAX = 1024
@@ -26,8 +29,6 @@ COMMAND_DIAGNOSTIC_BYTES_MAX = 1024
 def command(*argv, seconds=10, codes=(0,), maximum=8192, diagnostic_bytes=0):
     # Reuse the bounded pipe/group teardown primitive, not shell capture or an
     # unbounded log file. A timeout/output overflow is unknown, never absence.
-    if str(ROOT / 'src') not in sys.path:
-        sys.path.insert(0, str(ROOT / 'src'))
     from mizu.process import run
     result = run(list(argv), timeout=seconds, maximum=maximum)
     if result.reason != 'exited' or result.exit_code not in codes or result.survivors:
@@ -66,40 +67,27 @@ def atomic_json(path, value):
             os.unlink(temporary)
 
 
-def new_record():
-    name = 'mizu-recovery-' + uuid.uuid4().hex
-    return dict(version=1, name=name, unit=name + '.service',
-                cgroup='/system.slice/' + name + '.service', container_id=None,
-                launches_settled=False, reservation='held',
-                cgroup_clean=False, container_absent=False)
-
-
-def settle(record, cgroup_clean, container_absent):
-    """Only affirmative independent evidence for BOTH scopes releases a hold."""
-    record.update(cgroup_clean=cgroup_clean is True, container_absent=container_absent is True)
-    record['reservation'] = ('released' if record['launches_settled'] is True
-                             and cgroup_clean is True and container_absent is True else 'held')
-
-
-def read_record(path):
-    for target, mode in ((path.parent, 0o700), (path, 0o600)):
-        info = target.lstat()
+def ledger(path):
+    # Recovery never initializes a missing store or reconstructs identities from
+    # names, labels, fixture files, process memory, or the current branch.
+    root = path.parent / 'delegation-jobs'
+    for target, mode in ((path.parent, 0o700), (root, 0o700),
+                         (root / 'state.json', 0o600), (root / 'store.lock', 0o600)):
+        info = target.lstat()  # missing lock/state is never initialized/repaired
         if (stat.S_IMODE(info.st_mode) != mode or info.st_uid != os.getuid()
                 or stat.S_ISLNK(info.st_mode)):
-            raise RuntimeError('record is not private and owned')
-    if path.stat().st_size > 2048:
-        raise RuntimeError('oversized record')
-    record = json.loads(path.read_text())
-    if (set(record) != set(new_record()) or record['version'] != 1
-            or not re.fullmatch(r'mizu-recovery-[0-9a-f]{32}', record['name'])
-            or record['unit'] != record['name'] + '.service'
-            or record['cgroup'] != '/system.slice/' + record['unit']
-            or (record['container_id'] is not None
-                and not re.fullmatch(r'[0-9a-f]{64}', record['container_id']))
-            or type(record['launches_settled']) is not bool
-            or record['reservation'] not in ('held', 'released')):
-        raise RuntimeError('invalid fixture identity')
-    return record
+            raise RuntimeError('ledger is not private and owned')
+    return DelegationJobs(path.parent)
+
+
+def create_job(path):
+    store = DelegationJobs(path.parent)
+    store.start('worker', 'smoke', {'role': 'helper', 'task': 'Synthetic recovery fixture',
+                                  'profile': None, 'source_snapshot': 'a' * 64})
+    reservation = store.reservation()
+    directory = path.parent / reservation['run_id']
+    directory.mkdir(mode=0o700)
+    return store, reservation, directory
 
 
 def require_host():
@@ -146,46 +134,59 @@ def container_exists(identity):
     return result.exit_code == 0  # Podman: 1 absent; 125 runtime error (refused above)
 
 
-def clean_container(record):
-    name, saved = record['name'], record['container_id']
-    if container_exists(name):
-        found = command('podman', 'inspect', '--format', '{{.Id}} {{.Name}}', name).stdout.strip()
-        identity, actual_name = found.split()
-        if (not re.fullmatch(r'[0-9a-f]{64}', identity) or actual_name.lstrip('/') != name
-                or (saved is not None and identity != saved)):
-            raise RuntimeError('container identity mismatch')
-        command('podman', 'rm', '--force', '--time=2', identity)
-    # A saved ID may still exist even if the name disappeared/was renamed.
-    # Do not remove a renamed/mismatched resource; retain the reservation.
-    return not container_exists(name) and (saved is None or not container_exists(saved))
+def clean_container(container):
+    name, saved = container['name'], container['id']
+    if container['uid'] != os.getuid():
+        raise RuntimeError('OCI runtime namespace mismatch')
+    by_name, by_id = container_exists(name), container_exists(saved)
+    if by_name != by_id:
+        raise RuntimeError('renamed or mismatched container identity')
+    if by_name:
+        for selector in (name, saved):
+            found = command('podman', 'inspect', '--format', '{{.Id}} {{.Name}}', selector).stdout.strip()
+            if found.split() != [saved, name] and found.split() != [saved, '/' + name]:
+                raise RuntimeError('container identity mismatch')
+        command('podman', 'rm', '--force', '--time=2', saved)
+    # Check both exact selectors independently; CLI errors are unknown, not absence.
+    absent_name = not container_exists(name)
+    absent_id = not container_exists(saved)
+    return absent_name and absent_id
 
 
 def recover(path):
-    record = read_record(path)  # no inherited in-memory launch state
-    settle(record, None, None)
-    atomic_json(path, record)
-    cgroup_clean = container_absent = None
+    store = ledger(path)
+    reservation = store.reservation()
+    if reservation is None:
+        return  # Already sealed by an earlier, acknowledged or uncertain commit.
+    credentials = reservation['id'], reservation['token']
+    binding = store.runner_binding(*credentials)
+    scope = binding['scope']
+    cgroup_clean, absent = None, []
+    require_host()
     try:
-        require_host()
-        try:
-            fields = unit_state(record)
-            if fields['LoadState'] == 'loaded':
-                command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
-                        '--signal=SIGKILL', record['unit'], codes=(0, 1))
-                command('sudo', '-n', 'systemctl', 'stop', record['unit'])
-                # A killed main process can leave a failed transient unit even
-                # after its cgroup drains. Reset only this recorded unit.
-                command('sudo', '-n', 'systemctl', 'reset-failed', record['unit'], codes=(0, 1))
-            fields = unit_state(record)
-            cgroup_clean = fields['ActiveState'] == 'inactive' and cgroup_empty(record)
-        finally:
-            # One scope's failure must not prevent best-effort cleanup of the other.
-            container_absent = clean_container(record)
+        fields = unit_state(scope)
+        if fields['LoadState'] == 'loaded':
+            command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
+                    '--signal=SIGKILL', scope['unit'], codes=(0, 1))
+            command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
+            command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
+        fields = unit_state(scope)
+        cgroup_clean = fields['ActiveState'] == 'inactive' and cgroup_empty(scope)
     finally:
-        settle(record, cgroup_clean, container_absent)
-        atomic_json(path, record)
-    if record['reservation'] != 'released':
-        raise RuntimeError('cleanup incomplete or launch uncertain; reservation held')
+        # Failure in one scope must not prevent cleanup attempts for every
+        # other bound resource. Never seal after an exception/unknown result.
+        errors = []
+        for container in binding['containers']:
+            try:
+                if clean_container(container) is True:
+                    absent.append(container['id'])
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
+    store.runner_quiescent(*credentials, 'Synthetic descendant and OCI cleanup verified',
+                           cleanup={'binding': binding, 'scope_clean': cgroup_clean,
+                                    'containers_absent': absent})
 
 
 def process_in_scope(pid, record):
@@ -193,22 +194,39 @@ def process_in_scope(pid, record):
 
 
 def supervise(path):
-    # No runtime, socket, credentials, or production IDs in the synthetic unit.
+    # Actual child directory comes only from the durable ledger. No runtime,
+    # socket, credentials, or production IDs enter this synthetic unit.
+    store = ledger(path)
+    reservation = store.reservation()
+    binding = store.runner_binding(reservation['id'], reservation['token'])
     child = subprocess.Popen(['/usr/bin/setsid', '/usr/bin/sleep', '90'],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
-    atomic_json(path.parent / 'ready.json', {'supervisor': os.getpid(), 'descendant': child.pid})
+    atomic_json(Path(binding['directory']['path']) / 'ready.json',
+                {'supervisor': os.getpid(), 'descendant': child.pid})
     time.sleep(90)
 
 
 def live(path):
     path.parent.mkdir(mode=0o700)  # refuse reuse; CI owns this disposable directory
-    record = new_record()
-    atomic_json(path, record)  # identities and held reservation precede preflight/launch
+    store, reservation, directory = create_job(path)
+    credentials = reservation['id'], reservation['token']
+    name = 'mizu-recovery-' + reservation['run_id']
+    scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
     try:
         require_host()
         command('podman', 'pull', '--quiet', IMAGE, seconds=60)
-        command('sudo', '-n', 'systemd-run', '--unit=' + record['unit'],
+        cid = command('podman', 'create', '--pull=never', '--name', name, '--network=none',
+                      '--read-only', '--read-only-tmpfs=false', '--cap-drop=ALL',
+                      '--security-opt=no-new-privileges', '--user=65534:65534',
+                      '--pids-limit=16', '--cpus=0.1', '--memory=32m', '--timeout=90',
+                      '--log-driver=none', IMAGE, '/bin/sleep', '90').stdout.strip()
+        if not re.fullmatch(r'[0-9a-f]{64}', cid):
+            raise RuntimeError('missing container ID')
+        store.runner_bind(*credentials, str(directory), scope,
+                          [{'name': name, 'id': cid, 'uid': os.getuid()}])
+        store.runner_started(*credentials)  # durable identities AND claim precede execution
+        command('sudo', '-n', 'systemd-run', '--unit=' + scope['unit'],
                 '--slice=system.slice', '--service-type=exec',
                 '--property=User=' + str(os.getuid()), '--property=WorkingDirectory=/',
                 '--property=ExitType=cgroup', '--property=KillMode=control-group',
@@ -216,50 +234,45 @@ def live(path):
                 '--property=MemoryMax=64M', '--property=RuntimeMaxSec=120',
                 '--property=TimeoutStopSec=5', '--property=StandardOutput=null',
                 '--property=StandardError=null', '--property=NoNewPrivileges=yes',
-                '--property=PrivateNetwork=yes', sys.executable, str(Path(__file__).resolve()), '--supervise', str(path))
-        ready_path = path.parent / 'ready.json'
+                '--property=PrivateNetwork=yes', sys.executable, str(Path(__file__).resolve()),
+                '--supervise', str(path))
+        ready_path = directory / 'ready.json'
         deadline = time.monotonic() + 5
         while not ready_path.is_file() and time.monotonic() < deadline:
             time.sleep(.05)
         ready = json.loads(ready_path.read_text())
-        # setsid may not have exec'd yet; wait boundedly for its new session.
         while os.getsid(ready['descendant']) != ready['descendant'] and time.monotonic() < deadline:
             time.sleep(.05)
         if (os.getsid(ready['descendant']) != ready['descendant']
-                or not all(process_in_scope(pid, record) for pid in ready.values())
-                or unit_state(record)['ControlGroup'] != record['cgroup']):
+                or not all(process_in_scope(pid, scope) for pid in ready.values())
+                or unit_state(scope)['ControlGroup'] != scope['cgroup']):
             raise RuntimeError('supervisor/setsid cgroup evidence missing')
-        cid = command('podman', 'create', '--pull=never', '--name', record['name'], '--network=none',
-                      '--read-only', '--read-only-tmpfs=false', '--cap-drop=ALL',
-                      '--security-opt=no-new-privileges', '--user=65534:65534',
-                      '--pids-limit=16', '--cpus=0.1', '--memory=32m', '--timeout=90',
-                      '--log-driver=none', IMAGE, '/bin/sleep', '90').stdout.strip()
-        if not re.fullmatch(r'[0-9a-f]{64}', cid):
-            raise RuntimeError('missing container ID')
-        record['container_id'] = cid
-        atomic_json(path, record)  # container ID is durable BEFORE start
         command('podman', 'start', cid)
         if command('podman', 'inspect', '--format', '{{.State.Running}}', cid).stdout.strip() != 'true':
             raise RuntimeError('container not running')
-        record['launches_settled'] = True
-        atomic_json(path, record)
         command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=main',
-                '--signal=SIGKILL', record['unit'])
+                '--signal=SIGKILL', scope['unit'])
         deadline = time.monotonic() + 5
         while Path(f"/proc/{ready['supervisor']}").exists() and time.monotonic() < deadline:
             time.sleep(.05)
         if (Path(f"/proc/{ready['supervisor']}").exists()
-                or not process_in_scope(ready['descendant'], record)
-                or cgroup_empty(record) or not container_exists(cid)
-                or read_record(path)['reservation'] != 'held'):
+                or not process_in_scope(ready['descendant'], scope)
+                or cgroup_empty(scope) or not container_exists(cid)
+                or ledger(path).reservation()['binding']['containers'][0]['id'] != cid):
             raise RuntimeError('supervisor-death/held-reservation evidence missing')
+        # All launches have settled and the execution supervisor is dead, but
+        # its setsid descendant AND container remain: terminal != quiescent.
+        store.runner_finished(*credentials, 'failed')
+        if ledger(path).reservation() is None:
+            raise RuntimeError('terminal execution released reservation prematurely')
     finally:
-        # Separate process reads only the durable record. CI also invokes this
-        # entry point in an always() step if this entire controller is killed.
+        # Separate process uses ONLY the actual durable job ledger. CI repeats
+        # recovery in always() if the controller dies. Unsettled execution or
+        # incomplete binding retains the hold even if cleanup is attempted.
         command(sys.executable, str(Path(__file__).resolve()), '--recover', str(path), seconds=75)
-    if read_record(path)['reservation'] != 'released':
+    if ledger(path).reservation() is not None:
         raise RuntimeError('recovery did not release the synthetic reservation')
-    print('Synthetic supervisor death and scoped recovery proven; reservation released.')
+    print('Synthetic supervisor death and scoped ledger recovery proven; reservation released.')
 
 
 class RecoveryReservationTests(unittest.TestCase):
@@ -296,91 +309,136 @@ class RecoveryReservationTests(unittest.TestCase):
         self.assertNotIn(home, message)
         self.assertLess(len(message), 512)
 
-    def test_only_both_affirmative_proofs_release(self):
-        for group in (True, False, None, 'unknown', 1):
-            for container in (True, False, None, 'unknown', 1):
-                with self.subTest(group=group, container=container):
-                    record = new_record()
-                    record['launches_settled'] = True
-                    settle(record, group, container)
-                    self.assertEqual(record['reservation'] == 'released',
-                                     group is True and container is True)
+    def fixture(self, path, terminal=True, containers=1):
+        store, reservation, directory = create_job(path)
+        credentials = reservation['id'], reservation['token']
+        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        saved = [{'name': 'fixture-' + str(i), 'id': str(i + 1) * 64, 'uid': os.getuid()}
+                 for i in range(containers)]
+        store.runner_bind(*credentials, str(directory), scope, saved)
+        store.runner_started(*credentials)
+        if terminal:
+            store.runner_finished(*credentials, 'failed')
+        return store
 
-    def test_partial_launch_and_later_unknown_retain_hold(self):
-        record = new_record()
-        settle(record, True, True)
-        self.assertEqual(record['reservation'], 'held')
-        record['launches_settled'] = True
-        settle(record, True, True)
-        self.assertEqual(record['reservation'], 'released')
-        settle(record, None, True)
-        self.assertEqual(record['reservation'], 'held')
-
-    @unittest.skipUnless(os.name == 'posix', 'private POSIX recovery record')
-    def test_recovery_persists_hold_on_either_scope_failure(self):
-        # These are injected evidence results, NOT systemd/OCI validation.
+    @unittest.skipUnless(os.name == 'posix', 'systemd/rootless OCI recovery fixture')
+    def test_recovery_requires_every_scope_and_terminal_execution(self):
         module = sys.modules[__name__]
-        for group, container in ((True, True), (False, True), (True, False),
-                                 (OSError('unknown cgroup'), True),
-                                 (True, OSError('unknown runtime'))):
-            with self.subTest(group=group, container=container), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / 'state.json'
-                record = new_record()
-                record['launches_settled'] = True
-                atomic_json(path, record)
-                def group_probe(_):
-                    self.assertEqual(read_record(path)['reservation'], 'held')
-                    if isinstance(group, Exception):
-                        raise group
-                    return group
-                def container_probe(_):
-                    self.assertEqual(read_record(path)['reservation'], 'held')
-                    if isinstance(container, Exception):
-                        raise container
-                    return container
+        for group, container, terminal in ((True, True, True), (False, True, True),
+                (None, True, True), (True, False, True), (True, None, True),
+                (True, True, False), (OSError('unknown cgroup'), True, True),
+                (True, OSError('unknown runtime'), True)):
+            with self.subTest(group=group, container=container, terminal=terminal), \
+                    tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                self.fixture(path, terminal, containers=2)
+                def probe(value):
+                    self.assertIsNotNone(ledger(path).reservation())
+                    if isinstance(value, Exception):
+                        raise value
+                    return value
                 with (mock.patch.object(module, 'require_host'),
                       mock.patch.object(module, 'unit_state', return_value={
                           'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
-                      mock.patch.object(module, 'cgroup_empty', side_effect=group_probe),
-                      mock.patch.object(module, 'clean_container', side_effect=container_probe) as cleanup):
-                    if group is True and container is True:
+                      mock.patch.object(module, 'cgroup_empty', side_effect=lambda _: probe(group)),
+                      mock.patch.object(module, 'clean_container', side_effect=lambda _: probe(container)) as cleanup):
+                    if group is True and container is True and terminal:
                         recover(path)
+                        recover(path)  # uncertain final acknowledgement: inspect, never relaunch
+                        self.assertIsNone(ledger(path).reservation())
                     else:
-                        with self.assertRaises((RuntimeError, OSError)):
+                        with self.assertRaises((Denied, OSError)):
                             recover(path)
-                    cleanup.assert_called_once()
-                self.assertEqual(read_record(path)['reservation'],
-                                 'released' if group is True and container is True else 'held')
+                        self.assertIsNotNone(ledger(path).reservation())
+                    self.assertEqual(cleanup.call_count, 2)
 
-    @unittest.skipUnless(os.name == 'posix', 'private POSIX recovery record')
-    def test_unavailable_host_keeps_the_persisted_reservation_held(self):
+    @unittest.skipUnless(os.name == 'posix', 'systemd/rootless OCI recovery fixture')
+    def test_unavailable_host_or_missing_binding_never_releases(self):
         module = sys.modules[__name__]
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'state.json'
-            record = new_record()
-            record['launches_settled'] = True
-            atomic_json(path, record)
-            with mock.patch.object(module, 'require_host',
-                                   side_effect=RuntimeError('unsupported host')):
-                with self.assertRaisesRegex(RuntimeError, 'unsupported host'):
-                    recover(path)
-            self.assertEqual(read_record(path)['reservation'], 'held')
+        for bound in (False, True):
+            with self.subTest(bound=bound), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                if bound:
+                    self.fixture(path)
+                else:
+                    create_job(path)
+                with mock.patch.object(module, 'require_host', side_effect=RuntimeError('unsupported host')):
+                    with self.assertRaises((RuntimeError, Denied)):
+                        recover(path)
+                self.assertIsNotNone(ledger(path).reservation())
 
-    def test_atomic_record_is_private_and_exactly_bound(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'state.json'
-            record = new_record()
-            atomic_json(path, record)
-            self.assertEqual(json.loads(path.read_text()), record)
-            if os.name == 'posix':
-                self.assertEqual(read_record(path), record)
-                record['cgroup'] = '/system.slice/unrelated.service'
-                atomic_json(path, record)
-                with self.assertRaisesRegex(RuntimeError, 'identity'):
-                    read_record(path)
-                path.chmod(0o644)
-                with self.assertRaisesRegex(RuntimeError, 'private'):
-                    read_record(path)
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_recovery_rejects_unsafe_incomplete_or_changed_directory_before_commands(self):
+        module = sys.modules[__name__]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'state.json'
+            store = self.fixture(path)
+            directory = Path(store.reservation()['binding']['directory']['path'])
+            targets = [path.parent, store.root, store.root / 'state.json']
+            with mock.patch.object(module, 'command') as invoke:
+                for target in targets:
+                    mode = stat.S_IMODE(target.stat().st_mode)
+                    target.chmod(mode | 0o044)
+                    with self.assertRaisesRegex(RuntimeError, 'private'):
+                        recover(path)
+                    target.chmod(mode)
+                lock = store.root / 'store.lock'
+                lock.rename(store.root / 'missing.lock')
+                with self.assertRaises(FileNotFoundError):
+                    recover(path)
+                self.assertFalse(lock.exists())
+                (store.root / 'missing.lock').rename(lock)
+                directory.rename(directory.with_name('renamed'))
+                with self.assertRaises(OSError):
+                    recover(path)
+                invoke.assert_not_called()
+            self.assertIsNotNone(store.reservation())
+
+    @unittest.skipUnless(os.name == 'posix', 'rootless OCI identity namespace')
+    def test_exact_container_identity_rename_mismatch_unknown_and_absence(self):
+        module = sys.modules[__name__]
+        saved = {'name': 'fixture', 'id': 'a' * 64, 'uid': os.getuid()}
+        for exists, inspected, success in [
+                ([False, False, False, False], None, True),
+                ([True, True, False, False], 'a' * 64 + ' fixture', True),
+                ([False, True], None, False), ([True, False], None, False),
+                ([True, True], 'b' * 64 + ' fixture', False),
+                ([True, True], 'a' * 64 + ' renamed', False),
+                ([OSError('unknown runtime')], None, False)]:
+            with self.subTest(exists=exists, inspected=inspected):
+                with (mock.patch.object(module, 'container_exists', side_effect=exists),
+                      mock.patch.object(module, 'command', return_value=mock.Mock(stdout=inspected)) as invoke):
+                    if success:
+                        self.assertTrue(clean_container(saved))
+                    else:
+                        with self.assertRaises((OSError, RuntimeError)):
+                            clean_container(saved)
+                        if inspected is None:
+                            invoke.assert_not_called()
+                        self.assertFalse(any(call.args[:2] == ('podman', 'rm') for call in invoke.call_args_list))
+        with mock.patch.object(module, 'command') as invoke:
+            with self.assertRaises(RuntimeError):
+                clean_container({**saved, 'uid': os.getuid() + 1})
+            invoke.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'systemd/rootless OCI recovery fixture')
+    def test_recovery_uses_saved_identities_not_fixture_or_derived_names(self):
+        module = sys.modules[__name__]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'state.json'
+            store = self.fixture(path)
+            binding = store.reservation()['binding']
+            # A misleading old fixture file is not recovery authority.
+            atomic_json(path, {'name': 'wrong', 'container_id': 'b' * 64})
+            with (mock.patch.object(module, 'require_host'),
+                  mock.patch.object(module, 'unit_state', return_value={
+                      'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}) as scope,
+                  mock.patch.object(module, 'cgroup_empty', return_value=True),
+                  mock.patch.object(module, 'clean_container', return_value=True) as cleanup):
+                recover(path)
+                scope.assert_called_with(binding['scope'])
+                cleanup.assert_called_once_with(binding['containers'][0])
+            self.assertIsNone(store.reservation())
 
 
 if __name__ == '__main__':

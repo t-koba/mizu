@@ -1,8 +1,8 @@
 """Private delegation-state tests; no runtime, process or supervisor smoke claims.
 
-Covers the durable stable child run identity: generation, retry stability,
-reconstruction, owner-view hiding, tombstone retention and fail-closed
-rejection of malformed/duplicate/version-1 state."""
+Covers stable run identities and supervisor-only execution bindings: durable
+retry/reconstruction, owner-view hiding, tombstone retention, exact directory
+identity, complete cleanup proofs, and fail-closed invalid/older state."""
 import concurrent.futures
 import copy
 import os
@@ -20,7 +20,7 @@ class DelegationJobTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.store = jobs.DelegationJobs(self.root)
         self.path = self.root / 'delegation-jobs' / 'state.json'
         self.request = {'role': 'helper', 'task': 'Implement the focused slice',
@@ -31,13 +31,29 @@ class DelegationJobTests(unittest.TestCase):
 
     def runner(self):
         reservation = self.store.reservation()
+        if reservation['binding'] is None:
+            directory = self.root / reservation['run_id']
+            directory.mkdir(exist_ok=True)
+            self.store.runner_bind(reservation['id'], reservation['token'], str(directory),
+                                   {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [])
         return reservation['id'], reservation['token']
+
+    def cleanup(self):
+        binding = self.store.reservation()['binding']
+        return {'binding': binding, 'scope_clean': True,
+                'containers_absent': [c['id'] for c in binding['containers']]}
+
+    def assert_tombstone(self, tombstone):
+        # The old identity tombstone stays small; the new binding has its own
+        # format ceiling, both still subject to the unchanged ledger byte cap.
+        self.assertLess(len(canonical({k: v for k, v in tombstone.items() if k != 'binding'})), 600)
+        self.assertLessEqual(len(canonical(tombstone['binding'])), jobs.MAX_BINDING_BYTES)
 
     def complete(self, text='Retained child evidence'):
         job_id, token = self.runner()
         self.store.runner_started(job_id, token)
         self.store.runner_finished(job_id, token, 'succeeded')
-        self.store.runner_quiescent(job_id, token, text)
+        self.store.runner_quiescent(job_id, token, text, cleanup=self.cleanup())
 
     def test_exact_and_conflicting_replay_across_all_transitions(self):
         job_id = self.start()
@@ -51,7 +67,7 @@ class DelegationJobTests(unittest.TestCase):
                 elif transition == 'finished':
                     self.store.runner_finished(*self.runner(), 'cancelled')
                 elif transition == 'terminal':
-                    self.store.runner_quiescent(*self.runner(), 'Stopped and cleaned')
+                    self.store.runner_quiescent(*self.runner(), 'Stopped and cleaned', cleanup=self.cleanup())
                 self.assertEqual(self.start(), job_id)
                 for field, value in [('role', 'other'), ('task', 'Different task'),
                                      ('profile', 'fast'), ('source_snapshot', 'b' * 64)]:
@@ -96,14 +112,14 @@ class DelegationJobTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.runner_started(*binding)
         with self.assertRaises(Denied):
-            self.store.runner_quiescent(*binding, 'Not terminal yet')
+            self.store.runner_quiescent(*binding, 'Not terminal yet', cleanup=self.cleanup())
         self.store.runner_finished(*binding, 'cancelled')
         self.assertTrue(self.store.status('worker', job_id)['reserved'])
         self.store = jobs.DelegationJobs(self.root)
         self.assertEqual(self.runner(), binding)
         with self.assertRaises(Denied):
             self.start('second')
-        self.store.runner_quiescent(*binding, 'No child launched; teardown verified')
+        self.store.runner_quiescent(*binding, 'No child launched; teardown verified', cleanup=self.cleanup())
         self.assertFalse(self.store.status('worker', job_id)['reserved'])
         self.start('second')
 
@@ -129,7 +145,7 @@ class DelegationJobTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.result('worker', job_id)
         self.assertTrue(self.store.status('worker', job_id)['reserved'])
-        self.store.runner_quiescent(*binding, 'Dead runner reconciled; no live descendants')
+        self.store.runner_quiescent(*binding, 'Dead runner reconciled; no live descendants', cleanup=self.cleanup())
         self.assertIsNone(self.store.reservation())
         # A lost completion acknowledgement is resolved by inspection, not replay.
         self.assertEqual(self.store.result('worker', job_id)['execution'], 'failed')
@@ -142,16 +158,20 @@ class DelegationJobTests(unittest.TestCase):
         before = self.path.read_bytes()
         for binding in [(job_id, '0' * 64), ('b' * 64, token), (job_id, '../unsafe')]:
             for method, args in [(self.store.runner_started, ()),
+                                 (self.store.runner_binding, ()),
                                  (self.store.runner_finished, ('failed',)),
                                  (self.store.runner_quiescent, ('evidence',))]:
                 with self.subTest(method=method.__name__, binding=binding), self.assertRaises(Denied):
                     method(*binding, *args)
         with self.assertRaises(Denied):
             self.store.runner_finished(job_id, token, 'succeeded')
+        with self.assertRaises(Denied):
+            self.store.runner_bind(job_id, '0' * 64, str(self.root),
+                                   {'unit': 'other.service', 'cgroup': '/system.slice/other.service'}, [])
         self.assertEqual(before, self.path.read_bytes())
         self.store.runner_finished(job_id, token, 'failed')
         self.assertIsNotNone(self.store.reservation())
-        self.store.runner_quiescent(job_id, token, 'Launch failed; teardown verified')
+        self.store.runner_quiescent(job_id, token, 'Launch failed; teardown verified', cleanup=self.cleanup())
 
     def test_result_bound_and_eviction_leave_idempotency_tombstones(self):
         first = self.start()
@@ -159,10 +179,10 @@ class DelegationJobTests(unittest.TestCase):
         self.store.runner_started(*binding)
         self.store.runner_finished(*binding, 'succeeded')
         with self.assertRaises(Denied):
-            self.store.runner_quiescent(*binding, 'é' * (jobs.MAX_RESULT_BYTES // 2 + 1))
+            self.store.runner_quiescent(*binding, 'é' * (jobs.MAX_RESULT_BYTES // 2 + 1), cleanup=self.cleanup())
         self.assertIsNotNone(self.store.reservation())
         result = 'é' * (jobs.MAX_RESULT_BYTES // 2)
-        self.store.runner_quiescent(*binding, result)
+        self.store.runner_quiescent(*binding, result, cleanup=self.cleanup())
         self.assertEqual(self.store.result('worker', first)['result'], result)
         second = self.start('second')
         self.complete('Second result')
@@ -179,7 +199,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assertIsNone(tombstone['request'])
         self.assertIsNone(tombstone['token'])
         self.assertIsNone(tombstone['result'])
-        self.assertLess(len(canonical(tombstone)), 600)
+        self.assert_tombstone(tombstone)
 
     def test_history_capacity_refuses_new_starts_but_keeps_exact_replay(self):
         with patch.object(jobs, 'MAX_JOBS', 2):
@@ -296,7 +316,7 @@ class DelegationJobTests(unittest.TestCase):
         job_id = state['active']
         variants = [b'{', b'null', b'{"version":NaN}', b'[' * 65 + b']' * 65,
                     b' ' * (jobs.MAX_STATE_BYTES + 1),
-                    valid[:-2], valid + b' ', valid.replace(b'"version":2', b'"version":2,"version":2')]
+                    valid[:-2], valid + b' ', valid.replace(b'"version":3', b'"version":3,"version":3')]
         for field, value in [('status', 'lost'), ('request_digest', '0' * 64),
                              ('token', None), ('run_id', None), ('execution', []),
                              ('request', None), ('result', 'premature'), ('owner', 'editor')]:
@@ -352,7 +372,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store = jobs.DelegationJobs(self.root)
             self.assertEqual(self.store.reservation()['run_id'], run_id)
             self.assertEqual(self.store.reservation()['id'], job_id)
-        self.store.runner_quiescent(*self.runner(), 'evidence')
+        self.store.runner_quiescent(*self.runner(), 'evidence', cleanup=self.cleanup())
         # Tombstone retains the identity for audit after reconstruction.
         self.store = jobs.DelegationJobs(self.root)
         state = loads_finite(self.path.read_bytes())
@@ -367,6 +387,7 @@ class DelegationJobTests(unittest.TestCase):
         for view in (self.store.status('worker', first),
                      self.store.start('worker', 'first', self.request)):
             self.assertNotIn('run_id', view)
+            self.assertNotIn('binding', view)
             self.assertNotIn('token', view)
             self.assertNotIn('request', view)
         self.complete('First evidence')
@@ -383,8 +404,8 @@ class DelegationJobTests(unittest.TestCase):
         state = loads_finite(self.path.read_bytes())
         self.assertEqual(state['jobs'][first]['run_id'], first_run)
         self.assertEqual(state['jobs'][second]['run_id'], second_run)
-        self.assertLess(len(canonical(state['jobs'][first])), 600)
-        self.assertLess(len(canonical(state['jobs'][second])), 600)
+        self.assert_tombstone(state['jobs'][first])
+        self.assert_tombstone(state['jobs'][second])
 
     def test_malformed_duplicate_and_version1_run_state_rejected_without_reset(self):
         job_id = self.start()
@@ -437,6 +458,180 @@ class DelegationJobTests(unittest.TestCase):
         self.path.write_bytes(valid)
         self.assertEqual(self.store.reservation()['run_id'],
                          loads_finite(valid)['jobs'][job_id]['run_id'])
+
+    def test_binding_durability_conflicts_and_uncertain_acknowledgement(self):
+        self.start()
+        reservation = self.store.reservation()
+        credentials = reservation['id'], reservation['token']
+        directory = self.root / 'actual-child-run'
+        directory.mkdir()
+        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        containers = [{'name': 'fixture', 'id': 'c' * 64, 'uid': 1000}]
+        real_write = jobs.safe_write
+        for committed in (False, True):
+            def interrupted(*args):
+                if committed:
+                    real_write(*args)
+                raise OSError('Lost binding acknowledgement')
+            with patch.object(jobs, 'safe_write', side_effect=interrupted):
+                with self.assertRaises(OSError):
+                    self.store.runner_bind(*credentials, str(directory), scope, containers)
+            self.store = jobs.DelegationJobs(self.root)
+            self.assertEqual(self.store.reservation()['binding'] is not None, committed)
+        original = self.store.runner_bind(*credentials, str(directory), scope, containers)
+        self.assertEqual(original['run_id'], reservation['run_id'])
+        self.assertEqual(original['directory']['path'], str(directory))
+        self.assertEqual(original['directory']['inode'], directory.stat().st_ino)
+        before = self.path.read_bytes()
+        for other_scope, other_containers in [
+                ({'unit': 'other.service', 'cgroup': '/system.slice/other.service'}, containers),
+                (scope, [{**containers[0], 'id': 'd' * 64}]),
+                (scope, [{**containers[0], 'uid': 1001}]), (scope, [])]:
+            with self.assertRaises(Denied):
+                self.store.runner_bind(*credentials, str(directory), other_scope, other_containers)
+            self.assertEqual(self.path.read_bytes(), before)
+        original['containers'].clear()
+        containers[0]['name'] = 'changed'
+        self.assertEqual(self.store.reservation()['binding']['containers'][0]['name'], 'fixture')
+        self.store.runner_started(*credentials)
+        saved = self.store.reservation()['binding']
+        self.assertEqual(self.store.runner_bind(*credentials, str(directory), scope,
+                                               saved['containers']), saved)
+        with self.assertRaises(Denied):
+            self.store.runner_started(*credentials)
+
+    def test_cancel_before_binding_can_reconcile_no_launch_without_replay(self):
+        job_id = self.start()
+        reservation = self.store.reservation()
+        credentials = reservation['id'], reservation['token']
+        self.assertEqual(self.store.cancel('worker', job_id)['status'], 'cancel-requested')
+        directory = self.root / reservation['run_id']
+        directory.mkdir()
+        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        binding = self.store.runner_bind(*credentials, str(directory), scope, [])
+        with self.assertRaises(Denied):
+            self.store.runner_started(*credentials)
+        self.store.runner_finished(*credentials, 'cancelled')
+        cleanup = {'binding': binding, 'scope_clean': True, 'containers_absent': []}
+        self.store.runner_quiescent(*credentials, 'Cancelled before launch; no OCI resources',
+                                    cleanup=cleanup)
+        self.assertIsNone(self.store.reservation())
+        self.assertEqual(self.store.status('worker', job_id)['status'], 'terminal')
+
+    def test_missing_binding_and_incomplete_or_mismatched_proofs_keep_reservation(self):
+        self.start()
+        reservation = self.store.reservation()
+        credentials = reservation['id'], reservation['token']
+        with self.assertRaises(Denied):
+            self.store.runner_started(*credentials)
+        with self.assertRaises(Denied):
+            self.store.runner_quiescent(*credentials, 'Unbound', cleanup={})
+        directory = self.root / 'child'
+        directory.mkdir()
+        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        containers = [{'name': 'one', 'id': 'c' * 64, 'uid': 1000},
+                      {'name': 'two', 'id': 'd' * 64, 'uid': 1000}]
+        self.store.runner_bind(*credentials, str(directory), scope, containers)
+        with self.assertRaises(Denied):
+            self.store.runner_quiescent(*credentials, 'Not terminal', cleanup=self.cleanup())
+        self.store.runner_finished(*credentials, 'failed')
+        proof = self.cleanup()
+        variants = [None, {}, {**proof, 'scope_clean': 1}, {**proof, 'scope_clean': None},
+                    {**proof, 'containers_absent': ['c' * 64]},
+                    {**proof, 'containers_absent': ['c' * 64, 'c' * 64]},
+                    {**proof, 'extra': True}]
+        bad = copy.deepcopy(proof)
+        bad['binding']['run_id'] = '0' * 32
+        variants.append(bad)
+        bad = copy.deepcopy(proof)
+        bad['binding']['containers'][0]['uid'] = 1000.0
+        variants.append(bad)
+        before = self.path.read_bytes()
+        for evidence in variants:
+            with self.subTest(evidence=evidence), self.assertRaises(Denied):
+                self.store.runner_quiescent(*credentials, 'Evidence', cleanup=evidence)
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertIsNotNone(jobs.DelegationJobs.existing_reservation(self.root))
+        self.store.runner_quiescent(*credentials, 'Both scopes independently clean', cleanup=proof)
+        self.assertIsNone(self.store.reservation())
+        # Terminal execution without a binding is still held, even if a
+        # supervisor supplies an apparently positive but unrelated proof.
+        self.start('unbound')
+        reservation = self.store.reservation()
+        credentials = reservation['id'], reservation['token']
+        self.store.runner_finished(*credentials, 'failed')
+        with self.assertRaises(Denied):
+            self.store.runner_quiescent(*credentials, 'No binding', cleanup=proof)
+        with self.assertRaises(Denied):
+            self.store.runner_bind(*credentials, str(directory), scope, containers)
+        self.assertIsNotNone(self.store.reservation())
+
+    def test_binding_directory_missing_replaced_renamed_or_unobservable_keeps_hold(self):
+        self.start()
+        credentials = self.runner()
+        binding = self.store.reservation()['binding']
+        directory = Path(binding['directory']['path'])
+        self.store.runner_finished(*credentials, 'failed')
+        proof = self.cleanup()
+        moved = directory.with_name('moved')
+        directory.rename(moved)
+        with self.assertRaises(OSError):
+            self.store.runner_quiescent(*credentials, 'Missing', cleanup=proof)
+        directory.mkdir()
+        with self.assertRaises(Denied):
+            self.store.runner_quiescent(*credentials, 'Replaced', cleanup=proof)
+        with patch.object(jobs, '_directory_identity', side_effect=PermissionError('Unknown')):
+            with self.assertRaises(OSError):
+                self.store.runner_quiescent(*credentials, 'Unobservable', cleanup=proof)
+        self.assertIsNotNone(self.store.reservation())
+        directory.rmdir()
+        moved.rename(directory)
+        self.store.runner_quiescent(*credentials, 'Restored exact directory', cleanup=proof)
+
+    def test_malformed_ambiguous_oversized_bindings_and_corruption_fail_closed(self):
+        self.start()
+        credentials = self.runner()
+        valid = self.path.read_bytes()
+        binding = self.store.reservation()['binding']
+        container = {'name': 'fixture', 'id': 'c' * 64, 'uid': 1000}
+        variants = [None, {}, {**binding, 'run_id': '0' * 32},
+                    {**binding, 'containers': [container, container]},
+                    {**binding, 'containers': [container, {**container, 'name': 'other'}]},
+                    {**binding, 'containers': [{**container, 'id': 'short'}]},
+                    {**binding, 'containers': [{**container, 'uid': True}]},
+                    {**binding, 'scope': {**binding['scope'], 'cgroup': '/wrong'}},
+                    {**binding, 'containers': [{**container, 'name': 'x' * jobs.MAX_BINDING_BYTES}]}]
+        state = loads_finite(valid)
+        for malformed in variants[1:]:
+            bad = copy.deepcopy(state)
+            bad['jobs'][credentials[0]]['binding'] = malformed
+            raw = canonical(bad)
+            self.path.write_bytes(raw)
+            with self.assertRaises(Denied):
+                jobs.DelegationJobs.existing_reservation(self.root)
+            self.assertEqual(self.path.read_bytes(), raw)
+        self.path.write_bytes(valid)
+        # The prior schema must not silently become an empty/unbound store.
+        prior = copy.deepcopy(state)
+        prior['version'] = 2
+        del prior['jobs'][credentials[0]]['binding']
+        self.path.write_bytes(canonical(prior))
+        with self.assertRaises(Denied):
+            jobs.DelegationJobs(self.root)
+        self.path.write_bytes(valid)
+        # A missing mandatory schema field is not an unbound job.
+        del state['jobs'][credentials[0]]['binding']
+        self.path.write_bytes(canonical(state))
+        with self.assertRaises(Denied):
+            self.store.reservation()
+        self.path.write_bytes(valid)
+        alias = self.root / 'alias'
+        try:
+            alias.symlink_to(binding['directory']['path'], target_is_directory=True)
+        except OSError:
+            return  # Symlink creation is unavailable on some Windows workers.
+        with self.assertRaises(Denied):
+            self.store.runner_bind(*credentials, str(alias), binding['scope'], [])
 
     def test_unsafe_state_paths_are_refused(self):
         original = self.path.read_bytes()
