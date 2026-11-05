@@ -16,6 +16,7 @@ from mizu.fs import (MAX_FRAME, READ_PAGE_CHARS, canonical, digest, read_json, w
 from mizu.insights import Insights, INSIGHT_DECISION_POLICY, INSIGHT_PENDING_POLICY
 import mizu.insights as insights_module
 from mizu.shared_records import SharedRecords
+from support import write_fixture_json
 from mizu.smoke_refs import record_lock
 
 ACTIONS = ("accept", "modify", "reject", "defer")
@@ -65,13 +66,13 @@ class SharedDecisionPageTests(unittest.TestCase):
             insight_id = f"{index:032x}"
             key = insights_module._decision_key(insight_id, 1)
             event_id = key if action != "defer" else uuid.uuid4().hex
-            write_json(inbox / f"{insight_id}.json",
+            write_fixture_json(inbox / f"{insight_id}.json",
                        {**item, "id": insight_id, "title": f"Finding {index}",
-                        "body": f"Exact body {index}"}, exclusive=True)
-            write_json(decisions / f"{insight_id}.json",
-                       {**decision, "id": insight_id, "decision_key": key}, exclusive=True)
-            write_json(history / f"{event_id}.json",
-                       {**event, "id": insight_id, "decision_key": key}, exclusive=True)
+                        "body": f"Exact body {index}"})
+            write_fixture_json(decisions / f"{insight_id}.json",
+                       {**decision, "id": insight_id, "decision_key": key})
+            write_fixture_json(history / f"{event_id}.json",
+                       {**event, "id": insight_id, "decision_key": key})
 
     def page(self, role="reviewer", actions=ACTIONS, *, max_bytes=MAX_FRAME,
              limit=100, sources="any"):

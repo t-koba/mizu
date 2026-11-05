@@ -24,10 +24,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from mizu.cli import configure
 from mizu.errors import Denied
 from mizu.config import load
-from mizu.fs import mkdir
+from mizu.fs import canonical, mkdir
 from mizu.process import run
 from mizu.project import initialize
 from mizu.runtime import Context
+
+
+def write_fixture_json(path: Path, value: object) -> None:
+    """Write an exclusive JSON fixture without exercising production durability."""
+    with path.open("xb") as stream:
+        stream.write(canonical(value))
 
 
 def host_child_cost() -> float:
