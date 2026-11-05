@@ -19,8 +19,10 @@ roles get a bounded poll task invoking `mizu run --event` at the role's
 effective `event_poll_seconds` cadence (default 60 seconds). Linux/macOS
 unscheduled event services retain fast file triggers and also reevaluate at
 the effective `event_poll_seconds` cadence to recover missed notifications.
-Persisted code state is rechecked; routing and admission still govern whether a
-run starts.
+With opt-in `event_batch_seconds`, every watched non-daemon role instead gets
+only a periodic `mizu run --event` trigger at that cadence on all platforms,
+including scheduled roles. Ordinary schedules remain unchanged. Persisted code
+state is rechecked; routing and admission still govern whether a run starts.
 
 Event triggers use systemd defaults with no trigger limit: admission is
 state-based (`mizu run --event` exits before any model use when nothing is
@@ -252,16 +254,17 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
                    "ExecStopPost=-" + " ".join(map(quote, cleanup)),
                    "SuccessExitStatus=69 75 76 77 78 130"]
         result[event_base + ".service"] = "\n".join(event_service) + "\n"
-        trigger = ["[Unit]", f"Description=Mizu event trigger for {project.name} / {name}", "",
-                   "[Path]",
-                   *(f"PathChanged={watch}" for watch in watches[name]),
-                   f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
-        result[event_base + ".path"] = "\n".join(trigger) + "\n"
         role = config.roles[name]
-        if not (role.interval_seconds or role.calendar or role.daemon):
-            # Path notifications are only edges. Recheck persisted state
-            # after a lost/busy edge, using the same oneshot and admission gates.
-            poll = role_event_poll_seconds(role)
+        if role.event_batch_seconds is None:
+            trigger = ["[Unit]", f"Description=Mizu event trigger for {project.name} / {name}", "",
+                       "[Path]",
+                       *(f"PathChanged={watch}" for watch in watches[name]),
+                       f"Unit={event_base}.service", "", "[Install]", "WantedBy=default.target"]
+            result[event_base + ".path"] = "\n".join(trigger) + "\n"
+        if role.event_batch_seconds is not None or not (role.interval_seconds or role.calendar or role.daemon):
+            # Batch cadence replaces file hints; otherwise recovery rechecks
+            # persisted state after a lost/busy edge with the same admission gates.
+            poll = role.event_batch_seconds or role_event_poll_seconds(role)
             result[event_base + ".timer"] = "\n".join([
                 "[Unit]", f"Description=Mizu event recovery for {project.name} / {name}",
                 "", "[Timer]", f"OnBootSec={poll}s",
@@ -308,14 +311,15 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
                       "run", project.name, "--role", name, "--event"]
         event_body = [f"  <key>Label</key><string>{event_base}</string>",
                       "  <key>ProgramArguments</key>", "  <array>",
-                      _plist_args(event_args).rstrip("\n"), "  </array>",
-                      "  <key>WatchPaths</key>", "  <array>",
-                      "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name]).rstrip("\n"),
-                      "  </array>"]
+                      _plist_args(event_args).rstrip("\n"), "  </array>"]
         role = config.roles[name]
-        if not (role.interval_seconds or role.calendar or role.daemon):
-            # Combine recovery with WatchPaths, not a second concurrent job.
-            poll = role_event_poll_seconds(role)
+        if role.event_batch_seconds is None:
+            event_body.extend(["  <key>WatchPaths</key>", "  <array>",
+                "".join(f"    <string>{_xml(watch)}</string>\n" for watch in watches[name]).rstrip("\n"),
+                "  </array>"])
+        if role.event_batch_seconds is not None or not (role.interval_seconds or role.calendar or role.daemon):
+            # Batch-only periodic job, or recovery combined with WatchPaths.
+            poll = role.event_batch_seconds or role_event_poll_seconds(role)
             event_body.append(f"  <key>StartInterval</key><integer>{poll}</integer>")
         result[event_base + ".plist"] = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -384,17 +388,17 @@ def _render_windows(config: Config, project: Project, executable: Path) -> dict[
     # Event-only fallback: no file trigger on Windows, so watched roles without
     # a schedule poll with ``mizu run --event`` at the role's effective
     # `event_poll_seconds` cadence (default 60 seconds).
-    # Scheduled roles keep only their schedule trigger above; daemon roles
-    # need no poll (their loop rechecks admission).
+    # Opt-in batching also gives scheduled roles an independent event task;
+    # daemon roles need no poll (their loop rechecks admission).
     watches = event_watches(config, project)
     scheduled_names = {name for name, _, _, _ in _scheduled_roles(config, project, executable)}
     for name in sorted(watches):
-        if name in scheduled_names:
-            continue
         role = config.roles[name]
+        if name in scheduled_names and role.event_batch_seconds is None:
+            continue
         if role.daemon:
             continue
-        poll = role_event_poll_seconds(role)
+        poll = role.event_batch_seconds or role_event_poll_seconds(role)
         base = _role_base(project, name)
         event_base = base + "-event"
         event_args = [resolved, "--config", str(config.file),

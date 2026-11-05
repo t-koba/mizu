@@ -42,14 +42,23 @@ The shipped example (`config/config.example.toml`) exercises each pattern:
 | maintainer-searcher | read | `interval_seconds = 21600` | none |
 
 A role with neither a schedule, subscriptions, nor unscheduled `on_change`
-stays explicit-run only (`event_watches` in `src/mizu/services.py` returns no
-entry for it). An event-only role uses file triggers on Linux/macOS, including
+stays explicit-run-only for ordinary product work. Non-daemon roles still get
+a coarse inbox trigger for explicitly addressed operator attention;
+`event_watches` documents these separate paths. An event-only role uses file
+triggers on Linux/macOS, including
 a coarse `current.json` watch for unscheduled `on_change` roles, plus recovery
 reevaluation for every unscheduled watched role at its effective
 `event_poll_seconds` cadence (default 60 seconds, valid 60 through 31 days);
 Windows has
 no file trigger and instead renders a bounded poll task invoking
 `mizu run --event` at that same effective cadence for event-only roles, as noted below.
+
+A watched non-daemon role can instead opt into `event_batch_seconds` (integer
+60–2,678,400 seconds, unset by default) for periodic event-only triggers on all
+platforms, including for scheduled roles. It replaces file hints/recovery polls,
+not ordinary schedules or admission; those can still deliver inputs earlier.
+Daemon roles reject this setting. See [configuration](configuration.md) for the
+separate `event_poll_seconds` policy and unchanged delivery/acknowledgement rules.
 
 ## Wake sources versus delivered inputs
 
@@ -189,8 +198,12 @@ committed/reserved intent. Such an intent bypasses both dispatch skips, not
 control/producer/check holds or fresh admission checks. Without that intent,
 existing event labels take precedence over ready work;
 ready work has its own label for event-triggered or unchanged-code admission.
-It does not add or consume terminal work-item events. The daemon's configured
-ordinary spacing still applies (`roles.<name>.daemon_spacing_seconds` when set,
+It does not add or consume terminal work-item events. The same normalized
+`admission` label is exposed in both full and delta unit prompts, allowing role
+policy to distinguish a schedule, delivered event source, or continuation
+without operator-passed attributes; the bounded event payloads remain separate
+prompt fields. The daemon's configured ordinary spacing still applies
+(`roles.<name>.daemon_spacing_seconds` when set,
 else the policy default: `signals` uses the role-effective `cooldown_seconds`
 (`roles.<name>.cooldown_seconds` when set, else the project `[limits]` value),
 `periodic` uses `idle_seconds`); it affects ordinary daemon spacing only, never
@@ -674,8 +687,8 @@ recheck their wake policy on idle ticks instead of file triggers.
   role additionally gets an `-event.plist` with `WatchPaths` on the same
   directories and `mizu run --event` arguments, likewise including
   `current.json` for unscheduled `on_change` roles. That same event job also
-  has `StartInterval=<event_poll_seconds>` for recovery (default 60);
-  no second job is added.
+  has `StartInterval=<event_poll_seconds>` for unscheduled recovery (default
+  60); no second job is added.
 - Windows (Task Scheduler XML): schedule triggers only for scheduled roles —
   `TimeTrigger` with repetition for intervals, `CalendarTrigger` per `calendar`
   entry, `LogonTrigger` for daemons. There is no file trigger in the current
@@ -687,6 +700,15 @@ recheck their wake policy on idle ticks instead of file triggers.
   cadence (default `PT60S`); admission still exits cheaply with
   `skipped: no-event`/`unchanged` when nothing is due, so the poll cannot
   change trigger semantics.
+
+The descriptions above apply when `event_batch_seconds` is unset. With it set,
+Linux renders an `-event.timer` with `OnBootSec` and `OnUnitInactiveSec` equal to
+the batch cadence, targeting the existing event oneshot, and no `-event.path`.
+macOS renders `StartInterval` equal to the batch cadence and no `WatchPaths` in
+the event plist. Windows renders an `-event.xml` repetition at the batch cadence,
+also for scheduled roles. Ordinary schedule files are byte-for-byte unchanged.
+Rendering only produces definitions; the operator must replace any previously
+installed immediate file triggers to use the new cadence.
 
 Path/WatchPaths notifications are coarse reevaluation hints, not a
 durable transactional queue. If a write is coalesced or a dispatch is busy,

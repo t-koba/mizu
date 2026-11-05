@@ -323,7 +323,8 @@ def prompt_for(context: Context) -> str:
     # operator-selected `[limits] pending_insights` bound (newest kept), and
     # `open_insights` states the same bounded backlog with explicit total;
     # `recent_snapshots` follows `[limits] prompt_snapshots`. Exact snapshot
-    # references are always pinned. Publication/commit and `should_run`
+    # references are always pinned. `admission` is the exact normalized
+    # dispatch label selected by the host. Publication/commit and `should_run`
     # transitions below are the fixed single-writer contract, not policy.
     from . import work_order as _plan
     opening = _plan._capture_opening(context)
@@ -339,6 +340,7 @@ def prompt_for(context: Context) -> str:
                        "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
+                       "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
                                             for s in context.project.snapshots.history(
@@ -380,7 +382,8 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     Schema: the constant ``unit`` opening, then the names-only
     ``unit_tool_surface``, the ``goal_digest`` pin, the
     pinned ``published_snapshot`` and a small ``snapshot_delta``
-    (previous/current ids), then only the pending
+    (previous/current ids), plus the normalized dispatch ``admission`` label,
+    then only the pending
     proposals not yet offered, an ``open_insights`` statement of the still
     undecided backlog (ids plus total, so an already-offered insight never
     reads as done), the always-present bounded ``open_work_items`` page,
@@ -423,6 +426,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
                        "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
+                       "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},

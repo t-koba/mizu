@@ -26,7 +26,8 @@ def _reject(project, source, title="Finding", insight_id=None):
 class DecisionTriggerTests(Fixture):
     def test_unchanged_code_rejection_admits_origin_role_only(self):
         config = _trigger_config(self.config)
-        engine = Engine(config, driver=ScriptDriver(finish_with_decision_acks))
+        driver = ScriptDriver(finish_with_decision_acks)
+        engine = Engine(config, driver=driver)
         self.assertEqual(engine.run(self.project, "reviewer")["status"], "completed")
         self.assertEqual(engine.run(self.project, "reviewer").get("skipped"), "unchanged")
         _reject(self.project, "reviewer")
@@ -34,6 +35,7 @@ class DecisionTriggerTests(Fixture):
         self.assertEqual(admitted["status"], "completed")
         started = read_json(self.project.root / "runs" / admitted["run"] / "started.json")
         self.assertEqual((started["admission"], started["decision_events"]), ("decision", 1))
+        self.assertEqual(json.loads(driver.calls[-1][1])["admission"], "decision")
         logged = read_json(self.project.root / "runs" / admitted["run"] / "decision-events.json")
         self.assertEqual(logged["events"][0]["reason"], "not material")
         # Acknowledged on success: the next unchanged tick skips again (no loop).

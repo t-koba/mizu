@@ -741,6 +741,10 @@ class Role:
     #: Task Scheduler repetition bound. Only unscheduled watched roles use
     #: it for recovery reevaluation; scheduled timers stay on their schedule.
     event_poll_seconds: int | None = None
+    #: Opt-in periodic event trigger for watched non-daemon roles, including
+    #: scheduled roles. None preserves file triggers/recovery defaults; set
+    #: values replace immediate file triggers, not ordinary schedules.
+    event_batch_seconds: int | None = None
     #: Explicit daemon scheduling policy: ``signals`` consults the
     #: role-aware ``should_run`` readiness gate, ``periodic`` runs at the
     #: ordinary cadence while the project is armed and neither paused nor
@@ -1515,7 +1519,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1684,6 +1688,13 @@ def load(file: Path) -> Config:
         if role_event_poll is not None:
             number(role_event_poll, f"roles.{name}.event_poll_seconds",
                    EVENT_POLL_SECONDS_MIN, EVENT_POLL_SECONDS_MAX)
+        role_event_batch = role.get("event_batch_seconds")
+        if role_event_batch is not None:
+            # Same cross-platform repetition bounds as event recovery polling.
+            number(role_event_batch, f"roles.{name}.event_batch_seconds",
+                   EVENT_POLL_SECONDS_MIN, EVENT_POLL_SECONDS_MAX)
+            if daemon:
+                raise ConfigError(f"roles.{name}.event_batch_seconds cannot be used with daemon")
         raw_daemon_policy = role.get("daemon_policy")
         if raw_daemon_policy is None:
             daemon_policy = "signals" if workspace == "write" else "periodic"
@@ -1711,6 +1722,7 @@ def load(file: Path) -> Config:
                            cooldown_seconds=role_cooldown,
                            progress_signals=role_progress,
                            event_poll_seconds=role_event_poll,
+                           event_batch_seconds=role_event_batch,
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing)
     if not roles:

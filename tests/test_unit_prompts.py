@@ -77,6 +77,17 @@ class UnitPromptSeamTests(Fixture):
         self.assertEqual(finish["inputSchema"]["properties"]["outcome"]["enum"],
                          ["continue", "wait", "blocked", "done"])
 
+    def test_full_and_delta_expose_the_exact_dispatch_admission(self):
+        from mizu.unit_prompts import prompt_for, prompt_delta_for
+        ctx = self.context("worker")
+        for admission in ("schedule", "decision", "work_item", "operator_record",
+                          "wait", "ci", "operator", "ready_work", "change",
+                          "next_task", "continuation"):
+            with self.subTest(admission=admission):
+                ctx.admission = admission
+                self.assertEqual(json.loads(prompt_for(ctx))["admission"], admission)
+                self.assertEqual(json.loads(prompt_delta_for(ctx, []))["admission"], admission)
+
     def test_delta_clock_boundary_changes_only_the_clock_projection(self):
         import mizu.unit_prompts as unit_prompts
         ctx = self.context("worker")

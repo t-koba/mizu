@@ -353,6 +353,8 @@ class Context:
         self.run_dir, self.snapshot, self.workspace = run_dir, snapshot, workspace
         self.goal = (project.goal if role.workspace == "write" else snapshot["goal"]) if goal is None else goal
         self.goal_digest = digest(self.goal.encode())
+        # Normalized cause selected by dispatch; exposed to the unit prompt only.
+        self.admission: str | None = None
         # Capture the inputs actually offered to this run, not arrivals at publication.
         self.inbox_seen = project.insights.generation()
         self.wake_generation = _normalized_wake_generation(
@@ -2943,6 +2945,7 @@ class Engine:
                         project.snapshots.materialize(snapshot, workspace)
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult, delegate=self.delegate)
+                context.admission = admission
                 context.opening_task = (dispatch_state["next_task"]
                                         if _dispatch.admission == "next_task" else None)
                 context._slot_lease = True

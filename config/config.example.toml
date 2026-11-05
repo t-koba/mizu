@@ -465,6 +465,12 @@ interval_seconds = 900
 # ci_wake = false
 
 [roles.reporter]
+# Optional event batching (60-2678400 seconds; unset keeps current triggers).
+# Non-daemon watched roles only: replace file notifications/recovery polls with
+# one periodic `run --event` trigger, including for scheduled roles. Ordinary
+# schedules remain unchanged and may deliver inputs earlier. Independent of
+# event_poll_seconds, which only controls unset-batch unscheduled recovery.
+# event_batch_seconds = 300
 profile = "primary"
 policy = ["policies/shared.md", "policies/reporter.md"]
 workspace = "read"

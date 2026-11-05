@@ -1056,14 +1056,33 @@ projection. Event delivery reaches scheduling two ways: the writer daemon
 re-checks `should_run` against event, wait, CI and ready-work state every idle
 tick, and `mizu service` renders event wakes for non-daemon roles with
 `decision_events` or `work_item_events`, plus unscheduled `on_change` roles.
-Linux systemd path units and macOS `WatchPaths` invoke `mizu run --event` on
-subscribed changes; scheduled timers retain their own cadence. Unscheduled
+By default, Linux systemd path units and macOS `WatchPaths` invoke
+`mizu run --event` on subscribed changes; scheduled timers retain their own
+cadence. Unscheduled
 watched roles also get periodic recovery at their effective per-role
 `event_poll_seconds` (default 60 seconds, 60–2,678,400 seconds). Windows has no file trigger: unscheduled watched roles
 get a `mizu run --event` polling task at that cadence, while scheduled roles
-recheck their event inputs on the scheduled trigger. Event-triggered dispatch
-with nothing due returns `skipped: no-event` without consuming anything; a
-non-event `on_change` dispatch with an unchanged `code_digest` reports
+recheck their event inputs on the scheduled trigger.
+
+For a watched non-daemon role, optional `event_batch_seconds` (integer
+60–2,678,400 seconds) replaces immediate filesystem triggers and event recovery
+polls with one periodic `mizu run --event` trigger at that cadence on every
+platform, including for interval/calendar roles. Unset preserves the existing
+platform behavior exactly. It is invalid with `daemon = true`; daemon spacing
+and ordinary interval/calendar schedules are unchanged. `event_poll_seconds`
+remains the separate unscheduled recovery setting when batching is unset and
+does not add a faster poll when batching is set. This is service-trigger policy,
+not a runtime delivery embargo: ordinary schedules, explicit runs and other
+admission paths can still deliver pending inputs before the next batch trigger.
+Busy roles and existing admission gates can delay a run. Source filters,
+ordering, count caps, receipts and acknowledgement rules are unchanged; inputs
+remain pending until delivered and explicitly acknowledged under those rules.
+Rendering does not install or enable units; replacing existing installed file
+triggers is an operator deployment step. There is no new retry or cancellation
+mechanism; periodic triggers simply re-evaluate existing pending state.
+
+Event-triggered dispatch with nothing due returns `skipped: no-event` without
+consuming anything; a non-event `on_change` dispatch with an unchanged `code_digest` reports
 `unchanged`. A role with neither a schedule, event subscriptions, nor
 unscheduled `on_change` stays explicit-run only. Linux event triggers keep
 systemd defaults with no trigger limit (`Type=oneshot` with
@@ -1672,7 +1691,10 @@ decision windows while another takes smaller terminal batches), optional
 per-role event-only recovery poll override `event_poll_seconds` (60–2,678,400
 seconds, default 60; the Task Scheduler minimum/bounds; unscheduled watched
 roles recheck pending event inputs at this cadence on every platform while
-scheduled timers stay on their schedule), explicit daemon scheduling policy
+scheduled timers stay on their schedule), optional `event_batch_seconds`
+(integer 60–2,678,400 seconds, unset by default; watched non-daemon roles only)
+for periodic event-only triggers instead of file hints/recovery polling on all
+platforms, without changing ordinary schedules, explicit daemon scheduling policy
 `daemon_policy` (`signals` consults the role-aware `should_run` gate,
 `periodic` runs at the ordinary cadence while armed and neither paused nor
 draining; unset keeps the workspace default with identical effective behavior:
