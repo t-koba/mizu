@@ -111,8 +111,8 @@ class DecisionReceiptTests(Fixture):
     def test_legacy_cursor_cannot_hide_equal_time_batches_or_partial_holes(self):
         # This fixture targets receipt paging; auto-ID dedup is covered separately
         # in test_insight_archive. Seed one real decision, then clone its valid
-        # rev-1 records so the 205-row read case avoids 204 redundant submissions.
-        self._seed_receipt_batch(205)
+        # rev-1 records so the 101-row read case avoids 100 redundant submissions.
+        self._seed_receipt_batch(101)
         ids = sorted(p.stem for p in (self.project.root / "decision-history").glob("*.json"))
         write_json(self.project.root / "decision-cursors/reviewer.json",
                    {"role": "reviewer", "acknowledged_at": "2099-01-01T00:00:00+00:00",
@@ -121,13 +121,31 @@ class DecisionReceiptTests(Fixture):
         self.assertEqual([r["event"] for r in first], ids[:100])
         self.project.insights.acknowledge_decisions("reviewer", first[1:])
         second = self.rows(limit=100)
-        self.assertEqual([r["event"] for r in second], [ids[0]] + ids[100:199])
+        self.assertEqual([r["event"] for r in second], [ids[0]] + ids[100:])
         self.project.insights.acknowledge_decisions("reviewer", second)
         third = self.rows(limit=100)
-        self.assertEqual([r["event"] for r in third], ids[199:])
+        self.assertEqual([r["event"] for r in third], ids[101:])
         self.project.insights.acknowledge_decisions("reviewer", third)
         self.assertEqual(self.rows(limit=100), [])
-        self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), 205)
+        self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), 101)
+
+    def test_legacy_cursor_preserves_partial_holes_across_small_pages(self):
+        self._seed_receipt_batch(5)
+        ids = sorted(p.stem for p in (self.project.root / "decision-history").glob("*.json"))
+        write_json(self.project.root / "decision-cursors/reviewer.json",
+                   {"role": "reviewer", "acknowledged_at": "2099-01-01T00:00:00+00:00",
+                    "acknowledged": ids[:2], "defer_offset": 12345})
+        first = self.rows(limit=2)
+        self.assertEqual([r["event"] for r in first], ids[:2])
+        self.project.insights.acknowledge_decisions("reviewer", first[1:])
+        second = self.rows(limit=2)
+        self.assertEqual([r["event"] for r in second], [ids[0], ids[2]])
+        self.project.insights.acknowledge_decisions("reviewer", second)
+        third = self.rows(limit=2)
+        self.assertEqual([r["event"] for r in third], ids[3:])
+        self.project.insights.acknowledge_decisions("reviewer", third)
+        self.assertEqual(self.rows(limit=2), [])
+        self.assertEqual(len(list((self.project.root / "decision-history").glob("*.json"))), 5)
 
     def test_full_and_delta_prompts_carry_same_tokens(self):
         _reject(self.project, "reviewer")
