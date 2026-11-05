@@ -11,7 +11,8 @@ from mizu.config import load
 from mizu.errors import Busy, ConfigError, SnapshotConflict
 from mizu.insights import Insights
 from mizu.runtime import Engine
-from mizu.smoke_refs import record_lock
+from mizu.smoke_refs import record_lock, shared_lock
+from mizu.smoke_retention import retention_apply_lock
 
 
 class LockDiagnosticsTests(Fixture):
@@ -40,7 +41,7 @@ class LockDiagnosticsTests(Fixture):
         for row in summary["observations"]:
             self.assertEqual(set(row), {"lock", "phase", "operation", "stage", "outcome",
                                         "local_ms", "kernel_ms", "hold_ms"})
-            self.assertIn(row["lock"], {"shared-smoke", "project-record"})
+            self.assertIn(row["lock"], {"shared-smoke", "project-record", "retention-apply"})
             self.assertIn(row["phase"], {"pre-admission-startup", "editor-ingestion",
                                        "pre-admission-dispatch", "admission", "post-admission"})
             self.assertIn(row["operation"], {"record", "read", "list", "page", "write"})
@@ -152,7 +153,7 @@ class LockDiagnosticsTests(Fixture):
 
                 def kernel(fd, **kwargs):
                     kernels.append(fd)
-                    if (mode == "kernel" and len(kernels) == 2) or (mode == "shared-kernel" and len(kernels) == 1):
+                    if (mode == "kernel" and len(kernels) == 1) or (mode == "shared-kernel" and len(kernels) == 1):
                         raise BlockingIOError("sensitive-error")
                     return original_kernel(fd, **kwargs)
 
@@ -160,7 +161,9 @@ class LockDiagnosticsTests(Fixture):
                     calls.append(1)
                     with patch.object(fs, "_acquire_local", side_effect=local), \
                             patch.object(fs._platform, "lock_fd", side_effect=kernel):
-                        with diagnostics.operation("write"), record_lock(store.root):
+                        boundary = (shared_lock(store.root.parent.parent)
+                                    if mode.startswith("shared-") else record_lock(store.root))
+                        with diagnostics.operation("write"), boundary:
                             effects.append("sensitive-record")
                             with (self.root / "effect").open("a") as stream:
                                 stream.write("effect\n")
@@ -189,11 +192,17 @@ class LockDiagnosticsTests(Fixture):
                     continue
                 project = [r for r in rows if r["lock"] == "project-record" and r["phase"] == "editor-ingestion"][-1]
                 self.assertEqual((project["stage"], project["outcome"]), (expected_stage, expected_outcome))
-                shared = rows[-1]
-                self.assertEqual((shared["lock"], shared["stage"], shared["outcome"]),
-                                 ("shared-smoke", "body", "busy"))
+                self.assertFalse(any(r["lock"] == "shared-smoke" for r in rows))
                 self.assertEqual(project["operation"], "write")
                 self.assertEqual(json.loads(err.splitlines()[-1])["type"], "Busy")
+
+    def test_retention_apply_lock_has_a_fixed_diagnostic_label(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), diagnostics.collect(True):
+            with diagnostics.operation("write"), retention_apply_lock(self.config.data):
+                pass
+        observations = self.summary(err.getvalue())["observations"]
+        self.assertIn("retention-apply", [row["lock"] for row in observations])
 
     def test_cli_success_dispatch_and_disabled_output_parity(self):
         def dispatch(engine, project, *args, **kwargs):
@@ -260,8 +269,7 @@ class LockDiagnosticsTests(Fixture):
                     pass
         rows = self.summary(err.getvalue())["observations"]
         self.assertEqual([(r["lock"], r["phase"], r["operation"], r["outcome"]) for r in rows[-2:]],
-                         [("project-record", "post-admission", "write", "busy"),
-                          ("shared-smoke", "post-admission", "write", "busy")])
+                         [("project-record", "post-admission", "write", "busy")])
 
     def test_bounded_tail_unknown_locks_and_saturation(self):
         err = io.StringIO()

@@ -1,15 +1,15 @@
 """Typed smoke IDs and lock ordering for shared smoke-reference state.
 
-A ref-free record write (a new Insight submission) takes the project lock
-alone; retention skips the recognized atomic-write temporaries it creates.
-Writes that can add or remove smoke references acquire the shared lock before
-the project lock, keeping their pins serialized with retention's pair
-deletion. The smoke publisher also moves a whole project root while holding
-the shared lock; the project lock lives inside that movable root and cannot
-replace the shared boundary safely. Read-only unresolved-count and
-pending-insight scans use the project lock alone. IDs are scoped by their
-containing project/owner record; Insight entries also store the exact
-revision. History keeps IDs, but only current live owners pin.
+Managed record writes take only their project's record lock, including
+reference-bearing writes; those writes validate their pair while holding that
+lock. Retention first moves candidates behind the shared admission gate, then
+scans each project under lifecycle and record locks. A writer that validated
+before admission is observed by the scan; a later writer sees the candidate
+missing and refuses. Restore and pair publication still use the shared gate.
+Read-only unresolved-count and pending-insight scans use the project lock
+alone. IDs are scoped by their containing project/owner record; Insight
+entries also store the exact revision. History keeps IDs, but only current
+live owners pin.
 """
 from __future__ import annotations
 
@@ -55,26 +55,16 @@ def shared_lock(data: Path, *, blocking=False):
 
 @contextlib.contextmanager
 def project_record_lock(root: Path, *, blocking: bool = True):
-    """Serialize one project's records; caller must prove no shared-scan interference."""
+    """Serialize one project's records; movable roots need lifecycle coordination."""
     with lock(root / "locks" / "insights.lock", blocking=blocking):
         yield
 
 
 @contextlib.contextmanager
-def record_lock(root: Path, *, blocking: bool = True, shared: bool = True):
-    """Serialize a record write, optionally across the shared smoke boundary.
-
-    A write that cannot create or remove smoke references needs only its
-    project lock. ``shared=True`` keeps the global-before-project order for
-    reference-bearing writes, whose pin must stay serialized with retention.
-    Standalone record stores (e.g. import tools/tests) have no shared data
-    owner and never take it.
-    """
-    boundary = (shared_lock(root.parent.parent, blocking=blocking)
-                if shared and root.parent.name == "projects" else contextlib.nullcontext())
-    with boundary:
-        with project_record_lock(root, blocking=blocking):
-            yield
+def record_lock(root: Path, *, blocking: bool = True):
+    """Serialize a write to one project's records."""
+    with project_record_lock(root, blocking=blocking):
+        yield
 
 
 def require_pairs(root: Path, refs) -> None:

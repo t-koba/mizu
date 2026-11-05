@@ -15,6 +15,7 @@ from unittest.mock import patch
 from mizu import smoke_retention as retention, storage
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import atomic_write, digest, held, read_json, write_json
+import mizu.insights as insights_module
 from mizu.insights import Insights
 from mizu.smoke_refs import project_record_lock, record_lock, shared_lock, validate_refs
 from mizu.work_items import WorkItems
@@ -76,23 +77,23 @@ class SmokeRetentionTests(unittest.TestCase):
                 future = pool.submit(second.unresolved_counts, ['worker', 'reviewer'])
                 self.assertEqual(future.result(timeout=10), {'worker': 1, 'reviewer': 0})
 
-    def test_submit_skips_shared_lock_but_evidence_keeps_it(self):
+    def test_reference_bearing_and_ref_free_writes_are_project_local(self):
+        self.pair()
         insights, _ = self.owner()
         item = self.insight(insights)
         with shared_lock(self.data):
-            # Instrument acquisition to fail immediately rather than wait on
-            # the lock held above. Only reference-bearing writes may reach it.
-            with patch('mizu.smoke_refs.shared_lock', side_effect=Busy('shared lock held')) as shared:
+            with patch('mizu.smoke_refs.shared_lock', side_effect=AssertionError(
+                    'managed record writes must not acquire the global gate')):
                 submitted = insights.submit(source='worker', title='New', body='No refs',
                                             base_snapshot=None)
                 for refs in ({}, {'smoke_refs': []}):
-                    with self.subTest(refs=refs), self.assertRaises(Busy):
-                        insights.attach_evidence(item['id'], source='worker', text='No refs',
-                                                 expected_rev=1, **refs)
-                self.assertEqual(shared.call_count, 2)
+                    insights.attach_evidence(item['id'], source='worker', text='No refs',
+                                             expected_rev=1, **refs)
+                pinned = insights.attach_evidence(item['id'], source='worker', text='Pinned',
+                                                  expected_rev=1, smoke_refs=[self.a])
         self.assertEqual(submitted['title'], 'New')
-        self.assertEqual(insights.read(item['id'])['evidence'], [])
-        self.assertEqual(insights.unresolved_counts(['worker']), {'worker': 2})
+        self.assertEqual(len(pinned['evidence']), 3)
+        self.assertEqual(self.run_retention(apply=True)['pinned'], [self.a])
 
     def test_cross_project_unpinned_write_does_not_wait_for_shared_lock(self):
         first, _ = self.owner('first')
@@ -162,6 +163,32 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(len(replacement), 1)
         self.assertEqual(read_json(wait_path)['rev'], 2)
         self.assertEqual(retention.collect_refs(metadata, pairs), {self.a})
+
+    def test_collect_refs_shares_aggregate_budget_across_roots(self):
+        self.pair()
+        first, _ = self.owner('first')
+        second, _ = self.owner('second')
+        for store in (first, second):
+            self.insight(store, [self.a])
+        for limit in (1, 2):
+            with self.subTest(limit=limit):
+                metadata = retention.Metadata(self.data, budgets=retention.Budgets(refs=limit))
+                pairs = {self.a: retention.read_pair(metadata, self.a)}
+                count = [0]
+                self.assertEqual(retention.collect_refs(metadata, pairs, roots=[first.root],
+                                                        ref_count=count), {self.a})
+                self.assertEqual(count, [1])
+                if limit == 1:
+                    with self.assertRaises(LimitExceeded):
+                        retention.collect_refs(metadata, pairs, roots=[second.root], ref_count=count)
+                    with self.assertRaises(LimitExceeded):
+                        retention.collect_refs(metadata, pairs)
+                else:
+                    self.assertEqual(retention.collect_refs(metadata, pairs, roots=[second.root],
+                                                            ref_count=count), {self.a})
+                    self.assertEqual(retention.collect_refs(metadata, pairs), {self.a})
+                self.assertEqual(count, [2])
+                self.assertEqual(retention.collect_refs(metadata, pairs, roots=[second.root]), {self.a})
 
     def test_candidate_scan_lock_uses_lifecycle_then_record_and_allows_other_project(self):
         first, _ = self.owner('first')
@@ -275,14 +302,15 @@ class SmokeRetentionTests(unittest.TestCase):
         manifest = retention.read_pair(retention.Metadata(self.data), self.b)
         self.assertEqual(manifest['project'], retention.project_identity(project_in_pair))
 
-    def test_append_temporary_excludes_retention_until_publication(self):
+    def test_append_temporary_is_excluded_until_project_lock_releases(self):
         self.pair()
         insights, _ = self.owner()
         item = self.insight(insights, [self.a])
         mkstemp = tempfile.mkstemp
+        rename = os.rename
         for refs in ({}, {'smoke_refs': []}):
             with self.subTest(refs=refs):
-                entered, release = threading.Event(), threading.Event()
+                entered, release, pending_moved = (threading.Event() for _ in range(3))
 
                 def paused_temporary(*args, **kwargs):
                     fd, temporary = mkstemp(*args, **kwargs)
@@ -294,20 +322,27 @@ class SmokeRetentionTests(unittest.TestCase):
                             raise AssertionError('test coordination timed out')
                     return fd, temporary
 
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    with patch('mizu.fs.tempfile.mkstemp', side_effect=paused_temporary):
-                        future = pool.submit(insights.attach_evidence, item['id'], source='worker',
+                def observe_admission(source, destination):
+                    result = rename(source, destination)
+                    if (Path(source).parent.name == 'pairs'
+                            and Path(destination).name == self.a + '.pending'):
+                        pending_moved.set()
+                    return result
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    with patch('mizu.fs.tempfile.mkstemp', side_effect=paused_temporary), \
+                            patch.object(retention.os, 'rename', side_effect=observe_admission):
+                        writer = pool.submit(insights.attach_evidence, item['id'], source='worker',
                                              text='Append', expected_rev=1, **refs)
-                        try:
-                            self.assertTrue(entered.wait(10))
-                            self.assertEqual(len(list((insights.root / 'inbox').glob('.new-*'))), 1)
-                            # Busy must come from the real global lock, before
-                            # the strict store scan can see the live temporary.
-                            with self.assertRaises(Busy):
-                                self.run_retention(apply=True)
-                        finally:
-                            release.set()
-                        future.result(timeout=10)
+                        self.assertTrue(entered.wait(10))
+                        sweep = pool.submit(self.run_retention, apply=True)
+                        self.assertTrue(pending_moved.wait(10))
+                        self.assertEqual(len(list((insights.root / 'inbox').glob('.new-*'))), 1)
+                        with self.assertRaises(Busy):
+                            sweep.result(timeout=10)
+                        self.assertTrue((self.data / 'validation/pairs' / self.a).is_dir())
+                        release.set()
+                        writer.result(timeout=10)
                 self.assertEqual(list((insights.root / 'inbox').glob('.new-*')), [])
                 result = self.run_retention(apply=True)
                 self.assertTrue(result['complete'])
@@ -326,6 +361,119 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(result['retired'], [self.a])
         self.assertTrue(temporary.exists())
         temporary.unlink()
+
+    def test_policy_change_during_project_scan_rolls_back_admission(self):
+        pair = self.pair()
+        self.owner()
+        entered, release = threading.Event(), threading.Event()
+        collect = retention.collect_refs
+
+        def paused_collect(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError('test coordination timed out')
+            return collect(*args, **kwargs)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with patch.object(retention, 'collect_refs', side_effect=paused_collect):
+                future = pool.submit(self.run_retention, apply=True)
+                try:
+                    self.assertTrue(entered.wait(10))
+                    retention.set_days(self.data, 0)
+                finally:
+                    release.set()
+                with self.assertRaises(Busy):
+                    future.result(timeout=10)
+        self.assertTrue(pair.is_dir())
+        self.assertEqual(list((self.data / 'validation/quarantine').glob('*.pending')), [])
+        self.assertEqual(retention.policy(self.data), 0)
+
+    def test_crash_after_candidate_admission_recovers_pending_pair(self):
+        pair = self.pair()
+        rename = os.rename
+
+        def die_after_admission(source, destination):
+            result = rename(source, destination)
+            if (Path(source).parent.name == 'pairs'
+                    and Path(destination).name == self.a + '.pending'):
+                raise KeyboardInterrupt('synthetic process death after admission')
+            return result
+
+        with patch.object(retention.os, 'rename', side_effect=die_after_admission):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_retention(apply=True)
+        self.assertFalse(pair.exists())
+        pending = self.data / 'validation/quarantine' / (self.a + '.pending')
+        self.assertTrue(pending.is_dir())
+        result = self.run_retention(apply=True)
+        self.assertEqual(result['recovered'], [self.a])
+        self.assertEqual(result['retired'], [])
+        self.assertTrue(pair.is_dir())
+
+    def test_pending_recovery_charges_its_report_once(self):
+        pair = self.pair()
+        qroot = self.data / 'validation/quarantine'
+        qroot.mkdir()
+        pending = qroot / (self.a + '.pending')
+        pair.rename(pending)
+        report_bytes = (pending / 'report.json').stat().st_size
+        result = self.run_retention(apply=True,
+                                    budgets=retention.Budgets(report_bytes=report_bytes))
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['recovered'], [self.a])
+        self.assertEqual(result['report_bytes'], report_bytes)
+        self.assertTrue(pair.is_dir())
+
+    def test_crash_during_pending_recovery_retries_reference_scan(self):
+        pair = self.pair()
+        insights, _ = self.owner()
+        record = self.insight(insights, [self.a])
+        qroot = self.data / 'validation/quarantine'
+        qroot.mkdir()
+        pending = qroot / (self.a + '.pending')
+        pair.rename(pending)
+        rename = os.rename
+
+        def die_after_rollback(source, destination):
+            result = rename(source, destination)
+            if (Path(source).name == self.a + '.pending'
+                    and Path(destination).parent.name == 'pairs'):
+                raise KeyboardInterrupt('synthetic process death after rollback rename')
+            return result
+
+        with patch.object(retention.os, 'rename', side_effect=die_after_rollback):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_retention(apply=True)
+        self.assertTrue(pair.is_dir())
+        self.assertFalse(pending.exists())
+        result = self.run_retention(apply=True)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['pinned'], [self.a])
+        self.assertEqual(result['retired'], [])
+        self.assertTrue(pair.is_dir())
+        self.assertEqual(insights.read(record['id'])['evidence'][0]['smoke_refs'], [self.a])
+
+    def test_crash_after_commit_rename_finishes_only_committed_deletion(self):
+        pair = self.pair()
+        rename = os.rename
+
+        def die_after_commit(source, destination):
+            result = rename(source, destination)
+            if Path(destination).name == self.a + '.committed':
+                raise KeyboardInterrupt('synthetic process death after commit')
+            return result
+
+        with patch.object(retention.os, 'rename', side_effect=die_after_commit):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_retention(apply=True)
+        self.assertFalse(pair.exists())
+        committed = self.data / 'validation/quarantine' / (self.a + '.committed')
+        self.assertTrue(committed.is_dir())
+        result = self.run_retention(apply=True)
+        self.assertEqual(result['recovered'], [self.a])
+        self.assertTrue(result['complete'])
+        self.assertFalse(committed.exists())
+        self.assertFalse(pair.exists())
 
     def test_preflight_ignores_recognized_temporaries(self):
         root = self.data / 'projects' / 'one'
@@ -349,16 +497,21 @@ class SmokeRetentionTests(unittest.TestCase):
         temporary.unlink()
         self.assertEqual(self.run_retention(apply=True)['retired'], [self.a])
 
-    def test_reference_bearing_evidence_keeps_shared_lock(self):
-        self.pair()
-        insights, _ = self.owner()
-        item = self.insight(insights)
-        with patch('mizu.smoke_refs.shared_lock', side_effect=Busy('shared lock held')) as shared:
-            with self.assertRaises(Busy):
-                insights.attach_evidence(item['id'], source='worker', text='Pinned',
-                                         expected_rev=1, smoke_refs=[self.a])
-        shared.assert_called_once()
-        self.assertEqual(insights.read(item['id'])['evidence'], [])
+    def test_retention_scan_failure_restores_every_pending_candidate(self):
+        first, second = self.pair(self.a), self.pair(self.b)
+        owner, _ = self.owner()
+        self.insight(owner)
+        def fail_after_admission(*args, **kwargs):
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+            self.assertTrue((self.data / 'validation/quarantine' / (self.a + '.pending')).is_dir())
+            raise LimitExceeded('synthetic incomplete project scan')
+        with patch.object(retention, 'collect_refs', side_effect=fail_after_admission):
+            with self.assertRaises(LimitExceeded):
+                self.run_retention(apply=True)
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+        self.assertEqual(list((self.data / 'validation/quarantine').glob('*.pending')), [])
 
     def test_insight_attention_metadata_is_validated_without_changing_pins(self):
         self.pair()
@@ -618,9 +771,8 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(self.run_retention()['candidates'], [self.a])
         self.assertEqual(insights.read(record['id'])['evidence'][0]['smoke_refs'], [self.a])
 
-    def test_editor_gc_defers_cross_project_lock_contention_and_retries(self):
+    def test_editor_gc_defers_same_project_lock_contention_and_retries(self):
         insights, _ = self.owner('primary')
-        other, _ = self.owner('other')
         record = self.insight(insights)
         insights.decide(record['id'], 'reject', 'Not needed', '', 'run', expected_rev=1)
         inbox = insights.root / 'inbox' / f"{record['id']}.json"
@@ -628,11 +780,11 @@ class SmokeRetentionTests(unittest.TestCase):
         with patch('mizu.insights.time.time', return_value=cutoff_now.timestamp()), \
                 patch('mizu.fs._LOCAL_BLOCKING_TIMEOUT', 0.01), \
                 patch.object(insights, 'gc_decided', wraps=insights.gc_decided) as sweep:
-            with record_lock(other.root):
+            with record_lock(insights.root):
                 result = insights.ingest_editor(keep_days=1)
             self.assertEqual(result, {'accepted': 0, 'rejected': 0, 'reaped': 0})
             self.assertTrue(inbox.is_file())
-            # Once the other project's shared critical section ends, the next
+            # Once this project's record critical section ends, the next
             # ordinary ingestion pass completes the unchanged retention sweep.
             result = insights.ingest_editor(keep_days=1)
         self.assertEqual([call.kwargs.get('blocking') for call in sweep.call_args_list],
@@ -852,19 +1004,21 @@ class SmokeRetentionTests(unittest.TestCase):
             self.run_retention(apply=True)
         self.assertTrue(pair.exists())
 
-    def test_busy_prune_ref_write_and_publication(self):
+    def test_shared_gate_still_serializes_retention_and_pair_publication(self):
         pair = self.pair()
         insights, _ = self.owner()
         record = self.insight(insights)
         with shared_lock(self.data):
             with self.assertRaises(Busy):
                 self.run_retention(apply=True)
-            with patch("mizu.fs._LOCAL_BLOCKING_TIMEOUT", 0), self.assertRaises(Busy):
-                insights.attach_evidence(record['id'], source='worker', text='pin', expected_rev=1, smoke_refs=[self.a])
+            # A project-local reference write remains safe and does not join the
+            # machine-wide queue; its project record lock protects the scan.
+            insights.attach_evidence(record['id'], source='worker', text='pin',
+                                     expected_rev=1, smoke_refs=[self.a])
             with self.assertRaises(Busy):
                 self.pair(self.b)
         self.assertTrue(pair.exists())
-        self.assertEqual(insights.read(record['id'])['evidence'], [])
+        self.assertEqual(self.run_retention(apply=True)['pinned'], [self.a])
 
     def test_pending_rollback_and_committed_partial_deletion_recovery(self):
         pair = self.pair()
@@ -915,36 +1069,51 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(opened['smoke_refs'], [])
         self.assertEqual(self.run_retention()['candidates'], [self.a])
 
-    def test_apply_recomputes_preview_and_writer_serializes_before_prune(self):
-        self.pair()
+    def test_pending_admission_serializes_reference_validation_with_scan(self):
+        pair = self.pair()
         insights, _ = self.owner()
         record = self.insight(insights)
         self.assertEqual(self.run_retention()['candidates'], [self.a])
-        entered, release = threading.Event(), threading.Event()
-        from mizu.smoke_refs import require_pairs
-        def paused_check(root, refs):
-            entered.set()
-            if not release.wait(10):
-                raise AssertionError('test coordination timed out')
-            return require_pairs(root, refs)
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            with patch('mizu.insights.require_pairs', side_effect=paused_check):
-                future = pool.submit(insights.attach_evidence, record['id'], source='worker',
+        entered, release, pending_moved = (threading.Event() for _ in range(3))
+        original_write = insights_module.write_json
+        rename = os.rename
+
+        def paused_write(path, value, *args, **kwargs):
+            if Path(path) == insights.root / 'inbox' / f"{record['id']}.json":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError('test coordination timed out')
+            return original_write(path, value, *args, **kwargs)
+
+        def observe_admission(source, destination):
+            result = rename(source, destination)
+            if (Path(source).parent.name == 'pairs'
+                    and Path(destination).name == self.a + '.pending'):
+                pending_moved.set()
+            return result
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with patch.object(insights_module, 'write_json', side_effect=paused_write), \
+                    patch.object(retention.os, 'rename', side_effect=observe_admission):
+                writer = pool.submit(insights.attach_evidence, record['id'], source='worker',
                                      text='pin', expected_rev=1, smoke_refs=[self.a])
-                try:
-                    self.assertTrue(entered.wait(10))
-                    with self.assertRaises(Busy):
-                        self.run_retention(apply=True)
-                finally:
-                    release.set()
-                future.result(timeout=10)
-        self.assertEqual(self.run_retention(apply=True)['retired'], [])
+                self.assertTrue(entered.wait(10))
+                sweep = pool.submit(self.run_retention, apply=True)
+                self.assertTrue(pending_moved.wait(10))
+                with self.assertRaises(Busy):
+                    sweep.result(timeout=10)
+                self.assertTrue(pair.is_dir())
+                release.set()
+                writer.result(timeout=10)
+        self.assertEqual(self.run_retention(apply=True)['pinned'], [self.a])
+        self.assertEqual(insights.read(record['id'])['evidence'][0]['smoke_refs'], [self.a])
+
         insights.decide(record['id'], 'reject', 'Not needed', '', 'run', expected_rev=1)
-        self.run_retention(apply=True)
-        # Retirement winning the race cannot create a dangling new pin.
+        self.assertEqual(self.run_retention(apply=True)['retired'], [self.a])
         other = insights.submit(source='worker', title='New topic', body='Body', base_snapshot=None)
         with self.assertRaises(Denied):
-            insights.attach_evidence(other['id'], source='worker', text='late pin', expected_rev=1, smoke_refs=[self.a])
+            insights.attach_evidence(other['id'], source='worker', text='late pin',
+                                     expected_rev=1, smoke_refs=[self.a])
 
     def test_prune_does_not_take_workspace_or_role_locks(self):
         self.pair()
@@ -977,11 +1146,11 @@ class SmokeRetentionTests(unittest.TestCase):
         rename = os.rename
         def interrupt(source, destination):
             if str(destination).endswith('.committed'):
-                raise OSError('synthetic interruption before commit')
+                raise KeyboardInterrupt('synthetic process death before commit')
             return rename(source, destination)
         with patch.object(retention.os, 'rename', side_effect=interrupt):
-            result = self.run_retention(apply=True)
-        self.assertFalse(result['complete'])
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_retention(apply=True)
         self.assertFalse(pair.exists())
         result = self.run_retention(apply=True)
         self.assertEqual(result['recovered'], [self.a])

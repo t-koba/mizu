@@ -853,41 +853,38 @@ or change these fields participate in retention coordination. Free-text
 citations, external copies, and provider run IDs are not pins; users attach a
 typed reference when they require durable access.
 
-The bounded collector enumerates every safe project root and every
-reference-bearing record, plus complete pair manifests. Any unsafe link,
-malformed or unreadable reference store, missing referenced project/pair,
-unknown schema, or bound exhaustion makes the global plan incomplete and
-refuses all deletion. Initial fixed bounds are 5,000 project roots, 5,000
-pairs, 20,000 live references and 64 MiB of reference/manifest metadata; pair
-payload bytes are not read into the metadata budget. Only complete terminal
-bundles with valid timezone-aware completion times strictly older than the
-configured window are candidates. Future, missing, intermediate, unknown or
-contradictory evidence is preserved. With `0`, no new expiry scan runs, but
-recognized quarantine recovery remains available.
+The bounded collector validates every complete pair and scans every safe
+project root under a per-name lifecycle lock followed by that project's record
+lock. One occurrence counter, shared across all per-root scans, enforces the
+reference budget. Any unsafe link, malformed or unreadable store, missing
+referenced project/pair, unknown schema, busy record lock, or bound exhaustion
+refuses expiry. Only complete terminal bundles with valid timezone-aware times
+strictly older than the configured window are candidates. Future, missing,
+intermediate, unknown or contradictory evidence is preserved. With `0`, no new
+expiry scan runs, but recognized quarantine recovery remains available.
 
-Pair publication, typed-reference changes and retirement share
-`data_dir/locks/smoke-retention.lock`; prune/publication acquire it nonblocking,
-while record writers retain the existing bounded writer wait and acquire it
-before the per-project record lock. Insight submissions and all evidence appends
-keep this ordering even with omitted or empty `smoke_refs`: their inbox
-atomic-write temporaries must not overlap retention's strict store scan. The
-read-only `unresolved_counts` and ref-free insight submission use the
-per-project lock alone. The legacy `pending_insight_events` full scan runs
-without that lock and takes it only to revalidate selected rows/receipts or run
-the exact fallback after a metadata-witness change, so it remains independent
-of another project's shared lock. The legacy scan remains project-local and
-fails closed on unknown entries without an active writer.
+Reference-bearing writes validate the pair and commit under only the owning
+project record lock. Retention serializes sweeps on
+`data_dir/locks/smoke-retention-apply.lock`, then uses
+`data_dir/locks/smoke-retention.lock` only for short policy/pair snapshots,
+pending admission or rollback, restore publication, and irreversible commit.
+It moves candidates to `.pending` before scanning. A writer already holding the
+record lock makes the scan return `Busy` and candidates are restored; after
+admission a new reference cannot validate a pair that is pending. Restore holds
+the shared gate through restored-reference validation and root publication.
+Pair publication and policy updates also use that gate. Retention never acquires
+workspace or role-execution locks, but scans project record state nonblocking.
+The legacy `pending_insight_events` full scan remains project-local and fails
+closed on unknown entries without an active writer.
 
-Delivery binding nests the shared lock between
-`publication.lock` and `insights.lock`; snapshot and smoke-bundle publishers take
-only their own lock. Retention never acquires workspace or role-execution locks,
-avoiding a cycle with live writers. The live provider
-call never holds this global lock. Prune needs no project pause, defaults to
-a bounded dry-run, and recomputes its plan under the lock for `--apply`; busy
-or incomplete scans do nothing. Each whole pair directory is atomically renamed into same-filesystem
-quarantine, with pre-commit rollback and committed-deletion recovery plus a
-bounded maintenance audit. Pair retirement is atomic; the whole batch is not,
-so partial I/O failure is reported and later pairs remain untouched.
+Delivery binding nests `publication.lock` before the project record lock;
+snapshot and smoke-bundle publishers take only their own lock. The live provider
+call never holds these locks. Preview is bounded and read-only; apply recomputes
+the full plan rather than trusting it. Each whole pair directory is moved to
+same-filesystem quarantine, with pending rollback and committed-deletion
+recovery plus a bounded audit. Pair retirement is atomic; the whole batch is
+not, so partial I/O failure is reported and later candidates are restored or
+recovered without treating the apply as complete.
 
 Synthetic regressions cover cross-project pins, current versus terminal
 owners, exact Insight revisions and waits, malformed/missing/oversized/link

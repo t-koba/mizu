@@ -519,7 +519,7 @@ class Insights:
             raise Denied("Insight exceeds byte limit")
         # A new record has no evidence, so this ref-free write needs only the
         # project lock; retention skips the atomic temporaries it creates.
-        with lock_diagnostics.operation("write"), record_lock(self.root, shared=False):
+        with lock_diagnostics.operation("write"), record_lock(self.root):
             if not explicit:
                 best = None
                 best_key = None
@@ -1517,7 +1517,7 @@ replacement insight without implying rejected substance.
             return False
 
     def consume_waits(self, role_name: str, events) -> int:
-        """Release consumed wait pins under global-before-record coordination."""
+        """Release consumed wait pins under the owning project's record lock."""
         with lock_diagnostics.operation("write"), record_lock(self.root):
             return self._consume_waits(role_name, events)
 

@@ -355,33 +355,48 @@ unpublished staging is diagnostic evidence, never an expiry candidate.
 mizu smoke-retention                 # project-free, read-only advisory preview
 mizu smoke-retention --set-days 31   # operator CLI only; one shared data-dir policy
 mizu smoke-retention --set-days 0    # keep indefinitely (recovery still available)
-mizu smoke-retention --apply        # recompute under the global lock, then retire
+mizu smoke-retention --apply        # bounded pending-first scan, then retire
 ```
 
-No project pause is needed. Apply is nonblocking on
-`data_dir/locks/smoke-retention.lock`; a busy lock refuses without changing
-pairs. A bounded automatic sweep also runs without pause: when
+No project pause is needed. Sweeps serialize on the nonblocking
+`data_dir/locks/smoke-retention-apply.lock`. The shared
+`data_dir/locks/smoke-retention.lock` remains a short admission gate for pair
+publication, policy changes, restore publication, pending admission, rollback,
+and irreversible commit; the full project scan never holds it. Apply snapshots
+policy and pair identities under that gate, moves age-qualified candidates to
+`.pending` under the same gate, then checks every project under its nonblocking
+lifecycle lock followed by its project record lock. One shared reference counter
+and the configured metadata/report/entry bounds cover the complete scan. A busy
+project lock or incomplete scan restores admitted pairs before returning; if
+rollback itself is contended, normal quarantine recovery handles the pending
+state on the next apply. Pinned candidates return to `pairs`; only unpinned
+candidates cross the `.committed` boundary, one at a time, after a fresh policy
+check. Reference-bearing record writes validate and commit under only their
+project lock: a write already in progress makes retention return `Busy`, while
+a later write sees a pending/missing pair and refuses. Restore keeps the shared
+gate through restored-reference validation and root publication. Busy returns
+without consuming the automatic cadence.
+
+A bounded automatic sweep also runs without pause: when
 `[limits].automatic_smoke_retention_interval_seconds` (default 86,400; 0 disables,
 0–2,678,400) is due, the next top-level role execution attempts one
-best-effort sweep using the same implementation as manual apply before it acquires admission/execution locks,
-alongside workspace-cache and run-retention maintenance. Cadence state is global per
-`data_dir` (`maintenance/automatic-smoke-retention.json`) serialized with expiry under
-the existing nonblocking shared smoke lock, so at most one sweep runs due across projects and
-busy contention never consumes the cadence. The automatic path changes no policy,
-takes no project locks, never fails the requested run, never deletes on malformed,
-incomplete or uncertain reference state, and leaves snapshots/objects untouched; the
-latest bounded result is `data_dir/maintenance/automatic-smoke-retention.json`. Manual
-preview, `--set-days` and `--apply` are unchanged. Refused plans consume the interval;
-busy does not. Malformed/unsafe cadence state returns `unavailable` without a sweep
-or automatic repair; inspect and repair it explicitly. The fixed-size result stores
-only timestamp, status, completion counts/policy or an error class, never error text.
-A write failure can leave no new result; normal quarantine recovery still applies to
-an interrupted sweep. There is no background timer: the next safe boundary retries
-when due. Reference writers take this lock before their record-store lock (using
-the existing bounded writer wait); provider execution never holds it. Preview
-neither creates lock files nor recovers quarantine and is advisory: apply never
-trusts a preview. Each output list is sampled to 100 IDs with its full count
-and digest; the internal scan and apply are complete, not sampled.
+best-effort sweep before it acquires admission/execution locks, alongside
+workspace-cache and run-retention maintenance. The apply lock serializes cadence
+and expiry across projects; the shared gate is held only for the short global
+operations above. The scan takes lifecycle and project record locks one project
+at a time, never workspace or role-execution locks. Malformed, incomplete or
+uncertain reference state refuses expiry and never fails the requested run;
+snapshots/objects remain untouched. The latest bounded result is
+`data_dir/maintenance/automatic-smoke-retention.json`. Preview, `--set-days` and
+`--apply` remain distinct; preview neither creates lock files nor recovers
+quarantine and is advisory. Apply recomputes its complete plan, never trusting
+a preview. Output lists are sampled to 100 IDs with full counts and digests.
+Refused plans consume the cadence; any Busy contention does not. Malformed or
+unsafe cadence state returns `unavailable` without automatic repair. The fixed-
+size result contains only timestamp, status, completion counts/policy or an
+error class. A failed result write may leave no new cadence record; normal
+quarantine recovery handles interrupted sweeps. There is no background timer:
+the next safe boundary retries when due.
 
 Only current open/deferred Insight evidence or nonterminal WorkItems/waits with
 explicit `smoke_refs` pin bundles. Attach IDs with the host `attach_evidence`

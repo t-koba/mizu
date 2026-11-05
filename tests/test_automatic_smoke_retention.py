@@ -17,7 +17,7 @@ from mizu.config import load
 from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import held, write_json
 from mizu.insights import Insights
-from mizu.smoke_refs import shared_lock
+from mizu.smoke_refs import project_record_lock, shared_lock
 
 CLOCK = 2_000_000_000
 DAY = 86400
@@ -154,6 +154,17 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
         self.assertTrue(old.is_dir())
         self.assertEqual(self.maintain()["retired_total"], 1)
 
+    def test_busy_project_scan_does_not_consume_cadence(self):
+        old = self.pair()
+        root = self.data / "projects/owner"
+        root.mkdir(parents=True)
+        with project_record_lock(root):
+            self.assertEqual(self.maintain(), {"status": "busy"})
+            self.assertFalse(self.state.exists())
+            self.assertTrue(old.is_dir())
+        self.assertEqual(self.maintain()["retired_total"], 1)
+        self.assertFalse(old.exists())
+
     def test_two_projects_contend_for_one_shared_sweep(self):
         entered, release = threading.Event(), threading.Event()
         original = retention._run_locked
@@ -175,10 +186,10 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
             self.assertEqual(self.maintain(), {"status": "not-due"})
             self.assertEqual(run.call_count, 1)
 
-    def test_due_is_rechecked_under_the_shared_lock(self):
+    def test_due_is_rechecked_under_the_apply_lock(self):
         @contextlib.contextmanager
-        def acquire(data):
-            with shared_lock(data):
+        def acquire(data, *, blocking=False):
+            with shared_lock(data, blocking=blocking):
                 # Another project finished between the fast check and acquire.
                 write_json(self.state, self.completed())
                 yield
@@ -270,7 +281,8 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
         target = Path(self.temp.name) / "target.json"
         write_json(target, self.completed(0))
         original = target.read_bytes()
-        paths = [self.state, self.data / "locks/smoke-retention.lock"]
+        paths = [self.state, self.data / "locks/smoke-retention.lock",
+                 self.data / "locks/smoke-retention-apply.lock"]
         for path in paths:
             path.parent.mkdir(exist_ok=True)
             path.unlink(missing_ok=True)

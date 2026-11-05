@@ -377,11 +377,11 @@ class RestoreTests(Fixture):
         rename = retention.os.rename
         def interrupt(source, destination):
             if str(destination).endswith(".committed"):
-                raise OSError("synthetic interruption before deletion commit")
+                raise KeyboardInterrupt("synthetic process death before deletion commit")
             return rename(source, destination)
         with patch.object(retention.os, "rename", side_effect=interrupt):
-            result = retention.run(data, apply=True)
-        self.assertFalse(result["complete"])
+            with self.assertRaises(KeyboardInterrupt):
+                retention.run(data, apply=True)
         self.assertTrue((data / "validation/quarantine" / f"{smoke_id}.pending").is_dir())
         self.assertFalse(pair.exists())
         with self.assertRaises(Denied):

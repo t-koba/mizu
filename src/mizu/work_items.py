@@ -2701,8 +2701,8 @@ class WorkItems:
         exact pre-existing delivery revision, never the live workspace. A doing
         transition carrying snapshot_id records that delivery binding (event
         snapshot_id stays null); done carrying snapshot_id must equal it.
-        Delivery binding validates retained membership under publication.lock,
-        then smoke-retention.lock and insights.lock through append. Completion
+        Delivery binding validates retained membership under publication.lock
+        and the owning project's record lock. Completion
         copies valid embedded proof or
         pins an independently retained acceptance receipt by immutable ID.
         All validation precedes the exclusive atomic
@@ -2711,9 +2711,9 @@ class WorkItems:
         """
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
-        # Global order is publication -> smoke-retention -> insights. Snapshot
-        # and smoke-bundle publishers take only their own lock, so neither
-        # acquires the other's lock. Keep membership validation and append together.
+        # Publication membership and this record append stay ordered together.
+        # Smoke retention serializes candidate admission and then scans this
+        # project's record lock, so no machine-wide lock belongs on this write.
         binding_request = (status == "doing" and snapshot_id is not None)
         publication_wait = (status == "blocked" and isinstance(wait, dict)
                             and wait.get("kind") == "publication_ci")

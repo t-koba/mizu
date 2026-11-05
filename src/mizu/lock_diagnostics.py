@@ -13,7 +13,8 @@ from collections import deque
 # integers saturate at signed 32-bit maximum to bound serialized field width.
 MAX_LOCK_DIAGNOSTIC_ROWS = 32
 MAX_LOCK_DIAGNOSTIC_VALUE = 2147483647
-_LOCKS = {"insights.lock": "project-record", "smoke-retention.lock": "shared-smoke"}
+_LOCKS = {"insights.lock": "project-record", "smoke-retention.lock": "shared-smoke",
+          "smoke-retention-apply.lock": "retention-apply"}
 _PHASES = {"pre-admission-startup", "editor-ingestion", "pre-admission-dispatch",
            "admission", "post-admission"}
 _current = contextvars.ContextVar("lock_diagnostics", default=None)

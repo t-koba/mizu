@@ -1,12 +1,14 @@
 """Data-dir-owned shared smoke bundles: bounded preview, retirement and recovery.
 
-No provider work or workspace locks here. All mutators use the same
-nonblocking global lock. Publication validates the isolated scratch layout; the
+No provider work or workspace locks here. Expiry runs serialize on a separate
+nonblocking apply lock; the shared gate protects policy, pair publication,
+restore, candidate admission and commit, not project-record scans. Reference
+writers use their project lock and retention scans projects under lifecycle
+then record locks. Publication validates the isolated scratch layout; the
 scratch project is single-owner, written only by the calling smoke run before
 publication, so no in-tree lock handle is held across the rename (an open handle
 inside a renamed directory is refused on Windows). Preview is read-only,
-including quarantine recovery. Unknown or incomplete metadata refuses the entire
-expiry plan before any rename.
+including quarantine recovery. Unknown or incomplete metadata refuses expiry.
 """
 from __future__ import annotations
 
@@ -118,9 +120,9 @@ class Metadata:
         self.cache = {}
         self.has_refs = False
 
-    def read(self, path: Path, maximum=MAX_RECORD):
+    def read(self, path: Path, maximum=MAX_RECORD, *, fresh=False):
         name = path.relative_to(self.data).as_posix()
-        if name in self.cache:
+        if name in self.cache and not fresh:
             return self.cache[name]
         raw = safe_read(self.data, name, maximum)
         self.bytes += len(raw)
@@ -156,7 +158,7 @@ class Metadata:
         return record
 
 
-def policy(data: Path, metadata: Metadata | None = None) -> int:
+def policy(data: Path, metadata: Metadata | None = None, *, fresh=False) -> int:
     metadata = metadata or Metadata(data)
     path = data / "validation" / "retention-policy.json"
     directory(data)
@@ -166,7 +168,7 @@ def policy(data: Path, metadata: Metadata | None = None) -> int:
         path.lstat()
     except FileNotFoundError:
         return 31
-    record = metadata.read(path, 1024)
+    record = metadata.read(path, 1024, fresh=fresh)
     if (set(record) != {"version", "days"} or type(record["version"]) is not int
             or record["version"] != 1 or type(record["days"]) is not int
             or not 0 <= record["days"] <= MAX_DAYS):
@@ -192,6 +194,27 @@ def timestamp(value):
     if parsed is None or parsed.utcoffset() is None:
         raise Denied("Smoke completion must be a timezone-aware timestamp")
     return parsed
+
+
+@contextlib.contextmanager
+def retention_apply_lock(data: Path):
+    """Serialize expiry operations without holding the shared writer gate."""
+    data = Path(data)
+    path = data / "locks" / "smoke-retention-apply.lock"
+    with contextlib.ExitStack() as stack:
+        with shared_lock(data, blocking=False):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.is_symlink()
+                        or getattr(info, "st_reparse_tag", 0)):
+                    raise Denied("Unsafe smoke retention apply lock file")
+            # Open the persistent operation lock while shared path validation is
+            # held; release the global gate before the long scan begins.
+            stack.enter_context(lock(path, blocking=False))
+        yield
 
 
 def project_identity(path: Path):
@@ -225,7 +248,7 @@ def project_scan_lock(data: Path, root: Path, expected_identity: dict):
         if project_identity(root) != expected_identity:
             raise Denied("Managed project changed during retention scan")
         directory(root / "locks", optional=True)
-        with project_record_lock(root):
+        with project_record_lock(root, blocking=False):
             directory(root / "locks")
             if project_identity(root) != expected_identity:
                 raise Denied("Managed project changed during retention scan")
@@ -233,7 +256,9 @@ def project_scan_lock(data: Path, root: Path, expected_identity: dict):
 
 
 def admit_retirement_candidates(data: Path, expected_identities: dict[str, dict], *,
-                                budgets: Budgets | None = None) -> list[Path]:
+                                budgets: Budgets | None = None,
+                                expected_days: int | None = None,
+                                metadata: Metadata | None = None) -> list[Path]:
     """Move age-qualified pairs to pending under the restore admission gate.
 
     Candidates come from a complete bounded plan that already validated their
@@ -241,11 +266,17 @@ def admit_retirement_candidates(data: Path, expected_identities: dict[str, dict]
     rechecks identities, requires an empty quarantine (recovery must finish
     first), and performs only the admission renames. Restore takes the same lock
     around staged-reference validation and root publication. After admission,
-    the caller must scan every committed project under ``project_scan_lock``
-    before any pending-to-committed deletion. This primitive is not wired into
-    ``run`` yet.
+    the caller scans every committed project under ``project_scan_lock``
+    before any pending-to-committed deletion.
     """
-    budgets = budgets or Budgets()
+    if metadata is not None:
+        if Path(metadata.data) != Path(data):
+            raise ValueError("Metadata belongs to a different smoke data directory")
+        if budgets is not None and budgets != metadata.budgets:
+            raise ValueError("Conflicting smoke retention budgets")
+        budgets = metadata.budgets
+    budgets = Budgets() if budgets is None else budgets
+    metadata = metadata or Metadata(data, budgets=budgets)
     if (not isinstance(budgets, Budgets) or type(budgets.pairs) is not int
             or budgets.pairs < 1):
         raise ValueError("Smoke pair budget must be positive")
@@ -264,6 +295,8 @@ def admit_retirement_candidates(data: Path, expected_identities: dict[str, dict]
     directory(pairs)
     moved = []
     with shared_lock(data, blocking=False):
+        if expected_days is not None and policy(data, metadata, fresh=True) != expected_days:
+            raise Busy("Smoke retention policy changed before retirement admission")
         published_paths = entries(pairs, budgets.pairs)
         if any(not SMOKE_ID.fullmatch(path.name) for path in published_paths):
             raise Denied("Unknown published smoke pair")
@@ -586,7 +619,13 @@ def _store_entries(base: Path, metadata: Metadata):
             if not ATOMIC_TEMPORARY.fullmatch(path.name))
 
 
-def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
+def collect_refs(metadata: Metadata, pairs: dict, *, roots=None,
+                 ref_count: list[int] | None = None) -> set:
+    """Collect live pins, charging occurrences to an optional shared ``[count]``.
+
+    Omission starts a fresh count. Share the accumulator across per-root calls
+    with the same budgets; charges remain consumed if a scan fails.
+    """
     from .insights import (Insights, _effective_decision, _rev_of, MAX_EVIDENCE_ENTRIES,
                            MAX_EVIDENCE_CHARS, INSIGHT_METADATA_DEFAULTS, insight_metadata)
     from .work_items import WorkItems
@@ -594,13 +633,12 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
     roots = (entries(metadata.data / "projects", metadata.budgets.projects, optional=True)
              if roots is None else roots)
     pinned = set()
-    ref_count = 0
+    ref_count = [0] if ref_count is None else ref_count
 
     def add(refs):
-        nonlocal ref_count
         validate_refs(refs)
-        ref_count += len(refs)
-        if ref_count > metadata.budgets.refs:
+        ref_count[0] += len(refs)
+        if ref_count[0] > metadata.budgets.refs:
             raise LimitExceeded("Smoke live reference bound exceeded")
         if any(ref not in pairs for ref in refs):
             raise Denied("Live smoke reference has no complete pair")
@@ -797,58 +835,220 @@ def audit(data: Path, smoke_id: str, action: str):
 def run(data: Path, *, apply=False, moment=None, budgets: Budgets | None = None) -> dict:
     moment = moment or dt.datetime.now(dt.timezone.utc)
     timestamp(moment.isoformat())
-    # Preview is advisory and strictly read-only, including lock inodes.
-    # Apply always recomputes the complete plan under the global lock.
-    with shared_lock(data) if apply else contextlib.nullcontext():
-        return _run_locked(data, apply=apply, moment=moment, budgets=budgets)
+    if not apply:
+        return _run_locked(data, apply=False, moment=moment, budgets=budgets)
+    with retention_apply_lock(data):
+        return _run_locked(data, apply=True, moment=moment, budgets=budgets)
+
+
+def _rollback_pending(data: Path, smoke_ids: list[str], identities: dict[str, dict]) -> None:
+    """Restore an admitted but uncommitted batch; failure leaves normal recovery state."""
+    if not smoke_ids:
+        return
+    validation = data / "validation"
+    pairs = validation / "pairs"
+    quarantine_root = validation / "quarantine"
+    with shared_lock(data, blocking=False):
+        moved = []
+        failures = []
+        for smoke_id in smoke_ids:
+            pending = quarantine_root / f"{smoke_id}.pending"
+            target = pairs / smoke_id
+            committed = quarantine_root / f"{smoke_id}.committed"
+            try:
+                pending.lstat()
+                pending_exists = True
+            except FileNotFoundError:
+                pending_exists = False
+            try:
+                target.lstat()
+                target_exists = True
+            except FileNotFoundError:
+                target_exists = False
+            try:
+                committed.lstat()
+                committed_exists = True
+            except FileNotFoundError:
+                committed_exists = False
+            try:
+                if pending_exists and project_identity(pending) != identities[smoke_id]:
+                    raise Denied("Pending smoke pair changed before rollback")
+                if target_exists and project_identity(target) != identities[smoke_id]:
+                    raise Denied("Published smoke pair changed before rollback")
+                if committed_exists and project_identity(committed) != identities[smoke_id]:
+                    raise Denied("Committed smoke pair changed before rollback")
+                if pending_exists:
+                    if target_exists or committed_exists:
+                        raise Denied("Smoke pair rollback state is ambiguous")
+                    moved.append(smoke_id)
+                elif target_exists and committed_exists:
+                    raise Denied("Smoke pair rollback state is ambiguous")
+                elif not target_exists and not committed_exists:
+                    raise Denied("Smoke pair disappeared before rollback")
+                # A published pair was not admitted or was already restored; a
+                # committed pair crossed the irreversible boundary and stays so.
+            except (OSError, Denied) as exc:
+                failures.append(exc)
+        for smoke_id in moved:
+            try:
+                os.rename(quarantine_root / f"{smoke_id}.pending", pairs / smoke_id)
+                sync_dir(quarantine_root)
+                sync_dir(pairs)
+            except (OSError, Denied) as exc:
+                failures.append(exc)
+        if failures:
+            raise failures[0]
+
+
+def _recover_locked(data: Path, recovery, metadata: Metadata, result: dict) -> None:
+    """Finish prior quarantine state while the caller holds shared_lock."""
+    for path, smoke_id, state in recovery:
+        if state == "pending":
+            os.rename(path, data / "validation" / "pairs" / smoke_id)
+            sync_dir(path.parent)
+            sync_dir(data / "validation" / "pairs")
+            action = "rollback"
+        else:
+            _delete_committed(data, path, smoke_id, metadata.budgets)
+            action = "recovered-deletion"
+        result["recovered"].append(smoke_id)
+        audit(data, smoke_id, action)
+
+
+def _scan_refs_by_project(data: Path, metadata: Metadata, pairs: dict) -> set:
+    """Scan one root at a time; a busy project's record lock refuses the pass."""
+    roots = entries(data / "projects", metadata.budgets.projects, optional=True)
+    pinned = set()
+    ref_count = [0]
+    for root in roots:
+        identity = project_identity(root)
+        with project_scan_lock(data, root, identity):
+            pinned.update(collect_refs(metadata, pairs, roots=[root], ref_count=ref_count))
+    return pinned
+
+
+def _run_apply(data: Path, *, moment: dt.datetime, budgets: Budgets | None = None) -> dict:
+    metadata = Metadata(data, budgets=budgets)
+    result = {"days": 31, "apply": True, "candidates": [], "pinned": [],
+              "recovery": [], "retired": [], "recovered": []}
+    # Read policy/recovery and snapshot pair identities under the gate. Expensive
+    # project metadata is scanned later under each project's own lifecycle and
+    # record locks, with no shared lock held.
+    with shared_lock(data, blocking=False):
+        days = policy(data, metadata)
+        recovery = quarantine(data, metadata)
+        recovered_pending_manifests = {
+            smoke_id: read_pair(metadata, smoke_id, path=path)
+            for path, smoke_id, state in recovery if state == "pending"
+        }
+        result.update(days=days, recovery=[path.name for path, _, _ in recovery])
+        audit_rows(data, metadata)
+        if recovery:
+            try:
+                _recover_locked(data, recovery, metadata, result)
+            except (OSError, Denied, LimitExceeded) as exc:
+                result.update(complete=False, error=type(exc).__name__)
+                return bounded_result(result)
+        if not days:
+            result.update(metadata_bytes=metadata.bytes, report_bytes=metadata.report_bytes,
+                          complete=True)
+            return bounded_result(result)
+        pairs_dir = data / "validation" / "pairs"
+        pair_paths = entries(pairs_dir, metadata.budgets.pairs, optional=True)
+        pair_identities = {}
+        for path in pair_paths:
+            if not SMOKE_ID.fullmatch(path.name):
+                raise Denied("Unknown smoke pair entry")
+            pair_identities[path.name] = project_identity(path)
+
+    # Existing pending items were rolled back by recovery and are deliberately
+    # not newly expired in this invocation, matching the previous apply pass.
+    recovered_pending = {smoke_id for _, smoke_id, state in recovery if state == "pending"}
+    pairs = {}
+    cutoff = moment - dt.timedelta(days=days)
+    age_candidates = []
+    try:
+        for path in pair_paths:
+            manifest = recovered_pending_manifests.get(path.name)
+            if manifest is None:
+                manifest = read_pair(metadata, path.name)
+            pairs[path.name] = manifest
+            if (path.name not in recovered_pending
+                    and timestamp(manifest["completed_at"]) < cutoff):
+                age_candidates.append(path.name)
+        if age_candidates:
+            identities = {smoke_id: pair_identities[smoke_id] for smoke_id in age_candidates}
+            admit_retirement_candidates(data, identities, budgets=metadata.budgets,
+                                        expected_days=days, metadata=metadata)
+        pinned = _scan_refs_by_project(data, metadata, pairs)
+    except (OSError, Busy, Denied, LimitExceeded):
+        try:
+            _rollback_pending(data, age_candidates, pair_identities)
+        except Busy:
+            raise
+        except (OSError, Denied, LimitExceeded):
+            pass  # A later apply replays and rolls back recognized pending entries.
+        raise
+
+    retiring = [smoke_id for smoke_id in age_candidates if smoke_id not in pinned]
+    pinned_candidates = [smoke_id for smoke_id in age_candidates if smoke_id in pinned]
+    try:
+        _rollback_pending(data, pinned_candidates, pair_identities)
+    except Busy:
+        raise
+    except (OSError, Denied, LimitExceeded) as exc:
+        result.update(candidates=retiring, pinned=sorted(pinned), metadata_bytes=metadata.bytes,
+                      report_bytes=metadata.report_bytes, complete=False,
+                      error=type(exc).__name__, failed_id=pinned_candidates[0])
+        return bounded_result(result)
+
+    result.update(candidates=retiring, pinned=sorted(pinned), metadata_bytes=metadata.bytes,
+                  report_bytes=metadata.report_bytes)
+    qroot = data / "validation" / "quarantine"
+    try:
+        for smoke_id in retiring:
+            with shared_lock(data, blocking=False):
+                if policy(data, metadata, fresh=True) != days:
+                    raise Busy("Smoke retention policy changed during apply")
+                pending = qroot / f"{smoke_id}.pending"
+                committed = qroot / f"{smoke_id}.committed"
+                if project_identity(pending) != pair_identities[smoke_id]:
+                    raise Denied("Pending smoke pair changed before commit")
+                os.rename(pending, committed)
+                sync_dir(qroot)
+                _delete_committed(data, committed, smoke_id, metadata.budgets)
+                result["retired"].append(smoke_id)
+                audit(data, smoke_id, "deleted")
+    except (OSError, Busy, Denied, LimitExceeded) as exc:
+        remaining = [smoke_id for smoke_id in retiring if smoke_id not in result["retired"]]
+        try:
+            _rollback_pending(data, remaining, pair_identities)
+        except Busy:
+            raise
+        except (OSError, Denied, LimitExceeded):
+            pass
+        if isinstance(exc, Busy):
+            raise
+        result.update(complete=False, error=type(exc).__name__, failed_id=smoke_id,
+                      metadata_bytes=metadata.bytes, report_bytes=metadata.report_bytes)
+        return bounded_result(result)
+    result.update(complete=True, metadata_bytes=metadata.bytes, report_bytes=metadata.report_bytes)
+    return bounded_result(result)
 
 
 def _run_locked(data: Path, *, apply: bool, moment: dt.datetime,
                 budgets: Budgets | None = None) -> dict:
-    """Shared implementation; applying callers must already hold shared_lock."""
+    """Apply the two-phase admission protocol or produce an advisory preview."""
+    if apply:
+        return _run_apply(data, moment=moment, budgets=budgets)
     metadata = Metadata(data, budgets=budgets)
     days = policy(data, metadata)
     recovery = quarantine(data, metadata)
-    result = {"days": days, "apply": apply, "candidates": [], "pinned": [],
+    result = {"days": days, "apply": False, "candidates": [], "pinned": [],
               "recovery": [p.name for p, _, _ in recovery], "retired": [], "recovered": []}
     if days:
         result.update(plan(data, days, moment, recovery, metadata))
     audit_rows(data, metadata)
-    if not apply:
-        return bounded_result(result)
-    # Pending pairs participate in the scan above but never in this
-    # invocation's expiry candidates. Recovery does not bypass bad refs.
-    try:
-        for path, smoke_id, state in recovery:
-            if state == "pending":
-                os.rename(path, data / "validation" / "pairs" / smoke_id)
-                sync_dir(path.parent)
-                sync_dir(data / "validation" / "pairs")
-                action = "rollback"
-            else:
-                _delete_committed(data, path, smoke_id, metadata.budgets)
-                action = "recovered-deletion"
-            result["recovered"].append(smoke_id)
-            audit(data, smoke_id, action)
-        for smoke_id in result["candidates"]:
-            source = data / "validation" / "pairs" / smoke_id
-            qroot = data / "validation" / "quarantine"
-            qroot.mkdir(exist_ok=True, mode=0o700)
-            directory(qroot)
-            pending = qroot / f"{smoke_id}.pending"
-            committed = qroot / f"{smoke_id}.committed"
-            os.rename(source, pending)
-            sync_dir(source.parent)
-            sync_dir(qroot)
-            os.rename(pending, committed)  # irreversible deletion commit
-            sync_dir(qroot)
-            _delete_committed(data, committed, smoke_id, metadata.budgets)
-            result["retired"].append(smoke_id)
-            audit(data, smoke_id, "deleted")
-    except (OSError, Denied, LimitExceeded) as exc:
-        result.update(complete=False, error=type(exc).__name__, failed_id=smoke_id)
-        return bounded_result(result)
-    result["complete"] = True
     return bounded_result(result)
 
 def bounded_result(result):
@@ -902,9 +1102,9 @@ def _automatic_smoke_due(data: Path, instant: int, interval: int) -> bool:
 def maintain_automatic_smoke_retention(project) -> dict:
     """Best-effort global cadence; call before any project execution locks.
 
-    The existing nonblocking shared lock serializes both cadence and sweep,
-    including reference writers and manual apply. No second lock/order exists.
-    Busy does not consume the cadence. Only a due attempt writes a bounded
+    The nonblocking apply lock serializes cadence and manual sweeps. Short
+    shared gates protect pair admission/commit; project record scans are
+    nonblocking. Busy does not consume the cadence. Only a due attempt writes a bounded
     result; refused plans consume the interval to avoid repeated costly scans.
     Unsafe state refuses before expiry. Unexpected failures also stay local to
     maintenance, never swallowing process cancellation (BaseException).
@@ -922,7 +1122,7 @@ def maintain_automatic_smoke_retention(project) -> dict:
         instant = int(time.time())
         if not _automatic_smoke_due(data, instant, interval):
             return {"status": "not-due"}
-        with lock_diagnostics.operation("write"), shared_lock(data):
+        with lock_diagnostics.operation("write"), retention_apply_lock(data):
             # Another project may have run since the fast check.
             instant = int(time.time())
             if not _automatic_smoke_due(data, instant, interval):
