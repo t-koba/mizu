@@ -22,6 +22,7 @@ jobs:
     # receipt reserve model to 3,246 s, fitting each 60-minute cell. Linux/
     # Python 3.13 also stages the installer and runs OCI: 3,246 + 3,300 + 600
     # = 7,146 s, inside its unchanged 120-minute scope.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
       fail-fast: false

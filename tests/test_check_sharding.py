@@ -132,6 +132,7 @@ class WindowsShardWorkflowTests(unittest.TestCase):
     def test_only_windows_312_and_314_are_excluded_and_sharded_with_distinct_artifacts(self):
         core = self.jobs['core']
         self.assertTrue(self.workflow.startswith('name: Offline checks\n'))
+        self.assertIn('    runs-on: ${{ matrix.os }}\n', core)
         self.assertNotRegex(core, r'(?m)^    name:')  # Keep all other automatic matrix names.
         self.assertIn('        os: [ubuntu-24.04, macos-latest, windows-latest]\n', core)
         self.assertIn('        python: ["3.11", "3.12", "3.13", "3.14"]\n', core)
