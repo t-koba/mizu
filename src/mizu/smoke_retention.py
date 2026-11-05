@@ -27,8 +27,8 @@ from .config import (DEFAULT_SMOKE_RETENTION_ENTRIES, DEFAULT_SMOKE_RETENTION_ME
                      TOML_INTEGER_MAX)
 from .errors import Busy, Denied, LimitExceeded
 from . import lock_diagnostics
-from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier
-from .smoke_refs import SMOKE_ID, shared_lock, validate_refs
+from .fs import canonical, digest, loads_finite, now, safe_read, safe_write, sync_dir, write_json, identifier, lock
+from .smoke_refs import SMOKE_ID, project_record_lock, shared_lock, validate_refs
 
 MAX_RECORD = 128 * 1024
 MAX_DAYS = 36500
@@ -198,6 +198,99 @@ def project_identity(path: Path):
     directory(path)
     info = path.lstat()
     return {"device": info.st_dev, "inode": info.st_ino}
+
+
+@contextlib.contextmanager
+def project_scan_lock(data: Path, root: Path, expected_identity: dict):
+    """Hold a managed root's lifecycle lock before its movable record lock.
+
+    ``expected_identity`` is captured while enumerating ``data/projects``.
+    Initialization and restore use the same per-name lock. Verify the root
+    before opening its in-root lock so a missing/replaced path is not recreated;
+    recheck after acquisition to fail closed on an unsupported replacement.
+    Callers must not hold the machine-wide smoke lock while scanning.
+    """
+    data, root = Path(data), Path(root)
+    if (root.parent != data / "projects" or not identifier(root.name)
+            or not isinstance(expected_identity, dict)
+            or set(expected_identity) != {"device", "inode"}
+            or any(type(value) is not int or value < 0 for value in expected_identity.values())):
+        raise Denied("Invalid managed project scan identity")
+    directory(data)
+    lock_directory = data / "locks"
+    if not directory(lock_directory, optional=True):
+        lock_directory.mkdir(exist_ok=True, mode=0o700)
+        directory(lock_directory)
+    with lock(lock_directory / f"init-{root.name}.lock", blocking=False):
+        if project_identity(root) != expected_identity:
+            raise Denied("Managed project changed during retention scan")
+        directory(root / "locks", optional=True)
+        with project_record_lock(root):
+            directory(root / "locks")
+            if project_identity(root) != expected_identity:
+                raise Denied("Managed project changed during retention scan")
+            yield
+
+
+def admit_retirement_candidates(data: Path, expected_identities: dict[str, dict], *,
+                                budgets: Budgets | None = None) -> list[Path]:
+    """Move age-qualified pairs to pending under the restore admission gate.
+
+    Candidates come from a complete bounded plan that already validated their
+    pair contents and existing quarantine state. Under the shared lock this
+    rechecks identities, requires an empty quarantine (recovery must finish
+    first), and performs only the admission renames. Restore takes the same lock
+    around staged-reference validation and root publication. After admission,
+    the caller must scan every committed project under ``project_scan_lock``
+    before any pending-to-committed deletion. This primitive is not wired into
+    ``run`` yet.
+    """
+    budgets = budgets or Budgets()
+    if (not isinstance(budgets, Budgets) or type(budgets.pairs) is not int
+            or budgets.pairs < 1):
+        raise ValueError("Smoke pair budget must be positive")
+    if not isinstance(expected_identities, dict) or not 1 <= len(expected_identities) <= budgets.pairs:
+        raise Denied("Smoke retirement admission requires a bounded nonempty candidate map")
+    for smoke_id, identity in expected_identities.items():
+        if not isinstance(smoke_id, str) or not SMOKE_ID.fullmatch(smoke_id):
+            raise Denied("Invalid smoke pair ID")
+        if (not isinstance(identity, dict) or set(identity) != {"device", "inode"}
+                or any(type(value) is not int or value < 0 for value in identity.values())):
+            raise Denied("Invalid smoke pair identity")
+    directory(data)
+    validation = data / "validation"
+    directory(validation)
+    pairs = validation / "pairs"
+    directory(pairs)
+    moved = []
+    with shared_lock(data, blocking=False):
+        published_paths = entries(pairs, budgets.pairs)
+        if any(not SMOKE_ID.fullmatch(path.name) for path in published_paths):
+            raise Denied("Unknown published smoke pair")
+        if entries(validation / "quarantine", budgets.pairs, optional=True):
+            raise Busy("Smoke quarantine changed before retirement admission")
+        published = {path.name: path for path in published_paths}
+        for smoke_id in sorted(expected_identities):
+            source = published.get(smoke_id)
+            if source is None:
+                raise Denied("Smoke retirement candidate is no longer published")
+            if project_identity(source) != expected_identities[smoke_id]:
+                raise Denied("Smoke pair changed before retirement admission")
+        quarantine_root = validation / "quarantine"
+        if not directory(quarantine_root, optional=True):
+            quarantine_root.mkdir(mode=0o700)
+            directory(quarantine_root)
+            sync_dir(validation)
+        for smoke_id in sorted(expected_identities):
+            source = published[smoke_id]
+            pending = quarantine_root / f"{smoke_id}.pending"
+            os.rename(source, pending)
+            moved.append(pending)
+            if project_identity(pending) != expected_identities[smoke_id]:
+                raise Denied("Smoke pair changed during retirement admission")
+            sync_dir(pairs)
+            sync_dir(quarantine_root)
+    return moved
 
 
 def _manifest(metadata: Metadata, smoke_id: str, pair: Path) -> dict:

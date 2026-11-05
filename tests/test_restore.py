@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 from support import Fixture, bind_delivery
 from mizu.errors import Busy, Denied
+from mizu.insights import Insights
 from mizu.project import Project
 from mizu.storage import backup, restore
 from mizu import storage, smoke_retention as retention, snapshot as snapshot_module
@@ -86,6 +87,104 @@ class RestoreTests(Fixture):
                                          [staging, data / 'projects'])
                 self.assertEqual(list(staging.iterdir()), [])
                 self.assertTrue(all(not p.name.startswith('.') for p in (data / 'projects').iterdir()))
+
+    def _backup_with_smoke_reference(self, smoke_id):
+        data = self.config.data
+        (data / 'validation').mkdir(parents=True, exist_ok=True)
+        retention.publish(data, smoke_id, {'status': 'pass',
+                          'time': '2000-01-01T00:00:00+00:00'}, None)
+        self.project.set_control(paused=True)
+        insights = Insights(self.project.root)
+        record = insights.submit(source='worker', title='Pinned restore',
+                                 body='Synthetic smoke reference', base_snapshot=None)
+        insights.attach_evidence(record['id'], source='worker', text='Keep this pair',
+                                 expected_rev=1, smoke_refs=[smoke_id])
+        archive = self.root / f'{smoke_id}.tar.gz'
+        backup(self.project, archive)
+        shutil.rmtree(self.project.root)
+        return archive
+
+    def test_restore_publication_holds_admission_against_pending_rename(self):
+        smoke_id = 'd' * 32
+        archive = self._backup_with_smoke_reference(smoke_id)
+        data = self.config.data
+        pair = data / 'validation' / 'pairs' / smoke_id
+        expected = retention.project_identity(pair)
+        destination = data / 'projects' / 'restored'
+        reached, release = threading.Event(), threading.Event()
+        original_rename = storage.os.rename
+
+        def pause_publication(source, target):
+            if Path(target) == destination:
+                reached.set()
+                if not release.wait(10):
+                    raise AssertionError('restore publication was not released')
+            return original_rename(source, target)
+
+        with patch.object(storage.os, 'rename', side_effect=pause_publication):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(restore, self.config, 'restored', archive)
+                try:
+                    self.assertTrue(reached.wait(10), 'restore did not reach publication')
+                    with self.assertRaises(Busy):
+                        retention.admit_retirement_candidates(data, {smoke_id: expected})
+                    self.assertTrue(pair.is_dir())
+                    self.assertFalse((data / 'validation' / 'quarantine' /
+                                      f'{smoke_id}.pending').exists())
+                finally:
+                    release.set()
+                future.result(timeout=10)
+
+        restored = Project(self.config, 'restored')
+        metadata = retention.Metadata(data)
+        manifest = retention.read_pair(metadata, smoke_id)
+        self.assertEqual(retention.collect_refs(metadata, {smoke_id: manifest},
+                                               roots=[restored.root]), {smoke_id})
+
+    def test_restore_fails_fast_and_cleans_stage_when_admission_is_busy(self):
+        smoke_id = 'e' * 32
+        archive = self._backup_with_smoke_reference(smoke_id)
+        data = self.config.data
+        destination = data / 'projects' / 'busy-restore'
+        staging = data / 'staging' / 'projects'
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with retention.shared_lock(data):
+                future = pool.submit(restore, self.config, 'busy-restore', archive)
+                with self.assertRaises(Busy):
+                    future.result(timeout=5)
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(staging.glob('.restore-*')), [])
+
+    def test_pending_admission_first_refuses_restore_and_crash_recovers_pair(self):
+        smoke_id = 'f' * 32
+        archive = self._backup_with_smoke_reference(smoke_id)
+        data = self.config.data
+        pair = data / 'validation' / 'pairs' / smoke_id
+        expected = retention.project_identity(pair)
+        original_sync = retention.sync_dir
+
+        def interrupt_after_move(path):
+            if Path(path) == pair.parent:
+                raise OSError('synthetic crash after pending rename')
+            return original_sync(path)
+
+        with patch.object(retention, 'sync_dir', side_effect=interrupt_after_move):
+            with self.assertRaises(OSError):
+                retention.admit_retirement_candidates(data, {smoke_id: expected})
+        pending = data / 'validation' / 'quarantine' / f'{smoke_id}.pending'
+        self.assertTrue(pending.is_dir())
+        self.assertFalse(pair.exists())
+        with self.assertRaises(Denied):
+            restore(self.config, 'restored', archive)
+        self.assertFalse((data / 'projects' / 'restored').exists())
+        self.assertEqual(list((data / 'staging' / 'projects').glob('.restore-*')), [])
+
+        result = retention.run(data, apply=True)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['recovered'], [smoke_id])
+        self.assertEqual(result['retired'], [])
+        self.assertTrue(pair.is_dir())
+        self.assertFalse(pending.exists())
 
     def test_restore_checks_filesystem_before_creation_and_publication(self):
         self.project.set_control(paused=True)

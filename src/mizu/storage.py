@@ -1494,7 +1494,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             store.publish(checkpoint)
             from .smoke_refs import shared_lock
             from .smoke_retention import Budgets, validate_restored_refs
-            with shared_lock(config.data, blocking=True):
+            with shared_lock(config.data, blocking=False):
                 validate_restored_refs(config.data, stage,
                                        budgets=Budgets.from_limits(config.limits))
                 _check_project_paths(identities)

@@ -12,9 +12,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from mizu import smoke_retention as retention
+from mizu import smoke_retention as retention, storage
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.fs import atomic_write, digest, read_json, write_json
+from mizu.fs import atomic_write, digest, held, read_json, write_json
 from mizu.insights import Insights
 from mizu.smoke_refs import project_record_lock, record_lock, shared_lock, validate_refs
 from mizu.work_items import WorkItems
@@ -162,6 +162,95 @@ class SmokeRetentionTests(unittest.TestCase):
         self.assertEqual(len(replacement), 1)
         self.assertEqual(read_json(wait_path)['rev'], 2)
         self.assertEqual(retention.collect_refs(metadata, pairs), {self.a})
+
+    def test_candidate_scan_lock_uses_lifecycle_then_record_and_allows_other_project(self):
+        first, _ = self.owner('first')
+        second, _ = self.owner('second')
+        identity = retention.project_identity(first.root)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with retention.project_scan_lock(self.data, first.root, identity):
+                self.assertTrue(held(self.data / 'locks' / 'init-first.lock'))
+                self.assertTrue(held(first.root / 'locks' / 'insights.lock'))
+                future = pool.submit(second.submit, source='worker', title='Independent',
+                                     body='No references', base_snapshot=None)
+                result = future.result(timeout=5)
+                blocked_restore = pool.submit(storage.restore, SimpleNamespace(data=self.data), 'first',
+                                              self.data / 'absent-backup.tar.gz')
+                with self.assertRaises(Busy):
+                    blocked_restore.result(timeout=5)
+        self.assertEqual(second.read(result['id'])['title'], 'Independent')
+
+    def test_candidate_scan_identity_refusal_does_not_recreate_moved_root(self):
+        insights, _ = self.owner('moving')
+        root = insights.root
+        identity = retention.project_identity(root)
+        moved = root.with_name('moved')
+        root.rename(moved)
+        with self.assertRaises(Denied):
+            with retention.project_scan_lock(self.data, root, identity):
+                self.fail('missing root entered scan lock')
+        self.assertFalse(root.exists())
+        self.assertFalse((root / 'locks').exists())
+        self.assertTrue(moved.is_dir())
+
+    def test_fresh_reference_scan_aggregates_budget_across_projects(self):
+        self.pair(self.a); self.pair(self.b)
+        first, _ = self.owner('first')
+        second, _ = self.owner('second')
+        self.insight(first, [self.a])
+        self.insight(second, [self.b])
+        result = self.run_retention()
+        self.assertEqual(result['pinned'], [self.a, self.b])
+        for smoke_id in (self.a, self.b):
+            with self.subTest(smoke_id=smoke_id), self.assertRaises(LimitExceeded):
+                self.run_retention(apply=True, budgets=retention.Budgets(refs=1))
+            self.assertTrue((self.data / 'validation' / 'pairs' / smoke_id).is_dir())
+
+    def test_pending_admission_refuses_existing_quarantine_without_moving_pair(self):
+        pair = self.pair()
+        identity = retention.project_identity(pair)
+        quarantine = self.data / 'validation' / 'quarantine'
+        quarantine.mkdir()
+        marker = quarantine / 'unrecognized'
+        marker.write_text('untrusted')
+        with self.assertRaises(Busy):
+            retention.admit_retirement_candidates(self.data, {self.a: identity})
+        self.assertTrue(pair.is_dir())
+        self.assertEqual(marker.read_text(), 'untrusted')
+
+    def test_pending_admission_blocks_late_pin_and_recovers_as_rollback(self):
+        pair = self.pair()
+        insights, _ = self.owner()
+        record = self.insight(insights)
+        identity = retention.project_identity(pair)
+        pending = retention.admit_retirement_candidates(self.data, {self.a: identity})[0]
+        self.assertEqual(pending.name, self.a + '.pending')
+        self.assertFalse(pair.exists())
+        with self.assertRaises(Denied):
+            insights.attach_evidence(record['id'], source='worker', text='late pin',
+                                     expected_rev=1, smoke_refs=[self.a])
+        self.assertEqual(insights.read(record['id'])['evidence'], [])
+        result = self.run_retention(apply=True)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['recovered'], [self.a])
+        self.assertEqual(result['retired'], [])
+        self.assertTrue(pair.is_dir())
+
+    def test_scan_finds_existing_pin_after_pending_admission(self):
+        pair = self.pair()
+        insights, _ = self.owner()
+        record = self.insight(insights, [self.a])
+        identity = retention.project_identity(pair)
+        pending = retention.admit_retirement_candidates(self.data, {self.a: identity})[0]
+        metadata = retention.Metadata(self.data)
+        manifest = retention.read_pair(metadata, self.a, path=pending)
+        with retention.project_scan_lock(self.data, insights.root,
+                                         retention.project_identity(insights.root)):
+            pinned = retention.collect_refs(metadata, {self.a: manifest})
+        self.assertEqual(pinned, {self.a})
+        self.assertEqual(insights.read(record['id'])['evidence'][0]['smoke_refs'], [self.a])
+        pair.parent.mkdir(exist_ok=True)
+        os.rename(pending, pair)
 
     def test_submit_project_lock_failure_leaves_no_record(self):
         insights, _ = self.owner()

@@ -391,8 +391,10 @@ direct Insight-origin creation also inherits them. Omitting refs on a WorkItem t
 its item-level pins. A blocked wait carries its own refs.
 Terminal owner history retains the IDs but no longer retains the payload. A
 path, prose citation, or provider/VCS run ID is **not** a pin. Restore validates
-imported live refs under the same lock before exposing the new project; backups
-do not include shared smoke payloads, so restore requires those pairs to exist.
+imported live refs under the same lock before exposing the new project; the final
+admission lock is nonblocking, so contention returns `Busy` and discards the staged
+project without publishing it. Retry restore after contention clears. Backups do
+not include shared smoke payloads, so restore requires those pairs to exist.
 
 Apply refuses all new retirement on unsafe, unreadable, missing, malformed,
 unknown or over-bound relevant metadata in any project. Only complete terminal
