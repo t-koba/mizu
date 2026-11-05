@@ -119,6 +119,35 @@ class SmokeRetentionTests(unittest.TestCase):
             self.assertLess(elapsed, 5.0, f'unpinned submit waited {elapsed:.3f}s')
             self.assertEqual(second.read(result['id'])['title'], 'Other project')
 
+    def test_stale_wait_pruning_preserves_replacement_reference(self):
+        self.pair(self.a)
+        insights, _ = self.owner()
+        item = insights.submit(source='worker', title='Wait', body='body', base_snapshot=None)
+        at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
+        insights.decide(item['id'], 'defer', 'parked', 'later', 'test',
+                        wait={'kind': 'deadline', 'at': at, 'smoke_refs': [self.a]}, expected_rev=1)
+        insights.revise(item['id'], source='worker', title='Wait v2', body='body v2',
+                        base_snapshot=None, expected_rev=1)
+        metadata = retention.Metadata(self.data)
+        pairs = {self.a: retention.read_pair(metadata, self.a)}
+        wait_path = insights.root / 'waits' / f"{item['id']}.json"
+        original = insights._wait_bound
+        replacement = []
+
+        def interleaved(stored, current):
+            bound = original(stored, current)
+            if not bound and not replacement:
+                replacement.append(insights.decide(item['id'], 'defer', 'new wait', 'later', 'test',
+                    wait={'kind': 'deadline', 'at': at, 'smoke_refs': [self.a]}, expected_rev=2))
+                self.assertEqual(retention.collect_refs(metadata, pairs), {self.a})
+            return bound
+
+        with patch.object(insights, '_wait_bound', side_effect=interleaved):
+            self.assertEqual(insights.due_waits('reviewer', {}), [])
+        self.assertEqual(len(replacement), 1)
+        self.assertEqual(read_json(wait_path)['rev'], 2)
+        self.assertEqual(retention.collect_refs(metadata, pairs), {self.a})
+
     def test_submit_project_lock_failure_leaves_no_record(self):
         insights, _ = self.owner()
         before = self.snapshot()

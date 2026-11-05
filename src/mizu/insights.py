@@ -1289,6 +1289,28 @@ replacement insight without implying rejected substance.
         except (OSError, ValueError, TypeError, AttributeError):
             return False
 
+    def _prune_unbound_wait(self, path: Path, stored: dict) -> None:
+        """Best-effort removal only while the same wait stays unbound under the project lock."""
+        try:
+            with project_record_lock(self.root, blocking=False):
+                if path.is_symlink():
+                    return
+                name = path.relative_to(self.root).as_posix()
+                current_stored = json.loads(safe_read(self.root, name, wait_events.MAX_ROW_BYTES))
+                if current_stored != stored or not isinstance(current_stored, dict):
+                    return
+                try:
+                    current = self.read(current_stored.get("owner", ""))
+                except (Denied, OSError, ValueError, TypeError, AttributeError):
+                    return
+                if self._wait_bound(current_stored, current):
+                    return
+                path.unlink()
+        except (Busy, Denied, OSError, ValueError, TypeError, AttributeError):
+            # Pruning is housekeeping; contention or uncertain identity leaves
+            # the record for a later bounded read rather than risking a new wait.
+            return
+
     def due_waits(self, role_name: str, snapshot: dict, *, limit: int = 10) -> list:
         """Collect registered waits due for one role (one-shot, dispatch-lazy).
 
@@ -1329,8 +1351,7 @@ replacement insight without implying rejected substance.
                 except (Denied, OSError, ValueError, TypeError, AttributeError):
                     continue
                 if not self._wait_bound(stored, current):
-                    with contextlib.suppress(OSError):
-                        path.unlink()
+                    self._prune_unbound_wait(path, stored)
                     continue
                 if current.get("source") != role_name:
                     continue
@@ -1431,8 +1452,7 @@ replacement insight without implying rejected substance.
                 except (Denied, OSError, ValueError, TypeError, AttributeError):
                     continue
                 if not self._wait_bound(stored, current):
-                    with contextlib.suppress(OSError):
-                        path.unlink()
+                    self._prune_unbound_wait(path, stored)
                     continue
                 if not isinstance(stored.get("requires"), dict):
                     continue
