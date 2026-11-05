@@ -11,13 +11,18 @@ from mizu.protocol import DEFINITIONS, validate
 from mizu.runtime import prompt_for, prompt_delta_for
 from mizu.storage import backup, restore
 from mizu.work_item_seed import SEED_FIELDS, make_seed, validate_seed
-from mizu.work_items import EVENT_FIELDS, MAX_OPEN_ROW_BYTES
+from mizu.work_items import DELIVERY_EVENT_FIELDS, MAX_OPEN_ROW_BYTES
 
 
 class WorkItemDescriptionTests(Fixture):
     def setUp(self):
         super().setUp()
         self.store = self.project.work_items
+
+    @staticmethod
+    def event_fields(record):
+        # The blocked-wait lifetime is stored separately from the versioned event schema.
+        return set(record) - {"blocked_since"}
 
     def create(self, **kwargs):
         return self.store.create(idempotency_key="key", title="Work", actor="worker", **kwargs)
@@ -54,10 +59,10 @@ class WorkItemDescriptionTests(Fixture):
         original = path.read_bytes()
         doing = self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
         history_bytes = (path.parent / "2.json").read_bytes()
-        self.assertEqual(set(doing), EVENT_FIELDS)
+        self.assertEqual(self.event_fields(doing), DELIVERY_EVENT_FIELDS)
         blocked = self.store.transition(seed["id"], expected_rev=2, status="blocked", actor="worker",
                 wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
-        self.assertEqual(set(blocked), EVENT_FIELDS)
+        self.assertEqual(self.event_fields(blocked), DELIVERY_EVENT_FIELDS)
         self.assertEqual(self.store.get(seed["id"]), blocked)
         self.assertEqual(self.create(), {"record": first["record"], "created": False})
         with self.assertRaisesRegex(Denied, "Conflicting"):
@@ -96,7 +101,7 @@ class WorkItemDescriptionTests(Fixture):
                 doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
                 blocked = self.store.transition(item_id, expected_rev=2, status="blocked", actor="worker",
                 wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
-                self.assertEqual(set(blocked), EVENT_FIELDS | ({"description"} if version == 2 else set()))
+                self.assertEqual(self.event_fields(blocked), DELIVERY_EVENT_FIELDS | ({"description"} if version == 2 else set()))
                 if version == 2:
                     self.assertEqual(blocked["description"], "Scope")
                 path = self.project.root / "work-items" / item_id / "2.json"
@@ -151,7 +156,7 @@ class WorkItemDescriptionTests(Fixture):
         write_json(current, event)
         original = path.read_bytes()
         doing = self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
-        self.assertEqual(set(doing), EVENT_FIELDS)
+        self.assertEqual(self.event_fields(doing), DELIVERY_EVENT_FIELDS)
         self.assertEqual(self.store.get(seed["id"]), doing)
         self.assertEqual(self.project.insights.decide(proposal["id"], "accept", event["reason"], "", "retry",
                                                      expected_rev=1), event)
