@@ -386,6 +386,14 @@ def publish(data: Path, smoke_id: str, report: dict, project: Path | None) -> di
         destination = pairs / smoke_id
         if destination.exists() or destination.is_symlink():
             raise Denied("Smoke pair already exists")
+        quarantine = validation / "quarantine"
+        if directory(quarantine, optional=True):
+            for state in ("pending", "committed"):
+                try:
+                    (quarantine / f"{smoke_id}.{state}").lstat()
+                except FileNotFoundError:
+                    continue
+                raise Denied("Smoke pair ID is reserved by quarantine recovery")
         stage = staging / smoke_id
         try:
             stage.lstat()

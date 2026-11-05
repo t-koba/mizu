@@ -119,6 +119,21 @@ class SmokeRetentionTests(unittest.TestCase):
             self.assertLess(elapsed, 5.0, f'unpinned submit waited {elapsed:.3f}s')
             self.assertEqual(second.read(result['id'])['title'], 'Other project')
 
+    def test_publish_refuses_ids_reserved_by_quarantine_recovery(self):
+        for smoke_id, state in ((self.a, 'pending'), (self.b, 'committed')):
+            with self.subTest(state=state):
+                self.pair(smoke_id)
+                quarantine = self.data / 'validation' / 'quarantine'
+                quarantine.mkdir(exist_ok=True)
+                os.rename(self.data / 'validation' / 'pairs' / smoke_id,
+                          quarantine / f'{smoke_id}.{state}')
+                before = self.snapshot()
+                report = {'status': 'pass', 'time': self.moment.isoformat(),
+                          'result': {'replacement': True}}
+                with self.assertRaises(Denied):
+                    retention.publish(self.data, smoke_id, report, None)
+                self.assertEqual(self.snapshot(), before)
+
     def test_stale_wait_pruning_preserves_replacement_reference(self):
         self.pair(self.a)
         insights, _ = self.owner()
