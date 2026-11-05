@@ -100,9 +100,9 @@ class DecisionProjectionTests(unittest.TestCase):
         self.assertFalse((self.root / "shared-record-receipts").exists())
         self.assertFalse((self.root / "decision-receipts").exists())
 
-    def test_all_current_actions_sources_and_205_rows_ignore_legacy_receipts(self):
-        # These fixtures target projection behavior; auto-ID dedup is covered separately in test_insight_archive.
-        self.seed_decision_batch(205)
+    def test_all_current_actions_sources_and_101_rows_ignore_legacy_receipts(self):
+        # Keep just over the decision-page boundary; auto-ID dedup is covered separately in test_insight_archive.
+        self.seed_decision_batch(101)
         expected_ids = {f"insight.decision/{path.stem}" for path in
                         (self.root / "decision-history").glob("*.json")}
         rows = self.rows()
@@ -115,7 +115,7 @@ class DecisionProjectionTests(unittest.TestCase):
         write_json(self.root / "decision-cursors/reviewer.json", {"acknowledged_at": "2099-01-01"})
         projected = self.insights.project_decision_records()
         self.assertEqual(set(projected), expected_ids)
-        self.assertEqual(len(projected), 205)
+        self.assertEqual(len(projected), 101)
         self.assertEqual(self.insights.decision_events_with_diagnostics(
             "reviewer", ("accept", "modify", "reject", "defer"), sources="any", limit=100), before)
         self.assertEqual(receipt.read_bytes(), b"not json")
