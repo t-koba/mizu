@@ -6,12 +6,14 @@ import shutil
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from mizu.config import DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical, digest, read_json, write_json
 from mizu.insights import Insights, INSIGHT_DECISION_POLICY
+import mizu.insights as insights_module
 from mizu.shared_records import SharedRecords
 from mizu.smoke_refs import record_lock
 
@@ -44,6 +46,39 @@ class DecisionProjectionTests(unittest.TestCase):
     def record_path(self, record_id):
         return self.root / self.store._record_name(record_id)
 
+    def seed_decision_batch(self, count):
+        """Create four real action/source examples and clone valid rev-1 rows."""
+        actions = ("accept", "modify", "reject", "defer")
+        inbox, decisions, history = (self.root / name for name in
+                                     ("inbox", "decisions", "decision-history"))
+        templates = {}
+        for index, action in enumerate(actions):
+            source = "reviewer" if index % 2 else "searcher"
+            insight_id = f"{index:032x}"
+            with patch("mizu.insights.now", return_value="2026-01-01T01:00:00+01:00"):
+                self.decide(index, action=action, source=source, insight_id=insight_id)
+            key = insights_module._decision_key(insight_id, 1)
+            event_path = (next(path for path in history.glob("*.json")
+                               if read_json(path)["id"] == insight_id)
+                          if action == "defer" else history / f"{key}.json")
+            templates[(action, source)] = (read_json(inbox / f"{insight_id}.json"),
+                                            read_json(decisions / f"{insight_id}.json"),
+                                            read_json(event_path))
+        for index in range(len(actions), count):
+            action = actions[index % len(actions)]
+            source = "reviewer" if index % 2 else "searcher"
+            item, decision, event = templates[(action, source)]
+            insight_id = f"{index:032x}"
+            key = insights_module._decision_key(insight_id, 1)
+            event_id = key if action != "defer" else uuid.uuid4().hex
+            write_json(inbox / f"{insight_id}.json",
+                       {**item, "id": insight_id, "title": f"Finding {index}",
+                        "body": f"Exact body {index}"}, exclusive=True)
+            write_json(decisions / f"{insight_id}.json",
+                       {**decision, "id": insight_id, "decision_key": key}, exclusive=True)
+            write_json(history / f"{event_id}.json",
+                       {**event, "id": insight_id, "decision_key": key}, exclusive=True)
+
     def test_exact_payload_deterministic_digest_and_replay_after_restart(self):
         self.decide(evidence=True)
         row = self.rows()[0]
@@ -66,10 +101,7 @@ class DecisionProjectionTests(unittest.TestCase):
 
     def test_all_current_actions_sources_and_205_rows_ignore_legacy_receipts(self):
         # These fixtures target projection behavior; auto-ID dedup is covered separately in test_insight_archive.
-        with patch("mizu.insights.now", return_value="2026-01-01T01:00:00+01:00"):
-            for i in range(205):
-                self.decide(i, insight_id=f"{i:032x}", action=("accept", "modify", "reject", "defer")[i % 4],
-                            source="reviewer" if i % 2 else "searcher")
+        self.seed_decision_batch(205)
         expected_ids = {f"insight.decision/{path.stem}" for path in
                         (self.root / "decision-history").glob("*.json")}
         rows = self.rows()

@@ -510,7 +510,10 @@ class InsightRoutingSharedTests(InsightRoutingLegacyTests):
 
         from mizu.fs import write_json
         base = "2026-01-01T00:00:00+00:00"
-        for i in range(513):
+        # Exercise the configured-bound boundary without 513 redundant records.
+        bound = 3
+        self.project.insights.decision_projection_records = bound
+        for i in range(bound + 1):
             iid = f"{i:032x}"
             record = {"id": iid, "source": "searcher", "title": f"Previously acknowledged {i}",
                       "body": "Exact current body", "base_snapshot": None, "run": None,
@@ -523,7 +526,7 @@ class InsightRoutingSharedTests(InsightRoutingLegacyTests):
             envelopes = [envelope for _, envelope in
                          self.project.insights._pending_insight_envelopes_locked(
                              configured, 'reviewer')]
-        self.assertEqual(len(envelopes), 513)
+        self.assertEqual(len(envelopes), bound + 1)
         store = SharedRecords(self.project.root, INSIGHT_DELIVERY_POLICIES)
         for start in range(0, len(envelopes), 128):
             batch = envelopes[start:start + 128]

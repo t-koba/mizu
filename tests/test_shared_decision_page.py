@@ -105,19 +105,18 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertFalse((self.root / "shared-record-receipts").exists())
         self.assertFalse((self.root / "decision-receipts").exists())
 
-    def test_205_events_utc_then_stable_id_order_and_receipt_replay(self):
+    def test_105_events_utc_then_stable_id_order_and_receipt_replay(self):
         stamps = ("2026-01-01T01:00:00+01:00", "2025-12-31T19:00:00-05:00",
                   "2026-01-01T00:00:01+00:00", "2026-01-01T00:00:00+00:00")
-        # These fixtures target page behavior; auto-ID dedup is covered separately in test_insight_archive.
-        # Four real records cover the four repeating action/source/time patterns;
-        # clone their correctly keyed rev-1 files to avoid 201 redundant submissions.
-        self.seed_decision_batch(205, stamps)
+        # Cross the 100-row page boundary; the separate cap-boundary test below
+        # covers history larger than the configured projection window.
+        self.seed_decision_batch(105, stamps)
         projected = self.insights.project_decision_records()
         expected = sorted(projected, key=lambda key: (
             dt.datetime.fromisoformat(self.store.get(key)[0]["created_at"]).astimezone(dt.timezone.utc), key))
         first, manifest = self.page()
         self.assertEqual([entry.record_id for entry in manifest], expected[:100])
-        self.assertEqual(first["pending_count"], 205)
+        self.assertEqual(first["pending_count"], 105)
         self.assertTrue(first["count_truncated"])
         self.assertFalse(first["byte_truncated"])
         self.store.acknowledge("reviewer", manifest=manifest)
@@ -129,9 +128,9 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.insights = Insights(self.root)
         next_page, next_manifest = self.page()
         remaining = [key for key in expected if key not in {entry.record_id for entry in manifest[::2]}]
-        self.assertEqual(next_page["pending_count"], 155)
+        self.assertEqual(next_page["pending_count"], 55)
         self.assertEqual([entry.record_id for entry in next_manifest], remaining[:100])
-        self.assertEqual(self.page("searcher")[0]["pending_count"], 205)
+        self.assertEqual(self.page("searcher")[0]["pending_count"], 105)
         self.assertEqual(len(self.insights.decision_events("reviewer", ACTIONS, sources="any", limit=100)), 100)
         seen = [entry.record_id for entry in manifest[::2]]
         while next_manifest:
@@ -383,11 +382,15 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertEqual(len(page["events"]), 2)
         self.assertEqual(len(manifest), 2)
 
-    def test_513_current_decisions_page_all_events_after_acknowledgement(self):
+    def test_projection_bound_plus_one_decisions_remain_pageable_after_acknowledgement(self):
+        # The configured default's numeric value is covered separately; use a
+        # small explicit bound to exercise the same cap-relative behavior.
+        bound = 3
+        self.insights.decision_projection_records = bound
         self.decide()
         legacy = self.insights.decision_events("reviewer", ACTIONS)[0]
         payload = {k: v for k, v in legacy.items() if k != "ack_token"}
-        paths = [Path(f"{i:032x}.json") for i in range(513)]
+        paths = [Path(f"{i:032x}.json") for i in range(bound + 1)]
 
         def selected(insights, path, *args, **kwargs):
             return dt.datetime.now(dt.timezone.utc), dict(
@@ -405,7 +408,7 @@ class SharedDecisionPageTests(unittest.TestCase):
                     break
                 self.store.acknowledge(
                     "reviewer", [asdict(entry) for entry in manifest], manifest=manifest)
-        self.assertEqual(delivered, 513)
+        self.assertEqual(delivered, bound + 1)
 
     def test_moved_retained_attention_keeps_complete_pending_total(self):
         for index in range(3):
