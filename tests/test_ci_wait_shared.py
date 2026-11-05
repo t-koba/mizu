@@ -158,7 +158,8 @@ class SharedCiWaitTests(CiWaitFixture):
                 self.complete(context, tokens)
             self.assertEqual(self.receipts(), [])
         path.write_bytes(raw)
-        self.store.transition(b["id"], expected_rev=2, status="open", actor="worker")
+        self.store.transition(b["id"], expected_rev=2, status="open", actor="worker",
+                              reason="Explicitly reopen before registering the changed wait")
         self.store.transition(b["id"], expected_rev=3, status="blocked", actor="worker", wait=self.wait)
         with self.assertRaises(Denied):
             self.complete(context, tokens)
