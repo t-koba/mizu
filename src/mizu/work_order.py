@@ -161,8 +161,13 @@ def _stable_ready_for_hash(ready_work) -> dict:
     for row in items:
         if not isinstance(row, dict):
             raise Denied("Invalid ready-work row")
-        stable_items.append({k: v for k, v in row.items()
-                             if k not in {"age_seconds", "doing_age_seconds", "doing_stale"}})
+        stable_row = {k: v for k, v in row.items()
+                      if k not in {"age_seconds", "doing_age_seconds", "doing_stale"}}
+        wait_liveness = stable_row.get("wait_liveness")
+        if isinstance(wait_liveness, dict) and "blocked_age_seconds" in wait_liveness:
+            stable_row["wait_liveness"] = {k: v for k, v in wait_liveness.items()
+                                            if k != "blocked_age_seconds"}
+        stable_items.append(stable_row)
     stable = dict(ready_work)
     stable["items"] = stable_items
     # Signature lives separately; display never carries it.
@@ -186,7 +191,7 @@ def _stable_open_for_hash(open_work_items) -> dict:
         if not isinstance(row, dict):
             raise Denied("Invalid open-work row")
         stable["items"].append({k: v for k, v in row.items()
-                                if k not in {"doing_age_seconds", "doing_stale"}})
+                                if k not in {"doing_age_seconds", "doing_stale", "blocked_age_seconds"}})
     return stable
 
 

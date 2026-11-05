@@ -240,7 +240,8 @@ class WorkItemTests(Fixture):
         blocked = self.change("blocked", expected_rev=4,
                               wait={"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
         readers = self.status_readers()
-        expected = [reader() for reader in readers]
+        with patch("mizu.work_item_waits.now", return_value="2030-01-01T00:00:00+00:00"):
+            expected = [reader() for reader in readers]
         self.assertEqual(expected[:2], [1, 1])
         for page in (*expected[2:6], expected[6][0]):
             self.assertEqual(page["total"], 1)
@@ -255,7 +256,8 @@ class WorkItemTests(Fixture):
             self.assertEqual(snapshot_id, current_snapshot["id"])
             return get_snapshot(snapshot_id)
 
-        with patch.object(self.store.snapshots, "get", side_effect=current_only) as get:
+        with patch("mizu.work_item_waits.now", return_value="2030-01-01T00:00:00+00:00"), \
+                patch.object(self.store.snapshots, "get", side_effect=current_only) as get:
             for reader, result in zip(readers, expected):
                 with self.subTest(reader=reader.__name__):
                     self.assertEqual(reader(), result)
@@ -1622,6 +1624,7 @@ class WorkItemTests(Fixture):
         changed["transition"] = {"from": "open", "to": "blocked"}
         changed["wait"] = {"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"}
         changed["reason"] = "changed source"
+        changed["blocked_since"] = changed["updated_at"]
         write_json(rev_path, changed, exclusive=False)
         # Update the sidecar witness to the new directory identity so only the
         # source-backed content comparison can catch the change.

@@ -80,7 +80,7 @@ class BlockedWorkStatusTests(Fixture):
         with patch("mizu.work_items.lock", side_effect=AssertionError("read-only")):
             view = self.view()
         self.assertEqual(view["counts"], {"absent": 0, "pending": 2, "due": 1,
-                                           "impossible": 1, "receipt_bound": 0, "unknown": 0})
+                                           "impossible": 1, "receipt_bound": 0, "terminal": 0, "expired": 0, "unknown": 0})
         self.assertTrue(view["coverage_complete"])
         after = {p.relative_to(self.project.root): p.read_bytes()
                  for p in self.project.root.rglob("*") if p.is_file()}

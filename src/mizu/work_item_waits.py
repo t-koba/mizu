@@ -5,7 +5,7 @@ import datetime as dt
 
 from .errors import Denied, LimitExceeded
 from .smoke_refs import validate_refs
-from .fs import DIGEST, canonical, digest, identifier
+from .fs import DIGEST, canonical, digest, identifier, now
 
 #: Locally observable defer/task conditions, reevaluated from recorded state.
 WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
@@ -112,7 +112,40 @@ def stored_wait(value):
     return result
 
 
-def liveness(store, wait, snapshot, *, item=None) -> dict:
+def blocked_start(since, record):
+    """One wait episode ends only at an explicit open revision."""
+    if record["status"] == "open":
+        return None
+    if record["status"] == "blocked":
+        return since or record["updated_at"]
+    return since
+
+
+def blocked_age(store, item):
+    since = item.get("blocked_since")
+    age = (None if since is None else max(0, int(
+        (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(since)).total_seconds())))
+    wait = item.get("wait") or {}
+    return {"blocked_since": since, "blocked_age_seconds": age,
+            "blocked_max_age_seconds": None if wait.get("kind") == "deadline" else store.blocked_max_age_seconds}
+
+
+def liveness(store, wait, snapshot, *, item=None):
+    observed = _liveness(store, wait, snapshot, item=item)
+    if item is None:
+        return observed
+    age = blocked_age(store, item)
+    # Unknown/unsafe evidence never becomes a terminal claim. Expiration is
+    # local replanning authority only, not a remote failure or satisfaction.
+    if (observed["state"] in ("pending", "receipt_bound")
+            and age["blocked_max_age_seconds"] is not None
+            and age["blocked_age_seconds"] is not None
+            and age["blocked_age_seconds"] >= age["blocked_max_age_seconds"]):
+        observed = {**observed, "state": "expired", "reason": "blocked_max_age_reached"}
+    return {**observed, **age}
+
+
+def _liveness(store, wait, snapshot, *, item=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Insight-decided waits follow the current revision; dependency waits bind an

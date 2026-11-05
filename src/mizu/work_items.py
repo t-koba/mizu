@@ -40,9 +40,9 @@ from pathlib import Path
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import insight_archive, work_item_retirement
-from .work_item_waits import stored_wait, liveness
+from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
-                     PublicationEvidence)
+                     PublicationEvidence, TOML_INTEGER_MAX)
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
                  sync_dir, text_preview, write_json)
@@ -66,8 +66,7 @@ DELIVERED_EVENT_FIELDS = LEGACY_EVENT_FIELDS | {"delivered_tree"}
 SCOPED_EVENT_FIELDS = DELIVERED_EVENT_FIELDS | {"scope"}
 #: Every transition written now carries accepted scope and the delivery-schema
 #: projection; older shapes remain readable without rewriting their history.
-EVENT_FIELDS = SCOPED_EVENT_FIELDS | {"delivery_schema", "delivery", "verification_scope"}
-DELIVERY_EVENT_FIELDS = EVENT_FIELDS
+DELIVERY_EVENT_FIELDS = SCOPED_EVENT_FIELDS | {"delivery_schema", "delivery", "verification_scope"}
 MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_CURSOR_CHARS = 128
@@ -168,6 +167,7 @@ def _directory(path: Path) -> bool:
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
+                 blocked_max_age_seconds=604800,
                  publication_evidence: PublicationEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
@@ -178,6 +178,9 @@ class WorkItems:
         self.effective_verification = effective_verification
         self.doing_limit, self.doing_limits = doing_limit, dict(doing_limits or {})
         self.stale_seconds = stale_seconds
+        if type(blocked_max_age_seconds) is not int or not 1 <= blocked_max_age_seconds <= TOML_INTEGER_MAX:
+            raise Denied("Work-item blocked maximum age must be a positive TOML integer")
+        self.blocked_max_age_seconds = blocked_max_age_seconds
         if (type(history_temporaries) is not int
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
@@ -720,6 +723,14 @@ class WorkItems:
                 if since_stored is not None:
                     return None
                 return item, None
+            if "blocked_since" not in item:
+                if item["status"] != "open" and item["rev"] != 1:
+                    return None
+                if item["status"] == "blocked":
+                    item = {**item, "blocked_since": blocked_start(None, item)}
+            elif (exact_previous is not None and "blocked_since" not in exact_previous
+                  and exact_previous["status"] != "open" and exact_previous["rev"] != 1):
+                return None
             if item_status == "doing":
                 if (since_stored is None or not _timestamp(since_stored)
                         or since_stored != exact_current.get("updated_at")):
@@ -1722,7 +1733,18 @@ class WorkItems:
 
     def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True) -> None:
         """Validate transitions, always checking current completion evidence."""
-        fields = set(record) - {"smoke_refs"}
+        fields = set(record) - {"smoke_refs", "blocked_since"}
+        if "blocked_since" in previous and "blocked_since" not in record:
+            raise Denied("A transition cannot remove its blocked start")
+        if "blocked_since" in record:
+            since = record["blocked_since"]
+            if since is not None and not _timestamp(since):
+                raise Denied("Invalid blocked start timestamp")
+            if ("blocked_since" in previous or previous["status"] == "open" or previous["rev"] == 1):
+                start = previous.get("blocked_since", blocked_start(None, previous))
+                expected = blocked_start(start, record)
+                if since != expected:
+                    raise Denied("A blocked start resets only on an explicit open transition")
         if "smoke_refs" in record:
             validate_refs(record["smoke_refs"])
         if "smoke_refs" in previous and "smoke_refs" not in record:
@@ -1732,7 +1754,7 @@ class WorkItems:
         # readable history.
         description = {"description"} if "description" in previous else set()
         allowed = {frozenset(base | description | scope)
-                   for base in (EVENT_FIELDS, SCOPED_EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
+                   for base in (DELIVERY_EVENT_FIELDS, SCOPED_EVENT_FIELDS, DELIVERED_EVENT_FIELDS, LEGACY_EVENT_FIELDS)
                    for scope in (set(), {"scope"})}
         if frozenset(fields) not in allowed:
             raise Denied("Invalid work-item transition fields")
@@ -1833,6 +1855,7 @@ class WorkItems:
         current = self._seed(item_id, seed_event, history_revisions=history_revisions)
         chain_hash = hashlib.sha256()
         chain_hash.update(canonical(current) + b"\n")
+        blocked_since = blocked_start(None, current)
         yield current
         # The auditor uses the same safe scan, without recovery or writes.
         revisions = (self._history_revisions(item_id, recover=False, require_clean=True)
@@ -1842,6 +1865,9 @@ class WorkItems:
         for revision in range(2, len(revisions) + 2):
             record = self._read(f"work-items/{item_id}/{revision}.json")
             self._validate_transition(current, record, verify_snapshots=verify_snapshots)
+            blocked_since = blocked_start(blocked_since, record)
+            if "blocked_since" in record and record["blocked_since"] != blocked_since:
+                raise Denied("Blocked start does not match work-item history")
             current = record
             chain_hash.update(canonical(current) + b"\n")
             yield current
@@ -1856,12 +1882,15 @@ class WorkItems:
         return self._current_hold(item_id, seed_event=seed_event,
                                   history_revisions=history_revisions,
                                   verify_snapshots=verify_snapshots,
-                                  verify_current_delivery=verify_current_delivery)[0]
+                                  verify_current_delivery=verify_current_delivery, derive_blocked=False)[0]
 
     def _current_hold(self, item_id: str, *, seed_event=None,
                       history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
-                      verify_current_delivery: bool = False) -> tuple:
+                      verify_current_delivery: bool = False, blocked_waiter=None, derive_blocked=True) -> tuple:
+        # Optional output reuses this exact replay at the write boundary to
+        # prevent a doing revision from hiding a stale prior waiter.
         since = None
+        blocked_since = None
         current = None
         previous = None
         last_transition = None
@@ -1872,6 +1901,13 @@ class WorkItems:
             if previous is not None:
                 last_transition = (previous, current)
             previous = current
+            blocked_since = blocked_start(blocked_since, current)
+            if blocked_waiter is not None:
+                if current["status"] == "open":
+                    blocked_waiter.clear()
+                elif current["status"] == "blocked":
+                    blocked_waiter.clear()
+                    blocked_waiter.update(current, blocked_since=blocked_since)
             since = (since or current["updated_at"]) if current["status"] == "doing" else None
         terminal = retirement["record"]
         if (verify_current_delivery and not verify_snapshots and terminal is None
@@ -1879,7 +1915,10 @@ class WorkItems:
             if last_transition is None:
                 raise Denied("Current delivery lacks a validated transition")
             self._validate_delivery(*last_transition, verify_snapshots=True)
-        return work_item_retirement.project(current, terminal), None if terminal else since
+        item = work_item_retirement.project(current, terminal)
+        if derive_blocked and blocked_since is not None:
+            item = {**item, "blocked_since": blocked_since}
+        return item, None if terminal else since
 
     def get(self, item_id: str) -> dict:
         """Read one seed and at most 255 bounded full-state events under lock.
@@ -1934,7 +1973,7 @@ class WorkItems:
                                           verify_snapshots=verify_snapshots,
                                           verify_current_delivery=verify_current_delivery)
         view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
-                **self._hold_projection(since)}
+                **self._hold_projection(since), **blocked_age(self, item)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
             raise LimitExceeded("Work-item projection exceeds byte bound")
         return view
@@ -1969,6 +2008,7 @@ class WorkItems:
             row_budget = MAX_HISTORY_PAGE_BYTES - MAX_PROJECTION_BYTES - PREVIEW_BYTES - 1024
             current = None
             since = None
+            blocked_since = None
             previous = None
             last_transition = None
             retirement = {}
@@ -1978,6 +2018,7 @@ class WorkItems:
                     last_transition = (previous, record)
                 previous = record
                 current = record
+                blocked_since = blocked_start(blocked_since, record)
                 since = (since or record["updated_at"]) if record["status"] == "doing" else None
                 revision = record["rev"]
                 if revision <= after_rev or len(history) >= limit or stopped_for_bytes:
@@ -2022,7 +2063,9 @@ class WorkItems:
             current = work_item_retirement.project(current, terminal)
             if terminal:
                 since = None
-            projection = {"item": current, **self._origin_projection(current), **self._hold_projection(since)}
+            projection = {"item": current, **self._origin_projection(current),
+                          **self._hold_projection(since),
+                          **blocked_age(self, {**current, "blocked_since": blocked_since})}
             if len(canonical(projection)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
             history_total = current["rev"]
@@ -2067,7 +2110,7 @@ class WorkItems:
         status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
                   "holder": item["holder"], "updated_at": item["updated_at"],
                   "current_origin_rev": origin["current_origin_rev"],
-                  "stale": origin["stale"], **self._hold_projection(since)}
+                  "stale": origin["stale"], **self._hold_projection(since), **blocked_age(self, item)}
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 512)
@@ -2322,6 +2365,8 @@ class WorkItems:
                     ("current_origin_rev", "stale", "redecision", "doing_since", "doing_age_seconds", "doing_stale")})
         if item["status"] == "blocked":
             row["wait"] = item["wait"]
+            row.update({key: view[key] for key in
+                        ("blocked_since", "blocked_age_seconds", "blocked_max_age_seconds")})
             if wait_liveness is not None:
                 row["wait_liveness"] = wait_liveness
         if "description" in item:
@@ -2420,7 +2465,7 @@ class WorkItems:
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
-                  ("absent", "pending", "due", "impossible", "receipt_bound", "unknown")}
+                  ("absent", "pending", "due", "impossible", "receipt_bound", "terminal", "expired", "unknown")}
         total = 0
         open_count = 0
         eligible = 0
@@ -2501,7 +2546,7 @@ class WorkItems:
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
             view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
-                    **self._hold_projection(since)}
+                    **self._hold_projection(since), **blocked_age(self, item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
             open_count += 1
@@ -2521,12 +2566,12 @@ class WorkItems:
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
                 state = liveness(self, wait, published_snapshot,
-                                 item=item if ready_only else None)
+                                 item=item)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
                         continue
-                    if state["state"] not in ("due", "impossible", "absent", "terminal"):
+                    if state["state"] not in ("due", "impossible", "absent", "terminal", "expired"):
                         continue
                 if blocked_only:
                     counts[state["state"]] += 1
@@ -2762,11 +2807,26 @@ class WorkItems:
                     self, item_id, expected_rev=expected_rev, status=status, actor=actor, reason=reason,
                     history_revisions=history_revisions, wait=wait, snapshot_id=snapshot_id,
                     scope=scope, smoke_refs=smoke_refs)
-            current, previous_since = self._current_hold(item_id, history_revisions=history_revisions)
+            blocked_waiter = {}
+            current, previous_since = self._current_hold(
+                item_id, history_revisions=history_revisions, blocked_waiter=blocked_waiter)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
             if status == "blocked" and wait is None:
                 raise Denied("New blocked transitions require a supported observable wait")
+            if blocked_waiter:
+                state = liveness(self, blocked_waiter.get("wait"), None, item=blocked_waiter)
+                bound, age = state["blocked_max_age_seconds"], state["blocked_age_seconds"]
+                aged = (state["state"] not in ("due", "terminal", "impossible", "expired")
+                        and bound is not None and age is not None and age >= bound)
+                needs_open = state["state"] in ("terminal", "impossible", "expired") or aged
+                reopen_reason = (state["reason"] if state["state"] in ("terminal", "impossible", "expired")
+                                 else "blocked_max_age_reached" if aged else state["reason"])
+                if needs_open and (status == "blocked" or (status == "doing" and current["status"] == "blocked")):
+                    raise Denied(f"Reopen blocked work with a reason before renewing its wait: {reopen_reason}")
+                if (status == "open" and needs_open
+                        and (not isinstance(reason, str) or not reason.strip())):
+                    raise Denied("Reopening blocked work requires a reason")
             registered = None
             if wait is not None:
                 if status != "blocked":
@@ -2850,6 +2910,7 @@ class WorkItems:
                       "verification": verification, "delivered_tree": delivered_tree,
                       "scope": in_force, "delivery_schema": 1, "delivery": delivery,
                       "verification_scope": verification_scope}
+            record["blocked_since"] = blocked_start(current.get("blocked_since"), record)
             effective_smoke_refs = (current.get("smoke_refs") if smoke_refs is None else smoke_refs)
             if effective_smoke_refs is not None:
                 validate_refs(effective_smoke_refs)

@@ -72,7 +72,7 @@ class ProposalWaitTests(Fixture):
         self.assertEqual(self.store.get(blocked["id"]), blocked)
         self.assertEqual(self.store.page_ready()["total"], 0)
         live = self.store.blocked_liveness_readonly()
-        self.assertEqual(live["items"][0]["state"], "receipt_bound")
+        self.assertEqual(live["items"][0]["state"], "pending")
         with self.assertRaises(Denied):
             self.block(wait=blocked["wait"])  # Caller cannot supply its own pins.
         with self.assertRaises(Denied):
@@ -279,14 +279,16 @@ class ProposalWaitTests(Fixture):
         self.assertEqual(self.store.get(blocked["id"]), blocked)
         # A newly registered revision is a different event, not suppressed by the old receipt.
         opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"],
-                                       status="open", actor="worker")
+                                       status="open", actor="worker",
+                                       reason="receipt_route_terminal: reassess merged proposal")
         new = self.block(seed=opened)
         self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
         self.poll()
         self.assertEqual(proposal_waits.pending(self.store, "worker")[0]["rev"], new["rev"])
         with self.assertRaises(Denied):
             proposal_waits.validate_selection(ctx, tokens)
-        self.store.transition(new["id"], expected_rev=new["rev"], status="open", actor="worker")
+        self.store.transition(new["id"], expected_rev=new["rev"], status="open", actor="worker",
+                              reason="receipt_route_terminal: finish merge review")
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
 
     def test_ready_requires_exact_complete_route_not_proposal_facts(self):
@@ -301,6 +303,7 @@ class ProposalWaitTests(Fixture):
         self.poll()
         ready = self.store.page_ready(role_name="worker")
         self.assertNotEqual(ready["signature"], pending["signature"])
+        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "terminal")
         shared = proposal_waits.shared_store(self.store)
         record_id = proposal_waits._record_id(blocked)
         envelope, _ = shared.get(record_id)
@@ -313,6 +316,7 @@ class ProposalWaitTests(Fixture):
                 page = self.store.page_ready(role_name="worker")
                 self.assertEqual(page["total"], 0)
                 self.assertEqual(page["unknown_blocked"], 1)
+                self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "unknown")
         path.write_text("not JSON")
         self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
         write_json(path, envelope)

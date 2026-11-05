@@ -1,4 +1,5 @@
 """Writer explicit work order: bounded CAS record with review-gated display."""
+import copy
 import dataclasses
 import json
 
@@ -459,6 +460,31 @@ class WorkOrderTests(Fixture):
             row["doing_age_seconds"] = 999999
             row["doing_stale"] = True
         self.assertEqual(plan.generation_from_captured(**dict(base_kwargs, open_work_items=aged_open)), base)
+
+    def test_blocked_age_is_visible_but_does_not_churn_work_generation(self):
+        from mizu.work_order import _stable_open_for_hash, _stable_ready_for_hash
+
+        ready = {"items": [{"id": "wi_" + "1" * 32,
+                            "wait_liveness": {"state": "pending", "reason": "condition_pending",
+                                              "blocked_since": "2030-01-01T00:00:00+00:00",
+                                              "blocked_age_seconds": 5,
+                                              "blocked_max_age_seconds": 604800}}],
+                 "total": 1, "overflow_count": 0, "truncated": False,
+                 "unseeded_decisions": 0, "coverage_complete": True, "unknown_blocked": 0}
+        aged_ready = copy.deepcopy(ready)
+        aged_ready["items"][0]["wait_liveness"]["blocked_age_seconds"] = 6
+        self.assertEqual(_stable_ready_for_hash(ready), _stable_ready_for_hash(aged_ready))
+        expired_ready = copy.deepcopy(aged_ready)
+        expired_ready["items"][0]["wait_liveness"].update(
+            state="expired", reason="blocked_max_age_reached")
+        self.assertNotEqual(_stable_ready_for_hash(ready), _stable_ready_for_hash(expired_ready))
+
+        opened = {"items": [{"id": "wi_" + "1" * 32, "status": "blocked",
+                            "blocked_since": "2030-01-01T00:00:00+00:00",
+                            "blocked_age_seconds": 5, "blocked_max_age_seconds": 604800}]}
+        aged_opened = copy.deepcopy(opened)
+        aged_opened["items"][0]["blocked_age_seconds"] = 6
+        self.assertEqual(_stable_open_for_hash(opened), _stable_open_for_hash(aged_opened))
 
     def test_decision_page_summary_is_frozen_hashed_and_used_by_status(self):
         from unittest.mock import patch

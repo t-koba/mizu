@@ -174,8 +174,17 @@ class CiWaitTests(CiWaitFixture):
             self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
             self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
         self.assertEqual(self.store.get(blocked["id"]), blocked)
-        # Generic blocked diagnostics still defer to the receipt-bound route.
-        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "receipt_bound")
+        # Status uses the same exact terminal route without writing history/evidence.
+        before = {p.relative_to(self.project.root): p.read_bytes()
+                  for p in self.project.root.rglob("*") if p.is_file()}
+        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "terminal")
+        self.assertEqual({p.relative_to(self.project.root): p.read_bytes()
+                          for p in self.project.root.rglob("*") if p.is_file()}, before)
+        with self.assertRaisesRegex(Denied, "Reopen"):
+            self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="blocked", actor="worker",
+                                   wait=self.wait, scope="Renew wait", reason="Try again")
+        with self.assertRaisesRegex(Denied, "reason"):
+            self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="open", actor="worker")
 
     def test_ready_refuses_invalid_or_unavailable_terminal_source(self):
         blocked = self.block()
@@ -192,6 +201,7 @@ class CiWaitTests(CiWaitFixture):
                 page = self.store.page_ready(role_name="worker")
                 self.assertEqual(page["total"], 0)
                 self.assertEqual(page["unknown_blocked"], 1)
+                self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "unknown")
                 self.assertFalse(page["coverage_complete"])
         path.write_text("not JSON")
         self.assertEqual(self.store.page_ready()["total"], 0)
@@ -206,7 +216,8 @@ class CiWaitTests(CiWaitFixture):
         write_json(shared_path, {**envelope, "payload": {**envelope["payload"], "wait_digest": "0" * 64}})
         self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
         write_json(shared_path, envelope)
-        opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="open", actor="worker")
+        opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"], status="open",
+                                       actor="worker", reason="receipt_route_terminal: reassess CI")
         current = self.store.transition(opened["id"], expected_rev=opened["rev"], status="blocked",
                                         actor="worker", wait=self.wait)
         # Old evidence is not reused by a later revision of the same wait.
@@ -219,7 +230,8 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(self.store.page_ready()["total"], 1)
         self.assertNotEqual(self.store.page_ready()["signature"], original_signature)
 
-    def test_blocked_problem_rows_precede_pending_and_receipt_bound_rows(self):
+    @patch("mizu.work_item_waits.now", return_value="2000-01-01T00:00:01+00:00")
+    def test_blocked_problem_rows_precede_pending_and_receipt_bound_rows(self, _clock):
         with patch("mizu.work_items.now", return_value="2000-01-01T00:00:00+00:00"):
             self.block("pending", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
             self.block("ci")
@@ -244,7 +256,7 @@ class CiWaitTests(CiWaitFixture):
         view = self.store.blocked_liveness_readonly(limit=3)
         self.assertEqual({row["state"] for row in view["items"]}, {"absent", "impossible", "due"})
         self.assertEqual(view["counts"], {"absent": 1, "impossible": 1, "due": 1,
-                                         "unknown": 0, "pending": 1, "receipt_bound": 1})
+                                         "unknown": 0, "pending": 2, "receipt_bound": 0, "terminal": 0, "expired": 0})
         self.assertEqual((view["total"], view["overflow_count"], view["truncated"]), (5, 2, True))
         self.assertTrue(view["coverage_complete"])
 
@@ -521,7 +533,9 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(dispatch(), expected)
         self.assertEqual(expected["_dispatch"].admission, "wait")
         self.assertEqual([event["work_item"] for event in expected["wait_events"]], [item["id"]])
-        self.store.transition(item["id"], expected_rev=item["rev"], status="doing", actor="worker")
+        opened = self.store.transition(item["id"], expected_rev=item["rev"], status="open",
+                                       actor="worker", reason="receipt_route_terminal: process CI")
+        self.store.transition(item["id"], expected_rev=opened["rev"], status="doing", actor="worker")
         current = dispatch()
         self.assertEqual(current["wait_events"], [])
         self.assertEqual(current["_dispatch"].admission, "ready_work")
@@ -561,8 +575,10 @@ class CiWaitTests(CiWaitFixture):
         old_context = self.delivery_context("worker")
         old = old_context.wait_events
         self.assertEqual(len(old), 1)
-        self.store.transition(item["id"], expected_rev=4, status="doing", actor="reviewer")
-        current = self.store.transition(item["id"], expected_rev=5, status="blocked", actor="worker", wait=self.wait)
+        opened = self.store.transition(item["id"], expected_rev=4, status="open", actor="worker",
+                                       reason="receipt_route_terminal: reassign CI review")
+        doing = self.store.transition(item["id"], expected_rev=opened["rev"], status="doing", actor="reviewer")
+        current = self.store.transition(item["id"], expected_rev=doing["rev"], status="blocked", actor="worker", wait=self.wait)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.assertEqual(ci_waits.pending(self.store, "reviewer"), [])
         with self.assertRaises(Denied):
@@ -801,6 +817,31 @@ class PublicationCiWaitTests(CiWaitFixture):
         publication.mark_dispatch()
         return publication.complete(intent, sha)
 
+    def test_publication_rebinding_preserves_age_and_expires_without_remote_failure(self):
+        from test_blocked_wait_age import clock
+        self.store.blocked_max_age_seconds = 10
+        with clock(0) as start:
+            item = self.block()
+        with clock(3):
+            doing = self.store.transition(item["id"], expected_rev=item["rev"], status="doing", actor="worker")
+            child = self.descendant("new publication")
+            item = self.store.transition(item["id"], expected_rev=doing["rev"], status="blocked", actor="worker",
+                                         wait={**self.wait, "snapshot_id": child["id"]})
+        self.assertEqual(item["blocked_since"], start)
+        self.assertEqual(item["wait"]["snapshot_id"], child["id"])
+        with clock(10):
+            live = self.store.page_ready(role_name="worker")["items"][0]["wait_liveness"]
+            self.assertEqual((live["state"], live["reason"]), ("expired", "blocked_max_age_reached"))
+            self.assertNotIn("outcome", live)  # No receipt/dispatch is not a remote CI failure.
+            self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "expired")
+            with self.assertRaisesRegex(Denied, "Reopen"):
+                self.store.transition(item["id"], expected_rev=item["rev"], status="blocked", actor="worker",
+                                       wait=self.wait, scope="Rebind", reason="Try again")
+            with patch("mizu.ci_waits.evidence", side_effect=Denied("corrupt exact receipt")):
+                page = self.store.page_ready(role_name="worker")
+                self.assertEqual((page["total"], page["unknown_blocked"]), (0, 1))
+        self.assertEqual(self.store.get(item["id"]), item)
+
     def test_pre_receipt_wait_pins_snapshot_digest_and_config_without_polling_or_releasing(self):
         args = {"id": "wi_" + "a" * 32, "expected_rev": 1, "status": "blocked", "wait": self.wait}
         validate(args, DEFINITIONS["work_items_transition"][1])
@@ -819,7 +860,7 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.assertEqual(result["observed"], 0)
         reader.assert_not_called()
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
-        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "receipt_bound")
+        self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "pending")
         self.assertEqual(self.store.page_ready()["total"], 0)
         unrelated = self.store.create(actor="worker", idempotency_key="unrelated", title="Other work")
         self.assertEqual(self.store.page_ready()["items"][0]["id"], unrelated["record"]["work_item"]["id"])
@@ -1062,7 +1103,9 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
         self.assertEqual(self.store.page_ready(role_name='worker')['items'][0]['wait_liveness']['outcome'], 'success')
         self.assertEqual(self.store.get(item['id']), item)
-        doing = self.store.transition(item['id'], expected_rev=item['rev'], status='doing', actor='worker')
+        opened = self.store.transition(item['id'], expected_rev=item['rev'], status='open', actor='worker',
+                                       reason='receipt_route_terminal: validate delivery before closing')
+        doing = self.store.transition(item['id'], expected_rev=opened['rev'], status='doing', actor='worker')
         with self.assertRaisesRegex(Denied, 'prior exact snapshot'):
             self.store.transition(item['id'], expected_rev=doing['rev'], status='done', actor='worker',
                                   snapshot_id=child['id'])

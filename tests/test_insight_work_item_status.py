@@ -1,4 +1,6 @@
 """Owner-only compact work-item status on exact insight reads."""
+from unittest.mock import patch
+
 from support import Fixture
 from mizu.errors import Denied
 from mizu.fs import write_json
@@ -32,7 +34,8 @@ class InsightWorkItemStatusTests(Fixture):
             "id": item["id"], "expected_rev": 1, "status": "blocked",
             "reason": "Investigate the dependency", "wait": {"kind": "code_change"}})
 
-        owner = self.read("worker", proposal["id"])
+        with patch("mizu.work_item_waits.now", return_value=changed["updated_at"]):
+            owner = self.read("worker", proposal["id"])
         other = self.read("reporter", proposal["id"])
 
         status = owner["work_item_status"]
@@ -40,6 +43,8 @@ class InsightWorkItemStatusTests(Fixture):
             "id": item["id"], "status": "blocked", "rev": 2, "holder": "worker",
             "updated_at": changed["updated_at"], "current_origin_rev": 1,
             "stale": False, "doing_since": None, "doing_age_seconds": None, "doing_stale": False,
+            "blocked_since": changed["updated_at"], "blocked_age_seconds": 0,
+            "blocked_max_age_seconds": 604800,
             "reason_preview": "Investigate the dependency",
             "reason_truncated": False, "wait": changed["wait"]})
         self.assertNotIn("work_item_status", other)

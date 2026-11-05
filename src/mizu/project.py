@@ -162,6 +162,7 @@ class Project:
                                     doing_limits={name: role.work_items_doing for name, role in config.roles.items()
                                                   if role.work_items_doing is not None},
                                     stale_seconds=config.limits.work_items_stale_seconds,
+                                    blocked_max_age_seconds=config.limits.work_items_blocked_max_age_seconds,
                                     history_temporaries=config.limits.history_temporaries)
         self.insights.work_items = self.work_items
         from .role_state import RoleStateStore

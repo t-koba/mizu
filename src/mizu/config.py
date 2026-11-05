@@ -526,6 +526,8 @@ class Limits:
     work_items_doing: int = 1
     #: Visibility only: uninterrupted doing age that warrants review.
     work_items_stale_seconds: int = 86400
+    #: Lifetime of blocked waits without an explicit deadline.
+    work_items_blocked_max_age_seconds: int = 604800
     #: Operator-selected decision-event window per dispatch (1-100;
     #: default 10). The 100-event cap stays fixed mechanism; the value is
     #: policy: with rotation, a role with many deferrals sees each one
@@ -573,7 +575,9 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "smoke_retention_report_bytes": (1, TOML_INTEGER_MAX),
                  "pending_insights": (1, 1000),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
-                 "work_items_stale_seconds": (1, 31536000), "decision_events_limit": (1, 100),
+                 "work_items_stale_seconds": (1, 31536000),
+                 "work_items_blocked_max_age_seconds": (1, TOML_INTEGER_MAX),
+                 "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),
                  "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                  "event_stream_bytes": (1048576, 268435456),
