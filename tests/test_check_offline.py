@@ -2190,8 +2190,8 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Two runs on one cell would exceed that cell's job budget and
         # lose the timing evidence it exists for.
         self.assertIsNone(condition(gate))
-        # One declaration in each matrix job; each concrete cell runs it once.
-        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 2)
+        # One declaration for the normal matrix and one in each Windows shard job.
+        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 3)
         self.assertIn('--test-timings private-validation/test-timings.json', gate)
 
     def test_timings_artifact_survives_timeout_with_only_evidence(self):
