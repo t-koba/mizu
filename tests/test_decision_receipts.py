@@ -9,9 +9,31 @@ from mizu.errors import Denied, LimitExceeded
 from mizu.fs import read_json, write_json
 from mizu.insights import Insights
 from mizu.runtime import Engine, prompt_for, prompt_delta_for, _role_events_due
+from mizu.insights import _decision_key
 
 
 class DecisionReceiptTests(Fixture):
+    def _seed_receipt_batch(self, count):
+        """Create valid, equal-time legacy rows without repeating writer setup."""
+        first_id = f"{0:032x}"
+        with patch("mizu.insights.now", return_value="2026-01-01T00:00:00+00:00"):
+            _reject(self.project, "reviewer", title="Finding 0", insight_id=first_id)
+        first_key = _decision_key(first_id, 1)
+        inbox = self.project.root / "inbox"
+        decisions = self.project.root / "decisions"
+        history = self.project.root / "decision-history"
+        item = read_json(inbox / f"{first_id}.json")
+        decision = read_json(decisions / f"{first_id}.json")
+        event = read_json(history / f"{first_key}.json")
+        for index in range(1, count):
+            insight_id = f"{index:032x}"
+            key = _decision_key(insight_id, 1)
+            write_json(inbox / f"{insight_id}.json", {**item, "id": insight_id}, exclusive=True)
+            write_json(decisions / f"{insight_id}.json",
+                       {**decision, "id": insight_id, "decision_key": key}, exclusive=True)
+            write_json(history / f"{key}.json",
+                       {**event, "id": insight_id, "decision_key": key}, exclusive=True)
+
     def rows(self, role="reviewer", **kwargs):
         return self.project.insights.decision_events(role, ("reject", "defer"), **kwargs)
 
@@ -87,10 +109,10 @@ class DecisionReceiptTests(Fixture):
         self.assertEqual(self.rows("searcher", sources="any"), [other])
 
     def test_legacy_cursor_cannot_hide_equal_time_batches_or_partial_holes(self):
-        # These fixtures target receipt behavior; auto-ID dedup is covered separately in test_insight_archive.
-        with patch("mizu.insights.now", return_value="2026-01-01T00:00:00+00:00"):
-            for i in range(205):
-                _reject(self.project, "reviewer", title=f"Finding {i}", insight_id=f"{i:032x}")
+        # This fixture targets receipt paging; auto-ID dedup is covered separately
+        # in test_insight_archive. Seed one real decision, then clone its valid
+        # rev-1 records so the 205-row read case avoids 204 redundant submissions.
+        self._seed_receipt_batch(205)
         ids = sorted(p.stem for p in (self.project.root / "decision-history").glob("*.json"))
         write_json(self.project.root / "decision-cursors/reviewer.json",
                    {"role": "reviewer", "acknowledged_at": "2099-01-01T00:00:00+00:00",
