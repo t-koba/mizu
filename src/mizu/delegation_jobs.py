@@ -16,17 +16,19 @@ runner token, stable child run identity, execution outcome, request, result and
 result digest. The run identity is a random lowercase 32-hex string generated
 once on first start, retained in terminal tombstones for crash reconciliation,
 and never exposed in owner views. The supervisor-only binding is null until
-explicitly bound, then immutable and retained in terminal tombstones; it pins
-the exact run-directory path/device/inode, systemd unit/cgroup and the full
-rootless-Podman name/64-hex-ID/UID inventory. It is not launch authority. Older
-ledgers are refused, never migrated or reset. A request is exactly
+explicitly bound, then immutable while active; successful handback clears it
+atomically because recovery no longer references it. It pins the exact
+run-directory path/device/inode, systemd unit/cgroup and full rootless-Podman
+name/64-hex-ID/UID inventory. It is not launch authority. Older ledgers are
+refused, never migrated or reset. A request is exactly
 {role, task, profile, source_snapshot}; profile may be null, and snapshot is an
 immutable SHA256 snapshot ID. The host must pin the rest of the invocation
 authority before using this primitive; these fields grant no execution rights.
 Requests are bounded to 128 KiB canonical UTF-8 (task <= 65536 UTF-8 bytes),
-results to 32 KiB UTF-8, and the ledger to 1 MiB. Only the latest terminal
-result is retained. Old jobs retain identity/status/result-digest/binding
-tombstones indefinitely. The 1024-job history cap is shared project-state
+results to 32 KiB UTF-8, and the ledger to 1 MiB plus one maximum active
+binding. The ledger holds at most one active job, so the binding allowance does
+not accumulate across history. Only the latest terminal result is retained; old
+jobs retain small identity/status/result-digest tombstones indefinitely. The 1024-job history cap is shared project-state
 capacity policy pending this pilot's configuration section: capacity exhaustion
 refuses new starts, never forgets a key. The byte ceilings and schema are
 private format/safety limits, not scheduling policy.
@@ -62,12 +64,12 @@ from .fs import (DIGEST, canonical, digest, identifier, loads_finite, lock,
                  safe_read, safe_write, sync_dir, write_json)
 
 MAX_JOBS = 1024
-MAX_STATE_BYTES = 1024 * 1024
+# One active job can add one bounded binding; terminal handback removes it.
+MAX_BINDING_BYTES = 8192
+MAX_STATE_BYTES = 1024 * 1024 + MAX_BINDING_BYTES
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 32768
 MAX_TASK_BYTES = 65536
-# Private serialization/safety ceiling, not a resource-admission policy.
-MAX_BINDING_BYTES = 8192
 _STATES = {'queued', 'running', 'cancel-requested', 'terminal'}
 _OUTCOMES = {'succeeded', 'failed', 'cancelled'}
 _FIELDS = {'owner', 'key', 'request_digest', 'status', 'token', 'run_id', 'execution',
@@ -302,7 +304,7 @@ class DelegationJobs:
                         or (job['status'] == 'queued' and execution is not None)):
                     raise Denied('Invalid active delegation reservation')
             else:
-                if (job['binding'] is None or execution is None
+                if (job['binding'] is not None or execution is None
                         or job['token'] is not None or job['request'] is not None
                         or not _sha(job['result_digest'])):
                     raise Denied('Invalid delegation tombstone')
@@ -518,7 +520,7 @@ class DelegationJobs:
                 raise Denied('Delegation cleanup proof missing or mismatched')
             for old in state['jobs'].values():
                 old['result'] = None
-            job.update(status='terminal', token=None, request=None, result=result,
+            job.update(status='terminal', token=None, request=None, binding=None, result=result,
                        result_digest=digest(result.encode()))
             state['active'] = None
             self._save(state)

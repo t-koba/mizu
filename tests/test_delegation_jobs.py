@@ -44,10 +44,11 @@ class DelegationJobTests(unittest.TestCase):
                 'containers_absent': [c['id'] for c in binding['containers']]}
 
     def assert_tombstone(self, tombstone):
-        # The old identity tombstone stays small; the new binding has its own
-        # format ceiling, both still subject to the unchanged ledger byte cap.
-        self.assertLess(len(canonical({k: v for k, v in tombstone.items() if k != 'binding'})), 600)
-        self.assertLessEqual(len(canonical(tombstone['binding'])), jobs.MAX_BINDING_BYTES)
+        # Cleanup proves the binding is no longer referenced; retain only the
+        # bounded idempotency and execution-outcome tombstone.
+        self.assertIsNone(tombstone['binding'])
+        self.assertLess(len(canonical(tombstone)), 600)
+        self.assertEqual(jobs.MAX_STATE_BYTES, 1024 * 1024 + jobs.MAX_BINDING_BYTES)
 
     def complete(self, text='Retained child evidence'):
         job_id, token = self.runner()
