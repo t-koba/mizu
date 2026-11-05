@@ -5,7 +5,7 @@ import threading
 from unittest.mock import patch
 
 from support import Fixture
-from mizu import acceptance
+from mizu import acceptance, smoke_retention
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, lock, write_json
 
@@ -88,6 +88,16 @@ class RetainedDeliveryTests(Fixture):
         self.snapshot()
         self.assertNotIn(snapshot["id"], self.project.snapshots._history_ids())
         self.step("done", snapshot_id=snapshot["id"])
+
+    def test_retention_scan_replays_retained_acceptance_closure(self):
+        snapshot = self.snapshot(embedded=False)
+        self.bind(snapshot)
+        proof, scope = self.receipt(snapshot)
+        with patch("mizu.acceptance._current_scope", return_value=scope):
+            completed = self.step("done", snapshot_id=snapshot["id"])
+        self.assertEqual(completed["verification"], proof)
+        metadata = smoke_retention.Metadata(self.config.data)
+        self.assertEqual(smoke_retention.collect_refs(metadata, {}), set())
 
     def test_late_receipt_projection_is_pinned_not_reselected_on_replay(self):
         snapshot = self.snapshot(embedded=False)

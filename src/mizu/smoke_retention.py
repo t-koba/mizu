@@ -509,10 +509,10 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None) -> set:
         def _read(self, name):
             return metadata.read(self.root / name)
 
-        def _retained_verification(self, verification, code_digest, scope_digest):
+        def _retained_verification(self, verification, code_digest, scope_digest, snapshot_id):
             if isinstance(verification, dict) and isinstance(verification.get("receipt_id"), str):
                 metadata.read(self.root / "evidence/acceptance/objects" / f"{verification['receipt_id']}.json")
-            return super()._retained_verification(verification, code_digest, scope_digest)
+            return super()._retained_verification(verification, code_digest, scope_digest, snapshot_id)
 
     from .snapshot import Snapshots
 
