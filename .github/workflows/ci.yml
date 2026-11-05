@@ -10,40 +10,18 @@ concurrency:
   cancel-in-progress: true
 jobs:
   core:
-    # Portable development plane: offline unit/contract checks on all three OSes.
-    # Native service operation and live inference are not asserted here. Only
-    # Ubuntu 24.04/Python 3.13 additionally exercises real rootless OCI isolation.
-    runs-on: ${{ matrix.os }}
-    # The 2026-11-02 retained status rows for publication af5af555 at sha
-    # 0810d022 report green Windows job walls of 1609 s (3.11), 1768 s (3.14)
-    # and 1719 s (3.13); the two 3.12 shards, each a partial suite, took
-    # 1184/801 s. On 2026-11-01 the 3.14 job took 1282 s
-    # on one publication and was cut off at the 1800-second child bound on the
-    # next, a documentation-only change, while 3.11 took 1710 s and an earlier
-    # 3.13 job took 1628 s. On 2026-11-02 the 3.13 cell was also cut off at
-    # that bound (job wall 1821 s). These are single observations on
-    # unguaranteed hosted hardware and disk layout; same-revision hosted runs
-    # can vary enough that one cell is neither a cell cost nor a test ranking.
-    # Repeat or interleave observations with host/volume identity before
-    # deciding the shape. The bound therefore covers the slowest green cell
-    # with only 32 s of observed margin; whether the child bound or the suite
-    # duration should move is an operator decision. Every cell still holds the
-    # same modelled setup/child/later-phase/cleanup/
-    # suffix path (3246 s) inside a 60-minute scope and the gate reports its
-    # own bounded outcome instead of being cut off by the job scope. The
-    # later phase runs one child per check (ten on Windows, seventeen in a
-    # POSIX cell) and is bounded as a whole at 1200 s, so the number of
-    # checked files cannot grow the modelled path.
-    # The Linux/Python 3.13 cell also installs. That cell runs the gate
-    # once: the installer reuses the source gate's receipt, and the
-    # idempotence reinstall finds the release the cell already staged, so
-    # neither install runs a second gate. The cell's scope still holds the
-    # source gate's path plus the installer's own bounded staging call, so
-    # the cell is not cut off while the installer works, whether or not an
-    # install reaches its staged gate. A staged gate's pinned-adapter install
-    # is charged to its own later-phase budget, so it does not extend the
-    # 3300 s staging bound. The OCI step is capped at another 600 s:
-    # 3246 + 3300 + 600 = 7146 s still fits the unchanged 7200 s cell scope.
+    # Portable development plane; only Ubuntu/Python 3.13 adds rootless OCI.
+    # Windows/Python 3.12 and 3.14 use the same complete suite split by stable
+    # test-ID parity. Their aggregates below preserve the existing required
+    # check names; each shard still runs every non-unittest gate.
+    # The exact Windows 3.14 timing artifact recorded 3,735 completed tests
+    # totaling 1,781.994 s (longest case 11.678 s) before the unchanged 1,800 s
+    # child limit. Splitting this distributed workload reuses the 3.12 path;
+    # it does not raise the limit or remove tests/assertions.
+    # The 60 s setup + 1,800 s child + bounded later phase, cleanup and
+    # receipt reserve model to 3,246 s, fitting each 60-minute cell. Linux/
+    # Python 3.13 also stages the installer and runs OCI: 3,246 + 3,300 + 600
+    # = 7,146 s, inside its unchanged 120-minute scope.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
       fail-fast: false
@@ -53,6 +31,8 @@ jobs:
         exclude:
           - os: windows-latest
             python: "3.12"
+          - os: windows-latest
+            python: "3.14"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -117,8 +97,8 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
   windows-312-shards:
-    # Prototype: only this core cell is split. Each shard retains the complete
-    # non-unittest gate; the aggregate below owns the old external check name.
+    # Windows 3.12 and 3.14 split only unittest execution; each shard retains
+    # the full non-unittest gate, with aggregates preserving the old check names.
     name: windows-312-shard (${{ matrix.shard }})
     runs-on: windows-latest
     timeout-minutes: 60
@@ -165,6 +145,53 @@ jobs:
       - name: Require both shards
         env:
           SHARDS_RESULT: ${{ needs.windows-312-shards.result }}
+        run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
+  windows-314-shards:
+    # Reuse the established 3.12 split for the measured near-bound 3.14 suite.
+    name: windows-314-shard (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.14"
+      - name: Offline core and transport contracts
+        run: python scripts/check.py --test-shard ${{ matrix.shard }} --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-timings-windows-latest-3.14-shard-${{ matrix.shard }}
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: project-import-diagnostic-windows-latest-3.14-shard-${{ matrix.shard }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+  windows-314-core:
+    # Exactly one replacement for Offline checks / core (windows-latest, 3.14).
+    name: core (windows-latest, 3.14)
+    needs: [windows-314-shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both shards
+        env:
+          SHARDS_RESULT: ${{ needs.windows-314-shards.result }}
         run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
   durable-contract:
     # Authoritative durable coverage: the pinned Pi SDK is provisioned here in

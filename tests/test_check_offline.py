@@ -441,19 +441,6 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(required, 3246)
         self.assertGreaterEqual(int(match.group(1)), required)
 
-    def test_child_bound_covers_the_measured_suite_cost(self):
-        # The 2026-11-02 retained status rows for publication af5af555 at sha
-        # 0810d022 (vcs-read/d34efebefb214903b94cc411946edc68) report green
-        # Windows job walls of 1609 s (3.11), 1768 s (3.14) and 1719 s (3.13);
-        # the two 3.12 shards took 1184/801 s. On 2026-11-01 the 3.14 cell was
-        # cut off at the 1800 s child bound with an 1818 s job wall, and on
-        # 2026-11-02 the 3.13 cell was cut off at the same bound with a 1821 s
-        # wall. The bound covers the slowest green cell with only 32 s of
-        # observed margin; the edge and the operator decision are stated in
-        # docs/testing.md. Do not turn these observed job walls into a claimed
-        # headroom.
-        self.assertGreaterEqual(CHECK._unittest_timeout_seconds(), 1768)
-
     def test_installer_staging_gate_outlives_the_suite_child_bound(self):
         # The staged gate runs the same child; a staging timeout that does not
         # outlive the child's own bound would cut the gate off before its
@@ -776,11 +763,15 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
 
     def test_workflow_selects_only_exact_diagnostic_file_on_windows(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
-        parts = workflow.split('      - name: Upload managed-import diagnostic\n')
-        self.assertEqual(len(parts), 3,
-                         'expected exactly the core-matrix and Windows-3.12-shard diagnostic blocks')
+        marker = '      - name: Upload managed-import diagnostic\n'
+        parts = workflow.split(marker)
+        self.assertEqual(len(parts), 4,
+                         'expected core-matrix and Windows-3.12/3.14 shard diagnostic blocks')
         core_upload = parts[1].split('  windows-312-shards:', 1)[0]
-        shard_upload = parts[2].split('  windows-312-core:', 1)[0]
+        shard_uploads = (
+            ('3.12', parts[2].split('  windows-312-core:', 1)[0]),
+            ('3.14', parts[3].split('  windows-314-core:', 1)[0]),
+        )
         exact_path = ['path: private-validation/project-import-diagnostic.json']
         # Core matrix cell: Windows-only condition with a per-cell artifact name.
         self.assertEqual([line.strip() for line in core_upload.splitlines()
@@ -795,24 +786,26 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
         self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}',
                       core_upload)
         self.assertNotIn('project-import-diagnostic-windows-latest-3.12-shard', core_upload)
+        self.assertNotIn('project-import-diagnostic-windows-latest-3.14-shard', core_upload)
         self.assertIn('retention-days: 7', core_upload)
         self.assertIn('if-no-files-found: ignore', core_upload)
-        # Windows 3.12 shard cells: the job already runs on windows-latest,
-        # so the step uses a bare always() with a per-shard artifact name.
-        self.assertEqual([line.strip() for line in shard_upload.splitlines()
-                          if line.strip().startswith('if:')],
-                         ['if: always()'])
-        shard_uses = [line.strip() for line in shard_upload.splitlines()
-                      if line.strip().startswith('uses: actions/upload-artifact@')]
-        self.assertEqual(len(shard_uses), 1)
-        self.assertRegex(shard_uses[0], UPLOAD_ARTIFACT_USE)
-        self.assertEqual([line.strip() for line in shard_upload.splitlines() if 'path:' in line],
-                         exact_path)
-        self.assertIn('name: project-import-diagnostic-windows-latest-3.12-shard-${{ matrix.shard }}',
-                      shard_upload)
-        self.assertNotIn('${{ matrix.os }}', shard_upload)
-        self.assertIn('retention-days: 7', shard_upload)
-        self.assertIn('if-no-files-found: ignore', shard_upload)
+        for version, shard_upload in shard_uploads:
+            with self.subTest(version=version):
+                # Shard jobs run on Windows, so use bare always() and distinct names.
+                self.assertEqual([line.strip() for line in shard_upload.splitlines()
+                                  if line.strip().startswith('if:')], ['if: always()'])
+                shard_uses = [line.strip() for line in shard_upload.splitlines()
+                              if line.strip().startswith('uses: actions/upload-artifact@')]
+                self.assertEqual(len(shard_uses), 1)
+                self.assertRegex(shard_uses[0], UPLOAD_ARTIFACT_USE)
+                self.assertEqual([line.strip() for line in shard_upload.splitlines()
+                                  if 'path:' in line], exact_path)
+                artifact = (f'name: project-import-diagnostic-windows-latest-{version}'
+                            '-shard-${{ matrix.shard }}')
+                self.assertIn(artifact, shard_upload)
+                self.assertNotIn('${{ matrix.os }}', shard_upload)
+                self.assertIn('retention-days: 7', shard_upload)
+                self.assertIn('if-no-files-found: ignore', shard_upload)
 
 
 class UnittestFailureSummaryTests(unittest.TestCase):

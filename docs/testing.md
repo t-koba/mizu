@@ -304,94 +304,46 @@ caller-supplied SHA/run ID, CI environment variable nor a later branch head is
 an authority. Content digests detect missing/mixed pages; they do not authenticate
 an arbitrary externally supplied artifact or create a new CI receipt.
 
-The Windows/Python 3.12 sharding prototype alone runs `--test-shard 0` and
-`--test-shard 1`. Unittest discovery is unchanged; the parity of the SHA-256
-hash of each unique stable test ID (UTF-8, low bit of the final digest byte)
-assigns it to exactly one shard, retaining discovery order and fixture behavior.
-Duplicate or unavailable stable IDs fail sharded discovery. With no flag,
-`scripts/check.py` still runs full unsharded acceptance. Shard receipts use
-`suite: "offline-shard"` and `test_shard`, not reusable full offline receipts.
-Each shard also runs all other checks with the same waivers and bounds.
+Windows/Python 3.12 and 3.14 core cells run unittest in two stable-ID parity
+shards; discovery and fixtures stay unchanged. The low bit of the SHA-256 hash
+of each unique UTF-8 test ID assigns it to exactly one shard, preserving
+per-shard discovery order. Duplicate or unavailable IDs fail sharded discovery.
+Without `--test-shard`, `scripts/check.py` still runs the full unsharded suite.
+Shard receipts use `suite: "offline-shard"` and `test_shard`, never reusable
+full offline receipts. Both shards run the same non-unittest checks and waivers;
+their reports cannot substitute for the aggregate check.
 
-The original Windows/3.12 matrix cell is excluded and replaced by exactly one
-aggregate named `core (windows-latest, 3.12)` under `Offline checks`. It runs
-with `always()` and accepts only `success` from the whole two-shard matrix;
-failure, cancellation, skip or missing result cannot pass. Timing and diagnostic
-artifact names include `-shard-0` or `-shard-1`. For the retained run
-`41109593884` at SHA `ff2c0ef8193eb5cf832e9ded46a6834259a711ce`, the operator's
-host-side comparison report records verified artifact-manifest hashes, 1,977
-unique completed shard-0 IDs and 1,882 shard-1 IDs, no duplicates, unfinished
-IDs or overlap, and exact union with 3,859 IDs discovered from the exact source
-archive on Linux/Python 3.14.4. The sorted-ID-set SHA-256 is
-`e060d4a389786e8499525b9cb016b95bfa7bac9864c119eda5f97a31f8315f48`.
-This closes ID-set parity against that exact-source Linux discovery only; it is
-not an independently observed unsharded Windows/Python 3.12 execution. The
-reported shard unittest elapsed times (863.344 s and 661.782 s) are not total
-runner time, and no cost-savings result is established. Wall time, queueing and
-total runner seconds must still be measured before adopting this prototype; do
-not infer CI identity or cost savings from local partition checks alone. No
-timeout is raised.
+Each excluded Windows matrix cell is replaced by two shard jobs and one
+aggregate under its original required name: `core (windows-latest, 3.12)` or
+`core (windows-latest, 3.14)`. The aggregate runs with `always()` and accepts
+only `success` from its own two-cell matrix; failure, cancellation, skip or a
+missing result fails closed. Timing and managed-import diagnostic artifacts
+are distinct per Python version and shard. The 1,800-second suite-child limit
+and 60-minute shard scope are unchanged; partitioning changes only parallelism,
+not coverage or assertions.
 
-Every CI cell supplies `--test-timings` and uploads only the summary and
-`test-timings.json.d/*.json`, one artifact per cell (`actions/upload-artifact`
-v4.6.2, 7-day retention, `if: always()` with missing-file tolerance), and the
-authoritative `durable-contract` job publishes its own. Each supported host's
-suite timing is therefore sampled where it runs, so the one shared child bound
-rests on observations from that host rather than on a sibling's measurement. It
-records diagnostic evidence; it sets no timeout policy. One 1800 s child cap
-bounds the suite on every platform. The 2026-11-02 retained status rows for
-publication `af5af5553f1744dc08507e45bd90b1516a8aa3f410dcee27a93bee6363c61a89`
-at sha `0810d022ddaad2a1c062a924835d7c18dc26740d`
-(`vcs-read/d34efebefb214903b94cc411946edc68`) report green Windows job walls
-of 1609 s (3.11), 1768 s (3.14) and 1719 s (3.13); the two 3.12 shards, each a
-partial suite, took 1184 s and 801 s. On 2026-11-01 the 3.14 job took 1282 s on
-one publication and was cut off at the 1800 s child bound on the next, a
-documentation-only change; the same run's 3.11 job took 1710 s, and an earlier
-3.13 job took 1628 s. On 2026-11-02 the 3.13 cell was cut off at the same
-1800 s child bound (job wall 1821 s). These are single observations on
-unguaranteed hosted hardware and disk layout; published same-revision
-measurements show that hosted runs can vary enough that one cell is neither a
-cell cost nor a test ranking. Repeat or interleave observations with host
-identity and volume layout before deciding whether the bound or the suite shape
-should move. The bound therefore covers the slowest green cell with only 32 s
-of observed margin; whether the child bound or the suite duration should move
-is an operator decision. The retained per-cell timing artifacts are listed, but
-their content reads are currently refused; the adapter response shape has not
-been observed, so the refusal is not attributed to a particular cause. Once a
-deployment carries the artifact-field disclosure, that refusal names bounded
-missing/unexpected identifiers, making the shape observable without content.
-These job walls cannot yet be split into suite and later-phase cost; the status
-rows are the evidence used here. The gate exposes the child bound and the
-later-phase budget as
-`--suite-child-timeout` and `--later-phase-budget` (defaults 1800 s and
-1200 s; validated 1 to 86400 s ranges). It also exposes the per-check
-ceiling and the pinned-adapter install bound as `--check-timeout` and
-`--provision-timeout` (defaults 600 s and 300 s, same validated range); the
-first bounds each later-phase child, the second each install. CI uses the
-defaults; a run that passes other values must also ensure its enclosing job
-scope holds the resulting modeled path. The scope model's 60 s setup and
-120 s receipt/summary reserves are fixed conservative margins, not command
-timeouts. Pinned-adapter installs are charged to the later-phase budget, not
-added outside it: each install is bounded by `--provision-timeout` and by
-the phase's remaining time, and its elapsed time is recorded in the
-receipt's `later_phase` object. The modeled
-setup/child/later-phase/cleanup/suffix path is 3246 s, leaving 354 s inside
-the 60-minute Windows and POSIX scopes; this arithmetic is a contract, not a
-worst-case runtime claim. The authoritative `durable-contract` scope is 70
-minutes, holding the 3246 s modeled path; two 300 s installs are bounded
-inside its 1200 s later-phase budget and cannot extend that path. The
-Linux/Python 3.13 cell also installs. That cell runs the gate once: the
-installer reuses the source gate's receipt, and the idempotence reinstall
-finds the release the cell already staged, so neither install runs a second
-gate. Its scope is still 120 minutes, holding the source gate's modeled path
-(3246 s), the installer's own bounded staging call (3300 s), and the OCI
-step (600 s) = 7146 s, leaving 54 s inside the job, so the cell is not cut
-off while the installer works whether or not an install reaches its staged
-gate. A staged gate's install is charged to its own later-phase budget, so
-it does not extend the 3300 s staging bound. Every scope that
-encloses the gate holds the gate's modeled path, so a bounded run reports
-its own outcome instead of being cut off by the enclosing scope; the
-installer staging call holds the same path for the same reason.
+The 3.14 split is based on retained exact-snapshot timing evidence: on SHA
+`3ca295fd30906087761b4cbf95e931230fcdaaac`, all 3,735 tests completed with
+1,781.994 seconds of summed test time, the slowest individual case took
+11.678 seconds, and the child reached the existing 1,800-second bound. This
+shows a distributed near-bound workload, not one exceptional test. The split
+reuses the already-tested 3.12 parity mechanism. Total runner cost is not
+claimed to fall; the repeated non-unittest gates and exact-revision hosted
+results remain part of any future cost assessment.
+
+Every core cell uploads its bounded timing summary and detail pages; the
+Windows shards also retain per-shard timings and managed-import diagnostics.
+Artifacts are diagnostic, not pass/failure inputs. The shared suite-child
+limit remains 1,800 seconds; the later-phase budget is 1,200 seconds, each
+later-phase check is capped at 600 seconds, and each pinned-adapter install at
+300 seconds. These command limits accept validated values from 1 through
+86,400 seconds; CI uses the defaults. The 60-second setup and 120-second
+receipt/summary reserves give a 3,246-second modelled path, inside the standard
+60-minute Windows/POSIX cells; this is a bound calculation, not a runtime
+claim. `durable-contract` uses a 70-minute scope with its two adapter installs
+charged to the same 1,200-second later-phase budget. Ubuntu/Python 3.13 also
+runs the installer staging gate and a 600-second OCI step; the combined
+modelled path is 7,146 seconds inside its 120-minute cell.
 
 The later phase is bounded as a whole, not per child. It runs one child per
 check: the transport suite, every SDK contract suite that is not waived, one
@@ -402,31 +354,13 @@ derives it from the checked file set. A budget per child would make the
 gate's own path grow with the number of checked files, so the phase carries
 one 1200 s budget that every child and install shares: a child takes at most
 its own 600 s bound and what is left of the phase, with its own cleanup
-reserved inside that remainder. The budget covers the measured healthy phase
-with wide margin -- about 4 s for the earlier sixteen-child POSIX cell, and
-about 103 s for the earlier nineteen-child durable job, whose three SDK
-contract suites measured 5.6 s, 75.5 s and 18.1 s on the development host.
-Those measurements predate the current seventeen- and twenty-child phases, so
-they are lower bounds. Without an install it is sized for two children's
-full bounds, so one hung child still leaves the next child a positive bound;
-an install is charged to the same budget, so the phase stays inside its
-modeled path and the receipt records the install count and time. A child the
-phase can no longer afford is recorded as a failure with the reason
-`later-phase-budget-exhausted`; it is never skipped silently, and the receipt
-records the phase's own child count, budget, and consumed time.
-The 2026-10-21 Windows/3.13 run completed 2233 of about 2265 tests in
-1447 s and reached the previous 1450 s child cap without a reported
-test failure, and the 2026-10-21 POSIX run reached the previous 1000 s child
-cap with the suite still running and three load-sensitive assertions
-failing. Those observations moved the bound to 1800 s; the 2026-11-01 and
-2026-11-02 Windows observations above show that bound is now at its edge, not
-comfortably above the slowest host.
-A test that waits for a spawned child waits with one shared host-cost
-bound (60 s, with a 600 s backstop for the child's own release): the
-child is a fresh interpreter that re-imports the product's modules, so
-its start-up is the host's cost and not a bound the product sets. A
-short literal there let a loaded host report a healthy child as a
-failed test.
+reserved inside that remainder.
+
+A test that waits for a spawned child uses one shared host-cost bound (60 s,
+with a 600 s backstop for the child's own release): the child is a
+fresh interpreter that re-imports the product's modules, so its start-up is
+the host's cost and not a bound the product sets. A short literal there let
+a loaded host report a healthy child as a failed test.
 If the bounded run stalls again, use its partial per-test artifact to identify
 the unfinished test; timing samples are not bounds.
 

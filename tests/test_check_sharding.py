@@ -1,4 +1,4 @@
-"""Bounded Windows/3.12 prototype contracts; never execute the full suite here."""
+"""Windows shard contracts; never execute the full suite here."""
 import hashlib
 import io
 import json
@@ -129,7 +129,7 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.jobs = dict(re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
                                    self.workflow, re.M | re.S))
 
-    def test_only_windows_312_is_excluded_and_sharded_with_distinct_artifacts(self):
+    def test_only_windows_312_and_314_are_excluded_and_sharded_with_distinct_artifacts(self):
         core = self.jobs['core']
         self.assertTrue(self.workflow.startswith('name: Offline checks\n'))
         self.assertNotRegex(core, r'(?m)^    name:')  # Keep all other automatic matrix names.
@@ -137,8 +137,10 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.assertIn('        python: ["3.11", "3.12", "3.13", "3.14"]\n', core)
         matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertEqual(matrix.split('        exclude:\n')[1],
-                         '          - os: windows-latest\n            python: "3.12"\n')
+                         '          - os: windows-latest\n            python: "3.12"\n'
+                         '          - os: windows-latest\n            python: "3.14"\n')
         self.assertNotIn('--test-shard', core)
+        self.assertNotIn('--suite-child-timeout', core)
         shards = self.jobs['windows-312-shards']
         self.assertIn('    name: windows-312-shard (${{ matrix.shard }})\n', shards)
         self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', shards)
@@ -155,30 +157,53 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.assertIn('            private-validation/test-timings.json.d/*.json\n', shards)
         self.assertEqual(shards.count('        if: always()\n'), 2)
         self.assertNotIn('continue-on-error', shards)
+        self.assertNotIn('--suite-child-timeout', shards)
         self.assertNotRegex(shards, r'(?m)^    if:')
-        self.assertEqual(self.workflow.count('--test-shard'), 1)
+        self.assertEqual(self.workflow.count('--test-shard'), 2)
+        core314 = self.jobs['windows-314-shards']
+        self.assertIn('    name: windows-314-shard (${{ matrix.shard }})\n', core314)
+        self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', core314)
+        self.assertIn('      fail-fast: false\n      matrix:\n        shard: [0, 1]\n', core314)
+        self.assertIn('          python-version: "3.14"\n', core314)
+        self.assertIn('        run: ' + core_command.replace('check.py ',
+                      'check.py --test-shard ${{ matrix.shard }} ', 1) + '\n', core314)
+        self.assertEqual(re.findall(r'uses: (.+)', core), re.findall(r'uses: (.+)', core314))
+        self.assertEqual(re.findall(r'uses: (actions/upload-artifact@.+)', core),
+                         re.findall(r'uses: (actions/upload-artifact@.+)', core314))
+        for prefix in ('test-timings', 'project-import-diagnostic'):
+            self.assertIn(f'          name: {prefix}-windows-latest-3.14-shard-${{{{ matrix.shard }}}}\n', core314)
+        self.assertIn('            private-validation/test-timings.json.d/*.json\n', core314)
+        self.assertEqual(core314.count('        if: always()\n'), 2)
+        self.assertNotIn('continue-on-error', core314)
+        self.assertNotIn('--suite-child-timeout', core314)
+        self.assertNotRegex(core314, r'(?m)^    if:')
 
-    def test_exact_single_old_check_name_and_fail_closed_matrix_dependency(self):
-        aggregate = self.jobs['windows-312-core']
-        name = '    name: core (windows-latest, 3.12)\n'
-        self.assertEqual(self.workflow.count(name), 1)
-        self.assertIn(name, aggregate)
-        self.assertIn('    needs: [windows-312-shards]\n', aggregate)
-        self.assertIn('    if: ${{ always() }}\n', aggregate)
-        self.assertNotIn('timeout-minutes:', aggregate)
-        self.assertIn('          SHARDS_RESULT: ${{ needs.windows-312-shards.result }}\n', aggregate)
-        self.assertNotIn('continue-on-error', aggregate)
-        self.assertEqual(aggregate.count('      - name:'), 1)
-        command = re.search(r'        run: (.+)', aggregate).group(1)
-        argv = shlex.split(command)
-        self.assertEqual(argv[:2], ['python', '-c'])
-        # Execute the exact workflow predicate, not a reimplementation of it.
-        for result in ('success', 'failure', 'cancelled', 'skipped', '', None):
-            with self.subTest(result=result):
-                env = dict(os.environ)
-                env.pop('SHARDS_RESULT', None)
-                if result is not None:
-                    env['SHARDS_RESULT'] = result
-                child = subprocess.run([sys.executable, *argv[1:]], env=env,
-                                       capture_output=True, timeout=10)
-                self.assertEqual(child.returncode, 0 if result == 'success' else 1)
+    def test_exact_old_check_names_and_fail_closed_matrix_dependencies(self):
+        for python, short in (("3.12", "312"), ("3.14", "314")):
+            with self.subTest(python=python):
+                aggregate = self.jobs[f'windows-{short}-core']
+                shards = self.jobs[f'windows-{short}-shards']
+                name = f'    name: core (windows-latest, {python})\n'
+                self.assertEqual(self.workflow.count(name), 1)
+                self.assertIn(name, aggregate)
+                self.assertIn(f'    needs: [windows-{short}-shards]\n', aggregate)
+                self.assertIn('    if: ${{ always() }}\n', aggregate)
+                self.assertNotIn('timeout-minutes:', aggregate)
+                result_ref = f'          SHARDS_RESULT: ${{{{ needs.windows-{short}-shards.result }}}}\n'
+                self.assertIn(result_ref, aggregate)
+                self.assertNotIn('continue-on-error', aggregate)
+                self.assertEqual(aggregate.count('      - name:'), 1)
+                command = re.search(r'        run: (.+)', aggregate).group(1)
+                argv = shlex.split(command)
+                self.assertEqual(argv[:2], ['python', '-c'])
+                self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', shards)
+                # Execute the exact workflow predicate, not a reimplementation of it.
+                for result in ('success', 'failure', 'cancelled', 'skipped', '', None):
+                    with self.subTest(python=python, result=result):
+                        env = dict(os.environ)
+                        env.pop('SHARDS_RESULT', None)
+                        if result is not None:
+                            env['SHARDS_RESULT'] = result
+                        child = subprocess.run([sys.executable, *argv[1:]], env=env,
+                                               capture_output=True, timeout=10)
+                        self.assertEqual(child.returncode, 0 if result == 'success' else 1)
