@@ -3,7 +3,7 @@ import dataclasses
 import json
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, finish_with_decision_acks
+from support import Fixture, ScriptDriver, finish_with_decision_acks, write_fixture_json
 from test_decision_events import _reject, _trigger_config
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import read_json, write_json
@@ -28,11 +28,11 @@ class DecisionReceiptTests(Fixture):
         for index in range(1, count):
             insight_id = f"{index:032x}"
             key = _decision_key(insight_id, 1)
-            write_json(inbox / f"{insight_id}.json", {**item, "id": insight_id}, exclusive=True)
-            write_json(decisions / f"{insight_id}.json",
-                       {**decision, "id": insight_id, "decision_key": key}, exclusive=True)
-            write_json(history / f"{key}.json",
-                       {**event, "id": insight_id, "decision_key": key}, exclusive=True)
+            write_fixture_json(inbox / f"{insight_id}.json", {**item, "id": insight_id})
+            write_fixture_json(decisions / f"{insight_id}.json",
+                       {**decision, "id": insight_id, "decision_key": key})
+            write_fixture_json(history / f"{key}.json",
+                       {**event, "id": insight_id, "decision_key": key})
 
     def rows(self, role="reviewer", **kwargs):
         return self.project.insights.decision_events(role, ("reject", "defer"), **kwargs)
