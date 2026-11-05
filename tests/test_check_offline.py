@@ -549,11 +549,13 @@ class CheckTimeoutTests(unittest.TestCase):
             # A separate thread lets the test enforce a wall-clock bound and
             # still kill/reap the captured tree in finally if cleanup regresses.
             gate = threading.Thread(target=run_gate, daemon=True)
+            # The patched spawn blocks until the descendant is ready. A short
+            # synthetic wait still exercises timeout cleanup without a long delay.
             with mock.patch.object(CHECK, 'ROOT', root), \
                     mock.patch.object(CHECK.sys, 'argv', ['check.py', '--report', str(report)]), \
                     mock.patch.object(CHECK.sys, 'stdout', output), \
                     mock.patch.object(CHECK, 'spawn', side_effect=launch), \
-                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=10), \
+                    mock.patch.object(CHECK, '_unittest_timeout_seconds', return_value=3), \
                     mock.patch.object(CHECK, 'PROCESS_CLEANUP_TIMEOUT_SECONDS', 1), \
                     mock.patch.object(CHECK.shutil, 'which', return_value=None), \
                     mock.patch.object(CHECK, 'bash_available', return_value=False):
@@ -582,7 +584,7 @@ class CheckTimeoutTests(unittest.TestCase):
                     if timed_out:
                         # Windows Job Object termination can report process exit
                         # status 0; the gate records timeout in status/details.
-                        self.assertIn('timed out after 10 s', entry['details'])
+                        self.assertIn('timed out after 3 s', entry['details'])
                         self.assertIn('unittest failure details unavailable', entry['details'])
                     else:
                         self.assertEqual(entry['exit_code'], 0)
