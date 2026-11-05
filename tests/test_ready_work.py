@@ -2,10 +2,12 @@
 import dataclasses
 import datetime as dt
 import json
+import os
+import unittest
 from threading import Event
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, bind_delivery
 from mizu import work_items as work_items_module
 from mizu.errors import Denied
 from mizu.fs import now, read_json, write_json
@@ -272,6 +274,162 @@ class SatisfiedWorkWaitTests(Fixture):
         (self.project.workspace / 'changed.txt').write_text('changed\n')
         self.parked('done')
         self.assertEqual(self.project.work_items.page_ready()['total'], 1)
+
+
+class ReadyProjectionTests(Fixture):
+    item = ReadyWorkTests.item
+
+    def exact(self, **kwargs):
+        # The unsupported-identity path retains the original live replay.
+        with patch.object(work_items_module, "IS_WINDOWS", True):
+            return self.project.work_items.page_ready(**kwargs)
+
+    @unittest.skipIf(os.name == "nt", "POSIX metadata cache")
+    def test_cold_warm_equivalence_replays_less_but_scans_every_item(self):
+        store = self.project.work_items
+        opened = self.item("open")
+        self.item("doing", "doing")
+        self.item("waiting", "blocked", {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        closed = self.item("closed")
+        store.transition(closed["id"], expected_rev=1, actor="worker", status="dropped", reason="Settled")
+        with patch.object(work_items_module, "now", return_value=now()):
+            for role in (None, "worker", "reviewer"):
+                for limit in (1, 100):
+                    with self.subTest(role=role, limit=limit):
+                        expected = self.exact(role_name=role, limit=limit)
+                        store._projection_cache.clear()
+                        with patch.object(store, "_sidecar_load", return_value=None), \
+                             patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
+                             patch.object(store, "_history_revisions", wraps=store._history_revisions) as scan:
+                            cold = store.page_ready(role_name=role, limit=limit)
+                            self.assertEqual((replay.call_count, scan.call_count), (4, 4))
+                            replay.reset_mock()
+                            scan.reset_mock()
+                            warm = store.page_ready(role_name=role, limit=limit)
+                            self.assertEqual((replay.call_count, scan.call_count), (0, 4))
+                            self.assertTrue(all(c.kwargs["recover"] for c in scan.call_args_list))
+                        self.assertEqual(cold, expected)
+                        self.assertEqual(warm, expected)
+        # A new store can also reuse validated source-backed sidecars.
+        fresh = work_items_module.WorkItems(store.root, store.snapshots, store.insights)
+        with patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
+            self.assertEqual(fresh.page_ready(limit=1)["signature"],
+                             store.page_ready(limit=1)["signature"])
+            self.assertEqual(replay.call_count, 0)
+        fresh._projection_cache.clear()
+        fresh._sidecar_path(opened["id"]).write_text("{invalid")
+        with patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
+            self.assertEqual(fresh.page_ready()["total"], 2)
+            self.assertEqual(replay.call_count, 1)
+        with patch.object(fresh, "_history_identity", return_value=None), \
+             patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
+            self.assertEqual(fresh.page_ready()["total"], 2)
+            self.assertEqual(replay.call_count, 4)
+
+    def test_next_call_sees_other_store_appends_new_items_and_corruption(self):
+        store = self.project.work_items
+        item = self.item("existing")
+        other = work_items_module.WorkItems(store.root, store.snapshots, store.insights)
+        before = store.page_ready()
+        other.transition(item["id"], expected_rev=1, actor="worker", status="blocked",
+                         wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        self.assertEqual(store.page_ready()["total"], 0)
+        other.transition(item["id"], expected_rev=2, actor="worker", status="open")
+        self.assertEqual(store.page_ready()["signature"], before["signature"])
+        added = other.create(idempotency_key="other-store", title="New", actor="worker")["record"]["work_item"]
+        page = store.page_ready()
+        self.assertEqual(page["total"], 2)
+        self.assertIn(added["id"], [row["id"] for row in page["items"]])
+        # A terminal row is still scanned, and its old revisions still matter.
+        other.transition(item["id"], expected_rev=3, actor="worker", status="dropped", reason="Settled")
+        store.page_ready(limit=1)
+        path = store.root / "work-items" / item["id"] / "2.json"
+        record = read_json(path)
+        write_json(path, {**record, "rev": 9})
+        with self.assertRaises(Denied):
+            store.page_ready(limit=1)
+
+    def test_origin_hold_and_wait_liveness_are_not_cached(self):
+        store = self.project.work_items
+        proposal = self.project.insights.submit(source="reviewer", title="Origin", body="Scope", base_snapshot=None)
+        item = store.create(idempotency_key="origin", title="Origin work", actor="worker",
+                            origin={"insight_id": proposal["id"], "rev": 1})["record"]["work_item"]
+        store.transition(item["id"], expected_rev=1, actor="worker", status="doing")
+        self.item("wait", "blocked", {"kind": "insight_decided", "insight": proposal["id"]})
+        before = store.page_ready()
+        self.project.insights.revise(proposal["id"], source="reviewer", title="Revised", body="New",
+                                     base_snapshot=None, expected_rev=1)
+        self.assertTrue(store.page_ready()["items"][0]["stale"])
+        self.project.insights.decide(proposal["id"], "reject", "Not proceeding", "", "run", expected_rev=2)
+        with patch.object(work_items_module, "now", return_value="2099-01-02T00:00:00+00:00"):
+            after = store.page_ready()
+            self.assertEqual(after, self.exact())
+        self.assertEqual(after["total"], 2)
+        row = next(row for row in after["items"] if row["id"] == item["id"])
+        self.assertFalse(row["stale"])
+        self.assertEqual(row["redecision"], {"rev": 2, "action": "reject"})
+        self.assertEqual(row["current_origin_rev"], 2)
+        self.assertTrue(row["doing_stale"])
+        self.assertNotEqual(before["signature"], after["signature"])
+
+    def test_live_recovery_precedes_identity_for_direct_task_and_unseeded_directories(self):
+        store = self.project.work_items
+        direct = self.item("direct")
+        proposal = self.project.insights.submit(source="reviewer", title="Task", body="Scope", base_snapshot=None)
+        decision = self.project.insights.decide(proposal["id"], "accept", "Implement", "", "run", expected_rev=1)
+        task_id = decision["work_item"]["id"]
+        store.page_ready()
+        directories = [store.root / "work-items" / item_id for item_id in
+                       (direct["id"], task_id, store._create_id("worker", "uncommitted"))]
+        for directory in directories:
+            directory.mkdir(exist_ok=True)
+            (directory / ".new-abcdefgh").write_text("orphan")
+        identity = store._history_identity
+        def after_recovery(item_id):
+            self.assertFalse((store.root / "work-items" / item_id / ".new-abcdefgh").exists())
+            return identity(item_id)
+        with patch.object(store, "_history_identity", side_effect=after_recovery), \
+             patch.object(store, "_history_revisions_readonly", side_effect=AssertionError("live scan")):
+            self.assertEqual(store.page_ready()["total"], 2)
+        self.assertTrue(all(not (d / ".new-abcdefgh").exists() for d in directories))
+        # Unknown files cannot be hidden by the now-warm projection.
+        unexpected = directories[-1] / "unexpected"
+        unexpected.write_text("unsafe")
+        with self.assertRaises(Denied):
+            store.page_ready(limit=1)
+        unexpected.unlink()
+        if os.name != "nt":
+            alias = directories[0] / ".new-abcdefgh"
+            os.link(directories[0] / "create.json", alias)
+            store.page_ready()
+            self.assertFalse(alias.exists())
+            outside = store.root / "outside.json"
+            outside.write_text("not committed")
+            os.link(outside, alias)
+            with self.assertRaises(Denied):
+                store.page_ready()
+            self.assertTrue(alias.exists())
+
+    def test_live_delivery_and_completion_evidence_still_replays(self):
+        store = self.project.work_items
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snapshot = self.project.snapshots.create(
+            captured, goal="Goal", state="State", run="run", outcome="done", summary="Verified",
+            verification={"passed": True, "code_digest": captured["code_digest"], "run": "run"})
+        self.project.snapshots.publish(snapshot)
+        item = self.item("delivery")
+        bind_delivery(self.project, item["id"], snapshot["id"])
+        store.page_open_readonly()  # A readonly cache must not weaken live verification.
+        for status in ("doing", "done"):
+            if status == "done":
+                store.transition(item["id"], expected_rev=3, actor="worker", status="done",
+                                 snapshot_id=snapshot["id"])
+            store.page_ready()
+            with patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
+                 patch.object(store, "_validate_delivery", wraps=store._validate_delivery) as delivery:
+                store.page_ready()
+                self.assertEqual(replay.call_count, 1)
+                self.assertTrue(any(c.kwargs.get("verify_snapshots") for c in delivery.call_args_list))
 
 
 class ReadySetChangeTests(Fixture):

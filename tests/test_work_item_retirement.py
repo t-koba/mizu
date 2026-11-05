@@ -200,6 +200,9 @@ class RetirementTests(Fixture):
     def test_malformed_sidecars_and_wrong_or_gapped_chains_fail_closed(self):
         self.exhaust()
         self.change()
+        self.store.page_open_readonly()  # Prime the structural retirement cache.
+        self.assertEqual(self.store.page_ready()["total"], 0)
+        self.assertEqual(self.store.page_ready()["total"], 0)
         original = json.loads(self.path.read_bytes())
         mutations = [{}, {**original, "schema": True}, {**original, "schema": 2},
                      {**original, "chain_sha256": "0" * 64},
@@ -217,6 +220,8 @@ class RetirementTests(Fixture):
             with self.subTest(record=record):
                 write_json(self.path, record)
                 self.assert_invalid_readonly()
+                with self.assertRaises(Denied):
+                    self.store.page_ready()
         self.path.write_text('{"schema":', encoding="utf-8")
         self.assert_invalid_readonly()
         write_json(self.path, original)
@@ -226,9 +231,13 @@ class RetirementTests(Fixture):
         record["reason"] = "Otherwise valid, but not the chain retired"
         write_json(changed_path, record)
         self.assert_invalid_readonly()
+        with self.assertRaises(Denied):
+            self.store.page_ready()
         changed_path.write_bytes(saved)
         changed_path.unlink()
         self.assert_invalid_readonly()
+        with self.assertRaises(Denied):
+            self.store.page_ready()
         changed_path.write_bytes(saved)
         self.assertEqual(self.store.get(self.item_id)["status"], "dropped")
         self.assertEqual(audit(self.project)["work_item_events_skipped"], 0)

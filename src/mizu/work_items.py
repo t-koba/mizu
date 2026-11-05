@@ -5,9 +5,10 @@ hash-bound legacy sidecars. Reads and transitions share insights.lock; each succ
 Read-only views (`page_open_readonly`, `page_closed_readonly`) never acquire
 insights.lock and never recover or delete temporary files; they validate the
 same committed records and fail closed on unsafe or malformed state.
-A read-only page may reuse a source-backed sidecar projection only while the
-seed digest and every entry's metadata in the item directory are unchanged;
-the sidecar stores full source records and is compared byte-for-structure
+Read-only pages and locked live ready scans may reuse a structural projection
+only while the seed digest and every entry's metadata in the item directory
+are unchanged. The sidecar stores full source records and is compared
+byte-for-structure
 with the exact current/previous source records (at most two revision reads,
 plus a retirement file when present) before use. Terminal and retired items
 retain a source-backed sidecar so open/status scans skip their closed
@@ -16,11 +17,12 @@ history replay is the fallback, and Windows bypasses sidecar reuse. Origin
 staleness and hold state are recomputed on every call, and any unexpected
 shape bypasses the fast path. A continued doing-to-doing revision has no
 source-backed earlier hold start in its current and previous records, so it
-removes the sidecar and stays exact; all other misses also replay exactly.
-Unknown/unsafe records, incomplete
-chains and bounds fail closed. Retrying a
-committed CAS requires a re-read. Same-status events require a scope change or
-explicit delivery binding; only a proven forward dropped-to-done correction
+removes the sidecar; a fresh reader replays exactly on this and other misses.
+Live ready scans still validate every history directory and recover leftovers
+before sampling its identity; delivery, completion and retirement evidence
+stays on exact replay. Unknown/unsafe records, incomplete chains and bounds
+fail closed. Retrying a committed CAS requires a re-read. Same-status events
+require a scope change or explicit delivery binding; only a proven forward dropped-to-done correction
 may follow a terminal event.
 """
 from __future__ import annotations
@@ -980,7 +982,7 @@ class WorkItems:
                         if entry.name in ambiguous_task_sources:
                             raise Denied("Ambiguous task seed sources")
                         group = entry.name in task_sources
-                        if cache:
+                        if cache and not recover:
                             revisions, identity = self._history_revisions_readonly(entry.name)
                         else:
                             revisions, identity = (self._history_revisions(entry.name, recover=recover), None)
@@ -989,10 +991,12 @@ class WorkItems:
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")
                     continue
-                if cache:
+                if cache and not recover:
                     revisions, identity = self._history_revisions_readonly(entry.name)
                 else:
                     revisions, identity = (self._history_revisions(entry.name, recover=recover), None)
+                if recover and with_identity and not IS_WINDOWS:
+                    identity = self._history_identity(entry.name)
                 record = self._direct_record(entry.name)
                 if with_identity:
                     yield entry.name[3:], record, revisions, identity
@@ -2391,7 +2395,7 @@ class WorkItems:
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
-        cacheable = readonly and not IS_WINDOWS
+        cacheable = (readonly or ready_only) and not IS_WINDOWS
         events = self._iter_item_events_with_revisions(recover=not readonly,
                                                         cache=cacheable,
                                                         with_identity=cacheable)
@@ -2421,14 +2425,24 @@ class WorkItems:
             # Reuse this safely read event; _seed still validates its complete contract.
             history_revisions = scanned
             if history_revisions is None:
-                if cacheable:
+                if cacheable and readonly:
                     history_revisions, history_key = self._history_revisions_readonly(seed["id"])
                 elif readonly:
                     history_revisions = self._history_revisions(seed["id"], recover=False)
                 else:
                     history_revisions = self._history_revisions(seed["id"], recover=True)
+                    if cacheable:
+                        history_key = self._history_identity(seed["id"])
+            # Live evidence retains exact replay, including the retirement chain
+            # hash. Structural reuse never replaces recovery or inventory validation.
+            reuse_projection = cacheable and (readonly or not (
+                self.root / "work-items" / seed["id"] / "retirement.json").exists())
             cache_key = (digest(canonical(seed)), history_key)
-            cached = self._projection_cache.get(seed["id"]) if history_key is not None else None
+            cached = (self._projection_cache.get(seed["id"])
+                      if reuse_projection and history_key is not None else None)
+            if cached is not None and not readonly and (
+                    cached[1].get("delivery") is not None or cached[1]["status"] == "done"):
+                cached = None
             if cacheable and history_key is not None:
                 # Revalidate the immutable seed binding before trusting any
                 # cached projection: a decision event whose reason/scope
@@ -2441,7 +2455,10 @@ class WorkItems:
                 item, since = cached[1], cached[2]
             else:
                 sidecar = (self._sidecar_load(seed["id"], seed, history_key)
-                           if cacheable else None)
+                           if reuse_projection else None)
+                if sidecar is not None and not readonly and (
+                        sidecar[0].get("delivery") is not None or sidecar[0]["status"] == "done"):
+                    sidecar = None
                 if (sidecar is not None
                         and self._history_identity(seed["id"]) != history_key):
                     sidecar = None
@@ -2458,7 +2475,8 @@ class WorkItems:
                         verify_snapshots=False, verify_current_delivery=True)
                     stable = (history_key is not None
                               and self._history_identity(seed["id"]) == history_key)
-                    if stable and cacheable and item.get("delivery") is None:
+                    if (stable and reuse_projection and item.get("delivery") is None
+                            and (readonly or item["status"] != "done")):
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
                     else:
                         self._projection_cache.pop(seed["id"], None)
