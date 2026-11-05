@@ -19,8 +19,9 @@ shape bypasses the fast path. A continued doing-to-doing revision has no
 source-backed earlier hold start in its current and previous records, so it
 removes the sidecar; a fresh reader replays exactly on this and other misses.
 Live ready scans still validate every history directory and recover leftovers
-before sampling its identity; delivery, completion and retirement evidence
-stays on exact replay. Unknown/unsafe records, incomplete chains and bounds
+before sampling its identity. Read-only open/status sidecar hits check completion
+bindings structurally; exact replay and explicit evidence reads still verify
+manifest and acceptance evidence. Unknown/unsafe records, incomplete chains and bounds
 fail closed. Retrying a committed CAS requires a re-read. Same-status events
 require a scope change or explicit delivery binding; only a proven forward dropped-to-done correction
 may follow a terminal event.
@@ -510,14 +511,17 @@ class WorkItems:
                 AttributeError):
             return False
 
-    def _sidecar_load(self, item_id: str, seed: dict, history_key):
+    def _sidecar_load(self, item_id: str, seed: dict, history_key, *,
+                      source_only_completion: bool = False):
         """Return (item, since) from a source-backed sidecar, else None to replay exactly.
 
         Cache boundary: any missing/malformed/unsafe/mismatched sidecar or source
         read falls back to exact replay; sidecar content alone is never trusted.
         Stored previous/current are full source records (seed or exact revision
         files). At most the current/previous revision and retirement files are
-        read here; full history is never scanned.
+        read here; full history is never scanned. Read-only open/status projections
+        may validate completion bindings structurally; explicit evidence reads
+        and exact replay still verify manifests and retained acceptance.
         """
         try:
             if IS_WINDOWS or history_key is None:
@@ -641,8 +645,9 @@ class WorkItems:
                         if prev_rev == 1:
                             validate_seed(exact_previous,
                                           decision_task="wait" in exact_previous)
-                        self._validate_transition(exact_previous, exact_current,
-                                                  verify_snapshots=False)
+                        self._validate_transition(
+                            exact_previous, exact_current, verify_snapshots=False,
+                            source_only_completion=source_only_completion)
                     except (Denied, LimitExceeded):
                         return None
                     except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
@@ -1690,21 +1695,29 @@ class WorkItems:
                 raise Denied("Completion requires a prior exact snapshot and scope delivery binding")
         return binding, snapshot
 
-    def _retained_verification(self, verification, code_digest, scope_digest, snapshot_id):
+    def _retained_verification(self, verification, code_digest, scope_digest, snapshot_id, *,
+                               source_only: bool = False):
         from .acceptance import get
         if (not isinstance(verification, dict)
                 or set(verification) != {"source", "receipt_id", "passed", "code_digest"}
                 or verification["source"] != "retained_acceptance"
                 or verification["passed"] is not True
-                or verification["code_digest"] != code_digest):
+                or verification["code_digest"] != code_digest
+                or not isinstance(verification["receipt_id"], str)
+                or not DIGEST.fullmatch(verification["receipt_id"])
+                or not isinstance(scope_digest, str) or not DIGEST.fullmatch(scope_digest)):
             raise Denied("Invalid retained completion verification")
+        if source_only:
+            return
         receipt = get(self.root, verification["receipt_id"])
         if (receipt["code_digest"] != code_digest
                 or digest(canonical(receipt["scope"])) != scope_digest
                 or receipt["schema"] == 2 and receipt["scope"]["ci"]["snapshot_id"] != snapshot_id):
             raise Denied("Completion acceptance receipt code or scope mismatch")
 
-    def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True) -> None:
+    def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True,
+                             source_only_completion: bool = False) -> None:
+        """Validate fully, except completion evidence on exact-source sidecar hits."""
         fields = set(record) - {"smoke_refs"}
         if "smoke_refs" in record:
             validate_refs(record["smoke_refs"])
@@ -1730,10 +1743,21 @@ class WorkItems:
         refs_changed = (record.get("smoke_refs", []) != previous.get("smoke_refs", [])
                         or (record.get("wait") or {}).get("smoke_refs", []) !=
                            (previous.get("wait") or {}).get("smoke_refs", []))
-        # Done cannot precede another valid transition: its current completion
-        # proof remains strict even in status-only replay.
+        # Exact replay keeps done evidence strict even in status-only mode. Only
+        # a sidecar matched to its source records may use structural completion.
         binding, delivery_snapshot = self._validate_delivery(
-            previous, record, verify_snapshots=verify_snapshots or status == "done")
+            previous, record, verify_snapshots=verify_snapshots or (
+                status == "done" and not source_only_completion))
+        if source_only_completion and status == "done":
+            if "delivery_schema" not in record:
+                # Legacy closures have no source-bound delivery to validate;
+                # let the caller fall back to exact snapshot verification.
+                raise Denied("Legacy completion requires exact replay")
+            delivery = record["delivery"]
+            if (set(delivery) != {"snapshot_id", "code_digest", "scope_digest", "binding_rev"}
+                    or type(delivery["binding_rev"]) is not int
+                    or not 3 <= delivery["binding_rev"] <= previous["rev"]):
+                raise Denied("Invalid work-item delivery binding")
         if (status not in STATUSES or previous["status"] == "done"
                 or (previous["status"] == "dropped" and status != "done")
                 or (status == previous["status"] and not scope_changed and not refs_changed and not binding)):
@@ -1775,24 +1799,34 @@ class WorkItems:
                     or not isinstance(verification.get("code_digest"), str)
                     or not DIGEST.fullmatch(verification["code_digest"])):
                 raise Denied("Completion requires verified snapshot evidence")
-            snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.get(sid)
-            stored_verification = snapshot.get("verification")
+            snapshot = None if source_only_completion else (
+                delivery_snapshot if delivery_snapshot is not None else self.snapshots.get(sid))
+            code_digest = (snapshot["code_digest"] if snapshot is not None else
+                           record["delivery"]["code_digest"] if "delivery_schema" in record else
+                           verification["code_digest"])
+            if verification["code_digest"] != code_digest:
+                raise Denied("Completion evidence does not match its delivery")
             retained = verification.get("source") == "retained_acceptance"
+            if (source_only_completion and not retained
+                    and any(key in verification for key in ("source", "receipt_id"))):
+                # An unfamiliar proof form must use the exact manifest-backed
+                # validator rather than being treated as an embedded proof.
+                raise Denied("Completion proof requires exact replay")
             if retained and "delivery_schema" in record:
-                self._retained_verification(verification, snapshot["code_digest"],
-                                            record["verification_scope"], sid)
-            elif (snapshot.get("id") != sid or not isinstance(stored_verification, dict)
-                    or stored_verification != verification
-                    or stored_verification.get("passed") is not True
-                    or stored_verification.get("code_digest") != snapshot.get("code_digest")
-                    or record.get("verification_scope") is not None):
+                self._retained_verification(verification, code_digest,
+                                            record["verification_scope"], sid,
+                                            source_only=source_only_completion)
+            elif (record.get("verification_scope") is not None or snapshot is not None and (
+                    snapshot.get("id") != sid
+                    or snapshot.get("verification") != verification
+                    or verification["code_digest"] != snapshot.get("code_digest"))):
                 raise Denied("Completion evidence does not match its verified snapshot")
             if previous["status"] == "dropped" and (not retained or "delivery_schema" not in record):
                 raise Denied("Dropped correction requires independently retained acceptance")
             # A closure states the tree that carries its delivery. A record
             # written before the claim existed stays readable history; a
             # closure that states a tree its snapshot does not carry fails.
-            if "delivered_tree" in record and record["delivered_tree"] != snapshot.get("code_digest"):
+            if "delivered_tree" in record and record["delivered_tree"] != code_digest:
                 raise Denied("Completion does not name the tree that carries the delivery")
         elif (record["snapshot_id"] is not None or record["verification"] is not None
                 or record.get("delivered_tree") is not None
@@ -2454,7 +2488,8 @@ class WorkItems:
             if cached is not None and cached[0] == cache_key:
                 item, since = cached[1], cached[2]
             else:
-                sidecar = (self._sidecar_load(seed["id"], seed, history_key)
+                sidecar = (self._sidecar_load(seed["id"], seed, history_key,
+                                              source_only_completion=readonly)
                            if reuse_projection else None)
                 if sidecar is not None and not readonly and (
                         sidecar[0].get("delivery") is not None or sidecar[0]["status"] == "done"):

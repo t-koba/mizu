@@ -319,39 +319,90 @@ class WorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.count_open_readonly()
 
-    def test_status_projections_keep_current_done_completion_strict(self):
+    def test_done_sidecar_skips_manifests_but_exact_status_replay_stays_strict(self):
         self.change("doing")
         historical = self.snapshot("valid")
         self.bind(historical)
         snapshot = self.snapshot("valid")
         self.bind(snapshot, expected_rev=3)
-        self.change("done", expected_rev=4, snapshot_id=snapshot["id"])
-        get_snapshot = self.store.snapshots.get
-        def current_only(sid):
-            self.assertEqual(sid, snapshot["id"])
-            return get_snapshot(sid)
-        with patch.object(self.store.snapshots, "get", side_effect=current_only) as get:
-            self.assertEqual(self.store.count_open_readonly(), 0)
-            get.assert_called_once_with(snapshot["id"])
-        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
-            for reader in self.status_readers():
-                with self.subTest(reader=reader.__name__):
-                    if reader == self.store.blocked_liveness_readonly:
-                        self.assertEqual(reader()["diagnostic"], "unreadable")
-                    else:
-                        with self.assertRaisesRegex(Denied, "snapshot unavailable"):
-                            reader()
-            # A sidecar hit that encounters an unavailable current delivery
-            # snapshot falls back to exact validation, which observes it again;
-            # every reader still fails closed at least once.
-            self.assertGreaterEqual(get.call_count, len(self.status_readers()))
-        # A readable snapshot with tampered copied completion evidence also fails.
+        done = self.change("done", expected_rev=4, snapshot_id=snapshot["id"])
+        legacy = copy.deepcopy(done)
+        for key in ("delivered_tree", "delivery_schema", "delivery", "verification_scope"):
+            legacy.pop(key, None)
+        legacy["rev"] = 2
+        legacy["transition"] = {"from": "open", "to": "done"}
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        with self.assertRaisesRegex(Denied, "Legacy completion requires exact replay"):
+            fresh._validate_transition(self.seed, legacy, source_only_completion=True)
+        # The legacy event remains valid through the original manifest-backed path.
+        fresh._validate_transition(self.seed, legacy)
+        if not work_items_module.IS_WINDOWS:
+            with patch.object(fresh.snapshots, "get",
+                              side_effect=AssertionError("done sidecar reloaded manifest")) as get, \
+                    patch.object(fresh, "_current_hold",
+                                 side_effect=AssertionError("done sidecar replayed history")):
+                self.assertEqual(fresh.page_open_readonly()["total"], 0)
+                self.assertEqual(fresh.blocked_liveness_readonly()["total"], 0)
+                get.assert_not_called()
+        # Counts, locked reads, closed pages and explicit evidence stay strict.
+        with patch.object(fresh.snapshots, "get", side_effect=Denied("snapshot unavailable")):
+            for reader in (fresh.count_open, fresh.count_open_readonly, fresh.page_open,
+                           fresh.page_closed_readonly, lambda: fresh.get(self.item_id),
+                           lambda: fresh.explain(self.item_id, limit=1)):
+                with self.subTest(reader=reader), self.assertRaisesRegex(Denied, "snapshot unavailable"):
+                    reader()
+            # A miss still performs exact replay, including current done evidence.
+            (self.project.root / "work-item-state" / f"{self.item_id}.json").unlink(missing_ok=True)
+            with self.assertRaisesRegex(Denied, "snapshot unavailable"):
+                fresh.page_open_readonly()
+        # Exact replay rejects a tampered completion copy.
         path = self.directory / "5.json"
         done = json.loads(path.read_text())
         done["verification"]["run"] = "tampered"
         write_json(path, done)
         with self.assertRaisesRegex(Denied, "Completion evidence"):
-            self.store.count_open_readonly()
+            fresh.page_open_readonly()
+
+    def test_done_sidecar_retained_proof_is_structural_but_explicit_reads_verify_receipt(self):
+        self.require_posix_read_cache()
+        self.change("doing")
+        snapshot = self.snapshot()
+        self.bind(snapshot)
+        proof = {"source": "retained_acceptance", "receipt_id": "a" * 64,
+                 "passed": True, "code_digest": snapshot["code_digest"]}
+        self.store.effective_verification = lambda _: proof
+        # Offline receipt stub isolates the work-item validation boundary.
+        receipt = {"schema": 1, "code_digest": snapshot["code_digest"], "scope": {}}
+        with patch("mizu.acceptance.get", return_value=receipt):
+            done = self.change("done", expected_rev=3, snapshot_id=snapshot["id"])
+            self.assertEqual(self.store.get(self.item_id), done)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        with patch.object(fresh.snapshots, "get", side_effect=AssertionError("manifest reload")), \
+                patch("mizu.acceptance.get", side_effect=AssertionError("receipt reload")):
+            self.assertEqual(fresh.page_open_readonly()["total"], 0)
+        with patch("mizu.acceptance.get", side_effect=Denied("receipt unavailable")):
+            for reader in (lambda: fresh.get(self.item_id), lambda: fresh.explain(self.item_id, limit=1)):
+                with self.subTest(reader=reader), self.assertRaisesRegex(Denied, "receipt unavailable"):
+                    reader()
+        # Even matching source/sidecar records must have well-formed proof bindings.
+        sidecar_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        payload = json.loads(sidecar_path.read_text())
+        corruptions = [{**done, "verification": {**proof, field: value}}
+                       for field, value in (("receipt_id", "invalid"),
+                                            ("code_digest", "0" * 64), ("passed", False),
+                                            ("source", "unknown"))]
+        corruptions.append({**done, "delivery": {**done["delivery"], "binding_rev": 2}})
+        corruptions += [{**done, field: value} for field, value in (
+            ("verification_scope", "invalid"), ("delivered_tree", "0" * 64),
+            ("snapshot_id", "0" * 64), ("scope", {}))]
+        for index, corrupt in enumerate(corruptions):
+            write_json(self.directory / "4.json", corrupt)
+            identity = fresh._history_identity(self.item_id)
+            write_json(sidecar_path, {**payload, "current": corrupt, "history_identity": identity})
+            with self.subTest(corruption=index), \
+                    patch.object(fresh.snapshots, "get", side_effect=AssertionError("manifest reload")):
+                self.assertIsNone(fresh._sidecar_load(self.item_id, self.seed, identity,
+                                                     source_only_completion=True))
 
     def test_status_snapshot_reads_do_not_grow_with_delivery_history(self):
         self.change("doing")
@@ -942,9 +993,15 @@ class WorkItemTests(Fixture):
         write_json(path, completed)
         manifest = self.project.snapshots.root / "snapshots" / f"{snapshot['id']}.json"
         saved = json.loads(manifest.read_bytes())
-        write_json(manifest, {**saved, "summary": "tampered"})
-        with self.assertRaises(Denied):
-            self.store.get(self.item_id)
+        for evidence in ({**saved, "summary": "tampered"}, None):
+            if evidence is None:
+                manifest.unlink()
+            else:
+                write_json(manifest, evidence)
+            for reader in (lambda: self.store.get(self.item_id),
+                           lambda: self.store.explain(self.item_id, limit=1)):
+                with self.subTest(evidence=evidence is not None, reader=reader), self.assertRaises(Denied):
+                    reader()
         write_json(manifest, saved)
         self.assertEqual(self.store.get(self.item_id), completed)
 
