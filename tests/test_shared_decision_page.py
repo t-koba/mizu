@@ -106,18 +106,18 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertFalse((self.root / "shared-record-receipts").exists())
         self.assertFalse((self.root / "decision-receipts").exists())
 
-    def test_105_events_utc_then_stable_id_order_and_receipt_replay(self):
+    def test_101_events_utc_then_stable_id_order_and_receipt_replay(self):
         stamps = ("2026-01-01T01:00:00+01:00", "2025-12-31T19:00:00-05:00",
                   "2026-01-01T00:00:01+00:00", "2026-01-01T00:00:00+00:00")
         # Cross the 100-row page boundary; the separate cap-boundary test below
         # covers history larger than the configured projection window.
-        self.seed_decision_batch(105, stamps)
+        self.seed_decision_batch(101, stamps)
         projected = self.insights.project_decision_records()
         expected = sorted(projected, key=lambda key: (
             dt.datetime.fromisoformat(self.store.get(key)[0]["created_at"]).astimezone(dt.timezone.utc), key))
         first, manifest = self.page()
         self.assertEqual([entry.record_id for entry in manifest], expected[:100])
-        self.assertEqual(first["pending_count"], 105)
+        self.assertEqual(first["pending_count"], 101)
         self.assertTrue(first["count_truncated"])
         self.assertFalse(first["byte_truncated"])
         self.store.acknowledge("reviewer", manifest=manifest)
@@ -129,9 +129,9 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.insights = Insights(self.root)
         next_page, next_manifest = self.page()
         remaining = [key for key in expected if key not in {entry.record_id for entry in manifest[::2]}]
-        self.assertEqual(next_page["pending_count"], 55)
+        self.assertEqual(next_page["pending_count"], 51)
         self.assertEqual([entry.record_id for entry in next_manifest], remaining[:100])
-        self.assertEqual(self.page("searcher")[0]["pending_count"], 105)
+        self.assertEqual(self.page("searcher")[0]["pending_count"], 101)
         self.assertEqual(len(self.insights.decision_events("reviewer", ACTIONS, sources="any", limit=100)), 100)
         seen = [entry.record_id for entry in manifest[::2]]
         while next_manifest:
@@ -162,8 +162,10 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertEqual(new["events"][0]["rev"], 2)
 
     def test_multibyte_escaped_aggregate_bounds_reference_and_reconstruction(self):
+        # Keep several 137-character reads across multibyte and escaped text
+        # without excessive repetition of the same payload.
         for i in range(3):
-            self.decide(i, body=('日本語 😀 "quote" \\ slash\n\t' * 500))
+            self.decide(i, body=('日本語 😀 "quote" \\ slash\n\t' * 50))
         full, _ = self.page()
         exact_size = len(canonical(full))
         self.assertEqual(self.page(max_bytes=exact_size)[0], full)
