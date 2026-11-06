@@ -4,7 +4,7 @@ import json
 import uuid
 from unittest.mock import Mock, patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, without_blocked_age
 from mizu import ci_waits, vcs
 from mizu.config import PublicationEvidence
 from mizu.errors import Denied, LimitExceeded
@@ -163,11 +163,15 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(live["evidence"], {"record_digest": context.wait_events[0]["record_digest"]})
         self.acknowledge_delivery(context)
         self.assertEqual(ci_waits.pending(self.store, "worker"), [])
-        self.assertEqual(self.store.page_ready(role_name="worker"), terminal)
+        after_ack = self.store.page_ready(role_name="worker")
+        self.assertEqual(without_blocked_age(after_ack), without_blocked_age(terminal))
         self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         projected = json.loads(engine.driver.calls[-1][1])["ready_work"]["items"][0]
-        self.assertEqual(projected["wait_liveness"], live)
+        projected_live = projected["wait_liveness"]
+        self.assertEqual(without_blocked_age(projected_live), without_blocked_age(live))
+        self.assertIs(type(projected_live["blocked_age_seconds"]), int)
+        self.assertGreaterEqual(projected_live["blocked_age_seconds"], 0)
         self.assertFalse(projected["wait_satisfied"])  # Terminal input is not completion.
         for _ in range(2):
             self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="worker"))

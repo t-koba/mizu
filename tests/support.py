@@ -36,6 +36,16 @@ def write_fixture_json(path: Path, value: object) -> None:
         stream.write(canonical(value))
 
 
+def without_blocked_age(value):
+    """Copy a projection without its intentionally per-read age samples."""
+    if isinstance(value, dict):
+        return {key: without_blocked_age(item) for key, item in value.items()
+                if key != "blocked_age_seconds"}
+    if isinstance(value, list):
+        return [without_blocked_age(item) for item in value]
+    return value
+
+
 def host_child_cost() -> float:
     """Return this host's measured cost of starting and reaping a child.
 

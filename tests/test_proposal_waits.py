@@ -4,7 +4,7 @@ import dataclasses
 import json
 from unittest.mock import Mock, patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, without_blocked_age
 from mizu import proposal_waits, vcs
 from mizu.distribution import public_source_identity
 from mizu.errors import Denied
@@ -275,7 +275,8 @@ class ProposalWaitTests(Fixture):
         proposal_waits.complete(ctx, {"outcome": "wait", "ack_events": tokens})
         proposal_waits.complete(ctx, {"outcome": "wait", "ack_events": tokens})
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
-        self.assertEqual(self.store.page_ready(role_name="worker"), ready)
+        self.assertEqual(without_blocked_age(self.store.page_ready(role_name="worker")),
+                         without_blocked_age(ready))
         self.assertEqual(self.store.get(blocked["id"]), blocked)
         # A newly registered revision is a different event, not suppressed by the old receipt.
         opened = self.store.transition(blocked["id"], expected_rev=blocked["rev"],
@@ -299,7 +300,8 @@ class ProposalWaitTests(Fixture):
         self.row["state"] = "merged"
         with patch("mizu.proposal_waits.observe"):
             self.poll()
-        self.assertEqual(self.store.page_ready(role_name="worker"), pending)
+        self.assertEqual(without_blocked_age(self.store.page_ready(role_name="worker")),
+                         without_blocked_age(pending))
         self.poll()
         ready = self.store.page_ready(role_name="worker")
         self.assertNotEqual(ready["signature"], pending["signature"])
@@ -322,7 +324,8 @@ class ProposalWaitTests(Fixture):
         write_json(path, envelope)
         with patch("mizu.proposal_waits.evidence", side_effect=OSError("unavailable")):
             self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
-        self.assertEqual(self.store.page_ready(role_name="worker"), ready)
+        self.assertEqual(without_blocked_age(self.store.page_ready(role_name="worker")),
+                         without_blocked_age(ready))
 
     def test_unsafe_receipt_and_publication_fail_closed(self):
         self.poll()
