@@ -3553,6 +3553,10 @@ class Engine:
                     shutil.rmtree(workspace, ignore_errors=True)
 
     def consult(self, parent: Context, args: dict) -> dict:
+        # Direct callers must pass the same fence as Context dispatch.
+        validate(args, DEFINITIONS["consult"][1])
+        delegation_gates.check_access(parent._reservation_view, parent.role.name,
+                                      parent.snapshot, "consult", args)
         # The child unit takes its model from each answering role's own
         # profile or selector, exactly as a scheduled run of that role would:
         # fixed profiles run directly, selector roles resolve through a
@@ -3577,11 +3581,16 @@ class Engine:
             check_consult_role(role_name, self.config.roles[role_name])
         if not parent._slot_lease or parent.closed:
             raise Busy("Consultation requires a live admitted caller execution slot")
-        delegation_gates.refuse_live_tree(parent._reservation_view, "Consultation capture")
-        parent.close_exec()
-        capture = parent.project.snapshots.capture_files(parent.workspace)
-        snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
-                                              run=parent.run_dir.name, outcome="wait", summary="Consultation input")
+        reserved = parent._reservation_view is not None
+        if reserved:
+            # get validates the retained manifest and its content-addressed ID.
+            # Never touch the parent's live execution or workspace on this path.
+            snap = parent.project.snapshots.get(args["source_snapshot"])
+        else:
+            parent.close_exec()
+            capture = parent.project.snapshots.capture_files(parent.workspace)
+            snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
+                                                  run=parent.run_dir.name, outcome="wait", summary="Consultation input")
 
         def ask(role_name: str) -> dict:
             run_dir = parent.project.root / "runs" / uuid.uuid4().hex
@@ -3601,7 +3610,7 @@ class Engine:
                     from .classification import prepare as _prepare_selection
                     decision = _prepare_selection(
                         self, parent.project, role,
-                        parent.project.snapshots.get(), None, preview=True)
+                        snap if reserved else parent.project.snapshots.get(), None, preview=True)
                     profile = decision.get("profile") or ""
                     if not profile:
                         raise Denied("Consultation selector has no selectable profile: "

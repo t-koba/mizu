@@ -28,9 +28,10 @@ parent_control_plane = [
 # preflight (_engine_tool) is deliberately absent and remains denied.
 parent_transport = ["_hello", "_budget", "_model_usage", "_request_done"]
 
-# Only diff currently implements this condition. consult remains denied: its
-# callback captures the live tree and its schema has no explicit pinned input.
-# Input must be immutable and exactly match the reservation source snapshot.
+# diff uses the immutable Context snapshot. consult requires source_snapshot
+# equal to the reservation source and loads that exact retained manifest for
+# both consultation and selector preview, without live capture or parent close.
+# source_snapshot is forbidden without a trusted reservation.
 parent_snapshot_only = ["diff", "consult"]
 
 # finish remains denied. A future dedicated wait path must bind this exact job
@@ -52,7 +53,7 @@ default = "deny"
 
 [requirements]
 diff = "Use only the parent's immutable context snapshot, and require its identity to equal reservation.request.source_snapshot."
-consult = "Refuse the current parent.workspace capture; allow only after an explicit immutable source snapshot is passed and verified equal to reservation.request.source_snapshot."
+consult = "Require explicit source_snapshot equal to reservation.request.source_snapshot; retrieve and validate that exact retained manifest for consultation and selector preview. Missing, malformed or identity-mismatched manifests deny. Never capture/read parent.workspace or close its execution while reserved; source_snapshot is forbidden without a reservation."
 finish = "Only outcome=wait with an exact wait job id equal to the active reservation; bypass all live-tree bounds/captures on that path. Current API has no such delegation wait field, so it is not yet available."
 vcs_read = "Only the listed read-only status/evidence suboperations; every other or malformed suboperation is denied."
 native_tools = "Deny parent native engine-tool calls, regardless of role grants, while reserved."

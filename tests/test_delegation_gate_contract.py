@@ -1,12 +1,13 @@
 """Real Context gate tests, not runner/adapter/quiescence integration proof."""
 import dataclasses
+import json
 import tomllib
 from unittest.mock import Mock, patch
 
 from support import Fixture, bind_delegation_fixture
 from mizu import delegation_gates, delegation_jobs
 from mizu.errors import Denied
-from mizu.runtime import Context
+from mizu.runtime import Context, Engine
 
 
 MATRIX_PATH = delegation_gates.POLICY_PATH
@@ -79,6 +80,117 @@ class DelegationGateContractTests(Fixture):
         self.ctx.snapshot = {**self.ctx.snapshot, "id": "b" * 64}
         self.assert_refused_without_effects("diff", {})
 
+    def test_consult_gate_requires_exact_source_and_valid_parameters(self):
+        source = self.view["request"]["source_snapshot"]
+        args = {"question": "Pinned?", "source_snapshot": source}
+        handler = Mock(return_value={"allowed": True})
+        with patch.dict(Context._DISPATCH, consult=handler):
+            self.assertEqual(self.ctx.handle("consult", args), {"allowed": True})
+            self.assertEqual(self.ctx.dispatch("consult", args), {"allowed": True})
+            self.assertEqual(handler.call_count, 2)
+        for change in ({"source_snapshot": "b" * 64}, {"source_snapshot": None},
+                       {"source_snapshot": []}, {"source_snapshot": "invalid"},
+                       {"unexpected": True}, {"roles": "consult"}):
+            self.assert_refused_without_effects("consult", {**args, **change})
+        self.assert_refused_without_effects("consult", {"question": "Missing source"})
+        self.ctx._reservation_view = None
+        self.assert_refused_without_effects("consult", args)
+
+    def test_reserved_consult_and_selector_use_only_exact_retained_source(self):
+        source = self.project.snapshots.get(self.view["request"]["source_snapshot"])
+        original = (self.project.workspace / "app.py").read_text()
+        (self.project.workspace / "app.py").write_text("child partial edits\n")
+        # Move the published pointer too, so a selector cannot silently use it.
+        capture = self.project.snapshots.capture_files(self.project.workspace)
+        current = self.project.snapshots.create(capture, goal=self.ctx.goal, state="changed",
+                                                run="fixture", outcome="wait", summary="Later input")
+        self.assertNotEqual(current["id"], source["id"])
+        roles = {**self.config.roles, "consult": dataclasses.replace(
+            self.config.roles["consult"], profile="", selector="fixture")}
+        engine = Engine(dataclasses.replace(self.config, roles=roles))
+        self.ctx._slot_lease = True
+        self.ctx.consult = engine.consult
+        seen = []
+
+        def execute(child, driver, prompt, *, profile):
+            self.assertEqual(child.snapshot, source)
+            self.assertEqual((child.workspace / "app.py").read_text(), original)
+            seen.append(child.snapshot["id"])
+            child.finished = {"summary": "Pinned answer"}
+            return {}
+
+        with patch.object(self.ctx, "close_exec", side_effect=AssertionError("parent close")), \
+             patch.object(self.project.snapshots, "capture_files", side_effect=AssertionError("live capture")), \
+             patch.object(self.project.snapshots, "create", side_effect=AssertionError("new snapshot")), \
+             patch.object(engine, "resolve"), patch.object(engine, "_execute", side_effect=execute), \
+             patch("mizu.classification.prepare", return_value={"profile": "primary"}) as preview, \
+             patch.object(self.project.snapshots, "get", wraps=self.project.snapshots.get) as get:
+            result = self.ctx.handle("consult", {"question": "Pinned?", "source_snapshot": source["id"]})
+        self.assertEqual(seen, [source["id"]])
+        self.assertEqual(result["snapshot"], source["id"])
+        self.assertEqual(result["answers"][0]["answer"], "Pinned answer")
+        self.assertEqual(preview.call_args.args[3], source)
+        self.assertTrue(preview.call_args.kwargs["preview"])
+        self.assertTrue(get.call_args_list)
+        self.assertTrue(all(call.args == (source["id"],) for call in get.call_args_list))
+        self.assertFalse(self.ctx.closed)
+
+    def test_direct_consult_cannot_bypass_source_fence_or_manifest_validation(self):
+        engine = Engine(self.config)
+        self.ctx._slot_lease = True
+        source = self.view["request"]["source_snapshot"]
+        args = {"question": "Pinned?", "source_snapshot": source}
+        path = self.project.snapshots.root / "snapshots" / f"{source}.json"
+        original = path.read_bytes()
+        with patch.object(self.ctx, "close_exec") as close, \
+             patch.object(self.project.snapshots, "capture_files") as capture, \
+             patch.object(self.project.snapshots, "create") as create, \
+             patch.object(engine, "_execute") as execute, \
+             patch("mizu.classification.prepare") as preview:
+            for bad in ({"question": "Missing"}, {**args, "source_snapshot": "b" * 64},
+                        {**args, "source_snapshot": None}, {**args, "unexpected": True}):
+                with self.subTest(args=bad), self.assertRaises(Denied):
+                    engine.consult(self.ctx, bad)
+            self.ctx._reservation_view = {}
+            with self.assertRaises(Denied):
+                engine.consult(self.ctx, args)
+            self.ctx._reservation_view = None
+            with self.assertRaises(Denied):
+                engine.consult(self.ctx, args)
+            self.ctx._reservation_view = self.view
+            for content in (None, b'{}', b'[]', json.dumps(
+                    {**json.loads(original), "id": "b" * 64}).encode()):
+                if content is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(content)
+                with self.subTest(manifest=content), self.assertRaises(Denied):
+                    engine.consult(self.ctx, args)
+            path.write_bytes(original)
+            for operation in (close, capture, create, execute, preview):
+                operation.assert_not_called()
+        self.assertFalse((self.ctx.run_dir / "consultations").exists())
+
+    def test_ordinary_consult_still_closes_and_captures_live_workspace(self):
+        self.ctx._reservation_view = None
+        self.ctx._slot_lease = True
+        (self.project.workspace / "app.py").write_text("ordinary live input\n")
+        engine = Engine(self.config)
+
+        def execute(child, driver, prompt, *, profile):
+            self.assertEqual((child.workspace / "app.py").read_text(), "ordinary live input\n")
+            child.finished = {"summary": "Live answer"}
+            return {}
+
+        with patch.object(self.ctx, "close_exec", wraps=self.ctx.close_exec) as close, \
+             patch.object(self.project.snapshots, "capture_files", wraps=self.project.snapshots.capture_files) as capture, \
+             patch.object(engine, "resolve"), patch.object(engine, "_execute", side_effect=execute):
+            result = engine.consult(self.ctx, {"question": "Ordinary?"})
+        close.assert_called_once_with()
+        capture.assert_called_once_with(self.ctx.workspace)
+        self.assertNotEqual(result["snapshot"], self.view["request"]["source_snapshot"])
+        self.assertEqual(result["answers"][0]["answer"], "Live answer")
+
     def test_parent_transport_protocol_is_explicit_but_native_preflight_is_not(self):
         self.assertEqual(set(MATRIX["parent_transport"]),
                          {"_hello", "_budget", "_model_usage", "_request_done"})
@@ -137,7 +249,7 @@ class DelegationGateContractTests(Fixture):
         engine = __import__("mizu.runtime", fromlist=["Engine"]).Engine(self.config)
         self.ctx._slot_lease = True
         with patch.object(self.project.snapshots, "capture_files", side_effect=AssertionError("live capture")):
-            with self.assertRaisesRegex(Denied, "Consultation capture"):
+            with self.assertRaises(Denied):
                 engine.consult(self.ctx, {"question": "pinned?"})
             with self.assertRaisesRegex(Denied, "Delegation capture"):
                 engine.delegate(self.ctx, {"role": "reporter", "task": "test"})

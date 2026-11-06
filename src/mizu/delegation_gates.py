@@ -40,6 +40,8 @@ def _policy():
 
 def check_access(view, role_name, snapshot, operation, arguments):
     if view is None:
+        if operation == "consult" and isinstance(arguments, dict) and "source_snapshot" in arguments:
+            raise Denied("Consultation source_snapshot requires a trusted reservation")
         return  # No policy I/O or change to ordinary authorization.
     policy = _policy()
     if (not isinstance(view, dict) or not isinstance(view.get("id"), str)
@@ -60,12 +62,16 @@ def check_access(view, role_name, snapshot, operation, arguments):
     if (operation == "diff" and operation in policy["parent_snapshot_only"]
             and isinstance(snapshot, dict) and snapshot.get("id") == source):
         return
+    if operation == "consult" and operation in policy["parent_snapshot_only"]:
+        validate(arguments, DEFINITIONS[operation][1])
+        if arguments.get("source_snapshot") == source:
+            return
     if operation == "vcs_read":
         # Direct dispatch must reject malformed parameters too, before handlers.
         validate(arguments, DEFINITIONS[operation][1])
         if arguments.get("op") in policy["parameterized"][operation]["allow"]:
             return
-    # consult has no explicit immutable input; finish has no exact-job wait.
+    # finish has no exact-job wait; missing/mismatched snapshot inputs deny.
     # Neither a native tool grant nor an unknown operation bypasses this fence.
     raise Denied("Operation is unavailable while the workspace is reserved")
 
