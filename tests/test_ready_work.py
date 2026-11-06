@@ -435,6 +435,12 @@ class ReadyProjectionTests(Fixture):
         item = self.item("delivery")
         bind_delivery(self.project, item["id"], snapshot["id"])
         store.page_open_readonly()  # A readonly cache must not weaken live verification.
+        # Unsupported metadata witnesses (including Windows) retain exact replay.
+        cache_available = (
+            not work_items_module.IS_WINDOWS
+            and store._history_identity(item["id"]) is not None
+            and store._proof_identity(store.snapshots.root,
+                                     f"snapshots/{snapshot['id']}.json") is not None)
         for status in ("doing", "done"):
             if status == "done":
                 store.transition(item["id"], expected_rev=3, actor="worker", status="done",
@@ -443,9 +449,10 @@ class ReadyProjectionTests(Fixture):
             with patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
                  patch.object(store, "_validate_delivery", wraps=store._validate_delivery) as delivery:
                 store.page_ready()
-                self.assertEqual(replay.call_count, int(status == "doing"))
+                expected_live_validation = status == "doing" or not cache_available
+                self.assertEqual(replay.call_count, int(expected_live_validation))
                 self.assertEqual(any(c.kwargs.get("verify_snapshots") for c in delivery.call_args_list),
-                                 status == "doing")
+                                 expected_live_validation)
 
 
 class ReadySetChangeTests(Fixture):
