@@ -132,7 +132,9 @@ class SharedCiWaitTests(CiWaitFixture):
         with self.assertRaises(Denied):
             context._op_finish({**args, "ack_events": [token]})
         context.role = role
-        self.store.transition(item["id"], expected_rev=2, status="doing", actor="reviewer")
+        opened = self.store.transition(item["id"], expected_rev=2, status="open", actor="reviewer",
+                                       reason="receipt_route_terminal: invalidate prior delivery")
+        self.store.transition(opened["id"], expected_rev=opened["rev"], status="doing", actor="reviewer")
         with self.assertRaises(Denied):
             context._op_finish({**args, "ack_events": [token]})
         self.assertIsNone(context.finished)
@@ -257,7 +259,9 @@ class SharedCiWaitTests(CiWaitFixture):
         self.assertEqual(len(remaining), 1)
         self.assertNotIn(remaining[0]["work_item"], [e["work_item"] for e in context.wait_events])
         current = self.store.get(remaining[0]["work_item"])
-        self.store.transition(current["id"], expected_rev=2, status="doing", actor="worker")
+        opened = self.store.transition(current["id"], expected_rev=2, status="open", actor="worker",
+                                       reason="receipt_route_terminal: resume CI review")
+        self.store.transition(opened["id"], expected_rev=opened["rev"], status="doing", actor="worker")
         self.assertEqual(len(self.pending(limit=1)), 1)
         for limit in (0, 101, True):
             with self.assertRaises(Denied):
@@ -453,7 +457,9 @@ class SharedCiWaitTests(CiWaitFixture):
             event = json.loads(prompt)["wait_events"][0]
             context.handle("finish", {"outcome": "wait", "summary": "CI inspected", "state": "Next step",
                                       "ack_events": [event["ack_token"]]})
-            self.store.transition(item["id"], expected_rev=2, status="doing", actor="worker")
+            opened = self.store.transition(item["id"], expected_rev=2, status="open", actor="worker",
+                                           reason="receipt_route_terminal: source changed after finish intent")
+            self.store.transition(opened["id"], expected_rev=opened["rev"], status="doing", actor="worker")
         result = Engine(self.config, driver=ScriptDriver(changed)).run(self.project, "reviewer")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(self.receipts(), [])
