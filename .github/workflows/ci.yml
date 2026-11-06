@@ -11,9 +11,12 @@ concurrency:
 jobs:
   core:
     # Portable development plane; only Ubuntu/Python 3.13 adds rootless OCI.
-    # Windows/Python 3.12–3.14 use the same complete suite split by stable
+    # Windows/Python 3.11–3.14 use the same complete suite split by stable
     # test-ID parity. Their aggregates below preserve the existing required
     # check names; each shard still runs every non-unittest gate.
+    # The exact Windows 3.11 publication on mizu reached the unchanged 1,800 s
+    # child bound without unittest failure details; splitting keeps the gate
+    # complete without increasing its timeout.
     # Windows 3.13 timed out at that same child limit on main.
     # The exact Windows 3.14 timing artifact recorded 3,735 completed tests
     # totaling 1,781.994 s (longest case 11.678 s) before the unchanged 1,800 s
@@ -31,6 +34,8 @@ jobs:
         os: [ubuntu-24.04, macos-latest, windows-latest]
         python: ["3.11", "3.12", "3.13", "3.14"]
         exclude:
+          - os: windows-latest
+            python: "3.11"
           - os: windows-latest
             python: "3.12"
           - os: windows-latest
@@ -100,6 +105,54 @@ jobs:
           path: private-validation/project-import-diagnostic.json
           retention-days: 7
           if-no-files-found: ignore
+  windows-311-shards:
+    # Preserve the full Windows 3.11 suite after its unsharded child reached
+    # the unchanged 1,800-second bound; only unittest execution is partitioned.
+    name: windows-311-shard (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.11"
+      - name: Offline core and transport contracts
+        run: python scripts/check.py --test-shard ${{ matrix.shard }} --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-timings-windows-latest-3.11-shard-${{ matrix.shard }}
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: project-import-diagnostic-windows-latest-3.11-shard-${{ matrix.shard }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+  windows-311-core:
+    # Exactly one replacement for Offline checks / core (windows-latest, 3.11).
+    name: core (windows-latest, 3.11)
+    needs: [windows-311-shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both shards
+        env:
+          SHARDS_RESULT: ${{ needs.windows-311-shards.result }}
+        run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
   windows-312-shards:
     # Windows 3.12–3.14 split only unittest execution; every shard retains
     # the full non-unittest gate, and each aggregate preserves its old check name.

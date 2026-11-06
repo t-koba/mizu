@@ -304,9 +304,9 @@ caller-supplied SHA/run ID, CI environment variable nor a later branch head is
 an authority. Content digests detect missing/mixed pages; they do not authenticate
 an arbitrary externally supplied artifact or create a new CI receipt.
 
-Windows/Python 3.12, 3.13, and 3.14 core cells run unittest in two stable-ID
-parity shards; discovery and fixtures stay unchanged. The low bit of the
-SHA-256 hash of each unique UTF-8 test ID assigns it to exactly one shard,
+Windows/Python 3.11, 3.12, 3.13, and 3.14 core cells run unittest in two
+stable-ID parity shards; discovery and fixtures stay unchanged. The low bit of
+the SHA-256 hash of each unique UTF-8 test ID assigns it to exactly one shard,
 preserving per-shard discovery order. Duplicate or unavailable IDs fail
 sharded discovery. Without `--test-shard`, `scripts/check.py` still runs the
 full unsharded suite. Shard receipts use `suite: "offline-shard"` and
@@ -315,15 +315,22 @@ non-unittest checks and waivers; their reports cannot substitute for the
 aggregate check.
 
 Each excluded Windows matrix cell is replaced by two shard jobs and one
-aggregate under its original required name: `core (windows-latest, 3.12)`,
-`core (windows-latest, 3.13)`, or `core (windows-latest, 3.14)`. The aggregate
+aggregate under its original required name: `core (windows-latest, 3.11)`,
+`core (windows-latest, 3.12)`, `core (windows-latest, 3.13)`, or
+`core (windows-latest, 3.14)`. The aggregate
 runs with `always()` and accepts only `success` from its own two-cell matrix;
 failure, cancellation, skip or a missing result fails closed. Timing and
 managed-import diagnostic artifacts are distinct per Python version and shard.
 The 1,800-second suite-child limit and 60-minute shard scope are unchanged;
 partitioning changes only parallelism, not coverage or assertions.
 
-The 3.14 split is based on retained exact-snapshot timing evidence: on SHA
+The 3.11 split follows the exact automatic publication on `mizu` at SHA
+`c2cc6b01b365f0a5e1b09aed13c06b65ff1e5d7d`, where the unsharded
+`python-unit-and-contract-tests` child timed out at the unchanged 1,800-second
+limit without unittest failure details. This establishes that the unsharded
+gate exceeded its budget, not that a particular test failed. The split keeps
+the whole suite and timeout unchanged. The 3.14 split is based on retained
+exact-snapshot timing evidence: on SHA
 `3ca295fd30906087761b4cbf95e931230fcdaaac`, all 3,735 tests completed with
 1,781.994 seconds of summed test time, the slowest individual case took
 11.678 seconds, and the child reached the existing 1,800-second bound. This

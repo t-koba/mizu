@@ -129,7 +129,7 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.jobs = dict(re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
                                    self.workflow, re.M | re.S))
 
-    def test_only_windows_312_through_314_are_excluded_and_sharded_with_distinct_artifacts(self):
+    def test_only_windows_311_through_314_are_excluded_and_sharded_with_distinct_artifacts(self):
         core = self.jobs['core']
         self.assertTrue(self.workflow.startswith('name: Offline checks\n'))
         self.assertIn('    runs-on: ${{ matrix.os }}\n', core)
@@ -138,13 +138,15 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.assertIn('        python: ["3.11", "3.12", "3.13", "3.14"]\n', core)
         matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertEqual(matrix.split('        exclude:\n')[1],
+                         '          - os: windows-latest\n            python: "3.11"\n'
                          '          - os: windows-latest\n            python: "3.12"\n'
                          '          - os: windows-latest\n            python: "3.13"\n'
                          '          - os: windows-latest\n            python: "3.14"\n')
         self.assertNotIn('--test-shard', core)
         self.assertNotIn('--suite-child-timeout', core)
-        self.assertEqual(self.workflow.count('--test-shard'), 3)
-        for python, short in (("3.12", "312"), ("3.13", "313"), ("3.14", "314")):
+        self.assertEqual(self.workflow.count('--test-shard'), 4)
+        for python, short in (("3.11", "311"), ("3.12", "312"),
+                              ("3.13", "313"), ("3.14", "314")):
             with self.subTest(python=python):
                 shards = self.jobs[f'windows-{short}-shards']
                 self.assertIn(f'    name: windows-{short}-shard (${{{{ matrix.shard }}}})\n', shards)
@@ -166,7 +168,8 @@ class WindowsShardWorkflowTests(unittest.TestCase):
                 self.assertNotRegex(shards, r'(?m)^    if:')
 
     def test_exact_old_check_names_and_fail_closed_matrix_dependencies(self):
-        for python, short in (("3.12", "312"), ("3.13", "313"), ("3.14", "314")):
+        for python, short in (("3.11", "311"), ("3.12", "312"),
+                              ("3.13", "313"), ("3.14", "314")):
             with self.subTest(python=python):
                 aggregate = self.jobs[f'windows-{short}-core']
                 shards = self.jobs[f'windows-{short}-shards']

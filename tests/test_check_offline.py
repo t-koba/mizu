@@ -765,13 +765,14 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
         marker = '      - name: Upload managed-import diagnostic\n'
         parts = workflow.split(marker)
-        self.assertEqual(len(parts), 5,
-                         'expected core-matrix and Windows-3.12–3.14 shard diagnostic blocks')
-        core_upload = parts[1].split('  windows-312-shards:', 1)[0]
+        self.assertEqual(len(parts), 6,
+                         'expected core-matrix and Windows-3.11–3.14 shard diagnostic blocks')
+        core_upload = parts[1].split('  windows-311-shards:', 1)[0]
         shard_uploads = (
-            ('3.12', parts[2].split('  windows-312-core:', 1)[0]),
-            ('3.13', parts[3].split('  windows-313-core:', 1)[0]),
-            ('3.14', parts[4].split('  windows-314-core:', 1)[0]),
+            ('3.11', parts[2].split('  windows-311-core:', 1)[0]),
+            ('3.12', parts[3].split('  windows-312-core:', 1)[0]),
+            ('3.13', parts[4].split('  windows-313-core:', 1)[0]),
+            ('3.14', parts[5].split('  windows-314-core:', 1)[0]),
         )
         exact_path = ['path: private-validation/project-import-diagnostic.json']
         # Core matrix cell: Windows-only condition with a per-cell artifact name.
@@ -786,9 +787,9 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
                          exact_path)
         self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}',
                       core_upload)
-        self.assertNotIn('project-import-diagnostic-windows-latest-3.12-shard', core_upload)
-        self.assertNotIn('project-import-diagnostic-windows-latest-3.13-shard', core_upload)
-        self.assertNotIn('project-import-diagnostic-windows-latest-3.14-shard', core_upload)
+        for version in ('3.11', '3.12', '3.13', '3.14'):
+            self.assertNotIn(f'project-import-diagnostic-windows-latest-{version}-shard',
+                             core_upload)
         self.assertIn('retention-days: 7', core_upload)
         self.assertIn('if-no-files-found: ignore', core_upload)
         for version, shard_upload in shard_uploads:
@@ -2155,9 +2156,9 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('--test-timings private-validation/test-timings.json', workflow)
         # Every cell collects the evidence, so each supported host's suite
         # cost is measured where it runs.
-        # Core matrix, Windows/3.12–3.14 shard matrices, and the
+        # Core matrix, Windows/3.11–3.14 shard matrices, and the
         # authoritative durable job each collect timing evidence.
-        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 5)
+        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 6)
         # One artifact per cell, each named for its own cell.
         self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
         self.assertIn('name: test-timings-durable', workflow)
@@ -2194,7 +2195,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # lose the timing evidence it exists for.
         self.assertIsNone(condition(gate))
         # One declaration for the normal matrix and one in each Windows shard job.
-        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 4)
+        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 5)
         self.assertIn('--test-timings private-validation/test-timings.json', gate)
 
     def test_timings_artifact_survives_timeout_with_only_evidence(self):
