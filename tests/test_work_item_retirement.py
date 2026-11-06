@@ -48,7 +48,9 @@ class RetirementTests(Fixture):
             record = {**template, "rev": rev, "status": status,
                       "holder": "worker" if status == "doing" else None,
                       "transition": {"from": previous["status"], "to": status}}
-            write_json(self.directory / f"{rev}.json", record, exclusive=True)
+            path = self.directory / f"{rev}.json"
+            with path.open("xb") as stream:
+                stream.write(canonical(record))
             previous = record
         if blocked:
             self.last = self.change("blocked", expected_rev=MAX_REVISIONS - 1,
