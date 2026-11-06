@@ -60,6 +60,21 @@ def _producer_read(project, job_id, name):
         raise InvalidProducer(job_id, name + '_json') from exc
 
 
+def valid_cache_diagnostics(diagnostics):
+    """Accept only bounded, redacted cache diagnostics from retained jobs/results."""
+    reasons = ('unstable', 'entry_limit', 'byte_limit', 'unsafe_entry',
+               'unsafe_or_unreadable', 'reset_failed')
+    return (isinstance(diagnostics, list) and len(diagnostics) <= 2
+            and all(isinstance(item, dict) and not set(item) - {'phase', 'reason', 'path'}
+                    and item.get('phase') in ('input', 'output')
+                    and item.get('reason') in reasons
+                    and ('path' not in item or isinstance(item['path'], str)
+                         and len(item['path']) <= 256
+                         and re.fullmatch(r'[A-Za-z0-9_. /-]+', item['path'])
+                         and all(part not in ('', '.', '..') for part in item['path'].split('/')))
+                    for item in diagnostics))
+
+
 def read_job(project, job_id):
     if not _digest(job_id):
         raise Denied('Invalid acceptance job ID')
@@ -78,6 +93,8 @@ def read_job(project, job_id):
             or not isinstance(job.get('commands', []), list)
             or len(job.get('commands', [])) > 32
             or any(not isinstance(c, str) for c in job.get('commands', []))):
+        raise InvalidProducer(job_id, 'job_schema')
+    if not valid_cache_diagnostics(job.get('cache_diagnostics', [])):
         raise InvalidProducer(job_id, 'job_schema')
     if 'fresh' in job and type(job['fresh']) is not bool:
         raise InvalidProducer(job_id, 'job_schema')
@@ -217,7 +234,7 @@ def discover(project):
                 if original is None:
                     invalid[job_id] = 'job_subscription'
                     continue
-                for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key'):
+                for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key', 'cache_diagnostics'):
                     if key in original:
                         job[key] = original[key]
             elif job.get('detached'):

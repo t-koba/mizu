@@ -100,7 +100,7 @@ def read(project, job_id):
     job = raw_read(project, job_id)
     if job.get('shared_job') and not job.get('detached'):
         original = raw_read(project, job['shared_job'])
-        for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key'):
+        for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key', 'cache_diagnostics'):
             if key in original:
                 job[key] = original[key]
     elif job.get('detached'):
@@ -251,7 +251,7 @@ def cache_guard(project, *, blocking=True):
         guard.__exit__(None, None, None)
 
 
-def cache_input(project):
+def cache_input(project, *, diagnostic=None):
     """Fingerprint configured pre-execution trees while holding cache_guard.
 
     None means unbound, never empty. Count directories and absent names as
@@ -261,7 +261,8 @@ def cache_input(project):
     of a workspace must not change its identity. Hardlinks are bound only when
     every name of their inode is found inside these trees. Bind their topology
     by a deterministic relative name, not by a host inode number. Each name
-    still counts against both traversal and byte bounds.
+    still counts against both traversal and byte bounds. On failure, diagnostic
+    optionally receives a bounded reason and safe cache-relative path.
     """
     from . import platform
     from .fs import _same_file
@@ -276,6 +277,16 @@ def cache_input(project):
     def stamp(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
                 info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def unbound(reason='unstable', relative=None):
+        if diagnostic is not None:
+            diagnostic['reason'] = reason
+            path = relative.relative_to(base).as_posix() if relative is not None else ''
+            # Cache names are untrusted command output, not host diagnostics.
+            if (path and len(path) <= 256 and all(part not in ('.', '..') for part in path.split('/'))
+                    and re.fullmatch(r'[A-Za-z0-9_. /-]+', path)):
+                diagnostic['path'] = path
+        return None
 
     def inspect(relative):
         path = project.root
@@ -320,7 +331,7 @@ def cache_input(project):
         while pending:
             relative = pending.pop()
             if len(entries) >= project.config.sandbox.check_input_files:
-                return None
+                return unbound('entry_limit', relative)
             info = inspect(relative)
             key = relative.relative_to(base).as_posix()
             if info is None:
@@ -331,10 +342,10 @@ def cache_input(project):
                 children = []
                 with opened(relative, True) as node, os.scandir(node) as listing:
                     if isinstance(node, int) and not _same_file(info, os.fstat(node)):
-                        return None
+                        return unbound(relative=relative)
                     for child in listing:
                         if len(entries) + len(pending) + len(children) + 1 >= project.config.sandbox.check_input_files:
-                            return None
+                            return unbound('entry_limit', relative)
                         children.append(child.name)
                 children.sort()
                 value['children'] = children
@@ -342,37 +353,37 @@ def cache_input(project):
             elif stat.S_ISREG(info.st_mode) and info.st_nlink >= 1 and relative not in configured:
                 total += info.st_size
                 if total > project.config.sandbox.check_input_bytes:
-                    return None
+                    return unbound('byte_limit', relative)
                 with opened(relative, False) as node:
                     stream = os.fdopen(os.dup(node), 'rb') if isinstance(node, int) else node.open('rb')
                     with stream:
                         before = os.fstat(stream.fileno())
                         if not stat.S_ISREG(before.st_mode) or not _same_file(info, before):
-                            return None
+                            return unbound(relative=relative)
                         hasher, remaining = hashlib.sha256(), info.st_size
                         while remaining:
                             data = stream.read(min(remaining, 1048576))
                             if not data:
-                                return None
+                                return unbound(relative=relative)
                             remaining -= len(data)
                             hasher.update(data)
                         if stream.read(1) or stamp(os.fstat(stream.fileno())) != stamp(before):
-                            return None
+                            return unbound(relative=relative)
                         value['digest'] = hasher.hexdigest()
                 if info.st_nlink > 1:
                     if not info.st_ino:
-                        return None  # No trustworthy identity for link accounting.
+                        return unbound(relative=relative)  # No trustworthy identity for link accounting.
                     identity = (info.st_dev, info.st_ino)
                     prior, members = hardlinks.setdefault(identity, (stamp(info), []))
                     if prior != stamp(info):
-                        return None
+                        return unbound(relative=relative)
                     members.append(key)
             else:
-                return None
+                return unbound('unsafe_entry', relative)
             entries[key] = value
         for prior, members in hardlinks.values():
             if len(members) != prior[3]:  # st_nlink includes names outside our trees.
-                return None
+                return unbound('unsafe_entry', base / min(members))
             first = min(members)
             for key in members:
                 entries[key]['hardlink'] = first
@@ -382,10 +393,66 @@ def cache_input(project):
             except FileNotFoundError:
                 after = None
             if after != before:
-                return None
+                return unbound(relative=relative)
         return digest(canonical({'names': list(names), 'entries': entries}))
     except (OSError, Denied, ValueError, UnicodeError):
-        return None
+        return unbound('unsafe_or_unreadable', relative)
+
+
+def reset_cache(project):
+    """Discard only this execution's cache, under cache_guard, without link traversal."""
+    from . import platform
+    from .fs import _check_read_components
+    name = execution_key(project.config)
+    try:
+        if platform.HAS_OPENAT and platform.HAS_DIR_FD and shutil.rmtree.avoids_symlink_attacks:
+            fd = os.open(project.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                child = os.open('check-cache', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(name, dir_fd=fd)
+                else:
+                    os.unlink(name, dir_fd=fd)
+            finally:
+                os.close(fd)
+        else:
+            # Portable fallback: commands are quiescent and cache ownership is
+            # exclusive. rmtree never descends Windows directory junctions.
+            parent = _check_read_components(project.root, 'check-cache', ('check-cache',))
+            target = parent / name
+            info = target.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                target.unlink()
+            elif getattr(info, 'st_file_attributes', 0) & 0x400:
+                target.rmdir() if stat.S_ISDIR(info.st_mode) else target.unlink()
+            elif stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+    except FileNotFoundError:
+        pass
+    except (OSError, Denied):
+        raise Denied('Configured check cache reset failed') from None
+
+
+def recover_cache(project, job, phase):
+    diagnostic = {'phase': phase, 'reason': 'unstable'}
+    current = cache_input(project, diagnostic=diagnostic)
+    if current is not None:
+        return current
+    job.setdefault('cache_diagnostics', []).append(diagnostic)
+    try:
+        reset_cache(project)
+        current = cache_input(project)
+        if current is None:
+            raise Denied('Clean cache cannot be bound')
+        return current if phase == 'input' else None
+    except Denied:
+        diagnostic['reason'] = 'reset_failed'
+        raise Denied('Configured check cache reset failed') from None
 
 
 def cache_matches(project, job, current):
@@ -695,7 +762,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                     return _delivered_summary(project, pending_id, owner)
         current = cache_input(project) if not custom and not pending_binding else None
         if cache_configured and not pending_binding and current is None:
-            raise Denied('Cannot bind configured check cache inputs; verification not queued')
+            pending_binding = True
         cache_binding = ({'cache_input': current}
                          if cache_configured and not pending_binding else {})
         # A fresh request asks for a measurement of its own: it never joins an
@@ -822,6 +889,10 @@ def _retire_superseded(project, role, purpose, *, keep=frozenset(), replaced_by=
 
 
 def summary(job):
+    if 'cache_diagnostics' in job:
+        from .acceptance import valid_cache_diagnostics
+        if not valid_cache_diagnostics(job['cache_diagnostics']):
+            raise Denied('Malformed check cache diagnostics')
     continuation = ({'wait': {'operation': 'finish',
                              'arguments': {'outcome': 'wait', 'wait_for_check': job['id']},
                              'supply': ['summary', 'state'],
@@ -832,7 +903,7 @@ def summary(job):
             **{k: text_preview(job[k], 512)[0] if isinstance(job[k], str) else job[k]
                for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
                                'created_at', 'finished_at', 'passed', 'error', 'shared_job',
-                               'purpose', 'replaced_by', 'scratch_paths') if k in job}}
+                               'purpose', 'replaced_by', 'scratch_paths', 'cache_diagnostics') if k in job}}
 
 
 def pending(project, role, *, discovery=None):
@@ -906,6 +977,10 @@ def result(context, job_id):
     if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
         return output
     record = read_json(root(project) / job.get('shared_job', job_id) / 'result.json', {})
+    if isinstance(record, dict) and 'cache_diagnostics' in record:
+        from .acceptance import valid_cache_diagnostics
+        if not valid_cache_diagnostics(record['cache_diagnostics']):
+            raise Denied('Malformed check cache diagnostics')
     output['result'] = record
     if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
         output['accepted_for_current_source'] = False
@@ -1219,52 +1294,41 @@ def run_pending(project, stop, *, sandbox_factory=Sandbox):
 def _execute(project, job, stop, sandbox_factory, slot):
     directory = root(project) / job['id']
     path = directory / 'job.json'
-    role = project.config.roles.get(job.get('producer_role', job['role']))
-    receiver = project.config.roles.get(job['role'])
-    if (role is None or receiver is None or 'check_job' not in receiver.capabilities or 'check_job' not in role.capabilities
-            or job['kind'] not in role.capabilities):
-        job.update(status='refused', error='Check authority withdrawn', finished_at=now())
+
+    def refuse(error):
+        job.update(status='refused', error=error, finished_at=now())
         save_execution(project, job)
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
         return summary(job)
+
+    role = project.config.roles.get(job.get('producer_role', job['role']))
+    receiver = project.config.roles.get(job['role'])
+    if (role is None or receiver is None or 'check_job' not in receiver.capabilities or 'check_job' not in role.capabilities
+            or job['kind'] not in role.capabilities):
+        return refuse('Check authority withdrawn')
     # Verification cache inputs bind at execution start under the caller's
     # check-cache.lock (held by _run_one across _execute), never at enqueue.
     # The request identity (job id, derived at submit) is preserved; the
     # execution reuse identity (cache_input/shared_key) is rebound here to
     # the actual fingerprint. A legitimate change since enqueue therefore
-    # runs instead of refusing. Fail closed when the execution input cannot
-    # be bounded or when the record predates cache binding.
+    # runs instead of refusing. Unbindable caches are discarded; legacy
+    # records without a cache binding still fail closed.
     if job.get('cache_binding_pending') and not (job['kind'] == 'verify' and project.config.sandbox.check_cache_paths):
-        job.update(status='refused', error='Execution configuration, dependency or cache inputs changed', finished_at=now())
-        save_execution(project, job)
-        shutil.rmtree(directory / 'input', ignore_errors=True)
-        os.utime(root(project), None)
-        return summary(job)
+        return refuse('Execution configuration, dependency or cache inputs changed')
+    if (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and execution_environment(project, job) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
+        return refuse('Dependency inputs could not be bound for reusable acceptance'
+                   if job.get('inputs_bound_required') and job.get('environment') is None
+                   else 'Execution configuration, dependency or cache inputs changed')
     if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
         if 'cache_input' not in job and job.get('cache_binding_pending') != 1:
-            job.update(status='refused', error='Execution configuration, dependency or cache inputs changed', finished_at=now())
-            save_execution(project, job)
-            shutil.rmtree(directory / 'input', ignore_errors=True)
-            os.utime(root(project), None)
-            return summary(job)
-        current_cache = cache_input(project)
-        if current_cache is None:
-            job.update(status='refused', error='Cannot bind configured check cache inputs; verification refused', finished_at=now())
-            save_execution(project, job)
-            shutil.rmtree(directory / 'input', ignore_errors=True)
-            os.utime(root(project), None)
-            return summary(job)
+            return refuse('Execution configuration, dependency or cache inputs changed')
+        try:
+            current_cache = recover_cache(project, job, 'input')
+        except Denied:
+            return refuse('Configured check cache reset failed')
     else:
         current_cache = None
-    if (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and execution_environment(project, job) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
-        job.update(status='refused', error=('Dependency inputs could not be bound for reusable acceptance'
-                   if job.get('inputs_bound_required') and job.get('environment') is None
-                   else 'Execution configuration, dependency or cache inputs changed'), finished_at=now())
-        save_execution(project, job)
-        shutil.rmtree(directory / 'input', ignore_errors=True)
-        os.utime(root(project), None)
-        return summary(job)
     if current_cache is not None:
         # Rebind the actual execution input before staging any cache tree.
         # The job id stays the submit-time request identity; shared_key is
@@ -1356,16 +1420,27 @@ def _execute(project, job, stop, sandbox_factory, slot):
         # cleanup. They are compiler inputs, never evidence of a passing check.
         if job['status'] == 'completed' and job['kind'] == 'verify':
             cache = project.root / 'check-cache' / job['execution']
-            mkdir(cache)
-            for name in project.config.sandbox.check_cache_paths:
-                artifact = workspace / name
-                if project.snapshots.excluded(name) and artifact.is_dir() and not artifact.is_symlink():
-                    artifact.replace(cache / name)
-            if project.config.sandbox.check_cache_paths:
-                # Informational only: unbindable outputs do not invalidate the
-                # proof of this execution or replace its immutable input.
-                record['cache_output'] = cache_input(project)
-                write_json(directory / 'result.json', record)
+            try:
+                mkdir(cache)
+                for name in project.config.sandbox.check_cache_paths:
+                    artifact = workspace / name
+                    if project.snapshots.excluded(name) and (artifact.exists() or artifact.is_symlink()):
+                        artifact.replace(cache / name)
+                if project.config.sandbox.check_cache_paths:
+                    # Output is informational; only bindable artifacts persist.
+                    record['cache_output'] = recover_cache(project, job, 'output')
+            except (OSError, Denied):
+                job.update(status='refused', passed=False, error='Configured check cache reset failed')
+                if not job.get('cache_diagnostics') or job['cache_diagnostics'][-1]['reason'] != 'reset_failed':
+                    job.setdefault('cache_diagnostics', []).append({'phase': 'output', 'reason': 'reset_failed'})
+                    try:
+                        reset_cache(project)  # Also discard partially collected outputs.
+                    except Denied:
+                        pass  # The explicit refusal already excludes acceptance.
+                record['passed'] = False
+            if job.get('cache_diagnostics'):
+                record['cache_diagnostics'] = job['cache_diagnostics']
+            write_json(directory / 'result.json', record)
         if not job.get('scratch_paths'):
             shutil.rmtree(directory / 'input', ignore_errors=True)
     clean_scratch = (bool(job.get('scratch_paths')) and job['status'] == 'completed'

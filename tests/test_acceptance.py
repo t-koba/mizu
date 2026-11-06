@@ -1049,8 +1049,8 @@ class AcceptanceTests(Fixture):
         self.assertEqual(status['effective_verification_diagnostic'],
                          {'status': 'unassessed', 'reason': 'read_only_status'})
         self.assertEqual({p.relative_to(base): p.read_bytes() for p in base.rglob('*.json')}, before)
-        # Fresh execution/reuse still fingerprints and refuses both changed
-        # and unrepresentable inputs. Retention is not current authority.
+        # Fresh execution/reuse still fingerprints changed/unrepresentable
+        # inputs. Unbound cache requests queue, but cannot reuse retained proof.
         for function in ('environment', 'cache_input'):
             for value in ('f' * 64, None):
                 with self.subTest(function=function, value=value), patch.object(
@@ -1060,8 +1060,10 @@ class AcceptanceTests(Fixture):
                     fingerprint.assert_not_called()
                     self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
                     if function == 'cache_input' and value is None:
-                        with self.assertRaisesRegex(Denied, 'Cannot bind configured check cache'):
-                            check_jobs.submit(self.context())
+                        queued = check_jobs.submit(self.context())
+                        self.assertEqual(queued['status'], 'queued')
+                        self.assertFalse(queued['accepted_for_current_source'])
+                        self.assertTrue(check_jobs.raw_read(self.project, queued['id'])['cache_binding_pending'])
                     else:
                         self.assertNotIn('shared_job', check_jobs.submit(self.context()))
                     self.assertTrue(fingerprint.called)

@@ -402,16 +402,19 @@ cancelled, detached or invalid proof.
 If the lock is owned, submission durably queues an explicitly versioned
 pending-binding request without reading the cache, inventing an input, or
 joining another job. Pending requests count against normal queue bounds, support
-cancellation, and cannot be shared, joined or supply proof. Errors other than
-cache ownership fail closed; an unsafe or ambiguous retained store is refused.
-When the cache is readable but unbound, verification is refused before queueing.
+cancellation, and cannot be shared, joined or supply proof. Unbindable cache
+contents use the same pending-binding state; an unsafe or ambiguous retained
+job/evidence store still fails closed.
+Unbindable configured caches are recoverable cache misses, never empty inputs:
+under cache exclusion the runner deletes only `check-cache/<execution>` without
+following symlinks/reparse points, then fingerprints the clean cache before running.
+A reset or clean-rebind failure explicitly refuses the job without acceptance.
 The runner fingerprints the configured cache under the same exclusive lock
 immediately before moving any cache tree into frozen source and atomically
 persists the execution-start value in the running job (`cache_input`) and
 sharing key before staging. Only the validated version 1 pending marker permits
-missing enqueue-time binding; legacy missing-binding records and unsafe
-execution inputs are refused. A started execution is interrupted, not rebound,
-on runner recovery. Results and acceptance scopes bind the execution input.
+missing enqueue-time binding; legacy missing-binding records are refused. A
+started execution is interrupted, not rebound, on runner recovery. Results and acceptance scopes bind the execution input.
 The execution-long lock, cache-free checks and custom experiments retain their
 independent behavior.
 
@@ -423,7 +426,17 @@ present), along with current source, commands, execution environment and grants;
 it does not compare the live cache with that input. Older results without the
 echo can still be imported when their job binds a trustworthy input. After
 artifacts are staged back, `cache_output` records their fingerprint separately;
-an unbindable output is reported as null without changing the pass result.
+an unbindable output is reported as null and discarded before returning, without
+changing the pass result when discard succeeds. Commands may create arbitrary
+cache artifacts, but only safely bindable artifacts persist for reuse. Failed
+output reset refuses the job without acceptance. Summaries/results report up to
+one `cache_diagnostics` entry per phase (`input`, `output`): a bounded reason class
+(`entry_limit`, `byte_limit`, `unsafe_entry`, `unsafe_or_unreadable`, `unstable`,
+or `reset_failed`) and, when safely representable, an ASCII cache-relative `path`
+of at most 256 characters. Absolute paths and raw filesystem exceptions are never
+included in these diagnostics. Reset shares the existing portable filesystem trust
+boundary: POSIX pins parent components; the portable fallback checks parents and
+uses no-follow deletion while commands are quiescent under exclusive ownership.
 Later discovery, joining, submission and retained-acceptance lookup still compare
 the current cache fingerprint with the recorded execution input under `check-cache.lock`,
 never with `cache_output`: changed inputs require a new execution, not reuse of
