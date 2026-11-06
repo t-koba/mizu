@@ -304,32 +304,35 @@ caller-supplied SHA/run ID, CI environment variable nor a later branch head is
 an authority. Content digests detect missing/mixed pages; they do not authenticate
 an arbitrary externally supplied artifact or create a new CI receipt.
 
-Windows/Python 3.12 and 3.14 core cells run unittest in two stable-ID parity
-shards; discovery and fixtures stay unchanged. The low bit of the SHA-256 hash
-of each unique UTF-8 test ID assigns it to exactly one shard, preserving
-per-shard discovery order. Duplicate or unavailable IDs fail sharded discovery.
-Without `--test-shard`, `scripts/check.py` still runs the full unsharded suite.
-Shard receipts use `suite: "offline-shard"` and `test_shard`, never reusable
-full offline receipts. Both shards run the same non-unittest checks and waivers;
-their reports cannot substitute for the aggregate check.
+Windows/Python 3.12, 3.13, and 3.14 core cells run unittest in two stable-ID
+parity shards; discovery and fixtures stay unchanged. The low bit of the
+SHA-256 hash of each unique UTF-8 test ID assigns it to exactly one shard,
+preserving per-shard discovery order. Duplicate or unavailable IDs fail
+sharded discovery. Without `--test-shard`, `scripts/check.py` still runs the
+full unsharded suite. Shard receipts use `suite: "offline-shard"` and
+`test_shard`, never reusable full offline receipts. Both shards run the same
+non-unittest checks and waivers; their reports cannot substitute for the
+aggregate check.
 
 Each excluded Windows matrix cell is replaced by two shard jobs and one
-aggregate under its original required name: `core (windows-latest, 3.12)` or
-`core (windows-latest, 3.14)`. The aggregate runs with `always()` and accepts
-only `success` from its own two-cell matrix; failure, cancellation, skip or a
-missing result fails closed. Timing and managed-import diagnostic artifacts
-are distinct per Python version and shard. The 1,800-second suite-child limit
-and 60-minute shard scope are unchanged; partitioning changes only parallelism,
-not coverage or assertions.
+aggregate under its original required name: `core (windows-latest, 3.12)`,
+`core (windows-latest, 3.13)`, or `core (windows-latest, 3.14)`. The aggregate
+runs with `always()` and accepts only `success` from its own two-cell matrix;
+failure, cancellation, skip or a missing result fails closed. Timing and
+managed-import diagnostic artifacts are distinct per Python version and shard.
+The 1,800-second suite-child limit and 60-minute shard scope are unchanged;
+partitioning changes only parallelism, not coverage or assertions.
 
 The 3.14 split is based on retained exact-snapshot timing evidence: on SHA
 `3ca295fd30906087761b4cbf95e931230fcdaaac`, all 3,735 tests completed with
 1,781.994 seconds of summed test time, the slowest individual case took
 11.678 seconds, and the child reached the existing 1,800-second bound. This
 shows a distributed near-bound workload, not one exceptional test. The split
-reuses the already-tested 3.12 parity mechanism. Total runner cost is not
-claimed to fall; the repeated non-unittest gates and exact-revision hosted
-results remain part of any future cost assessment.
+reuses the already-tested 3.12 parity mechanism. The 3.13 split follows an
+exact-SHA Windows run on the main branch that hit the same 1,800-second bound
+even though the same check passed on `mizu`; the log did not identify a failing
+test. Sharding keeps the complete suite and unchanged bound, but no post-split
+runtime or total runner-cost reduction is claimed.
 
 Every core cell uploads its bounded timing summary and detail pages; the
 Windows shards also retain per-shard timings and managed-import diagnostics.

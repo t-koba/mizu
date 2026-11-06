@@ -129,7 +129,7 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.jobs = dict(re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
                                    self.workflow, re.M | re.S))
 
-    def test_only_windows_312_and_314_are_excluded_and_sharded_with_distinct_artifacts(self):
+    def test_only_windows_312_through_314_are_excluded_and_sharded_with_distinct_artifacts(self):
         core = self.jobs['core']
         self.assertTrue(self.workflow.startswith('name: Offline checks\n'))
         self.assertIn('    runs-on: ${{ matrix.os }}\n', core)
@@ -139,48 +139,34 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertEqual(matrix.split('        exclude:\n')[1],
                          '          - os: windows-latest\n            python: "3.12"\n'
+                         '          - os: windows-latest\n            python: "3.13"\n'
                          '          - os: windows-latest\n            python: "3.14"\n')
         self.assertNotIn('--test-shard', core)
         self.assertNotIn('--suite-child-timeout', core)
-        shards = self.jobs['windows-312-shards']
-        self.assertIn('    name: windows-312-shard (${{ matrix.shard }})\n', shards)
-        self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', shards)
-        self.assertIn('      fail-fast: false\n      matrix:\n        shard: [0, 1]\n', shards)
-        self.assertIn('          python-version: "3.12"\n', shards)
-        core_command = re.search(r'        run: (python scripts/check.py .+)', core).group(1)
-        self.assertIn('        run: ' + core_command.replace('check.py ',
-                      'check.py --test-shard ${{ matrix.shard }} ', 1) + '\n', shards)
-        self.assertEqual(re.findall(r'uses: (.+)', core)[:2], re.findall(r'uses: (.+)', shards)[:2])
-        self.assertEqual(re.findall(r'uses: (actions/upload-artifact@.+)', core),
-                         re.findall(r'uses: (actions/upload-artifact@.+)', shards))
-        for prefix in ('test-timings', 'project-import-diagnostic'):
-            self.assertIn(f'          name: {prefix}-windows-latest-3.12-shard-${{{{ matrix.shard }}}}\n', shards)
-        self.assertIn('            private-validation/test-timings.json.d/*.json\n', shards)
-        self.assertEqual(shards.count('        if: always()\n'), 2)
-        self.assertNotIn('continue-on-error', shards)
-        self.assertNotIn('--suite-child-timeout', shards)
-        self.assertNotRegex(shards, r'(?m)^    if:')
-        self.assertEqual(self.workflow.count('--test-shard'), 2)
-        core314 = self.jobs['windows-314-shards']
-        self.assertIn('    name: windows-314-shard (${{ matrix.shard }})\n', core314)
-        self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', core314)
-        self.assertIn('      fail-fast: false\n      matrix:\n        shard: [0, 1]\n', core314)
-        self.assertIn('          python-version: "3.14"\n', core314)
-        self.assertIn('        run: ' + core_command.replace('check.py ',
-                      'check.py --test-shard ${{ matrix.shard }} ', 1) + '\n', core314)
-        self.assertEqual(re.findall(r'uses: (.+)', core), re.findall(r'uses: (.+)', core314))
-        self.assertEqual(re.findall(r'uses: (actions/upload-artifact@.+)', core),
-                         re.findall(r'uses: (actions/upload-artifact@.+)', core314))
-        for prefix in ('test-timings', 'project-import-diagnostic'):
-            self.assertIn(f'          name: {prefix}-windows-latest-3.14-shard-${{{{ matrix.shard }}}}\n', core314)
-        self.assertIn('            private-validation/test-timings.json.d/*.json\n', core314)
-        self.assertEqual(core314.count('        if: always()\n'), 2)
-        self.assertNotIn('continue-on-error', core314)
-        self.assertNotIn('--suite-child-timeout', core314)
-        self.assertNotRegex(core314, r'(?m)^    if:')
+        self.assertEqual(self.workflow.count('--test-shard'), 3)
+        for python, short in (("3.12", "312"), ("3.13", "313"), ("3.14", "314")):
+            with self.subTest(python=python):
+                shards = self.jobs[f'windows-{short}-shards']
+                self.assertIn(f'    name: windows-{short}-shard (${{{{ matrix.shard }}}})\n', shards)
+                self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', shards)
+                self.assertIn('      fail-fast: false\n      matrix:\n        shard: [0, 1]\n', shards)
+                self.assertIn(f'          python-version: "{python}"\n', shards)
+                core_command = re.search(r'        run: (python scripts/check.py .+)', core).group(1)
+                self.assertIn('        run: ' + core_command.replace('check.py ',
+                              'check.py --test-shard ${{ matrix.shard }} ', 1) + '\n', shards)
+                self.assertEqual(re.findall(r'uses: (.+)', core), re.findall(r'uses: (.+)', shards))
+                self.assertEqual(re.findall(r'uses: (actions/upload-artifact@.+)', core),
+                                 re.findall(r'uses: (actions/upload-artifact@.+)', shards))
+                for prefix in ('test-timings', 'project-import-diagnostic'):
+                    self.assertIn(f'          name: {prefix}-windows-latest-{python}-shard-${{{{ matrix.shard }}}}\n', shards)
+                self.assertIn('            private-validation/test-timings.json.d/*.json\n', shards)
+                self.assertEqual(shards.count('        if: always()\n'), 2)
+                self.assertNotIn('continue-on-error', shards)
+                self.assertNotIn('--suite-child-timeout', shards)
+                self.assertNotRegex(shards, r'(?m)^    if:')
 
     def test_exact_old_check_names_and_fail_closed_matrix_dependencies(self):
-        for python, short in (("3.12", "312"), ("3.14", "314")):
+        for python, short in (("3.12", "312"), ("3.13", "313"), ("3.14", "314")):
             with self.subTest(python=python):
                 aggregate = self.jobs[f'windows-{short}-core']
                 shards = self.jobs[f'windows-{short}-shards']
