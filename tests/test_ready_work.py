@@ -342,7 +342,10 @@ class ReadyProjectionTests(Fixture):
         self.assertIn(added["id"], [row["id"] for row in page["items"]])
         # A terminal row is still scanned, and its old revisions still matter.
         other.transition(item["id"], expected_rev=3, actor="worker", status="dropped", reason="Settled")
-        store.page_ready(limit=1)
+        terminal = store.page_ready(limit=1)
+        self.assertEqual(terminal["total"], 1)
+        self.assertEqual([row["id"] for row in terminal["items"]], [added["id"]])
+        self.assertNotEqual(terminal["signature"], page["signature"])
         path = store.root / "work-items" / item["id"] / "2.json"
         record = read_json(path)
         write_json(path, {**record, "rev": 9})
