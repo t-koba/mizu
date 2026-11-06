@@ -73,7 +73,7 @@ class DecisionTaskTests(Fixture):
         self.assertEqual(self.store.page_open_readonly()["total"], 2)
         self.store.transition(ids[0], expected_rev=2, status="dropped", actor="worker", reason="superseded")
         self.assertEqual(self.store.page_closed_readonly()["items"][0]["id"], ids[0])
-        self.assertEqual(self.decide(work_items=self.tasks), event)
+        self.assertEqual(self.decide(work_items=self.tasks, scope="Deliver both parts"), event)
 
     def test_exact_and_conflicting_replays(self):
         event = self.decide(work_items=self.tasks, action="modify")
@@ -88,6 +88,15 @@ class DecisionTaskTests(Fixture):
                 self.decide(work_items=self.tasks, **{"action": "modify", **kwargs})
         self.assertEqual(json.loads(self.event_path.read_text()), event)
         self.assertEqual(len(list(self.event_path.parent.glob("*.json"))), 1)
+
+    def test_scope_presence_and_text_are_part_of_replay_identity(self):
+        event = self.decide(work_items=self.tasks, scope="Deliver both parts")
+        self.assertEqual(self.decide(work_items=copy.deepcopy(self.tasks),
+                                     scope="Deliver both parts", run="retry"), event)
+        for scope in (None, "Deliver a different scope"):
+            with self.subTest(scope=scope), self.assertRaises(Denied):
+                self.decide(work_items=self.tasks, scope=scope, run="retry")
+        self.assertEqual(json.loads(self.event_path.read_text()), event)
 
     def test_explicit_none_and_source_policy_none_deny_tasks(self):
         with self.assertRaises(Denied):
@@ -472,7 +481,7 @@ class DecisionTaskTests(Fixture):
         by_id = {row["id"]: row for row in liveness_rows}
         self.assertEqual(by_id[ids[4]]["state"], "pending")
         self.assertEqual(by_id[ids[5]]["state"], "impossible")
-        self.assertEqual(self.decide(work_items=tasks), event)
+        self.assertEqual(self.decide(work_items=tasks, scope="Deliver all contingent slices"), event)
 
     def test_code_change_retry_preserves_baseline_and_repairs_pointer_without_reading_head(self):
         self.tasks[1]["wait"] = {"kind": "code_change"}

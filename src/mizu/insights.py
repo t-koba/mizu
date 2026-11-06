@@ -1134,6 +1134,7 @@ replacement insight without implying rejected substance.
                 if (existing["action"] != action or existing["reason"] != reason
                         or existing["revisit"] != revisit
                         or existing.get("work_item_specs") != work_items
+                        or (("scope" in existing) != (scope is not None))
                         or (scope is not None and existing.get("scope") != scope)
                         or (intent_override is not None and action in ("accept", "modify")
                             and existing["work_item_intent"] != intent_override)):
