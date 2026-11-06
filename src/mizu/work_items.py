@@ -19,8 +19,12 @@ shape bypasses the fast path. A continued doing-to-doing revision has no
 source-backed earlier hold start in its current and previous records, so it
 removes the sidecar; a fresh reader replays exactly on this and other misses.
 Live ready scans still validate every history directory and recover leftovers
-before sampling its identity. Completed sidecar reads still validate the exact
-current delivery manifest and retained acceptance receipt, when used.
+before sampling its identity. In-process terminal projections come only from
+full status-mode replay, including retirement chain hashes and exact completion
+proof. They are reused only while the complete history witness and all proof
+sources (manifest, retained receipt, and CI publication when used) are unchanged
+across validation and lookup. Sidecars alone cannot establish this proof.
+Completed sidecar reads still validate exact completion evidence.
 Unknown/unsafe records, incomplete chains and bounds fail closed. Retrying a committed CAS requires a re-read. Same-status events
 require a scope change or explicit delivery binding; only a proven forward dropped-to-done correction
 may follow a terminal event.
@@ -382,6 +386,92 @@ class WorkItems:
         return ((dir_info.st_dev, dir_info.st_ino, dir_info.st_mode,
                  dir_info.st_nlink, dir_info.st_mtime_ns,
                  dir_info.st_ctime_ns, dir_info.st_size), tuple(entries))
+
+    @staticmethod
+    def _proof_identity(root, relative):
+        """POSIX no-follow witness, including ancestor replacement/unsafe paths.
+
+        Missing optional publication files are witnessed too. Directory times
+        are deliberately excluded: unrelated evidence additions are not changes
+        to an exact proof. Unsupported/unsafe sources always miss the cache.
+        """
+        try:
+            identities = []
+            path = root
+            for part in ("", *Path(relative).parts):
+                path = path / part
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    if path == root / relative:
+                        return (*identities, ("missing",))
+                    return None
+                if (stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    return None
+                base = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink)
+                if path == root / relative:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        return None
+                    identities.append((*base, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+                else:
+                    if not stat.S_ISDIR(info.st_mode):
+                        return None
+                    identities.append(base)
+            return tuple(identities)
+        except (OSError, AttributeError, NotImplementedError):
+            return None
+
+    def _validation_sources(self, record):
+        """Sample external dependencies BEFORE exact status-mode validation.
+
+        Receipt parsing only discovers sources, never proof. The ordinary
+        validator still checks manifests, acceptance and publications. Include
+        historical pinned waits too: their validators also consume evidence.
+        """
+        sources = []
+
+        def add(root, relative):
+            sources.append((root, relative, self._proof_identity(root, relative)))
+
+        def snapshot(sid):
+            if not isinstance(sid, str) or not DIGEST.fullmatch(sid):
+                raise ValueError("Invalid snapshot source")
+            add(self.snapshots.root, f"snapshots/{sid}.json")
+
+        def publication(pid):
+            if not isinstance(pid, str) or not DIGEST.fullmatch(pid):
+                raise ValueError("Invalid publication source")
+            for kind in ("intent", "dispatch", "receipt", "external"):
+                add(self.root, f"evidence/publications/{pid}.{kind}.json")
+
+        try:
+            wait = record.get("wait") or {}
+            if wait.get("kind") == "publication_ci":
+                snapshot(wait["snapshot_id"])
+            elif wait.get("kind") in ("ci", "proposal_merged"):
+                publication(wait["publication_id"])
+            if record.get("status") == "done":
+                snapshot(record["snapshot_id"])
+                verification = record["verification"]
+                if ("delivery_schema" in record
+                        and verification.get("source") == "retained_acceptance"):
+                    from .acceptance import _BASE, _read
+                    rid = verification["receipt_id"]
+                    if not isinstance(rid, str) or not DIGEST.fullmatch(rid):
+                        raise ValueError("Invalid acceptance source")
+                    relative = f"{_BASE}/objects/{rid}.json"
+                    add(self.root, relative)
+                    receipt = _read(self.root, relative)
+                    if receipt.get("schema") == 2:
+                        publication(receipt["publication_id"])
+            return sources
+        except (OSError, Denied, LimitExceeded, ValueError, TypeError, KeyError, AttributeError):
+            return [(None, None, None)]
+
+    def _proof_unchanged(self, sources):
+        return all(identity is not None and self._proof_identity(root, relative) == identity
+                   for root, relative, identity in sources)
 
     def _history_revisions_readonly(self, item_id: str):
         """Return a revision set and the identity it was read under.
@@ -1840,7 +1930,8 @@ class WorkItems:
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
-                    history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True):
+                    history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True,
+                    proof_sources=None):
         """Replay and validate one append-only chain, yielding one record at a time.
 
         The seed and each revision are immutable full-state records. Callers may
@@ -1864,6 +1955,8 @@ class WorkItems:
             raise Denied("Gapped work-item history")
         for revision in range(2, len(revisions) + 2):
             record = self._read(f"work-items/{item_id}/{revision}.json")
+            if proof_sources is not None:
+                proof_sources.extend(self._validation_sources(record))
             self._validate_transition(current, record, verify_snapshots=verify_snapshots)
             blocked_since = blocked_start(blocked_since, record)
             if "blocked_since" in record and record["blocked_since"] != blocked_since:
@@ -1886,7 +1979,8 @@ class WorkItems:
 
     def _current_hold(self, item_id: str, *, seed_event=None,
                       history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
-                      verify_current_delivery: bool = False, blocked_waiter=None, derive_blocked=True) -> tuple:
+                      verify_current_delivery: bool = False, blocked_waiter=None, derive_blocked=True,
+                      proof_sources=None) -> tuple:
         # Optional output reuses this exact replay at the write boundary to
         # prevent a doing revision from hiding a stale prior waiter.
         since = None
@@ -1897,7 +1991,7 @@ class WorkItems:
         retirement = {}
         for current in self._iter_chain(item_id, seed_event=seed_event,
                                         history_revisions=history_revisions, retirement=retirement,
-                                        verify_snapshots=verify_snapshots):
+                                        verify_snapshots=verify_snapshots, proof_sources=proof_sources):
             if previous is not None:
                 last_transition = (previous, current)
             previous = current
@@ -2496,53 +2590,60 @@ class WorkItems:
                     history_revisions = self._history_revisions(seed["id"], recover=True)
                     if cacheable:
                         history_key = self._history_identity(seed["id"])
-            # Live evidence retains exact replay, including the retirement chain
-            # hash. Structural reuse never replaces recovery or inventory validation.
+            # Only a full status-mode replay can populate a terminal proof.
+            # Full-history readers never consume this cache. Inventory/recovery
+            # and immutable seed binding remain mandatory on every live poll.
             reuse_projection = cacheable and (readonly or not (
                 self.root / "work-items" / seed["id"] / "retirement.json").exists())
-            cache_key = (digest(canonical(seed)), history_key)
+            cache_key = (digest(canonical(seed)), history_key, "current-delivery",
+                         self.snapshots.root, self.snapshots.max_file, tuple(self.snapshots.excludes))
             cached = (self._projection_cache.get(seed["id"])
-                      if reuse_projection and history_key is not None else None)
-            if cached is not None and not readonly and (
-                    cached[1].get("delivery") is not None or cached[1]["status"] == "done"):
-                cached = None
+                      if cacheable and history_key is not None else None)
             if cacheable and history_key is not None:
-                # Revalidate the immutable seed binding before trusting any
-                # cached projection: a decision event whose reason/scope
-                # changed while its embedded work_item stayed put must fail
-                # closed, not reuse a stale projection or sidecar. A missing
-                # identity already forces exact replay, so skip the extra
-                # lookup there (and keep bounded-scan harnesses isolated).
                 self._seed(seed["id"], event, history_revisions=history_revisions)
-            if cached is not None and cached[0] == cache_key:
+            valid = cached is not None and cached[0] == cache_key
+            if valid:
+                if len(cached) == 4:
+                    valid = self._proof_unchanged(cached[3])
+                else:
+                    valid = reuse_projection and (readonly or (
+                        cached[1].get("delivery") is None
+                        and cached[1]["status"] in OPEN_STATUS_ORDER))
+            if not valid:
+                cached = None
+            if cached is not None:
                 item, since = cached[1], cached[2]
             else:
+                # Evict before validation: failure must not leave a reusable proof.
+                self._projection_cache.pop(seed["id"], None)
                 sidecar = (self._sidecar_load(seed["id"], seed, history_key)
                            if reuse_projection else None)
                 if sidecar is not None and not readonly and (
-                        sidecar[0].get("delivery") is not None or sidecar[0]["status"] == "done"):
+                        sidecar[0].get("delivery") is not None
+                        or sidecar[0]["status"] in ("done", "dropped")):
                     sidecar = None
                 if (sidecar is not None
                         and self._history_identity(seed["id"]) != history_key):
                     sidecar = None
                 if sidecar is not None:
                     item, since = sidecar
-                    if item.get("delivery") is None:
+                    if item.get("delivery") is None and item["status"] in OPEN_STATUS_ORDER:
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
-                    else:
-                        self._projection_cache.pop(seed["id"], None)
                 else:
+                    proof_sources = []
                     item, since = self._current_hold(
                         seed["id"], seed_event=event,
                         history_revisions=history_revisions,
-                        verify_snapshots=False, verify_current_delivery=True)
-                    stable = (history_key is not None
+                        verify_snapshots=False, verify_current_delivery=True,
+                        proof_sources=proof_sources if cacheable else None)
+                    stable = (cacheable and history_key is not None
                               and self._history_identity(seed["id"]) == history_key)
-                    if (stable and reuse_projection and item.get("delivery") is None
-                            and (readonly or item["status"] != "done")):
+                    if stable and item["status"] in ("done", "dropped"):
+                        proof_sources = tuple(dict.fromkeys(proof_sources))
+                        if self._proof_unchanged(proof_sources):
+                            self._projection_cache[seed["id"]] = (cache_key, item, since, proof_sources)
+                    elif stable and reuse_projection and item.get("delivery") is None:
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
-                    else:
-                        self._projection_cache.pop(seed["id"], None)
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
             view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),

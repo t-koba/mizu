@@ -201,8 +201,13 @@ class RetirementTests(Fixture):
         self.exhaust()
         self.change()
         self.store.page_open_readonly()  # Prime the structural retirement cache.
-        self.assertEqual(self.store.page_ready()["total"], 0)
-        self.assertEqual(self.store.page_ready()["total"], 0)
+        cold = self.store.page_ready()
+        with patch.object(self.store, "_iter_chain", wraps=self.store._iter_chain) as replay, \
+             patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as transition:
+            self.assertEqual(self.store.page_ready(), cold)
+            self.assertEqual(self.store.page_ready(), cold)
+            if not work_items_module.IS_WINDOWS:
+                self.assertEqual((replay.call_count, transition.call_count), (0, 0))
         original = json.loads(self.path.read_bytes())
         mutations = [{}, {**original, "schema": True}, {**original, "schema": 2},
                      {**original, "chain_sha256": "0" * 64},
@@ -225,6 +230,7 @@ class RetirementTests(Fixture):
         self.path.write_text('{"schema":', encoding="utf-8")
         self.assert_invalid_readonly()
         write_json(self.path, original)
+        self.store.page_ready()  # Warm the exact retirement chain hash again.
         changed_path = self.directory / "4.json"
         saved = changed_path.read_bytes()
         record = json.loads(saved)
@@ -234,6 +240,7 @@ class RetirementTests(Fixture):
         with self.assertRaises(Denied):
             self.store.page_ready()
         changed_path.write_bytes(saved)
+        self.store.page_ready()
         changed_path.unlink()
         self.assert_invalid_readonly()
         with self.assertRaises(Denied):
@@ -241,6 +248,12 @@ class RetirementTests(Fixture):
         changed_path.write_bytes(saved)
         self.assertEqual(self.store.get(self.item_id)["status"], "dropped")
         self.assertEqual(audit(self.project)["work_item_events_skipped"], 0)
+        self.store.page_ready()
+        self.path.unlink()
+        # Absence is an ordinary exhausted nonterminal chain, not a retirement.
+        with patch.object(self.store, "_iter_chain", wraps=self.store._iter_chain) as replay:
+            self.assertEqual(self.store.page_ready()["total"], 1)
+            self.assertGreater(replay.call_count, 0)
 
     def test_only_exhausted_nonterminal_chains_can_retire(self):
         # A fabricated early sidecar must never be ignored by a normal CAS.

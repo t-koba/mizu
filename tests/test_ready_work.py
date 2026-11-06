@@ -310,17 +310,17 @@ class ReadyProjectionTests(Fixture):
                             self.assertTrue(all(c.kwargs["recover"] for c in scan.call_args_list))
                         self.assertEqual(cold, expected)
                         self.assertEqual(warm, expected)
-        # A new store can also reuse validated source-backed sidecars.
+        # A new store reuses structural sidecars, but replays the terminal proof.
         fresh = work_items_module.WorkItems(store.root, store.snapshots, store.insights)
         with patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
             self.assertEqual(fresh.page_ready(limit=1)["signature"],
                              store.page_ready(limit=1)["signature"])
-            self.assertEqual(replay.call_count, 0)
+            self.assertEqual(replay.call_count, 1)
         fresh._projection_cache.clear()
         fresh._sidecar_path(opened["id"]).write_text("{invalid")
         with patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
             self.assertEqual(fresh.page_ready()["total"], 2)
-            self.assertEqual(replay.call_count, 1)
+            self.assertEqual(replay.call_count, 2)
         with patch.object(fresh, "_history_identity", return_value=None), \
              patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
             self.assertEqual(fresh.page_ready()["total"], 2)
@@ -410,7 +410,22 @@ class ReadyProjectionTests(Fixture):
                 store.page_ready()
             self.assertTrue(alias.exists())
 
-    def test_live_delivery_and_completion_evidence_still_replays(self):
+    def test_terminal_cache_keeps_historical_wait_proof_dependencies(self):
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        with patch.dict(store.vcs, poll_enabled=True, command=["unused"], ci_branch="mizu"):
+            item = self.item("historical-ci", "blocked", {
+                "kind": "publication_ci", "snapshot_id": snapshot["id"], "checks": ["core"]})
+        store.transition(item["id"], expected_rev=2, actor="worker", status="dropped", reason="Settled")
+        store.page_ready()
+        store.page_ready()
+        (self.project.root / "snapshots" / (snapshot["id"] + ".json")).unlink()
+        with patch.object(store, "_iter_chain", wraps=store._iter_chain) as replay:
+            with self.assertRaises(Denied):
+                store.page_ready()
+            self.assertGreater(replay.call_count, 0)
+
+    def test_live_delivery_replays_but_exact_terminal_proof_is_reused(self):
         store = self.project.work_items
         captured = self.project.snapshots.capture_files(self.project.workspace)
         snapshot = self.project.snapshots.create(
@@ -428,8 +443,9 @@ class ReadyProjectionTests(Fixture):
             with patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
                  patch.object(store, "_validate_delivery", wraps=store._validate_delivery) as delivery:
                 store.page_ready()
-                self.assertEqual(replay.call_count, 1)
-                self.assertTrue(any(c.kwargs.get("verify_snapshots") for c in delivery.call_args_list))
+                self.assertEqual(replay.call_count, int(status == "doing"))
+                self.assertEqual(any(c.kwargs.get("verify_snapshots") for c in delivery.call_args_list),
+                                 status == "doing")
 
 
 class ReadySetChangeTests(Fixture):

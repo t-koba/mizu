@@ -93,6 +93,30 @@ class CIAcceptanceTests(Fixture):
         self.project.settings.pop('ci_acceptance')
         self.assertIsNone(acceptance.effective(self.project, self.snapshot))
         self.assertEqual(self.project.work_items.get(item['id']), record)
+        store = self.project.work_items
+        publication = (self.project.root / 'evidence/publications' /
+                       (self.publication['publication_id'] + '.external.json'))
+        saved = publication.read_bytes()
+        for mutation in ('corrupt', 'delete', 'add-intent'):
+            cold = store.page_ready()  # Warm exact schema-2 proof, including its publication.
+            with patch.object(store, '_iter_chain', wraps=store._iter_chain) as replay:
+                self.assertEqual(store.page_ready(), cold)
+                if sys.platform != 'win32':
+                    self.assertEqual(replay.call_count, 0)
+            extra = publication.with_name(self.publication['publication_id'] + '.intent.json')
+            if mutation == 'corrupt':
+                publication.write_text('{}')
+            elif mutation == 'delete':
+                publication.unlink()
+            else:
+                extra.write_text('{}')  # Absence is also a dependency of an external receipt.
+            with patch.object(store, '_iter_chain', wraps=store._iter_chain) as replay:
+                with self.assertRaises(Denied):
+                    store.page_ready()
+                self.assertGreater(replay.call_count, 0)
+            publication.write_bytes(saved)
+            if extra.exists():
+                extra.unlink()
 
     def test_idempotent_replay_does_not_requery_or_substitute_attempt(self):
         receipt_id = self.retain()
