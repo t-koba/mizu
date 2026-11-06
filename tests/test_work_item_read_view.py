@@ -1,10 +1,16 @@
 """Read-view reuse must preserve validation, output and request isolation."""
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, bind_delivery
+from mizu import acceptance, work_items as work_items_module
+from mizu.cli import _cmd_work_items
+from mizu.distribution import public_source_identity
+from mizu.publication import Publication
+from mizu.work_items import WorkItems
 from mizu.errors import Denied
-from mizu.fs import read_json, write_json
+from mizu.fs import canonical, read_json, write_json
 from mizu.runtime import Engine
 from mizu.snapshot import Snapshots
 from mizu.work_item_events import closed_page, progress
@@ -52,8 +58,6 @@ class ReadViewTests(Fixture):
         self.assertEqual(len(calls), 1)
 
     def test_cli_uses_one_validation_for_all_sections(self):
-        from types import SimpleNamespace
-        from mizu.cli import _cmd_work_items
         self.prepare()
         calls = []
         original = Snapshots.validate_manifest
@@ -68,6 +72,139 @@ class ReadViewTests(Fixture):
         self.assertEqual(len(result["closed"]["items"]), 3)
         self.assertEqual(len(calls), 1)
         self.assertIs(type(self.project.snapshots), Snapshots)
+
+    def test_cli_subscription_full_proof_supplies_status_pages(self):
+        snapshots, store = self.project.snapshots, self.project.work_items
+        store.vcs = {**self.config.vcs, "poll_enabled": True, "command": ["configured-adapter"]}
+        historical = snapshots.create(
+            snapshots.capture_files(self.project.workspace), goal="Goal", state="Historical",
+            run="run-1", outcome="wait", summary="Historical delivery")
+        snapshots.publish(historical)
+        publication = Publication(self.project.root, "a" * 40, historical["code_digest"],
+                                  "published", "push", projection=public_source_identity({}))
+        intent, _ = publication.prepare("approval", "run")
+        publication.mark_dispatch()
+        publication.complete(intent, "b" * 40)
+        item = store.create(actor="worker", title="Two deliveries and pinned wait",
+                            idempotency_key="two-deliveries")["record"]["work_item"]
+        bind_delivery(self.project, item["id"], historical["id"])
+        store.transition(item["id"], expected_rev=3, status="blocked", actor="worker",
+                         wait={"kind": "ci", "publication_id": publication.id, "checks": ["core"]})
+        (self.project.workspace / "delivery.txt").write_text("Changed delivery tree")
+        current = snapshots.create(
+            snapshots.capture_files(self.project.workspace), goal="Goal", state="Current",
+            run="run-1", outcome="wait", summary="Current delivery")
+        snapshots.publish(current)
+        self.assertNotEqual(historical["code_digest"], current["code_digest"])
+        bound = {"commands": ["true"], "execution": "a" * 64, "environment": "b" * 64,
+                 "image": "sha256:" + "c" * 64}
+        receipt_id = acceptance.retain(self.project, {
+            "passed": True, "snapshot_representable": True, "unchanged_during_verification": True,
+            "dependencies_unchanged": True, "code_digest": current["code_digest"],
+            "image": bound["image"], "run": "d" * 32,
+            "commands": [{"id": "e" * 32, "exit_code": 0, "reason": "exited"}]},
+            bound, producer={"kind": "verify", "id": "d" * 32, "run": "d" * 32})
+        store.effective_verification = lambda _: {
+            "source": "retained_acceptance", "receipt_id": receipt_id,
+            "passed": True, "code_digest": current["code_digest"]}
+        store.transition(item["id"], expected_rev=4, status="doing", actor="worker")
+        bind_delivery(self.project, item["id"], current["id"], expected_rev=5)
+        store.transition(item["id"], expected_rev=6, status="done", actor="worker",
+                         reason="Verified", snapshot_id=current["id"])
+        args = SimpleNamespace(cursor=None, limit=100, closed=100)
+        worker = self.config.roles["worker"]
+        self.config.roles["worker"] = dataclasses.replace(
+            worker, work_item_events=("done",), work_item_sources="any")
+
+        def uncached(value):
+            view = readonly_view(value)
+            view._peek_full_item = lambda *a, **kw: None
+            return view
+
+        def render(reuse):
+            store._projection_cache.clear()
+            with (patch("mizu.work_item_read_view.readonly_view",
+                        readonly_view if reuse else uncached),
+                  patch.object(WorkItems, "_iter_chain", autospec=True,
+                               side_effect=WorkItems._iter_chain) as chains,
+                  patch.object(WorkItems, "_sidecar_load", autospec=True,
+                               side_effect=WorkItems._sidecar_load) as sidecars,
+                  patch.object(WorkItems, "_validate_transition", autospec=True,
+                               side_effect=WorkItems._validate_transition) as transitions):
+                result = _cmd_work_items(self.config, self.project, args)
+            return canonical(result), (chains.call_count, sidecars.call_count, transitions.call_count)
+
+        for subscribed in (True, False):
+            with self.subTest(subscribed=subscribed):
+                self.config.roles["worker"] = dataclasses.replace(
+                    self.config.roles["worker"], work_item_events=("done",) if subscribed else ())
+                expected, before = render(False)
+                actual, after = render(True)
+                self.assertEqual(actual, expected)
+                if subscribed:
+                    self.assertEqual(after, (1, 0, 6))
+                    self.assertGreater(before[2], after[2])
+                else:
+                    self.assertEqual(after, before)
+                    if not work_items_module.IS_WINDOWS:
+                        self.assertEqual(after[1], 2)
+
+        self.config.roles["worker"] = dataclasses.replace(
+            worker, work_item_events=("done",), work_item_sources="any")
+        # A fresh response cannot reuse the prior response's full proof.
+        paths = [self.project.root / "snapshots" / f"{historical['id']}.json",
+                 self.project.root / "evidence/acceptance/objects" / f"{receipt_id}.json"]
+        for path in paths:
+            original = read_json(path)
+            with self.subTest(corruption=path.parent.name):
+                write_json(path, {**original, "code_digest": "0" * 64})
+                with self.assertRaises(Denied):
+                    _cmd_work_items(self.config, self.project, args)
+                write_json(path, original)
+
+    def test_full_item_peek_is_exact_and_preserves_active_ages(self):
+        store = self.project.work_items
+        for status in ("open", "doing", "blocked"):
+            seed = store.create(actor="worker", title=status,
+                                idempotency_key=status)["record"]["work_item"]
+            if status != "open":
+                store.transition(seed["id"], expected_rev=1, status=status, actor="worker",
+                                 wait={"kind": "deadline", "at": "2099-02-01T00:00:00+00:00"}
+                                 if status == "blocked" else None)
+            if status == "blocked":
+                # Legacy blocked rows require history-derived blocked_since.
+                path = store.root / "work-items" / seed["id"] / "2.json"
+                record = read_json(path)
+                record.pop("blocked_since")
+                write_json(path, record)
+        roles = {"worker": dataclasses.replace(self.config.roles["worker"],
+                                               work_item_events=("done",))}
+        with (patch("mizu.work_items.now", return_value="2099-01-01T00:00:00+00:00"),
+              patch("mizu.work_item_waits.now", return_value="2099-01-01T00:00:00+00:00")):
+            expected = store.page_open_readonly()
+            store._projection_cache.clear()
+            view = readonly_view(store)
+            progress(view, roles)
+            self.assertEqual(canonical(view.page_open_readonly()), canonical(expected))
+        event_id, event = next(store._iter_item_events(recover=False))
+        _, seed = store._seed_for_event(event_id, event, readonly=True)
+        revisions = store._history_revisions(seed["id"], recover=False)
+        def peek(view, observed=revisions, source=event):
+            return view._peek_full_item(seed["id"], seed_event=source, history_revisions=observed)
+
+        view = readonly_view(store)
+        self.assertIsNone(peek(view))
+        for snapshots, delivery in ((False, False), (False, True), (True, True)):
+            view._get(seed["id"], seed_event=event, history_revisions=revisions,
+                      verify_snapshots=snapshots, verify_current_delivery=delivery)
+            self.assertIsNone(peek(view))
+        view._get(seed["id"], seed_event=event, history_revisions=revisions)
+        self.assertIsNotNone(peek(view))
+        self.assertIsNone(peek(view, observed=(revisions or set()) | {255}))
+        self.assertIsNone(peek(view, source={**event, "changed": True}))
+        copy = peek(view)
+        copy["title"] = "Not authoritative"
+        self.assertNotEqual(peek(view)["title"], copy["title"])
 
     def test_fast_closed_item_cache_does_not_satisfy_strict_history_read(self):
         proposal = self.project.insights.submit(

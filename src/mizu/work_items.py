@@ -1969,6 +1969,10 @@ class WorkItems:
         if retirement is not None:
             retirement.update(chain_sha256=chain_sha256, record=terminal)
 
+    def _peek_full_item(self, item_id, *, seed_event, history_revisions):
+        """Only the request-scoped read facade can supply an exact full-proof hit."""
+        return None
+
     def _get(self, item_id: str, *, seed_event: dict | None = None,
              history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
              verify_current_delivery: bool = False) -> dict:
@@ -2611,7 +2615,12 @@ class WorkItems:
                         and cached[1]["status"] in OPEN_STATUS_ORDER))
             if not valid:
                 cached = None
-            if cached is not None:
+            full = (self._peek_full_item(seed["id"], seed_event=event,
+                                         history_revisions=history_revisions) if readonly else None)
+            # _get does not derive doing_since or legacy blocked_since.
+            if full is not None and full["status"] not in ("doing", "blocked"):
+                item, since = full, None
+            elif cached is not None:
                 item, since = cached[1], cached[2]
             else:
                 # Evict before validation: failure must not leave a reusable proof.
@@ -2763,12 +2772,16 @@ class WorkItems:
             else:
                 revisions = (scanned if scanned is not None else
                              self._history_revisions(seed["id"], recover=not readonly))
+            full = (self._peek_full_item(seed["id"], seed_event=event,
+                                         history_revisions=revisions) if readonly else None)
             sidecar = (self._sidecar_load(seed["id"], seed, history_key)
-                       if cacheable and history_key is not None else None)
+                       if full is None and cacheable and history_key is not None else None)
             if (sidecar is not None
                     and self._history_identity(seed["id"]) != history_key):
                 sidecar = None
-            if sidecar is not None:
+            if full is not None:
+                item = full
+            elif sidecar is not None:
                 item = sidecar[0]
             else:
                 item = self._get(seed["id"], seed_event=event,

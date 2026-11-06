@@ -8,6 +8,8 @@ manifest validation once in this request. Status and closed-page replay may skip
 snapshot reads the projection does not consume, while full chain validation
 remains active. Status reads validate current active bindings, and current done
 proofs remain strict.
+Status pages can peek at an exact full-proof item already read for subscriptions;
+open-page doing/blocked rows retain their derived-age reader.
 Exceptions are never cached. Cache eviction only costs another validated read.
 """
 from collections import OrderedDict
@@ -102,5 +104,12 @@ def readonly_view(store):
             item_bytes += size
         return deepcopy(items[key])
 
+    def peek_full_item(item_id, *, seed_event, history_revisions):
+        key = (item_id, canonical(seed_event),
+               None if history_revisions is None else frozenset(history_revisions),
+               True, False)
+        return deepcopy(items[key]) if key in items else None
+
     view._get = get_item
+    view._peek_full_item = peek_full_item
     return view
