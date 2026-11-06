@@ -2153,8 +2153,9 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('--test-timings private-validation/test-timings.json', workflow)
         # Every cell collects the evidence, so each supported host's suite
         # cost is measured where it runs.
-        # Core matrix, Windows/3.12 shard matrix, and authoritative durable job.
-        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 3)
+        # Core matrix, Windows/3.12 and Windows/3.14 shard matrices, and the
+        # authoritative durable job each collect timing evidence.
+        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 4)
         # One artifact per cell, each named for its own cell.
         self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
         self.assertIn('name: test-timings-durable', workflow)
@@ -2170,7 +2171,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertNotIn('path: private-validation/durable.json', workflow)
         # Timing stays diagnostic; the 60-minute/1800-second scope is
         # enforced while the always-uploaded artifact preserves partial progress.
-        self.assertIn('1800-second child', workflow)
+        self.assertIn('1,800 s child', workflow)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         self.assertEqual(CHECK._unittest_timeout_seconds(), 1800)
 
