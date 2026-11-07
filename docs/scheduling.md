@@ -123,8 +123,10 @@ wake-generation also admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the
-writer handoff for `continue`/`bounded` units. Mere progress or an unused
-no-progress allowance/backoff does not admit another writer unit.
+writer handoff for `continue`/`bounded` units. A no-progress writer may also
+self-admit after its configured fallback, but only while role-eligible ready
+work remains; a timer alone never admits an empty writer. Mere progress still
+requires a new actionable `Next:` for immediate writer handoff.
 
 ### Writer Next handoff
 
@@ -150,6 +152,18 @@ declaration must differ from the exact published parent's Next. Legacy/missing/c
 closed. This reads at most one parent, adds no store or task lifecycle, and
 never changes WorkItems eligibility or any wait/event routing.
 
+The separate no-progress fallback applies only to `continue`/`bounded` records
+with no selected progress: `no_progress_continuations` permits its bounded
+configured immediate attempts, then `writer_no_progress_backoff_seconds`
+(default 300 seconds) permits a later admission only if the current role-filtered
+ready set is nonempty. The existing ready-set scan supplies both membership-change
+and presence facts, so the fallback adds no second ledger scan or poll loop.
+It does not change progress-driven immediate handoff, allow a timer to revive
+`done`/`wait`/`blocked`, or bypass producer and control gates. Progress records
+already expose `signals.tool`, `has_progress` and `no_progress_count`; the
+`idle_with_open_work` status is the recorded-at-finish diagnostic, not a live
+scheduler verdict.
+
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the
 same Next, even after work, does not renew it. When this is the dispatch cause,
@@ -158,11 +172,13 @@ the exact step as the first `task` field. Persistent session identity, stable
 system context and cache remain unchanged. Independent events keep precedence;
 `--event` probes still require their existing subscribed event, not Next alone.
 
-Progress records and their allowance/backoff disposition remain bounded evidence
-and the read-only on-change policy below; that disposition alone is not writer
-readiness. No-progress parking, counters, recovery rotation on an already
-admitted run, and missing-finish nudges remain defect backstops, not normal
-observation-only scheduling sources.
+Progress records and their allowance/backoff disposition remain bounded
+evidence. Read-only roles use that policy for on-change dispatch as described
+below. Writers use the same no-progress disposition only as a bounded fallback
+when the current role-eligible ready set is nonempty; disposition alone is not
+writer readiness and does not bypass other gates. No-progress recovery rotation
+on an already admitted run and missing-finish nudges remain defect backstops,
+not general scheduling sources.
 
 Daemon readiness follows the explicit per-role `daemon_policy` in
 `src/mizu/runtime.py`, never `workspace`: `signals` (the default for `write`

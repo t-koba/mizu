@@ -21,6 +21,7 @@ class ProgressConfigTests(Fixture):
         self.assertEqual(limits.no_progress_continuations, 0)
         self.assertEqual(limits.no_progress_recovery_after, 2)
         self.assertEqual(limits.no_progress_backoff_seconds, 0)
+        self.assertEqual(limits.writer_no_progress_backoff_seconds, 300)
 
         raw = self.file.read_text()
         for setting, invalid in (
@@ -31,17 +32,23 @@ class ProgressConfigTests(Fixture):
                 ("no_progress_recovery_after", "0"),
                 ("no_progress_recovery_after", "101"),
                 ("no_progress_backoff_seconds", "86401"),
-                ("no_progress_backoff_seconds", "-1")):
-            candidate = raw.replace(
-                'progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.',
-                f"progress_signals = {invalid}" if setting == "progress_signals" else
-                'progress_signals = ["tool", "code", "decision", "insight", "input"]')
+                ("no_progress_backoff_seconds", "-1"),
+                ("writer_no_progress_backoff_seconds", "86401"),
+                ("writer_no_progress_backoff_seconds", "-1")):
+            candidate = raw
+            if setting == "progress_signals":
+                candidate = candidate.replace(
+                    'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.',
+                    f"progress_signals = {invalid}")
             if setting == "no_progress_continuations":
                 candidate = candidate.replace("no_progress_continuations = 0", f"no_progress_continuations = {invalid}")
             elif setting == "no_progress_recovery_after":
                 candidate = candidate.replace("no_progress_recovery_after = 2", f"no_progress_recovery_after = {invalid}")
             elif setting == "no_progress_backoff_seconds":
                 candidate = candidate.replace("no_progress_backoff_seconds = 0", f"no_progress_backoff_seconds = {invalid}")
+            elif setting == "writer_no_progress_backoff_seconds":
+                candidate = candidate.replace("writer_no_progress_backoff_seconds = 300",
+                                              f"writer_no_progress_backoff_seconds = {invalid}")
             self.file.write_text(candidate)
             with self.assertRaises(ConfigError):
                 load(self.file)
@@ -49,20 +56,23 @@ class ProgressConfigTests(Fixture):
         self.assertEqual(load(self.file).limits.progress_signals, DEFAULT_PROGRESS_SIGNALS)
         boundary = raw.replace("no_progress_continuations = 0", "no_progress_continuations = 100")
         boundary = boundary.replace("no_progress_backoff_seconds = 0", "no_progress_backoff_seconds = 86400")
+        boundary = boundary.replace("writer_no_progress_backoff_seconds = 300",
+                                    "writer_no_progress_backoff_seconds = 86400")
         boundary = boundary.replace("no_progress_recovery_after = 2", "no_progress_recovery_after = 100")
         self.file.write_text(boundary)
         limits = load(self.file).limits
         self.file.write_text(raw)
         self.assertEqual((limits.no_progress_continuations, limits.no_progress_backoff_seconds,
-                          limits.no_progress_recovery_after), (100, 86400, 100))
+                          limits.writer_no_progress_backoff_seconds,
+                          limits.no_progress_recovery_after), (100, 86400, 86400, 100))
 
         empty = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.',
             "progress_signals = []")
         self.file.write_text(empty)
         self.assertEqual(load(self.file).limits.progress_signals, ())
         state_opt_in = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.',
             'progress_signals = ["state"]')
         self.file.write_text(state_opt_in)
         self.assertEqual(load(self.file).limits.progress_signals, ("state",))
@@ -460,12 +470,14 @@ class ProgressAdmissionTests(Fixture):
     def test_configured_backoff_does_not_dispatch_empty_writer(self):
         old_stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=120)).isoformat(timespec="microseconds")
         parked = self._parked_snapshot(count=1, stamp=old_stamp)
-        limits = dataclasses.replace(self.config.limits, no_progress_backoff_seconds=60)
+        limits = dataclasses.replace(self.config.limits, writer_no_progress_backoff_seconds=60)
         role = dataclasses.replace(self.config.roles["worker"], on_change=True)
         roles = dict(self.config.roles)
         roles["worker"] = role
         config = dataclasses.replace(self.config, limits=limits, roles=roles)
         self.project.config = config
+        self.assertFalse(should_run(self.project, parked, current_time=dt.datetime.fromisoformat(old_stamp).timestamp() + 120,
+                                    role_name="worker", config=config))
         observed = self.project.root / "observed" / "worker.json"
         write_json(observed, {"code_digest": parked["code_digest"]})
         calls = []
@@ -569,10 +581,11 @@ class ProgressAdmissionTests(Fixture):
 
     def test_per_role_backoff_default_inherits_project_limit(self):
         self.assertEqual(self.config.limits.no_progress_backoff_seconds, 0)
-        for name in ("worker", "searcher"):
+        self.assertEqual(self.config.limits.writer_no_progress_backoff_seconds, 300)
+        for name, expected in (("worker", 300), ("searcher", 0)):
             with self.subTest(role=name):
                 self.assertIsNone(self.config.roles[name].no_progress_backoff_seconds)
-                self.assertEqual(role_no_progress_backoff_seconds(self.config, self.config.roles[name]), 0)
+                self.assertEqual(role_no_progress_backoff_seconds(self.config, self.config.roles[name]), expected)
 
     def test_per_role_backoff_rejects_out_of_range(self):
         original = self.file.read_text()
@@ -586,7 +599,7 @@ class ProgressAdmissionTests(Fixture):
 
     def test_per_role_backoff_bounds_inherit_or_override(self):
         original = self.file.read_text()
-        for value, expected in ((None, 0), (0, 0), (60, 60), (86400, 86400)):
+        for value, expected in ((None, 300), (0, 0), (60, 60), (86400, 86400)):
             with self.subTest(value=value):
                 text = original
                 if value is not None:

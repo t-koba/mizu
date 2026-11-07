@@ -469,6 +469,23 @@ class ReadySetChangeTests(Fixture):
     def signature(self, role='worker', limit=1):
         return self.project.work_items.page_ready(limit=limit, role_name=role)['signature']
 
+    def delivered_ready_base(self):
+        current = self.project.snapshots.get()
+        progress = {"schema": 3, "signals": {name: False for name in PROGRESS_SIGNALS},
+                    "selected": list(self.config.limits.progress_signals), "role": "worker",
+                    "has_progress": False, "no_progress_count": 0,
+                    "obligations_digest": "0" * 64, "recorded_at": now(),
+                    "ready_work": True, "ready_work_signature": self.signature()}
+        base = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=self.project.goal, state="Now: Ready work delivered\nNext: Reassess the task",
+            run=None, outcome="wait", summary="Ready work already delivered",
+            wake_at=4102444800, inbox_seen=self.project.insights.generation(),
+            wake_generation=self.project.control().get("wake_generation", ""),
+            progress=progress, parent=current["id"])
+        self.project.snapshots.publish(base)
+        return self.project.snapshots.get()
+
     def test_wait_with_unchanged_ready_work_parks_both_dispatch_paths(self):
         self.item('persistent')
         engine = self.engine()
@@ -608,24 +625,81 @@ class ReadySetChangeTests(Fixture):
         with self.assertRaises(Denied):
             validate_progress({k: v for k, v in progress.items() if k != 'ready_work_signature'})
 
-    def test_unchanged_ready_work_does_not_self_admit_writer(self):
+    def test_unchanged_ready_work_self_admits_writer_after_backoff(self):
         self.item('persistent-ready-work')
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, no_progress_backoff_seconds=60))
+            self.config.limits, writer_no_progress_backoff_seconds=60))
         self.project.config = self.config
+        self.delivered_ready_base()
         def finish(ctx, *_):
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'Observed only',
                                   'state': 'An ordinary free-text rewrite\nNext: Inspect the test result'})
-        engine = self.engine(finish)
+        engine = Engine(self.config, driver=ScriptDriver(finish))
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
-        self.assertTrue(snapshot['progress']['has_progress'])
-        self.assertEqual(snapshot['progress']['no_progress_count'], 0)
+        self.assertFalse(snapshot['progress']['has_progress'])
+        self.assertEqual(snapshot['progress']['no_progress_count'], 1)
         stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
-        self.assertFalse(should_run(self.project, snapshot, current_time=stamp + 61,
+        self.assertFalse(should_run(self.project, snapshot, current_time=stamp + 59,
                                     role_name='worker'))
-        self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
-        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        self.assertTrue(should_run(self.project, snapshot, current_time=stamp + 61,
+                                   role_name='worker'))
+
+    def test_progress_policy_change_reassesses_writer_with_ready_work(self):
+        self.item('policy-change-ready-work')
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, writer_no_progress_backoff_seconds=600))
+        self.project.config = self.config
+        self.delivered_ready_base()
+        def finish(ctx, *_):
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'No selected progress',
+                                  'state': 'New note\nNext: Reassess the ready task'})
+        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        current_config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, progress_signals=()))
+        self.project.config = current_config
+        self.assertTrue(should_run(self.project, snapshot, role_name='worker',
+                                   config=current_config))
+        malformed = {**snapshot, 'progress': {**snapshot['progress'], 'selected': 'invalid'}}
+        self.assertFalse(should_run(self.project, malformed, role_name='worker',
+                                    config=current_config))
+
+    def test_progress_driven_next_handoff_remains_immediate(self):
+        self.item('progress-driven-work')
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, writer_no_progress_backoff_seconds=600))
+        self.project.config = self.config
+        base = self.delivered_ready_base()
+        def finish(ctx, *_):
+            (ctx.workspace / 'progress.py').write_text('VALUE = 1\n')
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'Made progress',
+                                  'state': base['state'].replace(
+                                      'Reassess the task', 'Run the focused test')})
+        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        self.assertTrue(snapshot['progress']['signals']['code'])
+        self.assertTrue(should_run(self.project, snapshot,
+                                   current_time=dt.datetime.fromisoformat(
+                                       snapshot['progress']['recorded_at']).timestamp() + 1,
+                                   role_name='worker'))
+
+    def test_no_progress_allowance_self_admits_writer_only_with_ready_work(self):
+        self.item('bounded-no-progress-allowance')
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, no_progress_continuations=1,
+            writer_no_progress_backoff_seconds=600))
+        self.project.config = self.config
+        self.delivered_ready_base()
+        def finish(ctx, *_):
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'No selected progress',
+                                  'state': 'New note\nNext: Reassess the ready task'})
+        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot['progress']['no_progress_count'], 1)
+        stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
+        self.assertTrue(should_run(self.project, snapshot, current_time=stamp + 1,
+                                   role_name='worker'))
 
     def test_observer_records_offered_signature_not_work_arriving_during_run(self):
         role = self.config.roles['reviewer']

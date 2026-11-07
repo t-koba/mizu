@@ -152,9 +152,8 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
         role = _role_name
         role_config = _role_config
         # Effective per-role timer: roles.<name>.no_progress_backoff_seconds
-        # when set, else the project limit. Keep resolution centralized with
-        # the role configuration helpers; legacy config-like callers lacking
-        # a roles mapping still inherit the project value.
+        # when set, else the workspace-specific project limit. Keep resolution
+        # centralized with the role configuration helpers.
         backoff = role_no_progress_backoff_seconds(config, role_config)
         if set(value["selected"]) != set(selected) or value["role"] != role:
             return "reevaluate"

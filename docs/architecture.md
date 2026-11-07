@@ -360,14 +360,20 @@ not progress. The default `no_progress_continuations = 0` therefore parks after
 the first `continue`/`bounded` unit without a selected progress signal. A
 missing-finish continuation may still use the full work grant when no tool was
 called; otherwise it remains finish-only. Operators may allow 0–100
-consecutive no-progress continuations; selected progress or a role/policy change
-resets the streak. `no_progress_backoff_seconds = 0` disables a timer wake; a
-positive value permits a parked continuation to wake after that delay measured
-from its recorded progress timestamp. `no_progress_recovery_after = 2` rotates a
-persistent writer conversation to a fresh generation on the next independently
-admitted dispatch after two empty writer snapshots; it does not admit
-or schedule a run. `mizu status` exposes whether that recovery threshold is due
-and the count, so parked empty work is visible while awaiting its next trigger.
+consecutive no-progress continuations; writers use those immediate attempts
+only while role-eligible ready work remains. Selected progress or a role/policy
+change resets the streak. For read-only roles, `no_progress_backoff_seconds = 0`
+disables the timer wake; a positive value permits a parked on-change cursor to
+wake after that delay measured from its recorded progress timestamp. Writers
+inherit `writer_no_progress_backoff_seconds = 300` unless a per-role
+`no_progress_backoff_seconds` overrides it; the timer admits only when current
+role-eligible ready work remains. This bounded fallback does not change the
+daemon poll cadence or bypass other gates. `no_progress_recovery_after = 2`
+rotates a persistent writer conversation to a fresh generation on the next
+independently admitted dispatch after two empty writer snapshots; it does not
+admit or schedule a run. `mizu status` exposes whether that recovery threshold
+is due and the count, so parked empty work is visible while awaiting its next
+trigger; these fields are evidence, not a scheduler verdict.
 Writer-daemon readiness checks goal and operator generations, role-eligible
 ready work, and retained work-item CI wait evidence (including
 snapshot-bound waits resolved to an exact receipt/SHA) for the current blocked

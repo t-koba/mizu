@@ -162,10 +162,11 @@ model_request_seconds = 1200     # Positive logical-request/query/turn deadline.
 command_seconds = 300
 idle_seconds = 15
 cooldown_seconds = 5
-progress_signals = ["tool", "code", "decision", "insight", "input"] # Selected signals qualify progress evidence; writer admission also requires a new Next after work. Empty disables qualification.
-no_progress_continuations = 0 # Read-only on-change empty continuations allowed before parking (0-100); never writer readiness.
+progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.
+no_progress_continuations = 0 # Immediate no-progress self-admissions (0-100); writers require role-eligible ready work.
 no_progress_recovery_after = 2 # Consecutive empty continue/bounded units before next persistent-session dispatch starts fresh (1-100).
-no_progress_backoff_seconds = 0 # Read-only on-change backoff after parking (0 disables, max 86400); never writer readiness.
+no_progress_backoff_seconds = 0 # Read-only on-change timer default; per-role override also applies to writers.
+writer_no_progress_backoff_seconds = 300 # Writer fallback after no-progress continue/bounded, only with ready work (0 disables, max 86400).
 default_wait_seconds = 1800
 maximum_wait_seconds = 86400
 max_failures = 3
@@ -421,7 +422,7 @@ daemon = true
 # decision_page_bytes = 65536  # 1-1048576; include references/metadata, reserve other prompt space.
 # work_item_events_limit = 10
 # Per-role no-progress timer-wake override (optional, 0-86400; unset keeps the project value).
-# no_progress_backoff_seconds = 0
+# no_progress_backoff_seconds = 0 # Override this role's no-progress timer; unset writer roles use the project writer default.
 # Per-role writer-daemon cooldown override (optional, 1-1073741824; unset keeps
 # [limits].cooldown_seconds; applies to writable daemon spacing and deferred
 # re-evaluation, read-only cadence stays on idle_seconds).

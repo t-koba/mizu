@@ -234,16 +234,16 @@ def _has_ready_work(project, role=None) -> bool:
         return False
 
 
-def _ready_work_changed(project, record, role=None, *, work_items=None) -> bool:
-    """Compare full role-eligible membership to the input actually delivered.
+def _ready_work_observation(project, record, role=None, *, work_items=None) -> tuple[bool, bool]:
+    """Return membership change and current nonempty state from one bounded scan.
 
-    Current store/read or malformed progress errors close. Valid legacy records
-    (or an undelivered input) admit nonempty sets once; empty legacy sets do not
-    manufacture an event. The progress role and fingerprint scope prevent an
-    observer from consuming another role's ready-work signal.
+    Current store/read or malformed progress errors close both facts. Valid
+    legacy records (or an undelivered input) admit nonempty sets once; empty
+    legacy sets do not manufacture an event. The progress role and fingerprint
+    scope prevent an observer from consuming another role's ready-work signal.
     """
     if role is not None and "work_items_transition" not in role.capabilities:
-        return False
+        return False, False
     try:
         previous = record.get("progress")
         if previous is not None:
@@ -251,15 +251,23 @@ def _ready_work_changed(project, record, role=None, *, work_items=None) -> bool:
         store = project.work_items if work_items is None else work_items
         page = store.page_ready(
             limit=1, **({"role_name": role.name} if role is not None else {}))
-        signature = page["signature"]
-        if not isinstance(signature, str) or not DIGEST.fullmatch(signature):
-            return False
+        signature = page.get("signature")
+        total = page.get("total")
+        if (not isinstance(signature, str) or not DIGEST.fullmatch(signature)
+                or type(total) is not int or total < 0):
+            return False, False
+        present = total > 0
         if (previous is None or previous.get("ready_work_signature") is None
                 or role is not None and previous["role"] != role.name):
-            return page["total"] > 0
-        return signature != previous["ready_work_signature"]
+            return present, present
+        return signature != previous["ready_work_signature"], present
     except Exception:
-        return False
+        return False, False
+
+
+def _ready_work_changed(project, record, role=None, *, work_items=None) -> bool:
+    """Compare full role-eligible membership to the input actually delivered."""
+    return _ready_work_observation(project, record, role, work_items=work_items)[0]
 
 
 
@@ -4395,6 +4403,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             facts = dataclasses.replace(facts, continuation_ready=True)
             decision = _scheduling.evaluate(facts)
     completed_wait_probes = None
+    ready_work_observed = False
+    ready_work_present = False
     while decision.ready is None:
         needed = decision.needed
         if needed == "goal_changed":
@@ -4402,8 +4412,11 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         elif needed == "operator_woke":
             value = _operator_woke(control, role_record, observer=observer)
         elif needed == "ready_work_changed":
-            value = ((role_name is None or role is not None)
-                     and _ready_work_changed(project, role_record, role))
+            if role_name is None or role is not None:
+                value, ready_work_present = _ready_work_observation(project, role_record, role)
+                ready_work_observed = True
+            else:
+                value = False
         elif needed == "ci_wait_due":
             names = [role_name] if role_name in project.roles else [
                 name for name in project.roles
@@ -4461,6 +4474,20 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 value = True
             else:
                 value = bool(_writer_next_task(project, snapshot, role_name))
+                if (not value and role is not None and role.workspace == "write"
+                        and ready_work_observed and ready_work_present):
+                    progress = snapshot.get("progress")
+                    try:
+                        validate_progress(progress)
+                        policy_changed = set(progress["selected"]) != set(
+                            role_progress_signals(effective, role))
+                    except Exception:
+                        policy_changed = False
+                    disposition = progress_disposition(
+                        progress, snapshot.get("outcome", "wait"), effective,
+                        role_name, current_time)
+                    value = (policy_changed or disposition in
+                             ("self_admit_allowance", "self_admit_backoff"))
         else:
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})

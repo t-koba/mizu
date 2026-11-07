@@ -416,6 +416,7 @@ class Limits:
     no_progress_continuations: int = 0
     no_progress_recovery_after: int = 2
     no_progress_backoff_seconds: int = 0
+    writer_no_progress_backoff_seconds: int = 300
     default_wait_seconds: int = 1800
     maximum_wait_seconds: int = 86400
     max_failures: int = 3
@@ -603,6 +604,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "no_progress_continuations": (0, 100),
                  "no_progress_recovery_after": (1, 100),
                  "no_progress_backoff_seconds": (0, 86400),
+                 "writer_no_progress_backoff_seconds": (0, 86400),
                  "missing_finish_followups": (0, 3),
                  "safe_point_yield_quantum": (0, 1000),
                  "missing_finish_recovery_after": (1, 100),
@@ -865,10 +867,11 @@ def role_work_item_events_limit(config: "Config", role: "Role") -> int:
 def role_no_progress_backoff_seconds(config: "Config", role: "Role") -> int:
     """Effective no-progress timer wake for one role for one dispatch.
 
-    Schema: role override when set, else project `[limits]`
-    no_progress_backoff_seconds. Trust: configuration. Failure: never raises;
-    malformed overrides read as the project value (load already refuses
-    them fail-closed).
+    Schema: role override when set; otherwise writable roles inherit
+    `[limits].writer_no_progress_backoff_seconds` and read-only roles inherit
+    `[limits].no_progress_backoff_seconds`. Trust: configuration. Failure:
+    never raises; malformed overrides read as the applicable project value
+    (load already refuses them fail-closed).
     """
     try:
         value = getattr(role, "no_progress_backoff_seconds", None)
@@ -876,6 +879,8 @@ def role_no_progress_backoff_seconds(config: "Config", role: "Role") -> int:
         value = None
     if type(value) is int and 0 <= value <= 86400:
         return value
+    if getattr(role, "workspace", None) == "write":
+        return config.limits.writer_no_progress_backoff_seconds
     return config.limits.no_progress_backoff_seconds
 
 
