@@ -19,8 +19,9 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
 The `acceptance.py` retained-evidence ceiling and the `ci_observation.py`
-shared-cache caps and `ci_waits.py` diagnostic page caps are fixed safety
-bounds; `ci_waits.py`'s serialized check-set size is a mechanism contract;
+shared-cache caps and derived wake-branch/row aliases and `ci_waits.py`
+diagnostic page caps are fixed safety bounds; `ci_waits.py`'s serialized
+check-set size is a mechanism contract;
 `ci_wake.py`'s re-wake default is configured policy owned by
 `[vcs] ci_rewake_seconds`, and its record version is format, outside the
 name-scoped detector.
@@ -35,9 +36,11 @@ reads retain configured defaults; `[services]` owns the systemd restart and stop
 deadline defaults (15 and 45 seconds); include, role-policy, resource, CI-wake-branch
 and workspace-depth ceilings are mechanism or safety bounds; protocol integers
 and wait-seconds retain their format ranges.
-The `work_items.py` module-level page, cursor, row and revision bounds are
-fixed mechanism or safety contracts; its page-byte aliases reuse those
-declared bases rather than introducing separate literals.
+The `web_worker.py` include-envelope bound derives from the fixed include
+byte ceiling. `work_items.py` page, cursor, row, projection, revision and
+sidecar bounds are fixed mechanism or safety contracts; its page-byte aliases
+are inventoried against their shared declared bases rather than treated as new
+independent numeric policies.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
 character-count and maximum suffixes match the read-page and script-input names,
@@ -147,6 +150,7 @@ CANDIDATE = re.compile(
 EXTRA_CANDIDATES = {
     'model_catalog.py': frozenset({'MAXIMUM'}),
     'web.py': frozenset({'PROBE_MAX_HEADERS'}),
+    'work_items.py': frozenset({'_SIDECAR_MAX_BYTES'}),
 }
 # Non-numeric module-level policy defaults checked by their exact literal value.
 POLICY_DEFAULTS = {
@@ -181,6 +185,17 @@ DECLARATIONS = {
         'MAX_CI_FAILURE_BRANCHES': (
             '128', 'safety',
             'CI observation / bounded stored branches with failure or success evidence'),
+        'MAX_CI_WAKE_BRANCHES': (
+            'MAX_CI_WAKE_EXTRA_BRANCHES + 1', 'safety',
+            'CI observation / one required ci_branch plus the fixed extra-branch ceiling'),
+        'MAX_CI_WAKE_ROWS': (
+            'MAX_CI_WAKE_BRANCHES * MAX_CI_CHECKS_PER_BRANCH', 'safety',
+            'CI observation / selected wake-branch count times the stored per-branch check ceiling'),
+    },
+    'web_worker.py': {
+        'MAX_WEB_WORKER_INPUT_BYTES': (
+            '3 * MAX_INCLUDE_BYTES', 'safety',
+            'web worker / bounded canonical request frame derived from the fixed include-byte ceiling'),
     },
     'ci_waits.py': {
         'MAX_CHECK_SET_BYTES': (
@@ -374,6 +389,21 @@ DECLARATIONS = {
             '1024 * 1024', 'safety', 'work items / bounded page response'),
         'MAX_CLOSED_PAGE_ROWS': (
             '100', 'mechanism', 'work items / public closed-page row contract'),
+        'MAX_PROJECTION_BYTES': (
+            'PREVIEW_BYTES + 256', 'safety',
+            'work items / bounded canonical projection envelope around the shared text-preview ceiling'),
+        'MAX_HISTORY_PAGE_BYTES': (
+            'MAX_OPEN_PAGE_BYTES', 'safety',
+            'work items / history response shares the public open-page byte ceiling'),
+        'MAX_CLOSED_ROW_BYTES': (
+            'MAX_OPEN_ROW_BYTES', 'safety',
+            'work items / closed row shares the public open-row byte ceiling'),
+        'MAX_CLOSED_PAGE_BYTES': (
+            'MAX_OPEN_PAGE_BYTES', 'safety',
+            'work items / closed response shares the public open-page byte ceiling'),
+        '_SIDECAR_MAX_BYTES': (
+            'PREVIEW_BYTES * 2 + 4096', 'safety',
+            'work items / bounded structural sidecar read and write for two previews plus fixed metadata'),
     },
     'work_order.py': {
         'MAX_WORK_ORDER_ITEMS': (
@@ -1429,6 +1459,20 @@ def range_argument_inventory(tree):
 
 
 SYMBOLIC_BOUNDS = {
+    'ci_observation.py': {
+        'MAX_CI_WAKE_BRANCHES': frozenset({'MAX_CI_WAKE_EXTRA_BRANCHES'}),
+        'MAX_CI_WAKE_ROWS': frozenset({'MAX_CI_WAKE_BRANCHES', 'MAX_CI_CHECKS_PER_BRANCH'}),
+    },
+    'web_worker.py': {
+        'MAX_WEB_WORKER_INPUT_BYTES': frozenset({'MAX_INCLUDE_BYTES'}),
+    },
+    'work_items.py': {
+        'MAX_PROJECTION_BYTES': frozenset({'PREVIEW_BYTES'}),
+        'MAX_HISTORY_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),
+        'MAX_CLOSED_ROW_BYTES': frozenset({'MAX_OPEN_ROW_BYTES'}),
+        'MAX_CLOSED_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),
+        '_SIDECAR_MAX_BYTES': frozenset({'PREVIEW_BYTES'}),
+    },
     'delegation_jobs.py': {
         'MAX_STATE_BYTES': frozenset({'MAX_BINDING_BYTES', '_INTENT_NULL_OVERHEAD', 'MAX_JOBS'}),
     },
