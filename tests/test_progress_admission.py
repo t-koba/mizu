@@ -155,6 +155,48 @@ class ProgressAdmissionTests(Fixture):
         missing_parent = {**snapshot, 'parent': '0' * 64}
         self.assertIsNone(_writer_next_task(self.project, missing_parent, 'worker'))
 
+    def test_next_handoff_uses_effective_configured_progress_signals(self):
+        base = self._baseline()
+        state = "Now: worked.\nNext: Add the test."
+        parent = base["id"]
+        empty_signals = {name: False for name in PROGRESS_SIGNALS}
+
+        def candidate(selected, signal):
+            signals = {**empty_signals, signal: True}
+            return {
+                "outcome": "continue",
+                "state": state,
+                "parent": parent,
+                "progress": self._record(
+                    role="worker", selected=list(selected),
+                    count=0 if signal in selected else 1, signals=signals),
+            }
+
+        def with_signals(signals):
+            roles = dict(self.config.roles)
+            roles["worker"] = dataclasses.replace(roles["worker"], progress_signals=signals)
+            return dataclasses.replace(self.config, roles=roles)
+
+        original = self.project.config
+        try:
+            self.project.config = self.config
+            input_only = candidate(self.config.limits.progress_signals, "input")
+            self.assertEqual(_writer_next_task(self.project, input_only, "worker"), "Add the test.")
+
+            self.project.config = with_signals(("state",))
+            state_only = candidate(("state",), "state")
+            self.assertEqual(_writer_next_task(self.project, state_only, "worker"), "Add the test.")
+
+            self.project.config = with_signals(())
+            disabled = candidate((), "input")
+            self.assertIsNone(_writer_next_task(self.project, disabled, "worker"))
+
+            self.project.config = with_signals(("tool",))
+            unselected = candidate(("tool",), "input")
+            self.assertIsNone(_writer_next_task(self.project, unselected, "worker"))
+        finally:
+            self.project.config = original
+
     def test_state_only_next_does_not_create_handoff(self):
         base = self._baseline()
         state = 'Now: only declaring a follow-up.\nNext: Add the test.'

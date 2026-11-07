@@ -4015,20 +4015,19 @@ def _declared_next(state) -> str | None:
 def _writer_next_task(project, snapshot, role_name) -> str | None:
     """Resolve one durable writer handoff from the exact published parent pair.
 
-    Only continue/bounded work may declare readiness. State/input-only changes
-    and legacy/malformed evidence fail closed. Repeating the previous Next is
-    not a new declaration; publishing the successor consumes this handoff.
-    Reads at most one parent and never changes WorkItems or wait authority.
+    Only continue/bounded work with progress selected by the current role policy
+    may declare readiness. Changed policy and malformed evidence fail closed.
+    Repeating the previous Next is not a new declaration; publishing the
+    successor consumes this handoff. Reads at most one parent and never changes
+    WorkItems or wait authority.
     """
     if snapshot.get("outcome") not in ("continue", "bounded"):
         return None
     step = _declared_next(snapshot.get("state"))
     progress = snapshot.get("progress")
     try:
-        validate_progress(progress)
-        if (not step or progress["role"] != role_name
-                or not any(progress["signals"][name] and name in progress["selected"] for name in
-                           ("tool", "code", "decision", "insight"))):
+        if (not step or progress_disposition(
+                progress, snapshot["outcome"], project.config, role_name) != "self_admit_progress"):
             return None
         parent_id = snapshot.get("parent")
         if not parent_id:
