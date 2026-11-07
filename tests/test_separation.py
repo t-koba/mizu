@@ -911,14 +911,44 @@ class PresentationSeparationTests(Fixture):
         solo = dataclasses.replace(self.config, roles=single)
         self.assertEqual(_resolve_role(solo, None), "only")
 
-    def test_service_floors_are_named_constants(self):
+    def test_systemd_deadline_defaults_and_overrides_render(self):
         import mizu.services as svc
-        for name in ("RESTART_SEC", "ACCURACY_SEC", "RANDOMIZED_DELAY_SEC"):
-            self.assertTrue(hasattr(svc, name))
+        self.assertEqual(self.config.services.systemd_restart_delay_seconds, 15)
+        self.assertEqual(self.config.services.systemd_stop_timeout_seconds, 45)
         units = svc.render(self.config, self.project, ROOT / "bin/mizu", system="linux")
         text = "".join(units.values())
         self.assertIn("RestartSec=15", text)
         self.assertIn("AccuracySec=10s", text)
+        service_units = [content for name, content in units.items()
+                         if name.endswith(".service")]
+        self.assertTrue(service_units)
+        self.assertTrue(all("TimeoutStopSec=45" in content for content in service_units))
+
+        configured = dataclasses.replace(
+            self.config,
+            services=dataclasses.replace(
+                self.config.services, systemd_restart_delay_seconds=27,
+                systemd_stop_timeout_seconds=61))
+        overridden = "".join(svc.render(
+            configured, self.project, ROOT / "bin/mizu", system="linux").values())
+        self.assertIn("RestartSec=27", overridden)
+        self.assertNotIn("RestartSec=15", overridden)
+        self.assertTrue(all("TimeoutStopSec=61" in content
+                            for name, content in svc.render(
+                                configured, self.project, ROOT / "bin/mizu",
+                                system="linux").items()
+                            if name.endswith(".service")))
+        platform_config = dataclasses.replace(self.config, timezone="local")
+        platform_override = dataclasses.replace(
+            platform_config,
+            services=dataclasses.replace(
+                platform_config.services, systemd_restart_delay_seconds=27,
+                systemd_stop_timeout_seconds=61))
+        for system in ("macos", "windows"):
+            with self.subTest(system=system):
+                self.assertEqual(
+                    svc.render(platform_config, self.project, ROOT / "bin/mizu", system=system),
+                    svc.render(platform_override, self.project, ROOT / "bin/mizu", system=system))
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

@@ -270,6 +270,14 @@ mode = "rootless"                 # rootless on every OS, or single on Linux hos
 # cgroup_manager = "cgroupfs"
 # cgroup_parent = "user.slice/user-1000.slice/user@1000.service/mizucg"
 
+# Systemd-only service-manager deadlines; positive integer seconds.
+# Defaults preserve the existing generated units. Regenerate and reinstall
+# units after changing either value. Other platform service definitions ignore
+# this section.
+# [services]
+# systemd_restart_delay_seconds = 15
+# systemd_stop_timeout_seconds = 45
+
 # Host-command wall bounds for `mizu doctor` probes. Integer seconds 1-86400;
 # defaults shown. A probe that does not answer within its bound reports the
 # timeout and bound, never a missing capability.

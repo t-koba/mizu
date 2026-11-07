@@ -51,15 +51,9 @@ from .project import Project
 #: Definition file extensions each platform owns.
 SERVICE_EXTENSIONS = {"linux": (".service", ".timer", ".path"), "macos": (".plist",), "windows": (".xml",)}
 
-#: Fixed per-platform template floors (mechanism, not operator policy):
-#: restart delay avoids a tight crash loop, timer accuracy/jitter avoids
-#: thundering-herd wakeups, stop timeout bounds shutdown. Schedules
-#: (daemon/interval/calendar) stay operator policy; these floors keep the
-#: manager from busy-looping regardless of schedule choice.
-RESTART_SEC = 15
+#: Fixed systemd timer alignment settings; schedule cadence remains policy.
 ACCURACY_SEC = "10s"
 RANDOMIZED_DELAY_SEC = "15s"
-STOP_SEC = 45
 #: The event service disables its own start limiter so an unsupported/edited
 #: trigger can only cause sequential fast exits (admission exits before any
 #: model use when nothing is due), never a start-limit-hit that stops
@@ -204,12 +198,12 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
                    "cleanup", project.name, "--role", name]
         service = ["[Unit]", f"Description=Mizu {project.name} / {name}", "After=network-online.target",
                    "", "[Service]", "Type=exec", "UMask=0077", "KillMode=control-group", "Delegate=yes",
-                   f"TimeoutStopSec={STOP_SEC}", "ExecStart=" + " ".join(map(quote, args)),
+                   f"TimeoutStopSec={config.services.systemd_stop_timeout_seconds}", "ExecStart=" + " ".join(map(quote, args)),
                    "ExecStopPost=-" + " ".join(map(quote, cleanup)),
                    # These are expected operator/budget/lock outcomes, not service failures.
                    "SuccessExitStatus=69 75 76 77 78 130"]
         if role.daemon:
-            service.extend(["Restart=on-failure", f"RestartSec={RESTART_SEC}", "", "[Install]", "WantedBy=default.target"])
+            service.extend(["Restart=on-failure", f"RestartSec={config.services.systemd_restart_delay_seconds}", "", "[Install]", "WantedBy=default.target"])
         result[base + ".service"] = "\n".join(service) + "\n"
         if role.daemon:
             continue
@@ -227,7 +221,7 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
         result[base + ".service"] = "\n".join([
             "[Unit]", f"Description=Mizu {project.name} sandbox checks", "StartLimitIntervalSec=0",
             "", "[Service]", "Type=oneshot", "UMask=0077", "Delegate=yes", "KillMode=control-group",
-            "TimeoutStartSec=0", f"TimeoutStopSec={STOP_SEC}",
+            "TimeoutStartSec=0", f"TimeoutStopSec={config.services.systemd_stop_timeout_seconds}",
             "ExecStart=" + " ".join(map(quote, argv)), ""])
         result[base + ".path"] = "\n".join([
             "[Unit]", f"Description=Mizu {project.name} check queue notification", "", "[Path]",
@@ -250,7 +244,7 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
         event_service = ["[Unit]", f"Description=Mizu event dispatch for {project.name} / {name}", "After=network-online.target",
                    "StartLimitIntervalSec=0",
                    "", "[Service]", "Type=oneshot", "UMask=0077", "KillMode=control-group", "Delegate=yes",
-                   f"TimeoutStopSec={STOP_SEC}", "ExecStart=" + " ".join(map(quote, event_args)),
+                   f"TimeoutStopSec={config.services.systemd_stop_timeout_seconds}", "ExecStart=" + " ".join(map(quote, event_args)),
                    "ExecStopPost=-" + " ".join(map(quote, cleanup)),
                    "SuccessExitStatus=69 75 76 77 78 130"]
         result[event_base + ".service"] = "\n".join(event_service) + "\n"

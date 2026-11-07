@@ -327,6 +327,7 @@ def _merge_into(base: dict, fragment: dict, origin: Path, origins: dict[str, Pat
 #: Root keys accepted at the document level.
 ROOT_KEYS = frozenset({
     "data_dir", "engines", "timezone", "limits", "sandbox", "profiles", "roles",
+    "services",
     "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude",
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
@@ -681,6 +682,13 @@ class Doctor:
     image_inspect_seconds: int = 15
     node_capability_seconds: int = 10
     sandbox_smoke_seconds: int = 30
+
+
+@dataclasses.dataclass(frozen=True)
+class ServiceSettings:
+    #: Systemd deployment policy; defaults preserve the existing unit output.
+    systemd_restart_delay_seconds: int = 15
+    systemd_stop_timeout_seconds: int = 45
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1230,6 +1238,16 @@ def doctor_policy(raw: dict) -> Doctor:
     })
 
 
+def service_settings(raw: dict) -> ServiceSettings:
+    fields = dataclasses.fields(ServiceSettings)
+    keys(raw, {field.name for field in fields}, "services")
+    return ServiceSettings(**{
+        field.name: number(raw.get(field.name, field.default),
+                           f"services.{field.name}", 1, TOML_INTEGER_MAX)
+        for field in fields
+    })
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     file: Path
@@ -1266,6 +1284,7 @@ class Config:
     project_import: ProjectImport = dataclasses.field(default_factory=ProjectImport)
     publication_evidence: PublicationEvidence = dataclasses.field(default_factory=PublicationEvidence)
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
+    services: ServiceSettings = dataclasses.field(default_factory=ServiceSettings)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -1869,4 +1888,5 @@ def load(file: Path) -> Config:
                   publication=publication_policy(data.get("publication", {})),
                   project_import=project_import_policy(data.get("project_import", {})),
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
-                  scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})))
+                  scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})),
+                  services=service_settings(data.get("services", {})))

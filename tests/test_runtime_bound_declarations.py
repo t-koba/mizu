@@ -31,7 +31,8 @@ The `cli.py` module-level inventory is empty; its numeric page defaults remain
 explicit command-line presentation flags, not runtime bounds. The `config.py`
 module-level candidates are closed over the existing policy/default
 dictionaries and `CONFIG_MODULE_BOUNDS`: event polling and whole-file artifact
-reads retain configured defaults; include, role-policy, resource, CI-wake-branch
+reads retain configured defaults; `[services]` owns the systemd restart and stop
+deadline defaults (15 and 45 seconds); include, role-policy, resource, CI-wake-branch
 and workspace-depth ceilings are mechanism or safety bounds; protocol integers
 and wait-seconds retain their format ranges.
 The `work_items.py` module-level page, cursor, row and revision bounds are
@@ -677,10 +678,6 @@ DECLARATIONS = {
             'routing / bounded routing record'),
     },
     'services.py': {
-        'RESTART_SEC': (
-            '15', 'mechanism', 'service manager / fixed restart-delay floor avoids a tight crash loop'),
-        'STOP_SEC': (
-            '45', 'mechanism', 'service manager / fixed shutdown timeout bound'),
         'WINDOWS_RESTART_COUNT': (
             '999', 'mechanism',
             'service rendering / Windows restart-count schema maximum'),
@@ -1738,6 +1735,27 @@ def no_defaults(limit, /, count, *, size):
             with self.subTest(bound=name):
                 self.assertEqual(found[name], expression)
                 self.assertIn(category, categories)
+                self.assertTrue(rationale.strip())
+
+    def test_systemd_service_deadlines_are_configured_policy(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        settings = next(node for node in tree.body
+                        if isinstance(node, ast.ClassDef) and node.name == 'ServiceSettings')
+        fields = {node.target.id: ast.unparse(node.value) for node in settings.body
+                  if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)}
+        expected = {
+            'systemd_restart_delay_seconds': (
+                '15', 'configured policy',
+                'services / systemd deployment restart delay default'),
+            'systemd_stop_timeout_seconds': (
+                '45', 'configured policy',
+                'services / systemd deployment graceful-stop timeout default'),
+        }
+        self.assertEqual(set(fields), set(expected))
+        for name, (default, category, rationale) in expected.items():
+            with self.subTest(setting=name):
+                self.assertEqual(fields[name], default)
+                self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
 
     def test_vcs_artifact_page_budget_is_configured_policy(self):
