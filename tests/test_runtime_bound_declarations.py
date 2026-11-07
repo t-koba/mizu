@@ -1,8 +1,9 @@
 """Partial runtime-bound inventory, not a general numeric-literal linter.
 
 The `src/mizu` files below cover named, direct module-level Assign/AnnAssign
-bounds and direct numeric literal/arithmetic values at a short resource-call
-keyword set. The gate inventory covers `scripts/check.py`'s host-cost, output
+bounds and numeric literals nested anywhere in selected resource-call keyword
+expressions, including local deadline arithmetic and caller-default forwarding.
+The gate inventory covers `scripts/check.py`'s host-cost, output
 and artifact bounds; its enforced host-cost choices are configured policy
 defaults, while its scope reserves and output/artifact bounds are fixed safety
 ceilings.
@@ -28,10 +29,11 @@ name-scoped detector.
 The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
-The `cli.py` module-level inventory is empty; its numeric page defaults remain
-explicit command-line presentation flags, not runtime bounds. The `config.py`
-module-level candidates are closed over the existing policy/default
-dictionaries and `CONFIG_MODULE_BOUNDS`; symbolic `min` and canonical-length
+The `cli.py` module-level inventory is empty; its numeric page defaults are
+classified in `CALLS` as command-line presentation policy, not module constants.
+The `config.py` module-level candidates are closed over the existing
+policy/default dictionaries and `CONFIG_MODULE_BOUNDS`; symbolic `min` and
+canonical-length
 derivations use only their explicitly allowlisted operands in `SYMBOLIC_BOUNDS`.
 Event polling and whole-file artifact reads retain configured defaults;
 `[services]` owns the systemd restart and stop deadline defaults (15 and 45
@@ -41,8 +43,9 @@ retain their format ranges.
 The `web_worker.py` include-envelope bound derives from the fixed include
 byte ceiling. `lineage.py`'s full-ref length derives from its fixed prefix and
 branch-name format bound. `work_items.py` page, cursor, row, projection,
-revision and sidecar bounds are fixed mechanism or safety contracts; its
-page-byte aliases are inventoried against their shared declared bases rather
+revision, delivered-token and sidecar bounds are fixed mechanism or safety
+contracts; its delivered-token set covers prior progress plus one opening page,
+and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
@@ -88,22 +91,24 @@ suffixes (`_DEFAULT`, `_MIN`, `_MAXIMUM`, `_SEC`, `_SAMPLE`, `_BELOW`, and
 `_OVERHEAD`) so operational defaults and diagnostic caps are not missed merely
 because their names do not begin with `MAX_` or `DEFAULT_`. Schema/version
 markers without resource-bound behavior remain outside this detector. Every
-module with a detected numeric argument at the listed resource-call keywords
-is covered in `CALLS` too, so a new host deadline or
-read bound at those call sites fails until it is declared. The module and call
-inventories remain name- and numeric-scoped and therefore partial; absence from the tables
-is not evidence that a value is not a decision. Expressions are inventoried
-without evaluating source. Those detectors do not lint arbitrary numeric
-literals, aliases, nested assignments, call arguments outside the listed
-keyword set, or local arithmetic. Expand coverage as the behavior-based
-inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
-CiRequestEvidence, PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults,
-VCS polling fallback defaults, the retained-check Limits field and ceiling, and explicitly
-listed raw web and VCS settings; the decision-history recovery ceiling is checked alone,
-not as a full work_items.py inventory. Validation is covered
-by focused config tests. Classification records current ownership, not
-approval to leave policy in code. `format` is reserved for intrinsic wire or
-schema ranges; `safety` is a defensive ceiling on untrusted or oversized input,
+module with a numeric literal in the selected resource-call keyword
+expressions is covered in `CALLS`, so newly added local arithmetic, cache/queue
+capacities and caller-default forwarding at those sites fail until declared.
+The module and call inventories remain name- and scope-restricted and therefore
+partial; absence from the tables is not evidence that a value is not a decision.
+Expressions are inventoried without evaluating source. The call detector covers
+local arithmetic only when it appears in a selected bound-bearing keyword; these
+tests still do not lint arbitrary numeric literals, alias-only values, nested
+assignments, symbolic loop bounds, positional arguments or call keywords outside
+the listed set. Expand coverage as the behavior-based inventory reaches other
+owners. The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
+PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults, VCS
+polling fallback defaults, the retained-check Limits field and ceiling, and
+explicitly listed raw web and VCS settings; the decision-history recovery ceiling
+is checked alone, not as a full work_items.py inventory. Validation is covered
+by focused config tests. Classification records current ownership, not approval
+to leave policy in code. `format` is reserved for intrinsic wire or schema
+ranges; `safety` is a defensive ceiling on untrusted or oversized input,
 including a product-chosen validation maximum; `mechanism` is a fixed internal
 or public contract, including a retry-loop bound; `policy` is an operator
 decision not yet configurable; `configured policy` is its migrated form: an
@@ -399,6 +404,9 @@ DECLARATIONS = {
             'work items / revision-chain format bound including the immutable seed'),
         'MAX_OPEN_PAGE_ROWS': (
             '100', 'mechanism', 'work items / public open-page row contract'),
+        'MAX_DELIVERED_WAIT_RESOLUTION_TOKENS': (
+            '3 * MAX_OPEN_PAGE_ROWS', 'mechanism',
+            'work items / prior 200-token progress bound plus one 100-row opening page'),
         'MAX_OPEN_CURSOR_CHARS': (
             '128', 'mechanism', 'work items / opaque cursor format bound'),
         'MAX_OPEN_ROW_BYTES': (
@@ -1147,7 +1155,7 @@ CONFIG_MODULE_BOUNDS = {
 
 CALL_KEYWORDS = frozenset({
     'timeout', 'timeout_seconds', 'maximum', 'max_bytes', 'max_files',
-    'max_entries', 'max_depth', 'limit',
+    'max_entries', 'max_depth', 'limit', 'maxsize', 'length',
 })
 # (enclosing scope, callee, keyword, occurrence): (expression, class, rationale)
 CALLS = {
@@ -1161,6 +1169,24 @@ CALLS = {
     },
     'ci_requests.py': {},
     'insights.py': {},
+    'decision_delivery.py': {
+        ('read', 'store(context).read_page', 'limit', 0): (
+            "args.get('limit', 8192)", 'safety',
+            'decision delivery / omitted limit defaults to the shared-record page ceiling'),
+    },
+    'insight_tools.py': {
+        ('insights', 'page', 'maximum', 0): (
+            'PREVIEW_BYTES * 2', 'safety',
+            'insight tools / bounded result page for two preview-sized bodies'),
+    },
+    'process.py': {
+        ('_stop_io', 'thread.join', 'timeout', 0): (
+            'max(0.0, deadline - time.monotonic())', 'safety',
+            'process I/O stop / nonnegative remaining time under the shared stop deadline'),
+        ('send_bounded', 'thread.join', 'timeout', 0): (
+            'min(0.01, max(0, deadline - time.monotonic()))', 'mechanism',
+            'bounded RPC send / 10-ms cancellation poll clipped to the caller deadline'),
+    },
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
@@ -1169,6 +1195,13 @@ CALLS = {
         ('Context._op_vcs_read_ci_requests',
          'CiRequests(self.project.root, self.config.ci_requests).daily', 'limit', 0): (
             '100', 'mechanism', 'runtime / CI-request public page bound'),
+        ('Context._op_check_job', 'check_jobs.logs', 'limit', 0): (
+            "args.get('limit', 8192)", 'safety',
+            'runtime / check-log page defaults to the bounded reader ceiling'),
+        ('Context._op_vcs_read_ci_costs',
+         'CiRequests(self.project.root, self.config.ci_requests).page', 'limit', 0): (
+            "args.get('limit', 8)", 'policy',
+            'runtime / caller-selected CI-cost dispatch page default'),
         ('Engine._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row pending-decision dispatch check'),
         ('Engine._run', 'read_json', 'max_bytes', 0): (
@@ -1198,6 +1231,11 @@ CALLS = {
         ('source_commit', 'process.run', 'maximum', 0): (
             '4096', 'safety', 'publication / local Git HEAD output read bound'),
     },
+    'snapshot.py': {
+        ('_exclude_matcher', 'lru_cache', 'maxsize', 0): (
+            '16', 'mechanism',
+            'snapshot / bounded process-local matcher cache; eviction only recompiles'),
+    },
     'smoke_retention.py': {
         ('collect_refs', 'ReferenceSnapshots', 'max_bytes', 0): (
             '2 ** 63 - 1', 'mechanism',
@@ -1214,6 +1252,15 @@ CALLS = {
     'cli.py': {
         ('_cmd_insight', 'project.insights.list', 'limit', 0): (
             '1000', 'mechanism', 'CLI / fixed legacy insight-list page bound'),
+        ('_cmd_insight', 'project.insights.list_page', 'limit', 0): (
+            'args.limit if args.limit is not None else 30', 'policy',
+            'CLI / insight page default; callers may select --limit'),
+        ('_cmd_work_items', 'store.page_open_readonly', 'limit', 0): (
+            'args.limit if args.limit is not None else 25', 'policy',
+            'CLI / open work-item page default; callers may select --limit'),
+        ('_cmd_work_items', 'closed_page', 'limit', 0): (
+            'args.closed if args.closed is not None else 10', 'policy',
+            'CLI / closed work-item page default; callers may select --closed'),
     },
     'doctor.py': {
         ('container_runtime', 'run', 'maximum', 0): (
@@ -1232,6 +1279,8 @@ CALLS = {
             '1', 'safety', 'engine channel / bounded child-exit wait during teardown'),
         ('Channel.close', 'thread.join', 'timeout', 0): (
             '0.5', 'safety', 'engine channel / bounded reader-thread join during teardown'),
+        ('Channel.__init__', 'queue.Queue', 'maxsize', 0): (
+            '128', 'mechanism', 'engine channel / fixed parsed-record backpressure queue depth'),
     },
     'engine_config.py': {
         ('stop_engine_containers', 'run', 'timeout', 0): (
@@ -1243,6 +1292,9 @@ CALLS = {
     'operator_records.py': {
         ('store', 'KindPolicy', 'maximum', 0): (
             '140000', 'safety', 'operator records / bounded shared-record payload envelope'),
+        ('read', 'store(context.project).read_page', 'limit', 0): (
+            "args.get('limit', 8192)", 'safety',
+            'operator records / omitted limit defaults to the shared-record page ceiling'),
     },
     'persistent_exec.py': {
         ('ExecSession._remove', 'run', 'timeout', 0): (
@@ -1257,7 +1309,16 @@ CALLS = {
     },
     'platform.py': {
         ('terminate_process', 'process.wait', 'timeout', 0): (
-            '2', 'safety', 'platform / bounded process reap wait'),
+            '0.2 if grace == 0 else 5', 'safety',
+            'platform / bounded post-kill reap wait, shortened for immediate cancellation'),
+        ('terminate_process', 'process.wait', 'timeout', 1): (
+            '0.2 if grace == 0 else 5', 'safety',
+            'platform / bounded Windows job-close reap wait'),
+        ('terminate_process', 'process.wait', 'timeout', 2): (
+            '2', 'safety', 'platform / bounded process grace wait before kill fallback'),
+        ('terminate_process', 'process.wait', 'timeout', 3): (
+            '0.2 if grace == 0 else 5', 'safety',
+            'platform / bounded post-kill reap wait after portable termination'),
     },
     'proposal_waits.py': {
         ('shared_store', 'KindPolicy', 'maximum', 0): (
@@ -1266,6 +1327,31 @@ CALLS = {
     'safe_point.py': {
         ('read', 'read_json', 'max_bytes', 0): (
             '4096', 'safety', 'safe point / bounded saved-state read'),
+    },
+    'storage.py': {
+        ('_compress_event_log', 'shutil.copyfileobj', 'length', 0): (
+            '1048576', 'safety', 'storage / 1-MiB copy chunk bounds transient compression input'),
+    },
+    'web_operations.py': {
+        ('search', 'page', 'maximum', 0): (
+            'PREVIEW_BYTES * 2', 'safety',
+            'web operations / bounded result page for two preview-sized bodies'),
+    },
+    'work_item_operations.py': {
+        ('read', 'context.project.work_items.explain', 'limit', 0): (
+            "args.get('limit', 25)", 'policy',
+            'work items / by-ID history page default; caller may select limit'),
+        ('read', 'context.project.work_items.page_open', 'limit', 0): (
+            "args.get('limit', 25)", 'policy',
+            'work items / open-page default; caller may select limit'),
+        ('legacy_read', 'context.project.work_items.page_legacy', 'limit', 0): (
+            "args.get('limit', 25)", 'policy',
+            'work items / legacy-page default; caller may select limit'),
+    },
+    'work_item_read_view.py': {
+        ('readonly_view', 'lru_cache', 'maxsize', 0): (
+            '8192', 'safety',
+            'work items / bounded request-local path-key cache, eviction revalidates'),
     },
     'sandbox.py': {
         ('assert_no_checkpoint', 'run', 'timeout', 0): (
@@ -1539,6 +1625,7 @@ SYMBOLIC_BOUNDS = {
         'MAX_WEB_WORKER_INPUT_BYTES': frozenset({'MAX_INCLUDE_BYTES'}),
     },
     'work_items.py': {
+        'MAX_DELIVERED_WAIT_RESOLUTION_TOKENS': frozenset({'MAX_OPEN_PAGE_ROWS'}),
         'MAX_EVENT_BYTES': frozenset({'PREVIEW_BYTES', 'MAX_RESOLUTION_BYTES'}),
         'MAX_PROJECTION_BYTES': frozenset({'MAX_EVENT_BYTES'}),
         'MAX_HISTORY_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),
@@ -1600,7 +1687,10 @@ def call_inventory(tree):
         def visit_Call(self, node):
             callee = callee_name(node.func)
             for keyword in node.keywords:
-                if keyword.arg not in CALL_KEYWORDS or not numeric(keyword.value):
+                has_literal = any(
+                    isinstance(value, ast.Constant) and type(value.value) in (int, float)
+                    for value in ast.walk(keyword.value))
+                if keyword.arg not in CALL_KEYWORDS or not has_literal:
                     continue
                 base = ('.'.join(self.scope) or '<module>', callee, keyword.arg)
                 index = occurrences.get(base, 0)
@@ -2165,6 +2255,7 @@ if True:
 def outer():
     run(timeout=5, maximum=2)
     run(timeout=6)
+    run(timeout=max(0.0, deadline - now))
     read_json(max_bytes=2 ** 10)
     run(timeout_seconds=20)
     other(max_files=3, max_entries=4, max_depth=2)
@@ -2178,6 +2269,7 @@ def sibling():
             ('outer', 'run', 'timeout', 0): '5',
             ('outer', 'run', 'maximum', 0): '2',
             ('outer', 'run', 'timeout', 1): '6',
+            ('outer', 'run', 'timeout', 2): 'max(0.0, deadline - now)',
             ('outer', 'read_json', 'max_bytes', 0): '2 ** 10',
             ('outer', 'run', 'timeout_seconds', 0): '20',
             ('outer', 'other', 'max_files', 0): '3',
