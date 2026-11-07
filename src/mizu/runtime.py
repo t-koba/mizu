@@ -4646,6 +4646,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
         with lock(config.data / "locks" / f"daemon-{name}-{role_name}.lock", blocking=False):
             upstream_state: dict = {"last_fetch": None}
             ordinary_after = 0.0
+            project = None
             while not stop.is_set():
                 try:
                     updated = load(config.file)
@@ -4656,7 +4657,9 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     probe = service_due(config, name, stop)
                     if probe is not None:
                         print(json.dumps(probe, ensure_ascii=False), flush=True)
-                    project = Project(config, name)
+                    # Retain process-local validation caches across unchanged reloads.
+                    if project is None or project.config != config:
+                        project = Project(config, name)
                     project.insights.ingest_editor(keep_days=config.limits.retention_days)
                     if vcs_poll_enabled(config):
                         interval = vcs_poll_interval(config)

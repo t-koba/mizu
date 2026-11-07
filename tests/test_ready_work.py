@@ -7,7 +7,7 @@ import unittest
 from threading import Event
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, bind_delivery
+from support import Fixture, ScriptDriver, bind_delivery, without_blocked_age
 from mizu import work_items as work_items_module
 from mizu.errors import Denied
 from mizu.fs import now, read_json, write_json
@@ -325,6 +325,82 @@ class ReadyProjectionTests(Fixture):
              patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
             self.assertEqual(fresh.page_ready()["total"], 2)
             self.assertEqual(replay.call_count, 4)
+
+    def test_scale_readiness_reuses_history_but_recomputes_origin_and_waits(self):
+        # 96 items / 384 full-state revisions exercise repeated terminal proofs
+        # without making local or Windows exact-replay coverage expensive.
+        store = self.project.work_items
+        snapshots = self.project.snapshots
+        captured = snapshots.capture_files(self.project.workspace)
+        snapshot = snapshots.create(
+            captured, goal="Goal", state="State", run="run", outcome="done", summary="Verified",
+            verification={"passed": True, "code_digest": captured["code_digest"], "run": "run"})
+        snapshots.publish(snapshot)
+        proposal = self.project.insights.submit(
+            source="reviewer", title="Scale origin", body="Scope", base_snapshot=None)
+        item_count, terminal_count = 96, 24
+        items = []
+        for index in range(item_count):
+            item = store.create(
+                idempotency_key=f"scale-{index}", title=f"Scale item {index}", actor="worker",
+                origin={"insight_id": proposal["id"], "rev": 1})["record"]["work_item"]
+            items.append(item)
+            if index < terminal_count:
+                bind_delivery(self.project, item["id"], snapshot["id"])
+                store.transition(item["id"], expected_rev=3, actor="worker", status="done",
+                                 snapshot_id=snapshot["id"])
+            else:
+                store.transition(item["id"], expected_rev=1, actor="worker", status="doing")
+                store.transition(item["id"], expected_rev=2, actor="worker", status="open")
+                store.transition(item["id"], expected_rev=3, actor="worker", status="blocked",
+                                 wait={"kind": "insight_decided", "insight": proposal["id"]})
+        # Discard only disposable sidecars, never immutable history/evidence.
+        for item in items:
+            store._sidecar_path(item["id"]).unlink(missing_ok=True)
+        store = work_items_module.WorkItems(store.root, snapshots, store.insights)
+        cache_available = (
+            not work_items_module.IS_WINDOWS
+            and all(store._history_identity(item["id"]) is not None for item in items)
+            and store._proof_identity(snapshots.root, f"snapshots/{snapshot['id']}.json") is not None)
+        active_count = item_count - terminal_count
+        with patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
+             patch.object(store, "_validate_transition", wraps=store._validate_transition) as validate, \
+             patch.object(snapshots, "validate_manifest", wraps=snapshots.validate_manifest) as manifest, \
+             patch.object(store, "_origin_projection_impl", wraps=store._origin_projection_impl) as origin, \
+             patch.object(work_items_module, "liveness", wraps=work_items_module.liveness) as live:
+            cold = store.page_ready(limit=item_count)
+            cold_counts = (replay.call_count, validate.call_count, manifest.call_count)
+            self.assertEqual(cold_counts[:2], (item_count, item_count * 3))
+            self.assertEqual(cold_counts[2], terminal_count)
+            self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
+            for spy in (replay, validate, manifest, origin, live):
+                spy.reset_mock()
+            warm = store.page_ready(limit=item_count)
+            warm_counts = (replay.call_count, validate.call_count, manifest.call_count)
+            # Windows/unsupported metadata deliberately keep validating exactly.
+            self.assertEqual(warm_counts, (0, 0, 0) if cache_available else cold_counts)
+            self.assertEqual(without_blocked_age(warm), without_blocked_age(cold))
+            self.assertEqual(warm["total"], 0)
+            self.assertTrue(warm["coverage_complete"])
+            self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
+
+            # External origin/decision changes wake blocked rows without history
+            # changes. Neither origin projection nor wait liveness is cached.
+            self.project.insights.revise(proposal["id"], source="reviewer", title="Revised",
+                                         body="New scope", base_snapshot=None, expected_rev=1)
+            self.project.insights.decide(proposal["id"], "reject", "Settled", "", "run", expected_rev=2)
+            for spy in (replay, validate, manifest, origin, live):
+                spy.reset_mock()
+            changed = store.page_ready(limit=item_count)
+            self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
+            self.assertEqual({row["id"] for row in changed["items"]},
+                             {item["id"] for item in items[terminal_count:]})
+            self.assertEqual(changed["total"], active_count)
+            self.assertNotEqual(changed["signature"], warm["signature"])
+            for row in changed["items"]:
+                self.assertEqual(row["current_origin_rev"], 2)
+                self.assertFalse(row["stale"])
+                self.assertEqual(row["redecision"], {"rev": 2, "action": "reject"})
 
     def test_next_call_sees_other_store_appends_new_items_and_corruption(self):
         store = self.project.work_items
