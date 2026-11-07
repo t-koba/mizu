@@ -207,8 +207,9 @@ substantive decision, a terminal event, a due wait, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
 inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
 operator records and changed role-eligible ready work bypass it independently
-of workspace mode. A writer Next handoff or a read-only role-specific progress
-continuation can also bypass the unchanged-code gate. Read-only roles never inherit goal/inbox/run-wait generations or the
+of workspace mode. A writer Next handoff, a writer no-progress fallback with current role-eligible
+ready work, or a read-only role-specific progress continuation can also bypass
+the unchanged-code gate. Read-only roles never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
 changes, Next handoffs and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either

@@ -2594,8 +2594,10 @@ class Engine:
                           or role.decision_events or role.work_item_events)
         unscheduled = not bool(role.daemon or role.interval_seconds or role.calendar)
         has_code_event = bool(role.on_change and unscheduled and not code_unchanged)
-        ready_work_changed = ((not event_trigger or autonomous) and _ready_work_changed(
-            project, snapshot if role.workspace == "write" else cursor, role, work_items=work_items))
+        ready_work_changed, ready_work_present = (False, False)
+        if not event_trigger or autonomous:
+            ready_work_changed, ready_work_present = _ready_work_observation(
+                project, snapshot if role.workspace == "write" else cursor, role, work_items=work_items)
         # Only publishers consume snapshot-wide generations. Observers consume
         # operator wakes independently, even when no new code is published.
         wake_base = snapshot if role.workspace == "write" else cursor
@@ -2628,7 +2630,8 @@ class Engine:
                               and _dispatch_now >= snapshot["wake_at"])
         next_task = _writer_next_task(project, snapshot, role_name) if role.workspace == "write" else None
         if role.workspace == "write":
-            progress_self_admits = False
+            progress_self_admits = _writer_progress_fallback(
+                snapshot, self.config, role, ready_work_present, _dispatch_now)
         else:
             progress_self_admits = _progress_self_admits(cursor, self.config, role_name)
         explicit_wake = operator_woke or (role.workspace == "write" and (
@@ -4033,6 +4036,26 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
         return None
 
 
+def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None) -> bool:
+    """Shared daemon/dispatch fallback, only with proven role-eligible ready work.
+
+    Progress-driven Next handoffs remain independent. A timer or policy change
+    cannot turn an empty/failed ready-work observation into permission to run.
+    """
+    if (role.workspace != "write" or not ready_work_present
+            or record.get("outcome") not in ("continue", "bounded")):
+        return False
+    progress = record.get("progress")
+    try:
+        validate_progress(progress)
+        policy_changed = set(progress["selected"]) != set(role_progress_signals(config, role))
+    except Exception:
+        policy_changed = False
+    disposition = progress_disposition(
+        progress, record["outcome"], config, role.name, current_time)
+    return policy_changed or disposition in ("self_admit_allowance", "self_admit_backoff")
+
+
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
     """Only validated, role-specific continuation evidence can self-admit."""
     if record.get("outcome") not in ("continue", "bounded"):
@@ -4474,20 +4497,10 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 value = True
             else:
                 value = bool(_writer_next_task(project, snapshot, role_name))
-                if (not value and role is not None and role.workspace == "write"
-                        and ready_work_observed and ready_work_present):
-                    progress = snapshot.get("progress")
-                    try:
-                        validate_progress(progress)
-                        policy_changed = set(progress["selected"]) != set(
-                            role_progress_signals(effective, role))
-                    except Exception:
-                        policy_changed = False
-                    disposition = progress_disposition(
-                        progress, snapshot.get("outcome", "wait"), effective,
-                        role_name, current_time)
-                    value = (policy_changed or disposition in
-                             ("self_admit_allowance", "self_admit_backoff"))
+                if not value and role is not None:
+                    value = _writer_progress_fallback(
+                        snapshot, effective, role,
+                        ready_work_observed and ready_work_present, current_time)
         else:
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})
