@@ -98,7 +98,7 @@ class SessionDeltaTests(Fixture):
         from mizu.runtime import session_prompt
         ctx = self.context("worker")
         save_worker_session(self, {"tokens": 0})
-        with patch.object(self.project.work_items, "page_open_for_order",
+        with patch.object(self.project.work_items, "_page_open_impl",
                           side_effect=Denied("work-item page failed closed")) as page_open:
             with self.assertRaisesRegex(Denied, "work-item page failed closed"):
                 session_prompt(ctx, ctx.role, ctx.run_dir)
