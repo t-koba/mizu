@@ -30,9 +30,10 @@ opt-in collection is policy, but it introduces no host-cost numeric bound.
 The `cli.py` module-level inventory is empty; its numeric page defaults remain
 explicit command-line presentation flags, not runtime bounds. The `config.py`
 module-level candidates are closed over the existing policy/default
-dictionaries and `CONFIG_MODULE_BOUNDS`: the include, role-policy, resource,
-CI-wake-branch and workspace-depth ceilings are fixed mechanism or safety
-bounds, and the wait-seconds value is the protocol format bound.
+dictionaries and `CONFIG_MODULE_BOUNDS`: event polling and whole-file artifact
+reads retain configured defaults; include, role-policy, resource, CI-wake-branch
+and workspace-depth ceilings are mechanism or safety bounds; protocol integers
+and wait-seconds retain their format ranges.
 The `work_items.py` module-level page, cursor, row and revision bounds are
 fixed mechanism or safety contracts; its page-byte aliases reuse those
 declared bases rather than introducing separate literals.
@@ -74,8 +75,13 @@ are configured schema defaults declared separately; the per-rule and
 per-classifier tables are their owning configuration. Every current
 `src/mizu` module with a detected candidate is covered here (`config.py` has
 its own field-scoped table), so a new module with such a bound fails until it
-is declared. Every module with a detected numeric argument at the listed
-resource-call keywords is covered in `CALLS` too, so a new host deadline or
+is declared. The candidate vocabulary also includes nonstandard bound-bearing
+suffixes (`_DEFAULT`, `_MIN`, `_MAXIMUM`, `_SEC`, `_SAMPLE`, `_BELOW`, and
+`_OVERHEAD`) so operational defaults and diagnostic caps are not missed merely
+because their names do not begin with `MAX_` or `DEFAULT_`. Schema/version
+markers without resource-bound behavior remain outside this detector. Every
+module with a detected numeric argument at the listed resource-call keywords
+is covered in `CALLS` too, so a new host deadline or
 read bound at those call sites fails until it is declared. The module and call
 inventories remain name- and numeric-scoped and therefore partial; absence from the tables
 is not evidence that a value is not a decision. Expressions are inventoried
@@ -133,7 +139,8 @@ ROOT = Path(__file__).resolve().parents[1] / 'src' / 'mizu'
 GATE_ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 CANDIDATE = re.compile(
     r'(?:MAX_\w+|DEFAULT_\w+|\w+_(?:LIMIT|CAP|TIMEOUT\w*|SECONDS|DAYS|DEPTH|'
-    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN|CHARS|MAX))\Z'
+    r'ENTRIES|BYTES|ROWS|COUNT|MULTIPLIER|PER_RUN|CHARS|MAX|DEFAULT|MIN|MAXIMUM|'
+    r'SEC|SAMPLE|BELOW|OVERHEAD))\Z'
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
@@ -186,6 +193,9 @@ DECLARATIONS = {
             'CI waits / bounded observed-check rows per diagnostic projection'),
     },
     'delegation_jobs.py': {
+        '_INTENT_NULL_OVERHEAD': (
+            '14', 'format',
+            'async delegation / canonical JSON byte overhead for the explicit intent:null member'),
         'MAX_JOBS': (
             '1024', 'policy',
             'async delegation / shared project-state job-history capacity; lifetime tombstones '
@@ -272,6 +282,12 @@ DECLARATIONS = {
         '_AUDIT_JSON_BYTES': (
             '1048576', 'safety',
             'storage audit / bounded reference-JSON read; larger records are skipped and counted'),
+        'AUTOMATIC_PRUNE_INTERVAL_DEFAULT': (
+            '86400', 'configured policy',
+            'automatic prune / unchanged cadence default when the validated [limits] override is omitted'),
+        '_AUDIT_SAMPLE': (
+            '100', 'safety',
+            'storage audit / bounded diagnostic samples retain full counts and truncation markers'),
         'AUTOMATIC_PRUNE_INTERVAL_MAX': (
             '2678400', 'safety',
             'configuration validation / maximum accepted automatic-prune interval (31 days)'),
@@ -512,6 +528,9 @@ DECLARATIONS = {
             'smoke retention / bounded maintenance-audit record read and retained event count'),
         '_AUTOMATIC_SMOKE_RETENTION_STATE_BYTES': (
             '4096', 'safety', 'smoke retention / bounded automatic due-state read'),
+        'AUTOMATIC_SMOKE_RETENTION_INTERVAL_DEFAULT': (
+            '86400', 'configured policy',
+            'automatic smoke retention / unchanged cadence default when the validated [limits] override is omitted'),
         'AUTOMATIC_SMOKE_RETENTION_INTERVAL_MAX': (
             '2678400', 'safety',
             'configuration validation / maximum accepted automatic smoke-retention interval (31 days)'),
@@ -560,6 +579,8 @@ DECLARATIONS = {
             'insight retrieval / fixed public page bound'),
     },
     'lineage.py': {
+        'TARGET_VERSION_MIN': (
+            '1', 'format', 'lineage / accepted target-version range starts at version one'),
         'TARGET_VERSION_MAX': (
             '1073741824', 'format',
             'lineage / target version integer bound'),
@@ -612,6 +633,9 @@ DECLARATIONS = {
             'pi-durable store / bounded payload column'),
     },
     'process.py': {
+        'ADAPTER_DIAGNOSTIC_BYTES_DEFAULT': (
+            '2048', 'configured policy',
+            'adapter failure diagnostics / default model-visible stderr tail; per-adapter setting overrides it under the 8192-byte ceiling'),
         'ADAPTER_DIAGNOSTIC_BYTES_MAX': (
             '8192', 'safety',
             'process / bounded adapter diagnostic text'),
@@ -653,6 +677,10 @@ DECLARATIONS = {
             'routing / bounded routing record'),
     },
     'services.py': {
+        'RESTART_SEC': (
+            '15', 'mechanism', 'service manager / fixed restart-delay floor avoids a tight crash loop'),
+        'STOP_SEC': (
+            '45', 'mechanism', 'service manager / fixed shutdown timeout bound'),
         'WINDOWS_RESTART_COUNT': (
             '999', 'mechanism',
             'service rendering / Windows restart-count schema maximum'),
@@ -720,6 +748,25 @@ DECLARATIONS = {
         'MAX_DECISION_TASKS': (
             '16', 'format',
             'work-item seed / fixed task count'),
+    },
+    'doctor.py': {
+        '_CHECK_RUNNER_SETTINGS_MAXIMUM': (
+            '65536', 'safety', 'doctor / bounded read of untrusted project settings before validation'),
+    },
+    'sandbox.py': {
+        'CHECKPOINT_INSPECT_MAXIMUM': (
+            '262144', 'safety',
+            'checkpoint image inspection / bounded full output read so marker search refuses truncation'),
+    },
+    'scheduler_evidence.py': {
+        'SPARSE_BELOW': (
+            '5', 'mechanism',
+            'scheduler evidence / diagnostic sparse-sample classification; never a scheduler policy input'),
+    },
+    'work_item_events.py': {
+        'ACKED_ID_SAMPLE': (
+            '10', 'safety',
+            'work-item events / bounded recent acknowledged-ID sample while retaining the exact total'),
     },
     'workspace_reads.py': {
         'MAX_READ_IDENTITIES': (
@@ -975,10 +1022,12 @@ DECISION_RECONCILIATION = {
 
 
 # Remaining config.py module-level candidates not owned by the special
-# policy/default dictionaries above. These are fixed mechanism or safety
-# ceilings; MAX_WAIT_SECONDS is the protocol format bound. The inventory test
-# adds the module-level names already declared by those dictionaries, so a
-# new unexplained config.py literal fails it.
+# policy/default dictionaries above. Event-poll and whole-file artifact values
+# are configured defaults; the Task Scheduler minimum is a mechanism floor.
+# Include/role/resource/workspace ceilings are mechanism or safety; protocol
+# integers and wait-seconds are format bounds. The inventory test adds names
+# already declared by the special dictionaries, so a new unexplained literal
+# fails it.
 CONFIG_MODULE_BOUNDS = {
     'DEFAULT_ARTIFACT_FULL_READ_CHARS': (
         '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
@@ -1004,6 +1053,10 @@ CONFIG_MODULE_BOUNDS = {
         '262144', 'mechanism', 'config role policy / fixed composed-text byte total'),
     'TOML_INTEGER_MAX': (
         '(1 << 63) - 1', 'format', 'config / TOML signed-64-bit integer wire range'),
+    'EVENT_POLL_SECONDS_DEFAULT': (
+        '60', 'configured policy', 'service events / unchanged per-role recovery-poll default'),
+    'EVENT_POLL_SECONDS_MIN': (
+        '60', 'mechanism', 'service events / Task Scheduler minimum poll interval'),
     'EVENT_POLL_SECONDS_MAX': (
         '31 * 86400', 'safety', 'config / event-poll interval validation maximum (31 days)'),
     'MAX_WORKSPACE_CACHE_DEPTH': (
