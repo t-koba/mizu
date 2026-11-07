@@ -993,7 +993,7 @@ replacement insight without implying rejected substance.
                 continue
         return out
 
-    def unresolved_counts(self, sources, *, kind=None, addressee=None) -> dict:
+    def unresolved_counts(self, sources=None, *, kind=None, addressee=None, deferred_only=False) -> dict:
         """Count live unresolved inputs for each named source, fail-closed.
 
         One bounded read-only inbox scan under the project record lock for a
@@ -1005,10 +1005,15 @@ replacement insight without implying rejected substance.
         event bound. Unsafe, unreadable, vanished or malformed live entries
         raise rather than undercount; a missing decision only leaves its
         input unresolved. Unknown or malformed requested sources raise.
+        ``sources=None`` counts all sources; ``deferred_only`` selects only exact
+        current defer decisions, independent of decision-delivery acknowledgements.
         Tolerant prompt/list paths (``_live_entries``, ``generation``,
         ``list``) are unchanged.
         """
-        names = list(sources)
+        # None selects every live source, including sources no longer configured.
+        if type(deferred_only) is not bool:
+            raise Denied("deferred_only must be a boolean")
+        names = [] if sources is None else list(sources)
         for name in names:
             identifier(name)
         wanted = set(names)
@@ -1017,6 +1022,8 @@ replacement insight without implying rejected substance.
             inbox = self.root / "inbox"
             if not insight_archive._directory(inbox):
                 return counts
+            # Even an absent decision row must not hide an unsafe parent.
+            insight_archive._directory(self.root / "decisions")
             # iterdir propagates listing failures rather than glob's tolerant
             # handling. Do not skip a vanished row: its source is unknown.
             for path in sorted(inbox.iterdir()):
@@ -1053,12 +1060,14 @@ replacement insight without implying rejected substance.
                         decision = None
                 if decision is not None and decision["action"] != "defer":
                     continue
+                if deferred_only and (decision is None or decision["action"] != "defer"):
+                    continue
                 source = item["source"]
-                if source in wanted:
+                if sources is None or source in wanted:
                     metadata = insight_metadata(item) if kind is not None or addressee is not None else {}
                     if ((kind is None or metadata.get("kind") == kind)
                             and (addressee is None or metadata.get("addressee") == addressee)):
-                        counts[source] += 1
+                        counts[source] = counts.get(source, 0) + 1
         return counts
 
     def unresolved_count(self, source: str) -> int:

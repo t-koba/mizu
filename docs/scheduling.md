@@ -205,8 +205,29 @@ prompt projects pending insights; decision events, terminal work-item events,
 due waits, and CI facts are fetched by separate readers with their own role,
 route, and batch policies.
 
-Scheduled timer dispatches are plain one-shot runs: `mizu run` without
-`--event` (`src/mizu/cli.py` passes `event_trigger` only for `--event`).
+Scheduled timer dispatches are one-shot runs. Only timed roles with a nonempty
+`scheduled_inputs` declaration receive the internal `mizu run --scheduled`
+marker; other timers remain plain `mizu run`. The marker is threaded through
+CLI/Engine only by platform schedule definitions, not event jobs or daemons.
+Per-role
+`scheduled_inputs = []` (the default) preserves open-ended periodic execution.
+Opting in with `["deferred_insights"]` requires a timed role with `insights`;
+unknown or duplicate sources are refused at config load. Before model/run-slot
+admission, the strict insight reader scans live records under the existing
+project record lock and counts exact current defer decisions across all sources.
+Decision-delivery acknowledgements do not remove a deferral from this count.
+Proven emptiness alone still does not skip: the gate reuses the authoritative
+pre-admission projection and only returns `skipped: no-scheduled-input` (with the
+current snapshot ID/code digest, without a run directory or acknowledgement)
+when no other scheduled input is pending (subscribed decisions, terminal
+work-item events, due waits, current CI failures, operator records, ready-work
+sets, explicit wakes, progress self-admission or unobserved code change). An
+unavailable
+projection never proves emptiness and falls through to ordinary execution.
+Unreadable, unsafe or malformed evidence falls through to ordinary execution.
+Explicit operator wakes and pending continuations bypass this gate. Direct
+`mizu run`, event jobs, daemons and all existing admission/authority checks are
+unchanged; the marker grants no capability and adds no persisted store or retry.
 Event-triggered dispatch (`mizu run --event`, invoked by the platform file
 triggers or the recovery/poll triggers below) admits on a pending eligible
 operator record, a substantive decision event, a terminal `work_item_events`
@@ -739,7 +760,8 @@ roles, and scheduled writable roles
 recheck their wake policy on idle ticks instead of file triggers.
 
 - Linux (systemd user units): timers (`OnBootSec`/`OnUnitInactiveSec` for
-  intervals, `OnCalendar` for calendar entries) invoke plain `mizu run`;
+  intervals, `OnCalendar` for calendar entries) invoke `mizu run`; opted-in
+  roles append `--scheduled`;
   daemon roles get a service with restart policy instead of a timer. Every
   watched role additionally gets a `-event.service` (oneshot,
   `mizu run --event`) plus a `.path` unit with `PathChanged` watches on
@@ -753,7 +775,8 @@ recheck their wake policy on idle ticks instead of file triggers.
   oneshot. The install result lists both path and recovery timer for enabling,
   not the event oneshot itself.
 - macOS (launchd): `StartInterval` / `StartCalendarInterval` plists invoke
-  plain `mizu run`; daemon roles get `KeepAlive` + `RunAtLoad`. Every watched
+  `mizu run`; opted-in roles append `--scheduled`; daemon roles get
+  `KeepAlive` + `RunAtLoad`. Every watched
   role additionally gets an `-event.plist` with `WatchPaths` on the same
   directories and `mizu run --event` arguments, likewise including
   `current.json` for unscheduled `on_change` roles. That same event job also
@@ -761,7 +784,8 @@ recheck their wake policy on idle ticks instead of file triggers.
   60); no second job is added.
 - Windows (Task Scheduler XML): schedule triggers only for scheduled roles —
   `TimeTrigger` with repetition for intervals, `CalendarTrigger` per `calendar`
-  entry, `LogonTrigger` for daemons. There is no file trigger in the current
+  entry (opted-in roles append `--scheduled`), `LogonTrigger` for daemons.
+  There is no file trigger in the current
   schema: scheduled subscribers still see event inputs at the next timer
   firing (admission applies on every dispatch). Each event-only role
   (watched but unscheduled, including unscheduled `on_change`) instead gets

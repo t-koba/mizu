@@ -199,6 +199,36 @@ def current_ci_failures(project, *, limit: int = MAX_CI_FAILURES) -> list:
     return ci_failures_projection(project, limit=limit)[0]
 
 
+def selected_ci_failures_present(project, config=None) -> bool:
+    """Return whether the selected wake-branch cache has any failure rows.
+
+    Unlike prompt projections, this read is strict: malformed/unreadable
+    selected evidence raises so an admission gate cannot mistake it for empty.
+    Any nonempty selected row list is conservatively present; row-level
+    validation belongs to the normal CI projection.
+    """
+    if config is None:
+        config = getattr(project, "config", None)
+    branches = effective_ci_wake_branches(config)
+    if not branches:
+        return False
+    raw = read_json(project.root / POLL_STATE_FILE, {})
+    if not isinstance(raw, dict):
+        raise ValueError("Invalid CI observation cache")
+    failures = raw.get("failures", {})
+    if not isinstance(failures, dict):
+        raise ValueError("Invalid CI failure cache")
+    for branch in branches:
+        if branch not in failures:
+            continue
+        rows = failures[branch]
+        if not isinstance(rows, list):
+            raise ValueError("Invalid selected CI failure rows")
+        if rows:
+            return True
+    return False
+
+
 def effective_ci_wake_branches(project_config) -> tuple[str, ...]:
     """Deduplicated configured CI wake branches, fail-closed on bad runtime values."""
     try:

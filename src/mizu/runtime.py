@@ -33,7 +33,8 @@ from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
                              MAX_CI_WAKE_ROWS, POLL_STATE_FILE,
                              _clean_ci_failures, _clean_ci_successes, _valid_ci_run,
                              ci_failures_projection, current_ci_failures,
-                             effective_ci_wake_branches, wake_ci_failures)
+                             effective_ci_wake_branches, selected_ci_failures_present,
+                             wake_ci_failures)
 from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _ci_due, _ci_due_for, _ci_rewake_seconds,
                       _ci_wake_enabled, _ci_wake_fact_digest, _ci_wake_path,
@@ -2599,15 +2600,25 @@ class Engine:
                 substantive_events, substantive_diagnostics = substantive["events"], substantive["diagnostics"]
                 substantive_diagnostics = [d for d in substantive_diagnostics
                                             if isinstance(d, dict) and d.get("action") != "defer"]
+        ci_unavailable = False
         try:
             ci_present = _ci_due_for(project, self.config, role)
         except Exception:
             ci_present = []
+            ci_unavailable = True
+        ci_current_present = bool(ci_present)
+        if role.scheduled_inputs and role.ci_wake:
+            try:
+                ci_current_present = (ci_current_present or
+                                      selected_ci_failures_present(project, self.config))
+            except Exception:
+                ci_unavailable = True
         try:
             _ci_snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
             ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
         except Exception:
             ci_failures = []
+            ci_unavailable = True
         # A check-result subscription is not a request to start unrelated
         # project work. Explicit-only roles may resume their owned checks,
         # but generic ledger readiness belongs to configured autonomous runs.
@@ -2677,18 +2688,29 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
+        other_scheduled_input = bool(
+            ci_unavailable or not isinstance(record_state, (list, tuple)) or not record_state
+            or not isinstance(record_state[0], dict)
+            or record_state[0].get("wake_pending") or record_state[0].get("events")
+            or decision_events or receipt_diagnostics or terminal_events or wait_events
+            or ci_current_present or ci_failures or has_wait or ready_work_changed
+            or ready_work_present or explicit_wake
+            or progress_self_admits or next_task or (role.on_change and not code_unchanged))
         return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_resolved_wait': resolved_wait,
-                '_waits_reconciled': waits_reconciled, '_dispatch': _dispatch}
+                '_waits_reconciled': waits_reconciled, '_dispatch': _dispatch,
+                '_has_other_scheduled_input': other_scheduled_input}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
-                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
+                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False,
+                scheduled_invocation: bool = False) -> dict:
         with lock_diagnostics.collect(self.config.limits.lock_diagnostics):
             return self._run(project, role_name, attributes=attributes, retry_busy=retry_busy,
                              enqueue_busy=enqueue_busy, event_trigger=event_trigger,
-                             probes_serviced=probes_serviced)
+                             probes_serviced=probes_serviced, scheduled_invocation=scheduled_invocation)
 
     def _run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
-                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
+                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False,
+                scheduled_invocation: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
@@ -2726,15 +2748,69 @@ class Engine:
                       if role.workspace == "write" else None)
             lock_diagnostics.phase("editor-ingestion")
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
-            lock_diagnostics.phase("pre-admission-dispatch")
+            # Only timer-generated invocations opt in. Unknown evidence is not
+            # emptiness: preserve ordinary execution on any failed strict read.
+            # Operator wakes and saved continuations keep their existing path.
+            # The timer is the only dispatch for scheduled roles on Windows
+            # (no file trigger), so a proven-empty declared source alone must
+            # not skip when the authoritative pre-admission projection still
+            # shows another scheduled input (subscribed decisions, terminal
+            # work-item events, due waits/CI, operator records, ready work,
+            # explicit wakes, progress or code change).
             pre_dispatch_wait_resolution = False
             pre_dispatch_wait_reconciliation = False
+            scheduled_gate_state = None
+            if (scheduled_invocation and not event_trigger and role.scheduled_inputs
+                    and intent is None and not (
+                        role.workspace == "write" and safe_point.pending_hint(project.snapshots))):
+                try:
+                    snapshot = project.snapshots.get()
+                    wake_base = snapshot if role.workspace == "write" else _role_cursor(project, role_name)
+                    explicit_wake = _operator_woke(project.control(), wake_base,
+                                                   observer=role.workspace != "write")
+                    next_task = (_writer_next_task(project, snapshot, role_name)
+                                 if role.workspace == "write" else None)
+                    counts = project.insights.unresolved_counts(deferred_only=True)
+                    empty = (role.scheduled_inputs == ("deferred_insights",)
+                             and isinstance(counts, dict)
+                             and all(type(n) is int and n == 0 for n in counts.values()))
+                    if empty and not explicit_wake and not next_task:
+                        try:
+                            scheduled_gate_state = self._dispatch_state(
+                                project, role_name, role, event_trigger=False,
+                                continuation=False)
+                        except (MizuError, OSError, ValueError, TypeError, KeyError,
+                                AttributeError, OverflowError, RecursionError):
+                            scheduled_gate_state = None
+                        if scheduled_gate_state is not None:
+                            pre_dispatch_wait_resolution = bool(
+                                scheduled_gate_state.get("_resolved_wait"))
+                            pre_dispatch_wait_reconciliation = bool(
+                                scheduled_gate_state.get("_waits_reconciled"))
+                            if scheduled_gate_state.get("skip"):
+                                return scheduled_gate_state["skip"]
+                            if not scheduled_gate_state.get("_has_other_scheduled_input", True):
+                                gate_snapshot = scheduled_gate_state.get("snapshot") or snapshot
+                                return {"skipped": "no-scheduled-input",
+                                        "snapshot": gate_snapshot["id"],
+                                        "code_digest": gate_snapshot["code_digest"]}
+                            # Any other pending/current input falls through to
+                            # ordinary scheduled execution.
+                        # An unavailable dispatch projection never proves
+                        # emptiness; fall through to ordinary execution.
+                except (MizuError, OSError, ValueError, TypeError, KeyError,
+                        AttributeError, OverflowError, RecursionError):
+                    pass
+            lock_diagnostics.phase("pre-admission-dispatch")
             if (event_trigger or role.on_change) and not (
                     role.workspace == "write" and safe_point.pending_hint(project.snapshots)):
-                dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
-                                                      continuation=intent is not None)
-                pre_dispatch_wait_resolution = bool(dispatch_state.get("_resolved_wait"))
-                pre_dispatch_wait_reconciliation = bool(dispatch_state.get("_waits_reconciled"))
+                if scheduled_gate_state is not None:
+                    dispatch_state = scheduled_gate_state
+                else:
+                    dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
+                                                          continuation=intent is not None)
+                    pre_dispatch_wait_resolution = bool(dispatch_state.get("_resolved_wait"))
+                    pre_dispatch_wait_reconciliation = bool(dispatch_state.get("_waits_reconciled"))
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
             # Producer admission: hold only configured producer roles before

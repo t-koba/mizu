@@ -1734,7 +1734,33 @@ string or an array of path strings (e.g. shared principles plus the role file);
 parts are read as UTF-8 in order and joined with one `\n` (trailing newline
 kept), so the composed text is the prompt and the policy digest. Missing,
 unreadable, non-UTF-8, or oversize parts fail load; unknown keys still fail.
-Bounds (fixed mechanism): at most 16 parts, each at most 64 KiB, 256 KiB total. Capabilities grant
+Bounds (fixed mechanism): at most 16 parts, each at most 64 KiB, 256 KiB total.
+
+`scheduled_inputs` is an optional array of unique source names (default `[]`,
+open-ended scheduling). Its only supported value is `"deferred_insights"`;
+a nonempty declaration requires `interval_seconds` or `calendar` and the
+existing `insights` capability. For example, add
+`scheduled_inputs = ["deferred_insights"]` to a timed resolver that already has
+that capability. The platform timer command for an opted-in role carries the
+internal `--scheduled` marker: only those invocations may return
+`{"skipped":"no-scheduled-input","snapshot":"…","code_digest":"…"}` before
+model/run-slot admission. A strict locked insight-store scan must prove there
+are no exact current `defer` decisions across **all** live sources, including
+sources no longer configured and already-acknowledged decisions. Undecided,
+resolved and stale-decision revisions do not count as deferrals. Even then the
+timer falls through to ordinary execution when the authoritative pre-admission
+projection still shows another scheduled input (a subscribed decision, terminal
+work-item event, due wait, current CI failure, operator record, ready-work
+set, explicit wake, progress self-admission or unobserved code change); the
+timer is the only
+dispatch for scheduled roles on Windows. Unsafe, unreadable, malformed or
+otherwise unavailable evidence leaves ordinary scheduled execution in place,
+never establishes emptiness. The compact result creates no run, receipt or
+cursor and acknowledges nothing. Direct runs, event triggers, explicit operator
+wakes, pending continuations, daemons and roles with `[]` keep their existing
+behavior. No new read/routing authority is granted; see [scheduling.md](scheduling.md).
+
+Capabilities grant
 Mizu operations; `engine_tools` grants native or external MCP tools such as
 `codemode`, `web_search`, or `mcp__docs__search`. Exposure and automatic approval
 never grant execution authority. Native host command/file tools cannot bypass

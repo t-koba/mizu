@@ -797,6 +797,8 @@ class Role:
     #: ordinary daemon spacing only, never deferred re-evaluation or the
     #: ``cooldown_seconds`` retry policy.
     daemon_spacing_seconds: int | None = None
+    #: Opt-in input gate for platform timers only; empty keeps open-ended runs.
+    scheduled_inputs: tuple[str, ...] = ()
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -1576,7 +1578,7 @@ def load(file: Path) -> Config:
         if name in RESERVED_ROLE_NAMES:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
-                    "interval_seconds", "calendar", "daemon", "selector", "attributes",
+                    "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
                     "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
@@ -1662,6 +1664,12 @@ def load(file: Path) -> Config:
         daemon = boolean(role.get("daemon", False), "daemon")
         if sum((bool(interval), bool(calendar), daemon)) > 1:
             raise ConfigError("Choose one scheduling method per role")
+        scheduled_inputs = strings(role.get("scheduled_inputs", []), f"roles.{name}.scheduled_inputs")
+        if (len(set(scheduled_inputs)) != len(scheduled_inputs)
+                or set(scheduled_inputs) - {"deferred_insights"}):
+            raise ConfigError(f"roles.{name}.scheduled_inputs must list unique deferred_insights values")
+        if scheduled_inputs and (not (interval or calendar) or "insights" not in caps):
+            raise ConfigError(f"roles.{name}.scheduled_inputs requires a timed role with insights capability")
         raw_events = role.get("decision_events", [])
         events = strings(raw_events, f"roles.{name}.decision_events")
         if len(events) > 8 or len(set(events)) != len(events):
@@ -1782,7 +1790,8 @@ def load(file: Path) -> Config:
                            event_poll_seconds=role_event_poll,
                            event_batch_seconds=role_event_batch,
                            daemon_policy=daemon_policy,
-                           daemon_spacing_seconds=role_daemon_spacing)
+                           daemon_spacing_seconds=role_daemon_spacing,
+                           scheduled_inputs=scheduled_inputs)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

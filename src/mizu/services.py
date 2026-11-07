@@ -12,8 +12,9 @@ published-code changes for unscheduled ``on_change`` roles wake subscribed roles
 their next interval: systemd path units on Linux and WatchPaths on macOS invoke
 `mizu run --event`, which admits only on a subscribed decision/terminal event, a due
 wait, or an unobserved code change for that role and otherwise exits before any
-model use; the periodic timers invoke plain `mizu run` on their own schedules
-unchanged. Task Scheduler XML has no file trigger in this minimal schema, so
+model use; timed roles with `scheduled_inputs` invoke `mizu run --scheduled`
+on their ordinary timers. Other timers remain plain `mizu run`. Task Scheduler
+XML has no file trigger in this minimal schema, so
 scheduled roles still dispatch events when their timer fires, while event-only
 roles get a bounded poll task invoking `mizu run --event` at the role's
 effective `event_poll_seconds` cadence (default 60 seconds). Linux/macOS
@@ -95,6 +96,8 @@ def _scheduled_roles(config: Config, project: Project, executable: Path):
         base = _role_base(project, name)
         args = [str(executable.resolve()), "--config", str(config.file),
                 "daemon" if role.daemon else "run", project.name, "--role", name]
+        if not role.daemon and role.scheduled_inputs:
+            args.append("--scheduled")
         yield name, role, base, args
 
 
@@ -276,9 +279,7 @@ def _render_launchd(config: Config, project: Project, executable: Path) -> dict[
     entry = executable.resolve()
     resolved = str(entry)
     watches = event_watches(config, project)
-    for name, role, base, _ in _scheduled_roles(config, project, executable):
-        args = [resolved, "--config", str(config.file),
-                "daemon" if role.daemon else "run", project.name, "--role", name]
+    for name, role, base, args in _scheduled_roles(config, project, executable):
         body = [f"  <key>Label</key><string>{base}</string>",
                 "  <key>ProgramArguments</key>", "  <array>",
                 _plist_args(args).rstrip("\n"), "  </array>"]
@@ -346,9 +347,8 @@ def _render_windows(config: Config, project: Project, executable: Path) -> dict[
             raise Denied("Windows service needs the Mizu Python entry point beside its command wrapper")
     resolved = str(entry)
     zone_suffix = "+00:00" if config.timezone == "UTC" else ""
-    for name, role, base, _ in _scheduled_roles(config, project, executable):
-        args = [resolved, "--config", str(config.file),
-                "daemon" if role.daemon else "run", project.name, "--role", name]
+    for name, role, base, args in _scheduled_roles(config, project, executable):
+        args[0] = resolved  # Use the Python entry point, not a command wrapper.
         # Task Scheduler starts a real executable; mizu is a Python script.
         command, arguments = _xml(sys.executable), _windows_arguments(args)
         if role.daemon:

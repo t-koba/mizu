@@ -64,6 +64,7 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--role", default=None, help="Configured role (default: single configured role, else required)")
         if name == "run":
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
+            p.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
             p.add_argument("--event", action="store_true",
                            help="Event-triggered dispatch: exit without model use unless a subscribed decision or due wait is pending")
     p = sub.add_parser("check-jobs", help="Execute a bounded batch of frozen-input sandbox checks; no model")
@@ -290,7 +291,8 @@ def _cmd_run(config, project, args):
         # independently of provider recovery; the daemon keeps its
         # own defer-and-repoll loop and never waits here.
         return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)),
-                                             retry_busy=True, event_trigger=getattr(args, "event", False))
+                                             retry_busy=True, event_trigger=getattr(args, "event", False),
+                                             scheduled_invocation=getattr(args, "scheduled", False))
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
