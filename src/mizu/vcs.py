@@ -31,6 +31,7 @@ import re
 import stat
 from pathlib import Path
 
+from .config import DEFAULT_ARTIFACT_FULL_READ_CHARS, artifact_page_bytes
 from .errors import Denied
 from . import lineage
 from .fs import DIGEST, atomic_write, canonical, digest, safe_read
@@ -574,11 +575,8 @@ ACQUIRE_SCOPES = frozenset({"head", "full"})
 MAX_ARTIFACTS = 256
 #: Maximum CI artifact file-name chars (relative Unix path, no traversal).
 MAX_ARTIFACT_NAME = 512
-#: Maximum whole artifact text characters, unchanged for full reads.
-MAX_ARTIFACT_CONTENT = 524288
-#: UTF-8 can require four bytes per permitted character.
-MAX_ARTIFACT_BYTES = 4 * MAX_ARTIFACT_CONTENT
-MAX_ARTIFACT_PAGE_BYTES = 8192
+#: Intrinsic signed-64-bit adapter byte-position/size arithmetic range.
+MAX_ARTIFACT_BYTES = (1 << 63) - 1
 #: Field names disclosed in an artifact-shape denial. Only short lowercase
 #: identifiers are echoed; values, arbitrary keys and response text never are.
 MAX_ARTIFACT_FIELD_NAMES = 8
@@ -654,7 +652,7 @@ def parse_artifacts(data: dict) -> list:
     return out
 
 
-def check_artifact_range(params: dict) -> dict:
+def check_artifact_range(params: dict, settings: dict | None = None) -> dict:
     """Validate opt-in byte paging; omitted pairs preserve whole-file reads."""
     if "offset" not in params and "limit" not in params:
         return {}
@@ -662,26 +660,28 @@ def check_artifact_range(params: dict) -> dict:
         raise Denied("Artifact paging requires both offset and limit")
     offset, limit = params["offset"], params["limit"]
     if (type(offset) is not int or not 0 <= offset <= MAX_ARTIFACT_BYTES
-            or type(limit) is not int or not 1 <= limit <= MAX_ARTIFACT_PAGE_BYTES):
+            or type(limit) is not int or not 1 <= limit <= artifact_page_bytes(settings or {})):
         raise Denied("Invalid VCS artifact byte range")
     return {"offset": offset, "limit": limit}
 
 
-def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dict:
+def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None,
+                   settings: dict | None = None) -> dict:
     """Validate an artifact response and recompute its UTF-8 page hash.
 
     Paged responses carry exactly {artifact, digest, content, size, offset,
     next_offset, page_digest}. Whole-file mode also accepts the established
     {artifact, digest, content} shape, normalizing it and verifying the whole
     digest locally. Sizes/positions are UTF-8 bytes; limit=None requires a
-    whole file (still capped at MAX_ARTIFACT_CONTENT characters). The
-    adapter must reject offsets inside codepoints and over-cap files.
+    whole file capped by configured artifact_full_read_chars. Paged mode
+    bounds each page, not total file size (signed-64-bit byte arithmetic).
+    The adapter must reject offsets inside codepoints.
     Partial pages carry an adapter-asserted whole digest, NOT a locally
     verified one. Callers must check consistent size/hash and verify the
     assembled bytes. Trust remains external-untrusted. Failure: Denied.
     """
     if limit is not None:
-        check_artifact_range({"offset": offset, "limit": limit})
+        check_artifact_range({"offset": offset, "limit": limit}, settings)
     elif type(offset) is not int or offset != 0:
         raise Denied("Whole artifact reads start at zero")
     if (limit is None and isinstance(data, dict)
@@ -715,7 +715,9 @@ def parse_artifact(data: dict, *, name: str, offset: int = 0, limit=None) -> dic
         if not isinstance(data[key], str) or not _SHA.fullmatch(data[key]):
             raise Denied("Invalid VCS artifact content digest")
     content = data["content"]
-    if not isinstance(content, str) or len(content) > MAX_ARTIFACT_CONTENT:
+    if (not isinstance(content, str)
+            or len(content) > (limit if limit is not None else (settings or {}).get(
+                "artifact_full_read_chars", DEFAULT_ARTIFACT_FULL_READ_CHARS))):
         raise Denied("Invalid VCS artifact content")
     try:
         page = content.encode("utf-8")
@@ -921,9 +923,10 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         request = {"op": op, "branch": branch, "artifact": name}
         if sha is not None:
             request["sha"] = sha
-        byte_range = check_artifact_range(params)
+        byte_range = check_artifact_range(params, settings)
         request.update(byte_range)
-        got = parse_artifact(invoke(settings, request, cancel=cancel), name=name, **byte_range)
+        got = parse_artifact(invoke(settings, request, cancel=cancel),
+                             name=name, settings=settings, **byte_range)
         out = {"op": op, "branch": branch, **got, "trust": "external-untrusted"}
         if sha is not None:
             out["sha"] = sha

@@ -27,6 +27,10 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: `submit_insight` fixes source to the role name, so these are refused
 #: at config load to keep the operator channel unforgeable.
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
+#: Whole-artifact character budget; paged mode uses its own byte budget.
+DEFAULT_ARTIFACT_FULL_READ_CHARS = 524288
+
+
 #: TOML signed-64-bit integer representation ceiling, not a resource budget.
 TOML_INTEGER_MAX = (1 << 63) - 1
 #: Report/diagnostic counts flow through Python collection indexes. Usage scans
@@ -118,6 +122,12 @@ MAX_ROLE_POLICY_TOTAL = 262144
 EVENT_POLL_SECONDS_DEFAULT = 60
 EVENT_POLL_SECONDS_MIN = 60
 EVENT_POLL_SECONDS_MAX = 31 * 86400
+
+
+def artifact_page_bytes(settings: dict) -> int:
+    """Configured page budget, defaulting below the adapter JSON envelope cap."""
+    return settings.get("artifact_page_bytes",
+                        min(524288, max(1, settings.get("max_bytes", 524288) // 8)))
 
 
 def _tz_database_missing() -> bool:
@@ -1769,13 +1779,15 @@ def load(file: Path) -> Config:
     number(web["search_feed_item_limit"], "web.search_feed_item_limit", 1, 1000)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     vcs = data.get("vcs", {})
-    keys(vcs, {"command", "timeout_seconds", "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
+    keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
+               "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
                "poll_enabled", "poll_proposals_enabled", "ci_wait_descendants",
                "poll_interval_seconds", "poll_max_branches",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
                "close_grant", "merge_grant", "request_grant"}, "vcs")
     vcs = {"command": [], "timeout_seconds": 20,
+           "artifact_full_read_chars": DEFAULT_ARTIFACT_FULL_READ_CHARS,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
            "poll_enabled": False, "poll_proposals_enabled": False, "ci_wait_descendants": True,
@@ -1789,6 +1801,10 @@ def load(file: Path) -> Config:
         raise ConfigError("vcs.command must be a nonempty argv array without newlines")
     for k in ("timeout_seconds", "max_bytes"):
         number(vcs[k], f"vcs.{k}", 1, 16777216)
+    number(vcs["artifact_full_read_chars"], "vcs.artifact_full_read_chars", 1, TOML_INTEGER_MAX)
+    vcs["artifact_page_bytes"] = artifact_page_bytes(vcs)
+    number(vcs["artifact_page_bytes"], "vcs.artifact_page_bytes", 1,
+           max(1, vcs["max_bytes"] // 8))
     number(vcs["diagnostic_bytes"], "vcs.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     vcs["ci_branch"] = string(vcs["ci_branch"], "vcs.ci_branch")
     if vcs["ci_branch"] and (len(vcs["ci_branch"]) > 256 or any(c.isspace() for c in vcs["ci_branch"])):

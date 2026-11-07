@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu import vcs
-from mizu.errors import Denied
+from mizu.config import DEFAULT_ARTIFACT_FULL_READ_CHARS, artifact_page_bytes, load
+from mizu.errors import ConfigError, Denied
 
 SHA_A = "a" * 40
 NAME = "target/perf/audit.jsonl"
@@ -67,7 +68,7 @@ class ArtifactValidationTests(unittest.TestCase):
         return vcs.parse_artifact(payload, name=NAME, **kwargs)
 
     def test_whole_reads_preserve_character_cap_and_raw_utf8_hash(self):
-        for content in ("", '"measured"\n', "é😀", "😀" * vcs.MAX_ARTIFACT_CONTENT):
+        for content in ("", '"measured"\n', "é😀", "😀" * DEFAULT_ARTIFACT_FULL_READ_CHARS):
             with self.subTest(chars=len(content)):
                 out = self.parse(artifact(content))
                 self.assertEqual(out["content"], content)
@@ -75,10 +76,10 @@ class ArtifactValidationTests(unittest.TestCase):
                 self.assertEqual(out["size"], len(content.encode("utf-8")))
                 self.assertEqual(out["offset"], 0)
                 self.assertIsNone(out["next_offset"])
-        self.assertEqual(vcs.MAX_ARTIFACT_CONTENT, 524288)
-        self.assertEqual(vcs.MAX_ARTIFACT_BYTES, 4 * vcs.MAX_ARTIFACT_CONTENT)
+        self.assertEqual(DEFAULT_ARTIFACT_FULL_READ_CHARS, 524288)
+        self.assertEqual(vcs.MAX_ARTIFACT_BYTES, 2**63 - 1)
         with self.assertRaises(Denied):
-            self.parse(artifact("x" * (vcs.MAX_ARTIFACT_CONTENT + 1)))
+            self.parse(artifact("x" * (DEFAULT_ARTIFACT_FULL_READ_CHARS + 1)))
 
     def test_legacy_whole_file_read_is_normalized_and_locally_verified(self):
         content = "é😀\n"
@@ -118,16 +119,16 @@ class ArtifactValidationTests(unittest.TestCase):
         self.assertNotEqual(out["digest"], out["page_digest"])
 
     def test_maximum_request_and_page_bounds(self):
-        page = artifact("x" * vcs.MAX_ARTIFACT_PAGE_BYTES)
-        self.parse(page, offset=0, limit=vcs.MAX_ARTIFACT_PAGE_BYTES)
-        eof = artifact("", whole="😀" * vcs.MAX_ARTIFACT_CONTENT,
-                       offset=vcs.MAX_ARTIFACT_BYTES)
+        page = artifact("x" * artifact_page_bytes({}))
+        self.parse(page, offset=0, limit=artifact_page_bytes({}))
+        eof = {**artifact(""), "size": vcs.MAX_ARTIFACT_BYTES,
+               "offset": vcs.MAX_ARTIFACT_BYTES}
         self.parse(eof, offset=vcs.MAX_ARTIFACT_BYTES, limit=1)
         with self.assertRaises(Denied):
             self.parse(artifact("é😀"), offset=0, limit=5)  # 2 chars, 6 bytes
         with self.assertRaises(Denied):
-            self.parse(artifact("x" * (vcs.MAX_ARTIFACT_PAGE_BYTES + 1)),
-                       offset=0, limit=vcs.MAX_ARTIFACT_PAGE_BYTES)
+            self.parse(artifact("x" * (artifact_page_bytes({}) + 1)),
+                       offset=0, limit=artifact_page_bytes({}))
 
     def test_shape_denial_names_only_bounded_fields(self):
         good = artifact("x")
@@ -213,7 +214,7 @@ class ArtifactValidationTests(unittest.TestCase):
         bad = [{"offset": 0}, {"limit": 1}]
         for key, values in {
                 "offset": [None, False, True, 0.0, "0", -1, vcs.MAX_ARTIFACT_BYTES + 1],
-                "limit": [None, False, True, 1.0, "1", 0, -1, vcs.MAX_ARTIFACT_PAGE_BYTES + 1],
+                "limit": [None, False, True, 1.0, "1", 0, -1, artifact_page_bytes({}) + 1],
         }.items():
             bad.extend({"offset": 0, "limit": 8, key: value} for value in values)
         with patch.object(vcs, "invoke") as invoke:
@@ -223,7 +224,109 @@ class ArtifactValidationTests(unittest.TestCase):
             invoke.assert_not_called()
 
 
+class ArtifactConfigTests(Fixture):
+    def test_artifact_policy_defaults_and_ranges(self):
+        self.assertEqual(self.config.vcs["max_bytes"], 524288)
+        self.assertEqual(self.config.vcs["artifact_full_read_chars"], 524288)
+        self.assertEqual(self.config.vcs["artifact_page_bytes"], 65536)
+        original = "\n".join(line for line in self.file.read_text().splitlines()
+                             if not line.startswith("artifact_full_read_chars ="))
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).vcs["artifact_full_read_chars"], 524288)
+
+        def configured(**values):
+            before, section = original.split("\n[vcs]\n", 1)
+            section, after = section.split("\n[", 1)
+            lines = [line for line in section.splitlines()
+                     if line.split("=", 1)[0].strip() not in values]
+            lines.extend(f"{key} = {value}" for key, value in values.items())
+            self.file.write_text(before + "\n[vcs]\n" + "\n".join(lines) + "\n[" + after)
+
+        for maximum in (1, 7, 800000, 16777216):
+            with self.subTest(maximum=maximum):
+                configured(max_bytes=maximum)
+                self.assertEqual(load(self.file).vcs["artifact_page_bytes"],
+                                 min(524288, max(1, maximum // 8)))
+                page_max = max(1, maximum // 8)
+                for value in (1, page_max, page_max + 1, 0, -1, 'true', '"1"', '1.5'):
+                    with self.subTest(value=value):
+                        configured(max_bytes=maximum, artifact_page_bytes=value)
+                        if type(value) is int and 1 <= value <= page_max:
+                            self.assertEqual(load(self.file).vcs["artifact_page_bytes"], value)
+                        else:
+                            with self.assertRaisesRegex(ConfigError, "vcs.artifact_page_bytes"):
+                                load(self.file)
+        for value in (1, 524289, 2**63 - 1, 2**63, 0, -1, 'true', '"1"', '1.5'):
+            with self.subTest(full_chars=value):
+                configured(artifact_full_read_chars=value)
+                if type(value) is int and 1 <= value <= 2**63 - 1:
+                    self.assertEqual(load(self.file).vcs["artifact_full_read_chars"], value)
+                else:
+                    with self.assertRaisesRegex(ConfigError, "vcs.artifact_full_read_chars"):
+                        load(self.file)
+
+
 class ArtifactTests(Fixture):
+    def test_large_file_pages_through_eof_and_runtime_schema(self):
+        from mizu.fs import mkdir
+        from mizu.runtime import Context
+        # Beyond the former aggregate cap, including requests starting past it.
+        code = PAGING_ADAPTER.replace('"aé😀z" * 2000', '"aé😀z" * 300000')
+        settings = adapter_settings(code)
+        config = dataclasses.replace(self.config, vcs=settings)
+        role = dataclasses.replace(config.roles["worker"], capabilities=("vcs_read",))
+        run = self.project.root / "runs" / "large-artifact-test"
+        mkdir(run)
+        ctx = Context(config, self.project, role, run,
+                      self.project.snapshots.get(), self.project.workspace)
+        raw = ("aé😀z" * 300000).encode("utf-8")
+        offset = 2097160
+        chunks = []
+        while True:
+            out = ctx.handle("vcs_read", {"op": "artifact", "branch": "mizu",
+                             "artifact": NAME, "sha": SHA_A,
+                             "offset": offset, "limit": 65536})["result"]
+            self.assertEqual(out["size"], len(raw))
+            self.assertEqual(out["digest"], hashlib.sha256(raw).hexdigest())
+            chunks.append(out["content"].encode("utf-8"))
+            if out["next_offset"] is None:
+                break
+            offset = out["next_offset"]
+        self.assertEqual(b"".join(chunks), raw[2097160:])
+        eof = vcs.read_via(settings, "artifact", {"branch": "mizu", "artifact": NAME,
+                          "offset": len(raw), "limit": 1})
+        self.assertIsNone(eof["next_offset"])
+        self.assertEqual(eof["content"], "")
+
+    def test_configured_page_full_read_and_adapter_response_bounds(self):
+        params = {"branch": "mizu", "artifact": NAME}
+        for content in ("é😀", "x" * 524289):
+            payload = artifact(content)
+            # Isolate the character policy from the invocation byte cap,
+            # which is tested independently below.
+            with patch.object(vcs, "invoke", return_value=payload):
+                settings = {"artifact_full_read_chars": len(content)}
+                self.assertEqual(vcs.read_via(settings, "artifact", params)["content"], content)
+                with self.assertRaises(Denied):
+                    vcs.read_via({"artifact_full_read_chars": len(content) - 1}, "artifact", params)
+                # A whole-read cap never narrows an explicitly paged read.
+                self.assertEqual(vcs.read_via({"artifact_full_read_chars": 1,
+                                 "max_bytes": 8 * len(content.encode("utf-8")),
+                                 "artifact_page_bytes": len(content.encode("utf-8"))},
+                                 "artifact", {**params, "offset": 0,
+                                 "limit": len(content.encode("utf-8"))})["content"], content)
+        settings = adapter_settings(serving_code(artifact("é😀")))
+        settings["artifact_page_bytes"] = 6
+        self.assertEqual(vcs.read_via(settings, "artifact", {**params, "offset": 0,
+                         "limit": 6})["content"], "é😀")
+        with patch.object(vcs, "invoke") as invoke, self.assertRaises(Denied):
+            vcs.read_via(settings, "artifact", {**params, "offset": 0, "limit": 7})
+        invoke.assert_not_called()
+        settings = adapter_settings(serving_code(artifact("x" * 1000)), maximum=512)
+        settings["artifact_full_read_chars"] = 2000
+        with self.assertRaises(Denied):
+            vcs.read_via(settings, "artifact", params)
+
     def test_artifacts_list_normalized(self):
         payload = {"artifacts": [
             {"artifact": NAME, "size": 12}, {"artifact": "profiles/callgrind.out"},
@@ -291,7 +394,11 @@ class ArtifactTests(Fixture):
 
     def test_tool_schema_and_runtime_forward_pages_without_relaxing_other_ops(self):
         from mizu.fs import mkdir
+        from mizu.protocol import DEFINITIONS
         from mizu.runtime import Context
+        schema = DEFINITIONS["vcs_read"][1]["properties"]
+        self.assertEqual(schema["offset"]["maximum"], 2**63 - 1)
+        self.assertEqual(schema["limit"]["maximum"], 16777216 // 8)
         settings = adapter_settings(PAGING_ADAPTER)
         config = dataclasses.replace(self.config, vcs=settings)
         role = dataclasses.replace(config.roles["worker"],
@@ -306,7 +413,7 @@ class ArtifactTests(Fixture):
         out = ctx.handle("vcs_read", args)["result"]
         self.assertEqual(out["offset"], 8000)
         self.assertEqual(len(out["content"].encode("utf-8")), 8000)
-        for change in ({"offset": None}, {"limit": 8193}, {"offset": True}):
+        for change in ({"offset": None}, {"limit": artifact_page_bytes(settings) + 1}, {"offset": True}):
             with self.subTest(change=change), self.assertRaises(Denied):
                 ctx.handle("vcs_read", {**args, **change})
         for key in ("offset", "limit"):

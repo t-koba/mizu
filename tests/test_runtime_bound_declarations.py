@@ -452,10 +452,8 @@ DECLARATIONS = {
         'MAX_ARTIFACTS': ('256', 'mechanism', 'VCS artifacts / bounded true artifact entries'),
         'MAX_ARTIFACT_NAME': (
             '512', 'mechanism', 'VCS artifacts / bounded relative file-name chars'),
-        'MAX_ARTIFACT_CONTENT': (
-            '524288', 'safety', 'VCS artifacts / bounded whole-artifact text chars'),
-        'MAX_ARTIFACT_PAGE_BYTES': (
-            '8192', 'mechanism', 'VCS artifacts / bounded UTF-8 page read'),
+        'MAX_ARTIFACT_BYTES': (
+            '(1 << 63) - 1', 'format', 'VCS artifacts / signed-64-bit adapter byte arithmetic'),
         'MAX_CHECKS': ('1024', 'mechanism', 'VCS status / adapter payload already capped'),
         'MAX_PROPOSALS': ('256', 'mechanism', 'VCS proposals / bounded external proposal rows'),
         'MAX_REVIEWS': ('64', 'mechanism', 'VCS proposals / bounded independent reviews per row'),
@@ -771,6 +769,8 @@ CONFIGURED_SETTINGS = {
         'search_feed_item_limit': ('200', 'configured policy', 'web / per-feed RSS/Atom candidate shaping'),
     },
     'vcs': {
+        'artifact_full_read_chars': ('DEFAULT_ARTIFACT_FULL_READ_CHARS', 'configured policy',
+                                     'VCS artifacts / whole-file character budget'),
         'poll_max_branches': ('4', 'configured policy', 'VCS polling / branches considered per daemon tick'),
         'poll_fetch_timeout_seconds': ('30', 'configured policy', 'VCS polling / upstream fetch timeout default'),
         'poll_status_timeout_seconds': ('15', 'configured policy', 'VCS polling / per-branch status timeout default'),
@@ -950,6 +950,8 @@ DECISION_RECONCILIATION = {
 # adds the module-level names already declared by those dictionaries, so a
 # new unexplained config.py literal fails it.
 CONFIG_MODULE_BOUNDS = {
+    'DEFAULT_ARTIFACT_FULL_READ_CHARS': (
+        '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
     'MAX_RESOURCES': (
         '64', 'safety', 'config / bounded per-profile local resource list'),
     'MAX_CI_WAKE_EXTRA_BRANCHES': (
@@ -1311,12 +1313,23 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                         DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION, SMOKE_RETENTION_SCAN):
             declared.update(name for name in special if name in found)
         self.assertEqual(set(found), declared)
-        categories = {'mechanism', 'format', 'safety'}
+        categories = {'mechanism', 'format', 'safety', 'configured policy'}
         for name, (expression, category, rationale) in CONFIG_MODULE_BOUNDS.items():
             with self.subTest(bound=name):
                 self.assertEqual(found[name], expression)
                 self.assertIn(category, categories)
                 self.assertTrue(rationale.strip())
+
+    def test_vcs_artifact_page_budget_is_configured_policy(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'artifact_page_bytes')
+        expression, category, rationale = (
+            "settings.get('artifact_page_bytes', min(524288, max(1, settings.get('max_bytes', 524288) // 8)))",
+            'configured policy', 'VCS artifacts / per-page byte budget scaled to invocation cap')
+        self.assertEqual(ast.unparse(function.body[-1].value), expression)
+        self.assertEqual(category, 'configured policy')
+        self.assertTrue(rationale.strip())
 
     def test_vcs_poll_and_ci_wake_fallbacks_match_configured_policy_defaults(self):
         policy = inventory(ast.parse((ROOT / 'vcs_poll_policy.py').read_text(encoding='utf-8')))
