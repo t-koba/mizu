@@ -1,9 +1,12 @@
 """Systemd deployment and validation settings preserve defaults and reject invalid values."""
 import dataclasses
+import subprocess
+import sys
 from pathlib import Path
 
 from support import Fixture
-from mizu.config import ServiceSettings, TOML_INTEGER_MAX, load
+from mizu.config import (MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS, ServiceSettings,
+                         TOML_INTEGER_MAX, load)
 from mizu.errors import ConfigError
 
 
@@ -19,18 +22,29 @@ class ServiceSettingsTests(Fixture):
 
         original = self.file.read_text()
         for name in expected:
-            for value in (1, expected[name], TOML_INTEGER_MAX):
+            maximum = (MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS
+                       if name == "systemd_verify_timeout_seconds" else TOML_INTEGER_MAX)
+            for value in (1, expected[name], maximum):
                 with self.subTest(name=name, value=value):
                     self.file.write_text(original + f"\n[services]\n{name} = {value}\n")
                     configured = getattr(load(self.file).services, name)
                     self.assertEqual(configured, value)
-            for value in (0, -1, "true", "false", "1.5", '"1"', "[]", "{}"):
+            invalid_values = [0, -1, "true", "false", "1.5", '"1"', "[]", "{}"]
+            if name == "systemd_verify_timeout_seconds":
+                invalid_values.extend((maximum + 1, TOML_INTEGER_MAX))
+            for value in invalid_values:
                 with self.subTest(name=name, invalid=value):
                     self.file.write_text(original + f"\n[services]\n{name} = {value}\n")
                     with self.assertRaisesRegex(ConfigError, f"services.{name}"):
                         load(self.file)
         self.file.write_text(original)
         self.assertEqual(load(self.file).services, ServiceSettings())
+
+    def test_maximum_timeout_is_representable_by_subprocess(self):
+        result = subprocess.run(
+            [sys.executable, "-c", "import time; time.sleep(0.05)"],
+            capture_output=True, timeout=MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS)
+        self.assertEqual(result.returncode, 0)
 
     def test_unknown_keys_and_non_table_are_refused(self):
         original = self.file.read_text()

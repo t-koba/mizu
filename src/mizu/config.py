@@ -37,6 +37,9 @@ MAX_STORAGE_RUN_ENTRIES = 100_000
 
 #: TOML signed-64-bit integer representation ceiling, not a resource budget.
 TOML_INTEGER_MAX = (1 << 63) - 1
+#: subprocess selector waits use signed 32-bit milliseconds; retain the largest
+#: whole-second value that fits, regardless of the host parsing this config.
+MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS = 2_147_483
 #: Report/diagnostic counts flow through Python collection indexes. Usage scans
 #: reserve one index for the extra candidate that detects a truncated window.
 MAX_USAGE_POLICY_COUNT = min(TOML_INTEGER_MAX, sys.maxsize)
@@ -1250,8 +1253,10 @@ def service_settings(raw: dict) -> ServiceSettings:
     fields = dataclasses.fields(ServiceSettings)
     keys(raw, {field.name for field in fields}, "services")
     return ServiceSettings(**{
-        field.name: number(raw.get(field.name, field.default),
-                           f"services.{field.name}", 1, TOML_INTEGER_MAX)
+        field.name: number(
+            raw.get(field.name, field.default), f"services.{field.name}", 1,
+            MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS
+            if field.name == "systemd_verify_timeout_seconds" else TOML_INTEGER_MAX)
         for field in fields
     })
 

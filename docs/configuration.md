@@ -1094,9 +1094,11 @@ daemon units; `systemd_stop_timeout_seconds` (default 45) sets `TimeoutStopSec`
 for role, event-dispatch, and check-runner units. `systemd_verify_timeout_seconds`
 (default 60) bounds the optional `systemd-analyze verify` command during
 `mizu service install`; the install fails closed if verification times out.
-All three settings are positive integer seconds within TOML's signed-64-bit
-integer representation; systemd's own time-span syntax also applies to the
-unit fields. The settings preserve current behavior, do not change Mizu run
+It accepts 1 through 2,147,483 seconds: the fixed upper bound keeps whole
+seconds within the signed-32-bit millisecond selector timeout representation.
+The restart and stop settings are positive integer seconds within TOML's
+signed-64-bit representation; systemd's own time-span syntax also applies to
+the unit fields. The settings preserve current behavior, do not change Mizu run
 deadlines or schedule cadence, and have no effect on macOS or Windows
 service definitions. Regenerate and reinstall units after changing restart or
 stop policy; rendering alone never changes installed services.

@@ -1112,6 +1112,9 @@ CONFIG_MODULE_BOUNDS = {
         '262144', 'mechanism', 'config role policy / fixed composed-text byte total'),
     'TOML_INTEGER_MAX': (
         '(1 << 63) - 1', 'format', 'config / TOML signed-64-bit integer wire range'),
+    'MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS': (
+        '2147483', 'mechanism',
+        'services / largest whole-second subprocess selector timeout fitting signed 32-bit milliseconds'),
     'EVENT_POLL_SECONDS_DEFAULT': (
         '60', 'configured policy', 'service events / unchanged per-role recovery-poll default'),
     'EVENT_POLL_SECONDS_MIN': (
