@@ -31,6 +31,10 @@ RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 DEFAULT_ARTIFACT_FULL_READ_CHARS = 524288
 
 
+#: Aggregate entry ceiling for per-project run-reference scans.
+MAX_STORAGE_RUN_ENTRIES = 100_000
+
+
 #: TOML signed-64-bit integer representation ceiling, not a resource budget.
 TOML_INTEGER_MAX = (1 << 63) - 1
 #: Report/diagnostic counts flow through Python collection indexes. Usage scans
@@ -488,6 +492,8 @@ class Limits:
     retention_days: int = 31
     #: Completed, unreferenced run components; 0 retains indefinitely (0–3650).
     run_retention_days: int = 31
+    #: Physical-run retention scan budget, independent of usage reports (1–100000).
+    run_retention_scan_runs: int = 5000
     #: Unreferenced snapshot/history retention; 0 disables automatic GC (0–3650).
     snapshot_retention_days: int = 31
     #: Opt-out cadence (seconds) for automatic application of the configured
@@ -578,6 +584,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
                  "insight_cursor_ttl_seconds": (60, 604800),
+                 "run_retention_scan_runs": (1, MAX_STORAGE_RUN_ENTRIES),
                  "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
                  "smoke_retention_projects": (1, TOML_INTEGER_MAX),
                  "smoke_retention_pairs": (1, TOML_INTEGER_MAX),

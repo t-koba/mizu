@@ -466,6 +466,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `role_state_bytes` | Maximum canonical JSON bytes of a new replacement role-owned current research state record (1,024–65,536; default 4,096); existing records remain readable up to the supported 65,536-byte ceiling |
 | `role_state_prompt_bytes` | Maximum bytes of a role's own research state injected into its prompt (1–65,536; default 4,096); over-bound records inject status/generation/sizes only |
 | `retention_days` | Daily budget-file retention and decided insight live-inbox window (default 31 days; 0 disables; 0–3,650). Current-revision terminal insights move permanently to `insight-archive.sqlite3` before inbox removal; bodies/evidence are not deleted. Ingest still reports removed live copies as `reaped`. `insight list` remains live-only; explicit `insight page --scope archive` enumerates bodies and validated legacy identity-only tombstones (`body_unavailable: true`); ID reads include archived bodies and explicitly deny missing bodies. Archive retention is permanent, with no expiry/deletion knob (see operations for one-time migration and retry behavior). This setting never deletes snapshots, whole run directories, decisions, or archived insight bodies; bounded per-run dispatch measurements use the separate `event_log_*` retention below |
+| `run_retention_scan_runs` | Physical-run retention scan budget (default 5,000; integer 1–100,000), independent of usage-report limits. Exceeding this budget makes the scan incomplete and refuses all apply deletion |
 | `run_retention_days` | Completed, unreferenced per-project run-component retention (default 31 days; 0 keeps indefinitely; integer 0–3,650). Uses validated `started_at`, not mtime; whole connected components expire only when every member is terminal and strictly older than the window. See the retention contract below |
 | `snapshot_retention_days` | Automatic retention for unreferenced snapshot manifests and superseded immutable history generations (default 31 days; integer 0–3,650; 0 disables snapshot GC). The current pointer/history window and durable citations never expire by this clock. See [automatic snapshot retention](#automatic-snapshot-retention) |
 | `automatic_prune_interval_seconds` | Shared per-project cadence for automatic run pruning and snapshot GC at safe execution boundaries (default 86,400 seconds / one day; integer 0–2,678,400; 0 disables both automatic passes while manual commands stay available). No background timer; busy contention does not consume the cadence. Latest bounded result: `maintenance/automatic-prune.json`. Run pruning still uses `prune(project, apply=True, keep_artifacts=0)`; count-based artifact deletion is never enabled implicitly. Shared smoke expiry has its own cadence |
@@ -602,9 +603,11 @@ Permanent decisions, insight archives, WorkItems, receipts and other audit
 records remain: an expired historical run ID may no longer resolve to full
 output, and usage reports can only aggregate surviving run output.
 
-The reference scan retains the usage default of 5,000 physical runs (independent
-of `[usage]` report overrides), separately from
-its 100,000 directory-entry and distinct-pin bounds. Individual JSON is capped at
+The reference scan uses `[limits].run_retention_scan_runs` (default 5,000 physical
+runs; integer 1–100,000), independent of `[usage]` report overrides and the
+`run_retention_days` expiry window. Its upper range shares the fixed 100,000
+storage-run entry safety ceiling; the aggregate directory-entry and distinct-pin
+bounds still apply separately. Individual JSON is capped at
 1 MiB; combined envelope-read and metadata-subtree-preflight bytes are capped at
 64 MiB. Preflight checks every file/directory in a candidate run's payload and
 any remaining quarantine payload with lstat only and no link following. Opaque

@@ -37,10 +37,11 @@ deadline defaults (15 and 45 seconds); include, role-policy, resource, CI-wake-b
 and workspace-depth ceilings are mechanism or safety bounds; protocol integers
 and wait-seconds retain their format ranges.
 The `web_worker.py` include-envelope bound derives from the fixed include
-byte ceiling. `work_items.py` page, cursor, row, projection, revision and
-sidecar bounds are fixed mechanism or safety contracts; its page-byte aliases
-are inventoried against their shared declared bases rather than treated as new
-independent numeric policies.
+byte ceiling. `lineage.py`'s full-ref length derives from its fixed prefix and
+branch-name format bound. `work_items.py` page, cursor, row, projection,
+revision and sidecar bounds are fixed mechanism or safety contracts; its
+page-byte aliases are inventoried against their shared declared bases rather
+than treated as new independent numeric policies.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
 character-count and maximum suffixes match the read-page and script-input names,
@@ -618,6 +619,9 @@ DECLARATIONS = {
         'TARGET_BRANCH_MAX': (
             '256', 'format',
             'lineage / target branch name character bound'),
+        'TARGET_REF_MAX': (
+            'len(TARGET_REF_PREFIX) + TARGET_BRANCH_MAX', 'format',
+            'lineage / full refs/heads name length is prefix plus bounded branch name'),
         'TARGET_REMOTE_MAX': (
             '256', 'format',
             'lineage / target remote name character bound'),
@@ -738,8 +742,8 @@ DECLARATIONS = {
     },
     'storage_runs.py': {
         'MAX_ENTRIES': (
-            '100000', 'safety',
-            'storage runs / bounded scan entry ceiling'),
+            'MAX_STORAGE_RUN_ENTRIES', 'safety',
+            'storage runs / bounded scan entry ceiling re-exported from config'),
         'MAX_BYTES': (
             '64 * 1024 * 1024', 'safety',
             'storage runs / bounded aggregate scan bytes'),
@@ -947,6 +951,14 @@ CHECK_RETENTION = {
 }
 
 
+# The physical-run retirement budget has its own Limits owner. MAX_ENTRIES in
+# storage_runs remains the shared fixed safety ceiling, not a usage-report default.
+RUN_RETENTION_SCAN = {
+    'run_retention_scan_runs': ('5000', 'configured policy',
+                                'Limits / physical-run retention scan work budget'),
+}
+
+
 # The active recovery budget is policy; its separate absolute ceiling is
 # name-scoped, not a WorkItems numeric inventory.
 HISTORY_TEMPORARIES = {
@@ -1058,6 +1070,8 @@ DECISION_RECONCILIATION = {
 CONFIG_MODULE_BOUNDS = {
     'DEFAULT_ARTIFACT_FULL_READ_CHARS': (
         '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
+    'MAX_STORAGE_RUN_ENTRIES': (
+        '100000', 'safety', 'config / aggregate per-project run-reference scan entry ceiling'),
     'MAX_RESOURCES': (
         '64', 'safety', 'config / bounded per-profile local resource list'),
     'MAX_CI_WAKE_EXTRA_BRANCHES': (
@@ -1419,6 +1433,12 @@ def numeric(node, symbolic=()):
         return numeric(node.operand, symbolic)
     if isinstance(node, ast.BinOp):
         return numeric(node.left, symbolic) and numeric(node.right, symbolic)
+    if isinstance(node, ast.Call):
+        return (isinstance(node.func, ast.Name) and node.func.id == 'len'
+                and len(node.args) == 1 and not node.keywords
+                and isinstance(node.args[0], ast.Name) and node.args[0].id in symbolic)
+    if isinstance(node, ast.Attribute):
+        return ast.unparse(node) in symbolic
     return isinstance(node, ast.Name) and node.id in symbolic
 
 
@@ -1459,6 +1479,12 @@ def range_argument_inventory(tree):
 
 
 SYMBOLIC_BOUNDS = {
+    'lineage.py': {
+        'TARGET_REF_MAX': frozenset({'TARGET_REF_PREFIX', 'TARGET_BRANCH_MAX'}),
+    },
+    'storage_runs.py': {
+        'MAX_ENTRIES': frozenset({'MAX_STORAGE_RUN_ENTRIES'}),
+    },
     'ci_observation.py': {
         'MAX_CI_WAKE_BRANCHES': frozenset({'MAX_CI_WAKE_EXTRA_BRANCHES'}),
         'MAX_CI_WAKE_ROWS': frozenset({'MAX_CI_WAKE_BRANCHES', 'MAX_CI_CHECKS_PER_BRANCH'}),
@@ -1727,11 +1753,14 @@ def no_defaults(limit, /, count, *, size):
                     self.assertEqual(category, 'configured policy')
                     self.assertTrue(rationale.strip())
 
-    def test_started_evidence_alias_is_not_a_second_declaration(self):
+    def test_runtime_reexports_are_not_second_declarations(self):
         evidence = ast.parse((ROOT / 'evidence_records.py').read_text(encoding='utf-8'))
+        reads = ast.parse((ROOT / 'workspace_reads.py').read_text(encoding='utf-8'))
         runtime = ast.parse((ROOT / 'runtime.py').read_text(encoding='utf-8'))
         self.assertEqual(inventory(evidence), {'MAX_STARTED_EVIDENCE_BYTES': '65536'})
+        self.assertEqual(inventory(reads), {'MAX_READ_IDENTITIES': '1024'})
         self.assertNotIn('MAX_STARTED_EVIDENCE_BYTES', inventory(runtime))
+        self.assertNotIn('MAX_READ_IDENTITIES', inventory(runtime))
 
     def test_gate_declared_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
@@ -1864,6 +1893,21 @@ def no_defaults(limit, /, count, *, size):
                                       'MAX_HISTORY_TEMPORARIES')],
                          ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in HISTORY_TEMPORARIES.values()))
+
+    def test_run_retention_scan_budget_declaration(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'run_retention_scan_runs')
+        expression, category, rationale = RUN_RETENTION_SCAN[field.target.id]
+        self.assertEqual(ast.unparse(field.value), expression)
+        self.assertEqual(category, 'configured policy')
+        self.assertTrue(rationale.strip())
+        storage = ast.parse((ROOT / 'storage_runs.py').read_text(encoding='utf-8'))
+        self.assertNotIn('MAX_RUNS_SCANNED', {target.id for node in storage.body
+                         if isinstance(node, ast.Assign) for target in node.targets
+                         if isinstance(target, ast.Name)})
 
     def test_smoke_retention_scan_budget_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

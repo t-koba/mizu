@@ -585,14 +585,17 @@ class CompletedRunRetentionTests(Fixture):
         self.block({"kind": "insight_decided", "insight": proposal["id"]})
         self.assert_refused_without_deletion([free])
 
-    def test_physical_run_bound_is_separate_from_entry_bound(self):
-        from mizu.config import Usage
-        self.assertEqual(runs.MAX_RUNS_SCANNED, Usage.runs_scanned)
+    def test_physical_run_budget_is_separate_from_usage_report_limit(self):
+        self.project.config = dataclasses.replace(
+            self.config,
+            limits=dataclasses.replace(self.config.limits, run_retention_scan_runs=2),
+            usage=dataclasses.replace(self.config.usage, runs_scanned=1))
         a, b = self.run_record(), self.run_record()
-        with mock.patch.object(runs, "MAX_RUNS_SCANNED", 2):
-            self.assertEqual(self.candidates(), {a, b})
-            c = self.run_record()
-            self.assert_refused_without_deletion([a, b, c])
+        self.assertEqual(self.candidates(), {a, b})
+        self.project.config = dataclasses.replace(
+            self.project.config, usage=dataclasses.replace(self.config.usage, runs_scanned=100000))
+        c = self.run_record()
+        self.assert_refused_without_deletion([a, b, c])
 
     def test_nested_payload_links_are_never_traversed_or_deleted(self):
         old, free = self.run_record(), self.run_record()

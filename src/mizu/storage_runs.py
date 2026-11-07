@@ -15,13 +15,11 @@ import time
 import uuid
 from pathlib import Path
 
+from .config import MAX_STORAGE_RUN_ENTRIES
 from .errors import Denied, LimitExceeded
-from .config import Usage
 from .fs import DIGEST, canonical, digest, identifier, loads_finite, safe_read, sync_dir, write_json
 
-# Run retirement retains the usage default, independent of report overrides.
-MAX_RUNS_SCANNED = Usage.runs_scanned
-MAX_ENTRIES = 100_000
+MAX_ENTRIES = MAX_STORAGE_RUN_ENTRIES
 MAX_BYTES = 64 * 1024 * 1024
 RECORD_BYTES = 1024 * 1024
 PREVIEW_ROWS = 100
@@ -227,9 +225,9 @@ def plan(project):
         graph[b].add(a)
 
     try:
-        # Physical run count is the usage.py bound, independent of the larger
-        # entry/byte budgets needed for nested evidence and permanent ledgers.
-        directories = scan.children(root / "runs", limit=MAX_RUNS_SCANNED)
+        # Physical-run policy is independent of usage reports and the aggregate
+        # entry/byte safety budgets for nested evidence and permanent ledgers.
+        directories = scan.children(root / "runs", limit=project.config.limits.run_retention_scan_runs)
         for directory in directories:
             if not _directory(directory):
                 raise Denied("Unsafe run directory")

@@ -8,7 +8,8 @@ from support import Fixture
 from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
                          MAX_DECISION_RECEIPT_DIAGNOSTICS, MAX_HISTORY_TEMPORARIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
-                         TOML_INTEGER_MAX, Limits, ROOT_KEYS, _LIMIT_RANGES, load)
+                         TOML_INTEGER_MAX, MAX_STORAGE_RUN_ENTRIES, Limits, ROOT_KEYS,
+                         _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
 
@@ -76,6 +77,30 @@ class CheckRetainedConfigTests(Fixture):
         limits = load(self.file).limits
         self.assertEqual(limits.check_retained, 2)
         self.assertEqual(limits.check_pending, 32)
+
+
+class RunRetentionScanConfigTests(Fixture):
+    def test_default_and_strict_range(self):
+        self.assertEqual(MAX_STORAGE_RUN_ENTRIES, 100000)
+        self.assertEqual(_LIMIT_RANGES["run_retention_scan_runs"],
+                         (1, MAX_STORAGE_RUN_ENTRIES))
+        self.assertEqual(Limits().run_retention_scan_runs, 5000)
+        original = re.sub(r'(?m)^run_retention_scan_runs = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.run_retention_scan_runs, 5000)
+        for value in ('1', '5000', '100000', '0', '-1', '100001',
+                      'true', 'false', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n', f'\n[limits]\nrun_retention_scan_runs = {value}\n'))
+                if value in ('1', '5000', '100000'):
+                    limits = load(self.file).limits
+                    self.assertEqual(limits.run_retention_scan_runs, int(value))
+                    self.assertEqual(limits.run_retention_days, 31)
+                    self.assertEqual(load(self.file).usage.runs_scanned, 5000)
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.run_retention_scan_runs'):
+                        load(self.file)
 
 
 class HistoryTemporariesConfigTests(Fixture):
