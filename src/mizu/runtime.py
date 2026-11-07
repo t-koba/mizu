@@ -2770,10 +2770,11 @@ class Engine:
                                                    observer=role.workspace != "write")
                     next_task = (_writer_next_task(project, snapshot, role_name)
                                  if role.workspace == "write" else None)
-                    counts = project.insights.unresolved_counts(deferred_only=True)
-                    empty = (role.scheduled_inputs == ("deferred_insights",)
-                             and isinstance(counts, dict)
-                             and all(type(n) is int and n == 0 for n in counts.values()))
+                    empty = False
+                    if role.scheduled_inputs == ("deferred_insights",):
+                        has_deferred = project.insights.has_current_defer(
+                            max_entries=self.config.limits.scheduled_input_scan_items)
+                        empty = has_deferred is False
                     if empty and not explicit_wake and not next_task:
                         try:
                             scheduled_gate_state = self._dispatch_state(

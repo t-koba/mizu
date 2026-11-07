@@ -1,12 +1,14 @@
 """Timer-only input admission uses strict current decisions, never delivery cursors."""
 import dataclasses
 import json
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu.cli import _cmd_run, parser
 from mizu.config import load
-from mizu.errors import ConfigError, Denied
+from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.runtime import Engine
 from mizu.services import render
 
@@ -14,6 +16,7 @@ from mizu.services import render
 class ScheduledInputConfigTests(Fixture):
     def test_default_and_supported_timed_roles(self):
         self.assertTrue(all(r.scheduled_inputs == () for r in self.config.roles.values()))
+        self.assertEqual(self.config.limits.scheduled_input_scan_items, 1000)
         original = self.file.read_text()
         for name in ("searcher", "reporter"):  # interval and calendar
             with self.subTest(role=name):
@@ -24,6 +27,19 @@ class ScheduledInputConfigTests(Fixture):
                                         'capabilities = ["insights", "files", "read", "search"')
                 self.file.write_text(text)
                 self.assertEqual(load(self.file).roles[name].scheduled_inputs, ("deferred_insights",))
+
+    def test_scheduled_input_scan_limit_is_configurable_and_positive(self):
+        original = self.file.read_text()
+        pattern = r"(?m)^scheduled_input_scan_items\s*=.*$"
+        self.assertRegex(original, pattern)
+        self.file.write_text(re.sub(pattern, "scheduled_input_scan_items = 17", original, count=1))
+        self.assertEqual(load(self.file).limits.scheduled_input_scan_items, 17)
+        for value in ("0", "-1", "true"):
+            with self.subTest(value=value):
+                invalid = re.sub(pattern, f"scheduled_input_scan_items = {value}", original, count=1)
+                self.file.write_text(invalid)
+                with self.assertRaises(ConfigError):
+                    load(self.file)
 
     def test_invalid_declarations_are_refused(self):
         original = self.file.read_text()
@@ -81,7 +97,7 @@ class ScheduledInputRuntimeTests(Fixture):
         self.assertEqual(set((self.project.root / "runs").iterdir()) if (self.project.root / "runs").exists() else set(), runs)
 
     def test_direct_event_and_open_ended_runs_do_not_consult_source(self):
-        with patch.object(self.project.insights, "unresolved_counts", side_effect=AssertionError("not a timer gate")):
+        with patch.object(self.project.insights, "has_current_defer", side_effect=AssertionError("not a timer gate")):
             self.reaches_admission()
             # Existing event gate decides the result; it must not read scheduled inputs.
             result = self.engine.run(self.project, "reporter", event_trigger=True, scheduled_invocation=True)
@@ -100,21 +116,21 @@ class ScheduledInputRuntimeTests(Fixture):
         # Both saved reservations and pending safe-points keep their existing path.
         with patch("mizu.continuations.ready", return_value={"intent": "saved"}), patch(
                 "mizu.continuations.reservation", side_effect=RuntimeError("continuation reached")), patch.object(
-                self.project.insights, "unresolved_counts", side_effect=AssertionError("continuation")):
+                self.project.insights, "has_current_defer", side_effect=AssertionError("continuation")):
             with self.assertRaisesRegex(RuntimeError, "continuation reached"):
                 self.engine.run(self.project, "worker", scheduled_invocation=True)
         with patch("mizu.runtime.safe_point.pending_hint", return_value=True), patch.object(
-                self.project.insights, "unresolved_counts", side_effect=AssertionError("continuation")):
+                self.project.insights, "has_current_defer", side_effect=AssertionError("continuation")):
             self.reaches_admission("worker", scheduled_invocation=True)
 
-    def test_exact_defer_counts_all_sources_even_after_acknowledgement(self):
+    def test_current_defers_from_all_sources_survive_acknowledgement(self):
         self.submit("former-role", "defer")
         self.submit("searcher", "defer")
         rows = self.project.insights.decision_events("reporter", ["defer"], sources="any", limit=100)
         self.assertEqual(len(rows), 2)
         self.project.insights.acknowledge_decisions("reporter", rows, sources="any")
         self.assertEqual(self.project.insights.decision_events("reporter", ["defer"], sources="any", limit=100), [])
-        self.assertEqual(self.project.insights.unresolved_counts(deferred_only=True), {"former-role": 1, "searcher": 1})
+        self.assertTrue(self.project.insights.has_current_defer(max_entries=1000))
         self.engine.run(self.project, "reporter", scheduled_invocation=True)
         self.assertEqual(len(self.engine.driver.calls), 1)
 
@@ -126,7 +142,7 @@ class ScheduledInputRuntimeTests(Fixture):
         record = json.loads(path.read_text())
         record["rev"] = 2
         path.write_text(json.dumps(record))
-        self.assertEqual(self.project.insights.unresolved_counts(deferred_only=True), {})
+        self.assertFalse(self.project.insights.has_current_defer(max_entries=1000))
         self.assertEqual(self.engine.run(self.project, "reporter", scheduled_invocation=True)["skipped"],
                          "no-scheduled-input")
         # Existing producer accounting still includes undecided/stale-decision rows.
@@ -145,14 +161,14 @@ class ScheduledInputRuntimeTests(Fixture):
         except OSError:
             self.skipTest("Directory symlinks unavailable")
         with self.assertRaises(Denied):
-            self.project.insights.unresolved_counts(deferred_only=True)
+            self.project.insights.has_current_defer(max_entries=1000)
         self.reaches_admission(scheduled_invocation=True)
 
     def test_pending_insight_attention_blocks_empty_gate(self):
         self.project.insights.submit(
             source="searcher", title="Attention", body="Please review",
             base_snapshot=None, addressee="reporter")
-        self.assertEqual(self.project.insights.unresolved_counts(deferred_only=True), {})
+        self.assertFalse(self.project.insights.has_current_defer(max_entries=1000))
         self.reaches_admission(scheduled_invocation=True)
 
     def test_non_defer_decision_blocks_empty_gate(self):
@@ -165,7 +181,7 @@ class ScheduledInputRuntimeTests(Fixture):
         self.config.roles["reporter"] = role
         self.project.config = self.config
         self.submit("searcher", "accept")
-        self.assertEqual(self.project.insights.unresolved_counts(deferred_only=True), {})
+        self.assertFalse(self.project.insights.has_current_defer(max_entries=1000))
         self.reaches_admission(scheduled_invocation=True)
 
     def test_ready_check_job_blocks_empty_gate(self):
@@ -187,7 +203,7 @@ class ScheduledInputRuntimeTests(Fixture):
         self.project.work_items.transition(
             seed["id"], expected_rev=1, status="dropped", actor="worker",
             reason="Terminal")
-        self.assertEqual(self.project.insights.unresolved_counts(deferred_only=True), {})
+        self.assertFalse(self.project.insights.has_current_defer(max_entries=1000))
         self.reaches_admission(scheduled_invocation=True)
 
     def test_operator_record_blocks_empty_gate(self):
@@ -195,7 +211,7 @@ class ScheduledInputRuntimeTests(Fixture):
         from mizu import operator_records as records
         records.write(self.project, event_id="notice1", kind="operator.notice",
                       body="Exact notice", addressee="reporter")
-        self.assertEqual(self.project.insights.unresolved_counts(deferred_only=True), {})
+        self.assertFalse(self.project.insights.has_current_defer(max_entries=1000))
         self.reaches_admission(scheduled_invocation=True)
 
     def enable_ci_wake(self):
@@ -219,6 +235,65 @@ class ScheduledInputRuntimeTests(Fixture):
         write_json(self.project.root / "vcs-poll.json", {"failures": {"main": None}})
         self.reaches_admission(scheduled_invocation=True)
 
+    def set_scan_limit(self, value):
+        limits = dataclasses.replace(self.config.limits, scheduled_input_scan_items=value)
+        self.config = dataclasses.replace(self.config, limits=limits)
+        self.project.config = self.config
+        self.engine = Engine(self.config, driver=ScriptDriver())
+
+    def test_scan_bound_exhaustion_falls_through(self):
+        self.submit()
+        self.submit("reviewer")
+        self.set_scan_limit(1)
+        self.reaches_admission(scheduled_invocation=True)
+
+    def test_large_inbox_reads_only_the_configured_bound(self):
+        from mizu.fs import canonical
+        self.set_scan_limit(8)
+        inbox = self.project.root / "inbox"
+        inbox.mkdir(exist_ok=True)
+        entries = [inbox / f"record-{index:03d}.json" for index in range(10)]
+        real_iterdir = Path.iterdir
+        reads = []
+
+        def ordered_entries(path):
+            if path == inbox:
+                return iter(entries)
+            return real_iterdir(path)
+
+        def read_record(root, relative, maximum):
+            reads.append(relative)
+            identifier = Path(relative).stem
+            return canonical({"id": identifier, "source": "searcher", "rev": 1})
+
+        with patch.object(Path, "iterdir", ordered_entries), patch(
+                "mizu.insights.safe_read", side_effect=read_record):
+            with self.assertRaises(LimitExceeded):
+                self.project.insights.has_current_defer(max_entries=8)
+        self.assertEqual(len(reads), 8)
+
+    def test_current_defer_short_circuits_before_later_malformed_entry(self):
+        key = self.submit("searcher", "defer")
+        inbox = self.project.root / "inbox"
+        deferred = inbox / f"{key}.json"
+        later = inbox / "z-malformed.json"
+        later.write_text("{")
+        real_iterdir = Path.iterdir
+
+        def ordered_entries(path):
+            if path == inbox:
+                return iter((deferred, later))
+            return real_iterdir(path)
+
+        with patch.object(Path, "iterdir", ordered_entries):
+            self.assertTrue(self.project.insights.has_current_defer(max_entries=1))
+
+    def test_exact_scan_bound_can_prove_empty(self):
+        self.submit()
+        self.set_scan_limit(1)
+        result = self.engine.run(self.project, "reporter", scheduled_invocation=True)
+        self.assertEqual(result["skipped"], "no-scheduled-input")
+
     def test_malformed_and_unreadable_evidence_falls_through(self):
         key = self.submit("searcher", "reject")
         for directory in ("inbox", "decisions"):
@@ -232,8 +307,9 @@ class ScheduledInputRuntimeTests(Fixture):
         for error in (OSError("unreadable"), Denied("unsafe")):
             with self.subTest(error=error), patch("mizu.insights.safe_read", side_effect=error):
                 self.reaches_admission(scheduled_invocation=True)
-        for counts in (None, {"searcher": False}, {"searcher": -1}):
-            with self.subTest(counts=counts), patch.object(self.project.insights, "unresolved_counts", return_value=counts):
+        for result in (None, 0):
+            with self.subTest(result=result), patch.object(
+                    self.project.insights, "has_current_defer", return_value=result):
                 self.reaches_admission(scheduled_invocation=True)
         self.config.roles["reporter"] = dataclasses.replace(self.config.roles["reporter"], scheduled_inputs=("unknown",))
         self.reaches_admission(scheduled_invocation=True)

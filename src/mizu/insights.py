@@ -993,11 +993,70 @@ replacement insight without implying rejected substance.
                 continue
         return out
 
-    def unresolved_counts(self, sources=None, *, kind=None, addressee=None, deferred_only=False) -> dict:
+    def _current_live_decision(self, path, item):
+        """Read and validate the decision only when it binds this live revision."""
+        decision_path = self.root / "decisions" / path.name
+        try:
+            decision_path.lstat()
+        except FileNotFoundError:
+            return None
+        decision = json.loads(safe_read(
+            self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
+        if (not isinstance(decision, dict) or decision.get("id") != item["id"]
+                or decision.get("action") not in ("accept", "modify", "reject", "defer", "withdraw")):
+            raise Denied("Malformed live insight decision")
+        decision_rev = decision.get("rev", 1)
+        if type(decision_rev) is not int or decision_rev < 1:
+            raise Denied("Malformed live insight decision revision")
+        if decision_rev != item.get("rev", 1):
+            return None
+        return decision
+
+    def has_current_defer(self, *, max_entries: int) -> bool:
+        """Prove whether any live insight has an exact current defer decision.
+
+        Opens at most ``max_entries`` inbox entries under the project record
+        lock and returns immediately on the first current defer. A single
+        un-opened directory-entry lookahead detects overflow; if the bound is
+        exhausted before an empty result is proven, raises
+        ``LimitExceeded`` so callers keep the ordinary scheduled path. Unsafe,
+        unreadable, vanished or malformed records also fail closed.
+        """
+        if type(max_entries) is not int or max_entries < 1:
+            raise Denied("max_entries must be a positive integer")
+        with lock_diagnostics.operation("read"), project_record_lock(self.root):
+            inbox = self.root / "inbox"
+            if not insight_archive._directory(inbox):
+                return False
+            # A missing parent is normal; an unsafe existing parent is not.
+            insight_archive._directory(self.root / "decisions")
+            for index, path in enumerate(inbox.iterdir()):
+                if index >= max_entries:
+                    raise LimitExceeded("Scheduled-input insight scan bound exhausted")
+                if path.suffix != ".json":
+                    continue
+                item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
+                if not isinstance(item, dict):
+                    raise Denied("Malformed live insight record")
+                identifier(item.get("id"))
+                if item["id"] != path.stem:
+                    raise Denied("Live insight filename does not match ID")
+                identifier(item.get("source"))
+                item_rev = item.get("rev", 1)
+                if type(item_rev) is not int or item_rev < 1:
+                    raise Denied("Malformed live insight revision")
+                decision = self._current_live_decision(path, item)
+                if decision is not None and decision["action"] == "defer":
+                    return True
+        return False
+
+    def unresolved_counts(self, sources, *, kind=None, addressee=None) -> dict:
         """Count live unresolved inputs for each named source, fail-closed.
 
-        One bounded read-only inbox scan under the project record lock for a
-        consistent snapshot without the shared retention lock; undecided plus
+        One consistent read-only inbox scan under the project record lock;
+        per-record byte bounds apply, but this producer-accounting API retains
+        its existing full-scan behavior. The scheduled timer gate uses the
+        separately bounded :meth:`has_current_defer` reader. Undecided plus
         deferred revisions count, resolved and archive-only history do not.
         Optional kind/addressee filters select exact metadata without using the
         tolerant prompt listing for a negative liveness claim. Each inbox row is safely
@@ -1005,15 +1064,10 @@ replacement insight without implying rejected substance.
         event bound. Unsafe, unreadable, vanished or malformed live entries
         raise rather than undercount; a missing decision only leaves its
         input unresolved. Unknown or malformed requested sources raise.
-        ``sources=None`` counts all sources; ``deferred_only`` selects only exact
-        current defer decisions, independent of decision-delivery acknowledgements.
         Tolerant prompt/list paths (``_live_entries``, ``generation``,
         ``list``) are unchanged.
         """
-        # None selects every live source, including sources no longer configured.
-        if type(deferred_only) is not bool:
-            raise Denied("deferred_only must be a boolean")
-        names = [] if sources is None else list(sources)
+        names = list(sources)
         for name in names:
             identifier(name)
         wanted = set(names)
@@ -1022,8 +1076,6 @@ replacement insight without implying rejected substance.
             inbox = self.root / "inbox"
             if not insight_archive._directory(inbox):
                 return counts
-            # Even an absent decision row must not hide an unsafe parent.
-            insight_archive._directory(self.root / "decisions")
             # iterdir propagates listing failures rather than glob's tolerant
             # handling. Do not skip a vanished row: its source is unknown.
             for path in sorted(inbox.iterdir()):
@@ -1041,33 +1093,15 @@ replacement insight without implying rejected substance.
                 item_rev = item.get("rev", 1)
                 if type(item_rev) is not int or item_rev < 1:
                     raise Denied("Malformed live insight revision")
-                decision_path = self.root / "decisions" / path.name
-                try:
-                    decision_path.lstat()
-                except FileNotFoundError:
-                    # No decision cannot resolve (or hide) this input.
-                    decision = None
-                else:
-                    decision = json.loads(safe_read(
-                        self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
-                    if (not isinstance(decision, dict) or decision.get("id") != item["id"]
-                            or decision.get("action") not in ("accept", "modify", "reject", "defer", "withdraw")):
-                        raise Denied("Malformed live insight decision")
-                    decision_rev = decision.get("rev", 1)
-                    if type(decision_rev) is not int or decision_rev < 1:
-                        raise Denied("Malformed live insight decision revision")
-                    if decision_rev != item_rev:
-                        decision = None
+                decision = self._current_live_decision(path, item)
                 if decision is not None and decision["action"] != "defer":
                     continue
-                if deferred_only and (decision is None or decision["action"] != "defer"):
-                    continue
                 source = item["source"]
-                if sources is None or source in wanted:
+                if source in wanted:
                     metadata = insight_metadata(item) if kind is not None or addressee is not None else {}
                     if ((kind is None or metadata.get("kind") == kind)
                             and (addressee is None or metadata.get("addressee") == addressee)):
-                        counts[source] = counts.get(source, 0) + 1
+                        counts[source] += 1
         return counts
 
     def unresolved_count(self, source: str) -> int:

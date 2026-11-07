@@ -213,9 +213,12 @@ Per-role
 `scheduled_inputs = []` (the default) preserves open-ended periodic execution.
 Opting in with `["deferred_insights"]` requires a timed role with `insights`;
 unknown or duplicate sources are refused at config load. Before model/run-slot
-admission, the strict insight reader scans live records under the existing
-project record lock and counts exact current defer decisions across all sources.
-Decision-delivery acknowledgements do not remove a deferral from this count.
+admission, the strict insight reader opens at most the configured
+`limits.scheduled_input_scan_items` entries (default 1,000) under the existing
+project record lock. It stops at the first exact current defer across all
+sources; decision-delivery acknowledgements do not remove a deferral. One
+unopened entry detects overflow. If the bound is exhausted before emptiness is
+proven, it falls through to normal scheduling.
 Proven emptiness alone still does not skip: the gate reuses the authoritative
 pre-admission projection and only returns `skipped: no-scheduled-input` (with the
 current snapshot ID/code digest, without a run directory or acknowledgement)
