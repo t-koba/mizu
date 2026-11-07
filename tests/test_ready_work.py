@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, bind_delivery, without_blocked_age
 from mizu import work_items as work_items_module
+from mizu import work_item_waits as work_item_waits_module
 from mizu.errors import Denied
 from mizu.fs import now, read_json, write_json
 from mizu.runtime import (Engine, MAX_READY_WORK_AGE_SECONDS, _ready_work_age,
@@ -440,7 +441,9 @@ class ReadyProjectionTests(Fixture):
                                      base_snapshot=None, expected_rev=1)
         self.assertTrue(store.page_ready()["items"][0]["stale"])
         self.project.insights.decide(proposal["id"], "reject", "Not proceeding", "", "run", expected_rev=2)
-        with patch.object(work_items_module, "now", return_value="2099-01-02T00:00:00+00:00"):
+        fixed_now = "2099-01-02T00:00:00+00:00"
+        with (patch.object(work_items_module, "now", return_value=fixed_now),
+              patch.object(work_item_waits_module, "now", return_value=fixed_now)):
             after = store.page_ready()
             self.assertEqual(after, self.exact())
         self.assertEqual(after["total"], 2)
