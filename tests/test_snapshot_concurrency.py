@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mizu import snapshot as snapshot_module
 from mizu.errors import Denied, LimitExceeded, SnapshotConflict
 from mizu.fs import atomic_write, canonical, digest, read_json, write_json
-from mizu.snapshot import Snapshots
+from mizu.snapshot import SnapshotNotDescendant, Snapshots
 
 
 def store_at(root, **limits):
@@ -84,6 +84,33 @@ class SnapshotConcurrencyTests(unittest.TestCase):
     def publication_bytes(self):
         return {p.relative_to(self.store.root).as_posix(): p.read_bytes()
                 for p in [self.store.root / "current.json", *sorted((self.store.root / "histories").glob("*.json"))]}
+
+    def test_strict_negative_ancestry_is_distinct_from_unknown_evidence(self):
+        base, child, sibling = self.branches({'a': 'base'}, {'a': 'child'}, {'a': 'sibling'})
+        for ancestor, descendant in ((base, base), (child, base), (child, sibling)):
+            with self.subTest(ancestor=ancestor['id'], descendant=descendant['id']):
+                with self.assertRaises(SnapshotNotDescendant) as raised:
+                    self.store.require_descendant(ancestor['id'], descendant['id'])
+                self.assertIsInstance(raised.exception, Denied)
+        self.assertEqual(self.store.require_descendant(base['id'], child['id']), child)
+
+        def unknown(ancestor, descendant):
+            with self.assertRaises(Denied) as raised:
+                self.store.require_descendant(ancestor, descendant)
+            self.assertNotIsInstance(raised.exception, SnapshotNotDescendant)
+
+        unknown('invalid', child['id'])
+        unknown(base['id'], 'invalid')
+        unknown(base['id'], '0' * 64)
+        with patch.object(self.store, 'history_index', 0):
+            unknown(base['id'], child['id'])
+        path = self.store.root / 'snapshots' / (child['id'] + '.json')
+        write_json(path, {**child, 'parent': 'invalid'})
+        unknown(base['id'], child['id'])
+        unknown(child['id'], child['id'])  # Even same-ID negatives validate the manifest.
+        with patch.object(self.store, 'get', side_effect=OSError('unreadable')):
+            with self.assertRaises(OSError):
+                self.store.require_descendant(base['id'], child['id'])
 
     def test_disjoint_merge_is_createable_and_materializable(self):
         records = self.branches({"a": "old", "b": "old", "gone": "x"},

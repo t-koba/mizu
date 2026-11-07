@@ -1054,7 +1054,7 @@ for a role with `ci_wake`, or a changed ready-work set (including exact terminal
 evidence bindings) is a distinct admission reason that
 unchanged-code suppression must not swallow. Ready work is role-scoped: a role
 needs `work_items_transition`, and may claim an unheld `open` item or continue
-its own held `doing`/due `blocked` item; another role's held work does not qualify.
+its own held `open`/`doing`/due `blocked` item; another role's held work does not qualify.
 This ledger capability is independent of workspace permissions, so granting it to
 a read-only role does not grant source edits. Writer-daemon readiness still
 observes the configured writer cooldown. See the
@@ -1829,7 +1829,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
 | `probe` | One policy-bounded HTTPS request to `probe_hosts` with an allowlisted method and bounded headers/body; observes status, headers and bounded body with a receipt (no redirects, no credentials) |
 | `insights` | Read proposals |
-| `work_items_read` | Read an open-item page (optional cursor up to 128 characters; limit 1–100, default 25; rows at most 8192 canonical bytes) or one exact seeded item by ID in any status, including terminal states, with current origin staleness and paged immutable history (`after_rev` exclusive 0–256, default 0; limit 1–100, default 25; chain at most 256 revisions; records at most 128 KiB). Either response is capped at 1 MiB and is a fresh live view, not a frozen snapshot; unsafe or malformed store data fails closed. This read grant does not imply transition authority |
+| `work_items_read` | Read an open-item page (optional cursor up to 128 characters; limit 1–100, default 25; rows at most 8192 canonical bytes) or one exact seeded item by ID in any status, including terminal states, with current origin staleness and paged immutable history (`after_rev` exclusive 0–256, default 0; limit 1–100, default 25; chain at most 256 revisions; ordinary records at most 131,072 bytes, with resolution-bearing transition events at most 131,593 bytes). Either response is capped at 1 MiB and is a fresh live view, not a frozen snapshot; unsafe or malformed store data fails closed. This read grant does not imply transition authority |
 | `work_items_transition` | Append one CAS-bound status revision; actor is fixed to the role, stale revisions require a fresh read, `snapshot_id` on a doing-to-doing revision first records an exact retained published snapshot/scope binding (the binding event stores `snapshot_id` as null), `done` requires that prior binding and exactly its `snapshot_id` with valid embedded or independently retained digest-bound acceptance (not live workspace equality), dropped-to-done correction requires the independently retained receipt, `dropped` requires a reason, and new transitions to `blocked` require a supported structured wait (historical no-wait records remain readable). An optional scope (1-4000 nonblank characters) states the scope in force from that revision on; omitting it inherits the previous revision's scope, a scope is never cleared, a scope change is its own recorded event with a reason naming what it supersedes, and a `done` closure may not change the scope it inherits (record the change in an earlier transition). Granted only to the example worker role |
 | `work_items_legacy_read` | Read a bounded live event inventory of unresolved/reconciled legacy accept/modify history and explicit no-work dispositions, with origin validity, bounded decision/reconciliation reasons and coverage. Observational; no proposal bodies. Granted only to the example worker; does not imply reconciliation authority |
 | `work_items_reconcile` | Exclusively record one immutable hash-bound open/drop resolution without rewriting decisions. Expected action and optional revision must match; runtime actor and nonblank reason required; open needs title and valid source origin/timestamp, drop has no seed. Exact retries return `created: false` and do not count as progress; conflicts fail closed. Non-observational on first write, forbidden to consult/delegation children, no wrap-up exception. Granted only to the example worker |
@@ -2658,12 +2658,78 @@ The generation binds semantic unit-opening inputs, captured once per unit and re
 ## Project metadata
 
 `projects/NAME/PROJECT.md` is the human goal. `project.toml` has `roles`,
-repeatable `verify` command strings, optional `attributes`, per-project `vcs`, and an optional `recorded_batches` table
+repeatable `verify` command strings, optional `attributes`, `work_item_wait_resolution`, per-project `vcs`, and an optional `recorded_batches` table
 of operator-owned named custom batches. These are outside the workspace and
 are not exposed as writable model tools. Alter them as operator while paused.
 Verification command exit status alone does not prove semantic correctness,
 particularly when the repository's tests are editable. Use independent review
 and external acceptance fixtures for critical requirements.
+
+### Work-item wait resolution
+
+Set the top-level project key `work_item_wait_resolution = "reopen"` (default),
+or `"manual"` to leave all reopening to explicit transitions. For example,
+in **project.toml**, not the shared daemon configuration:
+
+```toml
+roles = ["worker"]
+verify = ["python -m compileall -q src"]
+work_item_wait_resolution = "reopen" # alternative: "manual"
+```
+
+During unit-opening work-order preparation, a role with both `work_order` and
+`work_items_transition` may reconcile its own held waiters before open/ready
+prompt projections are captured. Reconciliation shares the open/order projection
+scan: it observes supported active waiters until at most
+`limits.work_items_prompt` successful transitions have been made (the prompt row
+cap is unchanged). Pending/unknown waits do not consume that budget. The scan
+still inventories the existing ledger and validates changed chains; unchanged
+closed chains reuse existing source-witnessed projections rather than being
+replayed by a separate reconciliation pass. Candidate proof uses the existing
+bounded retained snapshot/receipt discovery; each append rechecks it under locks
+and CAS. There is no new index or cursor. Read tools, ready/open pages, status,
+and work-order review reads never perform these transitions. The first slice resolves only:
+
+- `code_change`: a validated observed snapshot ID and code digest differ from
+  the wait's stored code-digest baseline.
+- `publication_ci`: a retained, strict descendant of both the bound delivery
+  snapshot and the pinned wait snapshot has a different code digest from both,
+  with exactly one validated retained publication receipt on the wait's pinned
+  branch. Existing snapshot-history/ancestry and publication-evidence bounds
+  apply. List position alone is not ancestry; an unbound delivery cannot resolve.
+
+Missing, unknown, corrupt, ambiguous, or bounded-out proof leaves the wait
+pending. This does not request hosted CI, declare a CI result, finish work, or
+change other wait kinds. Non-superseded CI waits keep their exact receipt/result
+route. A stale CAS is not retried. Exhausted revision chains are not retired
+automatically. The manual policy does not rewrite earlier resolutions.
+
+An automatic blocked-to-open revision clears the active wait but retains its
+original holder, scope, delivery, and item smoke references. Only that holder
+can act on the held-open item or see it as role-eligible ready work; ordinary
+model-authored `open` transitions still release the holder (including an
+explicit held-open-to-open release without a scope change), and seeds stay
+unheld. The immutable `wait_resolution` member records `wait_rev`, SHA-256
+`wait_digest` of the canonical prior wait (including any wait smoke references),
+`kind` (`due` or `superseded`), `resolved_at` (the event's UTC seconds timestamp),
+and `evidence` (exact `snapshot_id`/`code_digest`, plus `publication_id` and
+canonical `receipt_digest` for supersession). Item identity is the enclosing
+revision chain. Replay validates the recorded proof, not today's moving
+receipt inventory; later ambiguity never rewrites the original observation.
+The field appears on that event and its current open projection, not subsequent
+transitions. Resolution snapshots are durable storage roots while their history
+references them.
+
+The new field's exact maximum canonical growth is **521 bytes**, including its
+leading comma (three-digit prior revision, 64-byte hex identities/digests, and a
+25-byte UTC timestamp). Only work-item event reads carrying this field may use
+131,593 bytes instead of 131,072; the corresponding work-item projection
+allowance grows by the same 521 bytes. Ordinary events, seeds, other records,
+row/page budgets, and general caps are unchanged. On platforms supporting the
+existing metadata-witness cache, resolved-open projections reuse full validation
+while the seed/history, consumed ancestry manifests, and exact publication
+sources remain unchanged. A changed or unsafe witness forces validation again;
+Windows keeps its existing exact-replay fallback.
 
 In each operator-owned `projects/NAME/project.toml`, `[vcs.lineage_target]` (default absent) names the single expected promotion target that lineage readiness is bound to. All four keys are required with no implicit `origin`/`main`: `repository` is the 64 lowercase hex repository identity digest (non-secret, never a URL); `remote` is a safe ASCII remote name (1–256 chars, alphanumeric first, then alphanumeric, dot, underscore, slash or hyphen, with no empty, `.` or `..` path components); `target_ref` is a valid full branch ref (`refs/heads/<branch>`, branch name at most 256 characters and full ref at most 267); and `version` is the descriptor version in 1–1,073,741,824 (bump on intentional change). `publish`/`status` requests carry this descriptor when configured; adapter `lineage` responses must match it exactly, and new lineage facts bind it (`expected_repository`/`expected_remote`/`expected_target_ref`/`expected_version`, schema 2). Missing configuration leaves readiness `unknown`/`unconfigured` without failing ordinary publish or CI; legacy unbound receipts (schema 1) stay readable but never establish readiness; a changed descriptor makes prior observations `unknown`/`descriptor_mismatch` (receipt `stale`) without rewriting them. Shared `[vcs]` adapter settings and grants remain in the daemon config; unknown project `[vcs]` keys and a global target are rejected. Project settings are loaded when the project is opened; change them while paused. The metadata stays operator-owned; the product never gates external promotion.
 

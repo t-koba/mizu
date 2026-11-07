@@ -1182,6 +1182,8 @@ class PublicationCiWaitTests(CiWaitFixture):
             # displace valid status targets. Order alone grants no ancestry.
             candidates = list(ci_waits._candidates(self.store, {**item, 'wait': child_wait}, True))
             self.assertEqual(candidates, [(one['id'], None), (two['id'], two['id'])])
+            self.assertEqual(list(ci_waits._candidates(
+                self.store, {**item, 'wait': child_wait}, True, newest_first=True)), candidates)
 
     def test_candidate_discovery_reads_linear_manifests_in_any_history_order(self):
         item = self.block()
@@ -1191,14 +1193,17 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.assertTrue(set(children).issubset(retained))
         orders = [retained, list(reversed(retained)), retained[::2] + retained[1::2]]
         for history in orders:
-            with self.subTest(history=history[:2]), patch.object(
-                    snapshots, '_history_ids', return_value=history), patch.object(
-                    snapshots, 'validate_manifest', wraps=snapshots.validate_manifest) as reads:
-                candidates = list(ci_waits._candidates(self.store, item, True))
-            self.assertEqual(candidates[0], (self.snapshot['id'], None))
-            self.assertEqual({sid for sid, candidate in candidates if candidate}, set(children))
-            self.assertEqual(len(candidates), 65)
-            self.assertLessEqual(reads.call_count, len(children) + 1)
+            for newest_first in (False, True):
+                with self.subTest(history=history[:2], newest_first=newest_first), patch.object(
+                        snapshots, '_history_ids', return_value=history), patch.object(
+                        snapshots, 'validate_manifest', wraps=snapshots.validate_manifest) as reads:
+                    candidates = list(ci_waits._candidates(
+                        self.store, item, True, newest_first=newest_first))
+                ordered = reversed(history) if newest_first else history
+                self.assertEqual(candidates, [(self.snapshot['id'], None)] + [
+                    (sid, sid) for sid in ordered if sid in children])
+                self.assertEqual(len(candidates), 65)
+                self.assertLessEqual(reads.call_count, len(children) + 1)
 
     def test_candidate_memo_preserves_bounds_branches_duplicates_and_revalidates(self):
         item = self.block()

@@ -23,6 +23,10 @@ from .startup import HOST_STATE_FILES
 from .vcs import REF_PREFIX
 
 
+class SnapshotNotDescendant(Denied):
+    """Validated strict-negative ancestry, not missing or uncertain evidence."""
+
+
 _CURRENT_PARENT = object()
 _PATH_VALIDATION_CACHE_LIMIT = 256
 
@@ -669,7 +673,7 @@ class Snapshots:
             if not isinstance(descendant_id, str) or not DIGEST.fullmatch(descendant_id):
                 raise Denied("Ancestry requires exact snapshot IDs")
             if ancestor_id == descendant_id:
-                raise Denied("Replacement must be a newer snapshot")
+                raise SnapshotNotDescendant("Replacement must be a newer snapshot")
             current, path = descendant_id, []
             while current is not None and current not in distances:
                 if len(path) >= self.history_index:
@@ -684,7 +688,7 @@ class Snapshots:
                 distances[sid] = steps
             steps = distances[descendant_id]
             if steps is None:
-                raise Denied("Replacement is not a newer descendant")
+                raise SnapshotNotDescendant("Replacement is not a newer descendant")
             if steps > self.history_index:
                 raise Denied("Replacement ancestry is incomplete within history budget")
             return steps

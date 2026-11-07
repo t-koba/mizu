@@ -278,7 +278,10 @@ def _capture_opening(context) -> dict:
         project = context.project
         config = context.config
         limit_open = config.limits.work_items_prompt
-        if "work_order" in caps:
+        from .work_item_resolution import reconcile
+        if {"work_order", "work_items_transition"} <= caps:
+            open_work_items, order_inventory = reconcile(project, context.role.name, limit=limit_open)
+        elif "work_order" in caps:
             open_work_items, order_inventory = project.work_items.page_open_for_order(limit=limit_open)
         else:
             open_work_items = project.work_items.page_open(limit=limit_open)
@@ -571,7 +574,7 @@ def _is_actionable_locked(project, role_name: str, item_id: str, published_snaps
         return False
     holder = item.get("holder")
     if status == "open":
-        if holder is not None:
+        if holder not in (None, role_name):
             return False
     elif status == "doing":
         if holder != role_name:

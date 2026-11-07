@@ -525,7 +525,9 @@ def check_recorded_batches(value) -> dict[str, tuple[str, ...]]:
 def check_project_settings(
         settings) -> tuple[list[str], tuple[str, ...], dict[str, tuple[str, ...]], dict | None]:
     """Validate the complete operator-owned project.toml schema in one place."""
-    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs", "ci_acceptance"}, "project")
+    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs", "ci_acceptance", "work_item_wait_resolution"}, "project")
+    if settings.get("work_item_wait_resolution", "reopen") not in ("reopen", "manual"):
+        raise ConfigError("project.work_item_wait_resolution must be reopen or manual")
     from .selection import attributes
     attributes(settings.get("attributes", {}))
     roles = strings(settings.get("roles", []), "project.roles")

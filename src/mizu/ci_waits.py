@@ -20,6 +20,7 @@ from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, loads_
 from .fs import now as observed_now
 from .shared_records import RECORD_BYTES, RECEIPT_BYTES, KindPolicy, SharedRecords, _token
 from .publication import Publication
+from .snapshot import SnapshotNotDescendant
 from .vcs import _reject_terminal_controls, parse_status_checks
 from .work_items import _directory, _timestamp
 
@@ -71,7 +72,7 @@ def normalize_publication(value, *, snapshots, branch=None, stored=False):
     return result
 
 
-def _resolved(store, wait, observed_snapshot=None):
+def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_distance=None):
     if wait["kind"] == "ci":
         return wait
     target = wait
@@ -79,21 +80,36 @@ def _resolved(store, wait, observed_snapshot=None):
         if (not isinstance(observed_snapshot, dict)
                 or set(observed_snapshot) != {"snapshot_id", "code_digest"}):
             raise Denied("Invalid observed CI snapshot")
-        snapshot = store.snapshots.require_descendant(
-            wait["snapshot_id"], observed_snapshot["snapshot_id"])
+        if wait_distance is None:
+            snapshot = store.snapshots.require_descendant(
+                wait["snapshot_id"], observed_snapshot["snapshot_id"])
+        else:
+            wait_distance(observed_snapshot["snapshot_id"])
+            snapshot = store.snapshots.get(observed_snapshot["snapshot_id"])
         if snapshot["code_digest"] != observed_snapshot["code_digest"]:
             raise Denied("Observed CI snapshot digest mismatch")
         target = {**wait, **observed_snapshot}
-    # The ordinary listing intentionally skips corrupt records. This consumer
-    # needs complete evidence of uniqueness, so corruption refuses the scan.
-    page = Publication.list_receipts(store.root, code_digest=target["code_digest"],
-                                     branch=wait["branch"], limit=2, strict=True,
-                                     policy=store.publication_evidence)
-    if (page["truncated"] or page["scan_stopped"] or page["total"] != 1
-            or len(page["publications"]) != 1):
-        return None
-    receipt = Publication.read_receipt(store.root, page["publications"][0]["publication_id"])
-    if receipt["code_digest"] != target["code_digest"] or receipt["branch"] != wait["branch"]:
+    # Only reconciliation's advisory scan supplies a call-local cache. Locked
+    # transitions and ordinary CI polling always list afresh by default.
+    key = (wait["branch"], target["code_digest"])
+    if receipt_cache is not None and key in receipt_cache:
+        publication_id = receipt_cache[key]
+    else:
+        # The ordinary listing skips corrupt records; uniqueness needs strict
+        # evidence. Exceptions escape without creating a cache entry.
+        page = Publication.list_receipts(store.root, code_digest=target["code_digest"],
+                                         branch=wait["branch"], limit=2, strict=True,
+                                         policy=store.publication_evidence)
+        publication_id = (page["publications"][0]["publication_id"]
+                          if not page["truncated"] and not page["scan_stopped"]
+                          and page["total"] == 1 and len(page["publications"]) == 1 else None)
+    if publication_id is not None:
+        receipt = Publication.read_receipt(store.root, publication_id)
+        if receipt["code_digest"] != target["code_digest"] or receipt["branch"] != wait["branch"]:
+            return None
+    if receipt_cache is not None and len(receipt_cache) < store.snapshots.history_index:
+        receipt_cache[key] = publication_id
+    if publication_id is None:
         return None
     return {**wait, "publication_id": receipt["publication_id"], "sha": receipt["published_sha"],
             **({"observed_snapshot": observed_snapshot} if observed_snapshot is not None else {})}
@@ -535,27 +551,36 @@ def complete(context, finished):
                            manifest=context.ci_wait_manifest)
 
 
-def _candidates(store, item, descendants):
+def _candidates(store, item, descendants, *, newest_first=False, wait_distance=None):
+    """Discover bounded descendants; a supplied checker requires exact negatives."""
     wait = item["wait"]
     if wait["kind"] == "ci":
         yield "", None
         return
     yield wait["snapshot_id"], None
     if descendants:
-        # History order is not ancestry. Ineligible/corrupt manifests cannot
-        # consume the status window or prevent another candidate's discovery.
-        try:
-            distance = store.snapshots._descendant_distance_from(wait["snapshot_id"])
-        except (Denied, LimitExceeded, OSError, ValueError):
-            return
+        # History order is not ancestry. Ordinary polling skips ineligible or
+        # corrupt manifests so they cannot consume the status window.
+        if wait_distance is None:
+            try:
+                distance = store.snapshots._descendant_distance_from(wait["snapshot_id"])
+            except (Denied, LimitExceeded, OSError, ValueError):
+                return
+        else:
+            distance = wait_distance
         seen = {wait["snapshot_id"]}
-        for sid in store.snapshots._history_ids()[-store.snapshots.history_index:]:
+        history = store.snapshots._history_ids()[-store.snapshots.history_index:]
+        for sid in reversed(history) if newest_first else history:
             if sid in seen:
                 continue
             seen.add(sid)
             try:
                 distance(sid)
-            except (Denied, LimitExceeded, OSError, ValueError):
+            except (Denied, LimitExceeded, OSError, ValueError) as exc:
+                # Reconciliation must stop on unknown ancestry, not fall back
+                # to an older receipt. Ordinary polling keeps its skip policy.
+                if wait_distance is not None and not isinstance(exc, SnapshotNotDescendant):
+                    raise
                 continue
             yield sid, sid
 

@@ -379,7 +379,14 @@ DECLARATIONS = {
         '_DECISION_IDLE_CACHE_LIMIT': (
             '256', 'safety', 'runtime / bounded in-process empty-decision cache entries'),
     },
+    'work_item_resolution.py': {
+        'MAX_RESOLUTION_BYTES': (
+            '521', 'format', 'work items / exact maximum canonical wait-resolution member growth'),
+    },
     'work_items.py': {
+        'MAX_EVENT_BYTES': (
+            'PREVIEW_BYTES + MAX_RESOLUTION_BYTES', 'mechanism',
+            'work items / existing event ceiling plus the exact maximum wait-resolution member'),
         'MAX_REVISIONS': (
             '256', 'mechanism',
             'work items / revision-chain format bound including the immutable seed'),
@@ -394,7 +401,7 @@ DECLARATIONS = {
         'MAX_CLOSED_PAGE_ROWS': (
             '100', 'mechanism', 'work items / public closed-page row contract'),
         'MAX_PROJECTION_BYTES': (
-            'PREVIEW_BYTES + 256', 'safety',
+            'MAX_EVENT_BYTES + 256', 'safety',
             'work items / bounded canonical projection envelope around the shared text-preview ceiling'),
         'MAX_HISTORY_PAGE_BYTES': (
             'MAX_OPEN_PAGE_BYTES', 'safety',
@@ -1539,7 +1546,8 @@ SYMBOLIC_BOUNDS = {
         'MAX_WEB_WORKER_INPUT_BYTES': frozenset({'MAX_INCLUDE_BYTES'}),
     },
     'work_items.py': {
-        'MAX_PROJECTION_BYTES': frozenset({'PREVIEW_BYTES'}),
+        'MAX_EVENT_BYTES': frozenset({'PREVIEW_BYTES', 'MAX_RESOLUTION_BYTES'}),
+        'MAX_PROJECTION_BYTES': frozenset({'MAX_EVENT_BYTES'}),
         'MAX_HISTORY_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),
         'MAX_CLOSED_ROW_BYTES': frozenset({'MAX_OPEN_ROW_BYTES'}),
         'MAX_CLOSED_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),

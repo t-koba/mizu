@@ -2053,7 +2053,7 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         health_record = read_json(context.project.root / "health" / f"{context.role.name}.json", {})
         if isinstance(health_record, dict) and missing_finish_recovery_due(health_record, context.config):
             streak = missing_finish_streak(health_record)
-            if _has_ready_work(context.project):
+            if _has_ready_work(context.project, context.role):
                 missing_recovery_due = True
                 missing_reason = (
                     f"missing-finish units {streak} "

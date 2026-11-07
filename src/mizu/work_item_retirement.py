@@ -44,6 +44,8 @@ def read(store, current, chain_sha256):
     normalized = request(current["id"], req["expected_rev"], req["status"], req["actor"], req["reason"])
     if req != normalized or record["request_sha256"] != digest(canonical(normalized)):
         raise Denied("Invalid work-item retirement request identity")
+    if current["status"] == "open" and current["holder"] not in (None, req["actor"]):
+        raise Denied("Held-open work belongs to its holder")
     project(current, record)  # Enforce the ordinary event byte bound on reads too.
     return record
 
@@ -57,6 +59,7 @@ def project(current, record):
             "transition": {"from": current["status"], "to": "dropped"},
             "snapshot_id": None, "verification": None, "delivered_tree": None,
             "verification_scope": None}
+    projected.pop("wait_resolution", None)
     if len(canonical(projected)) > PREVIEW_BYTES:
         raise LimitExceeded("Work-item event exceeds byte bound")
     return projected
@@ -70,11 +73,14 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
         raise Denied("Retirement cannot change scope, evidence, references or waits")
     state = {}
     current = None
+    has_resolution = False
     for current in store._iter_chain(item_id, history_revisions=history_revisions, retirement=state):
-        pass
+        has_resolution |= "wait_resolution" in current
     from .work_items import MAX_REVISIONS
     if current["rev"] != MAX_REVISIONS or current["status"] not in ("open", "doing", "blocked"):
         raise Denied("Retirement requires an exhausted nonterminal work item")
+    if current["status"] == "open" and current["holder"] not in (None, actor):
+        raise Denied("Held-open work belongs to its holder")
     record = state.get("record")
     if record is not None:
         if record["request"] != req:
@@ -89,6 +95,9 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
         project(current, record)  # Refuse an unreadable projection before committing.
         write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
         store._wake_terminal()
+    if has_resolution:
+        store._sidecar_remove(item_id)
+        return project(current, record)
     try:
         # Cache boundary: store the exact retirement binding with the last two
         # ordinary source records; never fails the commit or retry.

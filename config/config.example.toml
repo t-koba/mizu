@@ -5,6 +5,8 @@
 # deep-merge and any duplicate leaf key is an error naming both files.
 # Relative values inside fragments resolve against this directory.
 # include = []
+# Per-project policy belongs in projects/NAME/project.toml, not this file:
+# work_item_wait_resolution = "reopen" (default); "manual" disables automatic reopening.
 data_dir = "~/.local/state/mizu"
 timezone = "UTC"
 # Default answering role for consultation when the caller names none.

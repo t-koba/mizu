@@ -18,15 +18,17 @@ staleness and hold state are recomputed on every call, and any unexpected
 shape bypasses the fast path. A continued doing-to-doing revision has no
 source-backed earlier hold start in its current and previous records, so it
 removes the sidecar; a fresh reader replays exactly on this and other misses.
+Items with any wait resolution also remain exact-only: current/previous
+records cannot establish their historical resolution proof.
 Live ready scans still validate every history directory and recover leftovers
-before sampling its identity. In-process terminal projections come only from
-full status-mode replay, including retirement chain hashes and exact completion
-proof. They are reused only while the complete history witness and all proof
+before sampling its identity. In-process terminal and resolved-open projections
+come only from full status-mode replay, including exact resolution proof,
+retirement chain hashes and completion proof where applicable. They are reused only while the complete history witness and all proof
 sources (manifest, retained receipt, and CI publication when used) are unchanged
 across validation and lookup. Sidecars alone cannot establish this proof.
 Completed sidecar reads still validate exact completion evidence.
 Unknown/unsafe records, incomplete chains and bounds fail closed. Retrying a committed CAS requires a re-read. Same-status events
-require a scope change or explicit delivery binding; only a proven forward dropped-to-done correction
+require a scope/reference change, held-open release, or delivery binding; only a proven forward dropped-to-done correction
 may follow a terminal event.
 """
 from __future__ import annotations
@@ -45,6 +47,7 @@ from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import insight_archive, work_item_retirement
 from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age
+from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      PublicationEvidence, TOML_INTEGER_MAX)
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
@@ -71,7 +74,8 @@ SCOPED_EVENT_FIELDS = DELIVERED_EVENT_FIELDS | {"scope"}
 #: Every transition written now carries accepted scope and the delivery-schema
 #: projection; older shapes remain readable without rewriting their history.
 DELIVERY_EVENT_FIELDS = SCOPED_EVENT_FIELDS | {"delivery_schema", "delivery", "verification_scope"}
-MAX_PROJECTION_BYTES = PREVIEW_BYTES + 256
+MAX_EVENT_BYTES = PREVIEW_BYTES + MAX_RESOLUTION_BYTES
+MAX_PROJECTION_BYTES = MAX_EVENT_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
 MAX_OPEN_CURSOR_CHARS = 128
 MAX_OPEN_ROW_BYTES = 8192
@@ -280,13 +284,18 @@ class WorkItems:
         return current_count
 
     def _read(self, name: str) -> dict:
+        event = name.startswith("work-items/") and _REVISION_NAME.fullmatch(Path(name).name)
+        raw = safe_read(self.root, name, MAX_EVENT_BYTES if event else PREVIEW_BYTES)
         try:
-            value = json.loads(safe_read(self.root, name, PREVIEW_BYTES),
-                               parse_constant=_reject_json_constant)
+            value = json.loads(raw, parse_constant=_reject_json_constant)
         except (ValueError, UnicodeError) as exc:
+            if len(raw) > PREVIEW_BYTES:
+                raise LimitExceeded("Work-item event exceeds byte bound") from exc
             raise Denied("Malformed work-item record") from exc
         if not isinstance(value, dict):
             raise Denied("Malformed work-item record")
+        if event and len(raw) > (MAX_EVENT_BYTES if "wait_resolution" in value else PREVIEW_BYTES):
+            raise LimitExceeded("Work-item event exceeds byte bound")
         return value
 
     @staticmethod
@@ -391,9 +400,10 @@ class WorkItems:
     def _proof_identity(root, relative):
         """POSIX no-follow witness, including ancestor replacement/unsafe paths.
 
-        Missing optional publication files are witnessed too. Directory times
-        are deliberately excluded: unrelated evidence additions are not changes
-        to an exact proof. Unsupported/unsafe sources always miss the cache.
+        Missing optional publication files are witnessed too: each cache lookup
+        rechecks the exact leaf, so its creation changes the witness. Directory
+        times are excluded to avoid invalidating on unrelated evidence additions.
+        Unsupported/unsafe sources always miss the cache.
         """
         try:
             identities = []
@@ -422,7 +432,7 @@ class WorkItems:
         except (OSError, AttributeError, NotImplementedError):
             return None
 
-    def _validation_sources(self, record):
+    def _validation_sources(self, record, previous):
         """Sample external dependencies BEFORE exact status-mode validation.
 
         Receipt parsing only discovers sources, never proof. The ordinary
@@ -451,6 +461,25 @@ class WorkItems:
                 snapshot(wait["snapshot_id"])
             elif wait.get("kind") in ("ci", "proposal_merged"):
                 publication(wait["publication_id"])
+            resolution = record.get("wait_resolution")
+            if resolution is not None:
+                evidence = resolution["evidence"]
+                snapshot(evidence["snapshot_id"])
+                if resolution["kind"] == "superseded":
+                    publication(evidence["publication_id"])
+                    # Witness exactly the ancestry consumed by validation,
+                    # not older parents beyond both pinned ancestors.
+                    targets = {previous["wait"]["snapshot_id"], record["delivery"]["snapshot_id"]}
+                    sid, edges = evidence["snapshot_id"], 0
+                    while sid is not None and edges <= self.snapshots.history_index:
+                        snapshot(sid)
+                        targets.discard(sid)
+                        if not targets:
+                            break
+                        sid = self.snapshots.get(sid).get("parent")
+                        edges += 1
+                    if targets:
+                        raise ValueError("Incomplete resolution proof sources")
             if record.get("status") == "done":
                 snapshot(record["snapshot_id"])
                 verification = record["verification"]
@@ -678,6 +707,10 @@ class WorkItems:
             if retirement_raw is not None and not isinstance(retirement_raw, dict):
                 return None
             try:
+                # Resolution proof can span historical snapshots/receipts. Replay
+                # once to collect all witnesses for the in-memory proof cache.
+                if "wait_resolution" in current_raw:
+                    return None
                 current_rev = current_raw.get("rev")
                 if type(current_rev) is not int:
                     return None
@@ -868,9 +901,14 @@ class WorkItems:
                     continue
                 if self._sidecar_load(seed["id"], seed, identity) is not None:
                     continue
+                history_flags = set()
                 item, since = self._current_hold(
                     seed["id"], seed_event=event, history_revisions=revisions,
-                    verify_snapshots=False, verify_current_delivery=True)
+                    verify_snapshots=False, verify_current_delivery=True,
+                    history_flags=history_flags)
+                if "wait_resolution" in history_flags:
+                    self._sidecar_remove(seed["id"])
+                    continue
                 revision = item["rev"]
                 if revision == 1:
                     previous, current = None, seed
@@ -1823,7 +1861,7 @@ class WorkItems:
 
     def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True) -> None:
         """Validate transitions, always checking current completion evidence."""
-        fields = set(record) - {"smoke_refs", "blocked_since"}
+        fields = set(record) - {"smoke_refs", "blocked_since", "wait_resolution"}
         if "blocked_since" in previous and "blocked_since" not in record:
             raise Denied("A transition cannot remove its blocked start")
         if "blocked_since" in record:
@@ -1863,9 +1901,11 @@ class WorkItems:
         # current proof of completion, including on a source-backed sidecar hit.
         binding, delivery_snapshot = self._validate_delivery(
             previous, record, verify_snapshots=verify_snapshots or status == "done")
+        release = (status == previous["status"] == "open" and previous["holder"] is not None
+                   and record["holder"] is None and "wait_resolution" not in record)
         if (status not in STATUSES or previous["status"] == "done"
                 or (previous["status"] == "dropped" and status != "done")
-                or (status == previous["status"] and not scope_changed and not refs_changed and not binding)):
+                or (status == previous["status"] and not scope_changed and not refs_changed and not binding and not release)):
             raise Denied("Invalid work-item status transition")
         # The scope in force is inherited by every revision; it is never
         # cleared, and a closure may not change it.
@@ -1875,7 +1915,14 @@ class WorkItems:
                 and record_scope != previous_scope):
             raise Denied("Completion cannot change the accepted scope; "
                          "record the scope change in an earlier transition")
-        holder = actor if status == "doing" else (previous["holder"] or actor) if status == "blocked" else None
+        if previous["status"] == "open" and previous["holder"] not in (None, actor):
+            raise Denied("Held-open work belongs to its holder")
+        resolved = "wait_resolution" in record
+        if resolved:
+            from .work_item_resolution import validate
+            validate(self, previous, record)
+        holder = (previous["holder"] if resolved else actor if status == "doing" else
+                  (previous["holder"] or actor) if status == "blocked" else None)
         if (any(record[key] != previous[key] for key in ("id", "title", "origin", "created_at")
                 + (("description",) if "description" in previous else ()))
                 or type(record["rev"]) is not int or record["rev"] != previous["rev"] + 1
@@ -1956,7 +2003,7 @@ class WorkItems:
         for revision in range(2, len(revisions) + 2):
             record = self._read(f"work-items/{item_id}/{revision}.json")
             if proof_sources is not None:
-                proof_sources.extend(self._validation_sources(record))
+                proof_sources.extend(self._validation_sources(record, current))
             self._validate_transition(current, record, verify_snapshots=verify_snapshots)
             blocked_since = blocked_start(blocked_since, record)
             if "blocked_since" in record and record["blocked_since"] != blocked_since:
@@ -1984,7 +2031,9 @@ class WorkItems:
     def _current_hold(self, item_id: str, *, seed_event=None,
                       history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
                       verify_current_delivery: bool = False, blocked_waiter=None, derive_blocked=True,
-                      proof_sources=None) -> tuple:
+                      proof_sources=None, history_flags=None) -> tuple:
+        # History flags let writers exclude historical resolution proofs from
+        # the current/previous-only sidecar without making reads mutate state.
         # Optional output reuses this exact replay at the write boundary to
         # prevent a doing revision from hiding a stale prior waiter.
         since = None
@@ -1996,6 +2045,8 @@ class WorkItems:
         for current in self._iter_chain(item_id, seed_event=seed_event,
                                         history_revisions=history_revisions, retirement=retirement,
                                         verify_snapshots=verify_snapshots, proof_sources=proof_sources):
+            if history_flags is not None and "wait_resolution" in current:
+                history_flags.add("wait_resolution")
             if previous is not None:
                 last_transition = (previous, current)
             previous = current
@@ -2012,6 +2063,10 @@ class WorkItems:
                 and current["status"] in OPEN_STATUS_ORDER and current.get("delivery") is not None):
             if last_transition is None:
                 raise Denied("Current delivery lacks a validated transition")
+            if proof_sources is not None:
+                relative = f"snapshots/{current['delivery']['snapshot_id']}.json"
+                proof_sources.append((self.snapshots.root, relative,
+                                      self._proof_identity(self.snapshots.root, relative)))
             self._validate_delivery(*last_transition, verify_snapshots=True)
         item = work_item_retirement.project(current, terminal)
         if derive_blocked and blocked_since is not None:
@@ -2209,6 +2264,8 @@ class WorkItems:
                   "holder": item["holder"], "updated_at": item["updated_at"],
                   "current_origin_rev": origin["current_origin_rev"],
                   "stale": origin["stale"], **self._hold_projection(since), **blocked_age(self, item)}
+        if "wait_resolution" in item:
+            status["wait_resolution"] = item["wait_resolution"]
         reason = item.get("reason")
         if reason is not None:
             preview, clipped = text_preview(reason, 512)
@@ -2388,8 +2445,9 @@ class WorkItems:
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
-        and that role's held doing/blocked items are eligible. Authorization
-        to transition is checked by the caller. Satisfied generic waits re-enter
+        and that role's held open/doing/blocked items are eligible. Held-open
+        ownership is also enforced at the transition boundary; other grant
+        authorization is checked by the caller. Satisfied generic waits re-enter
         this page for reassessment, as do absent or confidently impossible
         releasers; they never imply completion. CI/proposal waits become ready only
         from their validated local terminal route, independent of event ack.
@@ -2461,6 +2519,8 @@ class WorkItems:
                 "created_at", "updated_at")}
         row.update({key: view[key] for key in
                     ("current_origin_rev", "stale", "redecision", "doing_since", "doing_age_seconds", "doing_stale")})
+        if "wait_resolution" in item:
+            row["wait_resolution"] = item["wait_resolution"]
         if item["status"] == "blocked":
             row["wait"] = item["wait"]
             row.update({key: view[key] for key in
@@ -2543,7 +2603,8 @@ class WorkItems:
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
-                        blocked_only: bool = False, include_open_count: bool = False):
+                        blocked_only: bool = False, include_open_count: bool = False,
+                        _active_transform=None):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -2551,8 +2612,13 @@ class WorkItems:
         deletes. Cursor, limit, ordering, overflow and byte bounds match
         :meth:`page_open`. Superseded historical delivery manifests are skipped,
         but each current active delivery is checked against its exact snapshot
-        before its status or ordering is used.
+        before its status or ordering is used. Host-only opening orchestration
+        can supply an active transform on the unlocked readonly path; public
+        read entry points never do. The returned state is used before selection,
+        counting and fingerprints, so transitions cannot leave a stale page.
         """
+        if _active_transform is not None and not readonly:
+            raise Denied("Lifecycle transform requires an unlocked read-only scan")
         cursor_key = _open_cursor_key(cursor)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
@@ -2600,7 +2666,8 @@ class WorkItems:
             reuse_projection = cacheable and (readonly or not (
                 self.root / "work-items" / seed["id"] / "retirement.json").exists())
             cache_key = (digest(canonical(seed)), history_key, "current-delivery",
-                         self.snapshots.root, self.snapshots.max_file, tuple(self.snapshots.excludes))
+                         self.snapshots.root, self.snapshots.max_file, tuple(self.snapshots.excludes),
+                         self.snapshots.history_index)
             cached = (self._projection_cache.get(seed["id"])
                       if cacheable and history_key is not None else None)
             if cacheable and history_key is not None:
@@ -2636,7 +2703,8 @@ class WorkItems:
                     sidecar = None
                 if sidecar is not None:
                     item, since = sidecar
-                    if item.get("delivery") is None and item["status"] in OPEN_STATUS_ORDER:
+                    if (item.get("delivery") is None and "wait_resolution" not in item
+                            and item["status"] in OPEN_STATUS_ORDER):
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
                 else:
                     proof_sources = []
@@ -2647,14 +2715,22 @@ class WorkItems:
                         proof_sources=proof_sources if cacheable else None)
                     stable = (cacheable and history_key is not None
                               and self._history_identity(seed["id"]) == history_key)
-                    if stable and item["status"] in ("done", "dropped"):
+                    if stable and (item["status"] in ("done", "dropped")
+                                   or "wait_resolution" in item):
                         proof_sources = tuple(dict.fromkeys(proof_sources))
                         if self._proof_unchanged(proof_sources):
                             self._projection_cache[seed["id"]] = (cache_key, item, since, proof_sources)
-                    elif stable and reuse_projection and item.get("delivery") is None:
+                    elif (stable and reuse_projection and item.get("delivery") is None
+                          and "wait_resolution" not in item):
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
             if item["status"] not in ("open", "doing", "blocked"):
                 continue
+            if _active_transform is not None:
+                transformed = _active_transform(item)
+                if transformed is not item:
+                    item, since = transformed, None
+                if item["status"] not in ("open", "doing", "blocked"):
+                    continue
             view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                     **self._hold_projection(since), **blocked_age(self, item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
@@ -2666,7 +2742,7 @@ class WorkItems:
                 order_sum = (order_sum + int(digest(leaf), 16)) % (1 << 256)
             if ready_only and role_name is not None:
                 if item["status"] == "open":
-                    if item.get("holder") is not None:
+                    if item.get("holder") not in (None, role_name):
                         continue
                 elif item.get("holder") != role_name and not (
                         item["status"] == "blocked" and item.get("holder") is None):
@@ -2885,7 +2961,7 @@ class WorkItems:
         return self._page_closed_impl(limit=limit, readonly=True)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
-                   wait=None, snapshot_id=None, scope=None, smoke_refs=None) -> dict:
+                   wait=None, snapshot_id=None, scope=None, smoke_refs=None, _resolve_wait=False) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
         The event states the scope in force for the item at that revision: a
@@ -2913,19 +2989,35 @@ class WorkItems:
         publication_wait = (status == "blocked" and isinstance(wait, dict)
                             and wait.get("kind") == "publication_ci")
         publication = (lock(self.snapshots.root / "locks" / "publication.lock")
-                       if binding_request or publication_wait else contextlib.nullcontext())
+                       if binding_request or publication_wait or _resolve_wait else contextlib.nullcontext())
         with publication, record_lock(self.root):
             history_revisions = self._recover_temporary_writes(item_id)
             if expected_rev == MAX_REVISIONS:
+                if _resolve_wait:
+                    raise Denied("Automatic resolution cannot retire an item")
                 return work_item_retirement.retire(
                     self, item_id, expected_rev=expected_rev, status=status, actor=actor, reason=reason,
                     history_revisions=history_revisions, wait=wait, snapshot_id=snapshot_id,
                     scope=scope, smoke_refs=smoke_refs)
             blocked_waiter = {}
+            history_flags = set()
             current, previous_since = self._current_hold(
-                item_id, history_revisions=history_revisions, blocked_waiter=blocked_waiter)
+                item_id, history_revisions=history_revisions, blocked_waiter=blocked_waiter,
+                history_flags=history_flags)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
+            resolution = None
+            if current["status"] == "open" and current["holder"] not in (None, actor):
+                raise Denied("Held-open work belongs to its holder")
+            if _resolve_wait:
+                if (current["status"] != "blocked" or current["holder"] != actor
+                        or status != "open" or any(value is not None for value in
+                            (wait, snapshot_id, scope, smoke_refs))):
+                    raise Denied("Automatic resolution requires the current held waiter")
+                from .work_item_resolution import observe
+                resolution = observe(self, current)
+                if resolution is None:
+                    raise Denied("Wait has no exact resolution evidence")
             if status == "blocked" and wait is None:
                 raise Denied("New blocked transitions require a supported observable wait")
             if blocked_waiter:
@@ -3024,6 +3116,13 @@ class WorkItems:
                       "verification": verification, "delivered_tree": delivered_tree,
                       "scope": in_force, "delivery_schema": 1, "delivery": delivery,
                       "verification_scope": verification_scope}
+            record.pop("wait_resolution", None)
+            if resolution is not None:
+                record["holder"] = current["holder"]
+                record["wait_resolution"] = {
+                    **resolution, "wait_rev": current["rev"],
+                    "wait_digest": digest(canonical(current["wait"])),
+                    "resolved_at": record["updated_at"]}
             record["blocked_since"] = blocked_start(current.get("blocked_since"), record)
             effective_smoke_refs = (current.get("smoke_refs") if smoke_refs is None else smoke_refs)
             if effective_smoke_refs is not None:
@@ -3038,7 +3137,7 @@ class WorkItems:
             if (status == "doing"
                     and (current["status"] != "doing" or current["holder"] != actor)):
                 self._require_doing_capacity(actor)
-            if len(canonical(record)) > PREVIEW_BYTES:
+            if len(canonical(record)) > (MAX_EVENT_BYTES if resolution is not None else PREVIEW_BYTES):
                 raise LimitExceeded("Work-item event exceeds byte bound")
             write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)
             if status in ("done", "dropped"):
@@ -3055,6 +3154,9 @@ class WorkItems:
                 except FileNotFoundError:
                     pass
                 else:
+                    self._sidecar_remove(item_id)
+                    return record
+                if resolution is not None or "wait_resolution" in history_flags:
                     self._sidecar_remove(item_id)
                     return record
                 if status == "doing" and current["status"] == "doing":

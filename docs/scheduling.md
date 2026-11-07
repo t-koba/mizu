@@ -77,8 +77,9 @@ unchanged. Work that became due while paused and delivered inputs still admit
 through their own readiness checks. Use `mizu wake` only for an additional
 operator-requested reevaluation when ordinary work is not due.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
-It means an unheld `open` item the role can claim, or a `doing` item held by
-that role, with no structured wait. Satisfied or dead blocked waits below are ready
+It means an unheld `open` item the role can claim, or an `open`/`doing` item held by
+that role, with no structured wait. Automatic wait reopening retains the holder;
+see [project wait-resolution policy](configuration.md#work-item-wait-resolution). Satisfied or dead blocked waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.
 Another role's held work never admits it. A changed eligible set (including terminal
 evidence bindings below) admits the writer
