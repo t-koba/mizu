@@ -210,13 +210,14 @@ def remove_leftover(config: Config, name: str, env: dict[str, str]) -> str | Non
     """Remove one container by exact name without `--ignore`. Returns stderr
     on failure, None on success or when already absent."""
     listed = run([*runtime_base(config), "ps", "--all", "--filter", f"name={name}",
-                  "--format", "{{.ID}}"], timeout=15, maximum=8192, env=env)
+                  "--format", "{{.ID}}"],
+                 timeout=config.sandbox.cleanup_timeout_seconds, maximum=8192, env=env)
     if listed.exit_code != 0:
         return stop_note(listed) or listed.stderr
     if not listed.stdout.split():
         return None
     removed = run([*runtime_base(config), "rm", "--force", name],
-                  timeout=15, maximum=8192, env=env)
+                  timeout=config.sandbox.cleanup_timeout_seconds, maximum=8192, env=env)
     if removed.exit_code != 0:
         return stop_note(removed) or removed.stderr
     return None
@@ -446,7 +447,8 @@ class Sandbox:
             # Killing only the launcher is insufficient: remove the container itself.
             ignored = remove_argv(self.config, name)
             if ignored is not None:
-                cleanup = run(ignored, timeout=15, maximum=8192, env=env)
+                cleanup = run(ignored, timeout=self.config.sandbox.cleanup_timeout_seconds,
+                              maximum=8192, env=env)
                 if cleanup.exit_code != 0:
                     # The removal did not succeed, so it is never read as done.
                     record["cleanup_error"] = stop_note(cleanup) or cleanup.stderr
@@ -551,7 +553,8 @@ def _remove_containers(config: Config, project: Path, role: str | None) -> dict:
     argv = [*runtime_base(config), "ps", "--all", "--filter", f"label=io.mizu.project={label}"]
     if role:
         argv.extend(["--filter", f"label=io.mizu.role={role}"])
-    result = run([*argv, "--format", "{{.ID}}"], timeout=15, maximum=65536, env=env)
+    result = run([*argv, "--format", "{{.ID}}"],
+                 timeout=config.sandbox.cleanup_timeout_seconds, maximum=65536, env=env)
     if result.exit_code != 0:
         raise Denied(f"Cannot inspect leftover containers: {stop_note(result) or result.stderr}")
     ids = result.stdout.split()
@@ -559,7 +562,9 @@ def _remove_containers(config: Config, project: Path, role: str | None) -> dict:
         if not all(c in "0123456789abcdef" for c in cid):
             raise Denied("Unexpected container identifier")
     if ids:
-        result = run([*runtime_base(config), "rm", "--force", *ids], timeout=30, maximum=65536, env=env)
+        result = run([*runtime_base(config), "rm", "--force", *ids],
+                     timeout=config.sandbox.bulk_cleanup_timeout_seconds,
+                     maximum=65536, env=env)
         if result.exit_code != 0:
             raise Denied(f"Container cleanup failed: {stop_note(result) or result.stderr}")
     return {"removed": len(ids)}

@@ -243,6 +243,8 @@ check_input_files = 250000    # Bound on the dependency inputs one check may com
 check_input_bytes = 8589934592 # Bound on the bytes of those inputs (1-1099511627776).
 temporary_mb = 256
 file_mb = 128                     # Per-file limit, NOT a whole-workspace disk quota.
+# cleanup_timeout_seconds = 15    # Per OCI listing/removal call, except bulk removal.
+# bulk_cleanup_timeout_seconds = 30 # Project-wide removal; positive TOML integer seconds.
 selinux_label = true              # Linux-only :z relabeling of dedicated mounts.
 entrypoint = "/bin/sh"            # Policy-selected container entrypoint; the image must provide it.
 entrypoint_args = []              # Ordered runner argv after the image, before `-c` script (one argv item each, never shell-split). Empty keeps the existing command; e.g. entrypoint_args = ["-o", "pipefail"] with entrypoint = "/bin/bash".

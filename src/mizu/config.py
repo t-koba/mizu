@@ -651,6 +651,10 @@ class Sandbox:
     check_input_bytes: int = 8589934592
     temporary_mb: int = 256
     file_mb: int = 128
+    #: Host/runtime-dependent cleanup walls, in seconds per OCI CLI call.
+    #: Defaults preserve the 15s per-call and 30s bulk-removal limits.
+    cleanup_timeout_seconds: int = 15
+    bulk_cleanup_timeout_seconds: int = 30
     selinux_label: bool = True
     #: Container network selected by policy. `none` preserves the previous
     #: behavior. Any other value is passed to the runtime as `--network=<value>`
@@ -1390,6 +1394,9 @@ def load(file: Path) -> Config:
     for k in ("memory_mb", "cpus", "pids", "temporary_mb", "file_mb"):
         if k in sb:
             number(sb[k], f"sandbox.{k}", 1, 1048576)
+    for k in ("cleanup_timeout_seconds", "bulk_cleanup_timeout_seconds"):
+        if k in sb:
+            number(sb[k], f"sandbox.{k}", 1, TOML_INTEGER_MAX)
     for k in ("executable", "image"):
         if k in sb:
             string(sb[k], f"sandbox.{k}")

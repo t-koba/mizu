@@ -1263,29 +1263,14 @@ CALLS = {
         ('assert_no_checkpoint', 'run', 'timeout', 0): (
             '15', 'policy', 'sandbox / host-dependent checkpoint-image inspect wall; '
             'policy pending measurement'),
-        ('remove_leftover', 'run', 'timeout', 0): (
-            '15', 'policy', 'sandbox / host-dependent leftover-container list wall; '
-            'policy pending measurement'),
         ('remove_leftover', 'run', 'maximum', 0): (
             '8192', 'safety', 'sandbox / bounded leftover-container list output'),
-        ('remove_leftover', 'run', 'timeout', 1): (
-            '15', 'policy', 'sandbox / host-dependent leftover-container removal wall; '
-            'policy pending measurement'),
         ('remove_leftover', 'run', 'maximum', 1): (
             '8192', 'safety', 'sandbox / bounded leftover-container removal output'),
-        ('Sandbox.execute', 'run', 'timeout', 0): (
-            '15', 'policy', 'sandbox / host-dependent post-command removal wall; '
-            'policy pending measurement'),
         ('Sandbox.execute', 'run', 'maximum', 0): (
             '8192', 'safety', 'sandbox / bounded cleanup output read'),
-        ('_remove_containers', 'run', 'timeout', 0): (
-            '15', 'policy', 'sandbox / host-dependent project-container list wall; '
-            'policy pending measurement'),
         ('_remove_containers', 'run', 'maximum', 0): (
             '65536', 'safety', 'sandbox / bounded project-container list output'),
-        ('_remove_containers', 'run', 'timeout', 1): (
-            '30', 'policy', 'sandbox / host-dependent bulk removal wall; '
-            'policy pending measurement'),
         ('_remove_containers', 'run', 'maximum', 1): (
             '65536', 'safety', 'sandbox / bounded bulk removal output'),
     },
@@ -1882,6 +1867,26 @@ def no_defaults(limit, /, count, *, size):
                 'services / systemd-analyze verification wall-time default'),
         }
         self.assertEqual(set(fields), set(expected))
+        for name, (default, category, rationale) in expected.items():
+            with self.subTest(setting=name):
+                self.assertEqual(fields[name], default)
+                self.assertEqual(category, 'configured policy')
+                self.assertTrue(rationale.strip())
+
+    def test_sandbox_cleanup_timeouts_are_configured_policy(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        settings = next(node for node in tree.body
+                        if isinstance(node, ast.ClassDef) and node.name == 'Sandbox')
+        fields = {node.target.id: ast.unparse(node.value) for node in settings.body
+                  if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)}
+        expected = {
+            'cleanup_timeout_seconds': (
+                '15', 'configured policy',
+                'sandbox / per-OCI-call listing, exact-name, and post-command cleanup deadline'),
+            'bulk_cleanup_timeout_seconds': (
+                '30', 'configured policy',
+                'sandbox / per-OCI-call project-wide removal deadline'),
+        }
         for name, (default, category, rationale) in expected.items():
             with self.subTest(setting=name):
                 self.assertEqual(fields[name], default)
