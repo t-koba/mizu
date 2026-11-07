@@ -117,13 +117,15 @@ def validate(store, previous, record):
 MAX_RESOLUTION_BYTES = 521
 
 
-def reconcile(project, role_name, *, limit):
+def reconcile(project, role_name, *, limit, on_resolution=None):
     """Capture the open/order projection, resolving proven waits in that scan.
 
     The private transform runs only on validated active records, outside read
     locks. Public read APIs never supply it. Pending/unknown evidence consumes
     no transition budget; each append repeats proof under publication/record
-    locks and CAS. No extra ledger scan, candidate list, cursor or assignment.
+    locks and CAS. ``on_resolution`` is an in-process scheduling hint called
+    after each durable reopening; it does not alter proof or authority. No extra
+    ledger scan, candidate list, cursor or assignment.
     """
     policy = project.settings.get('work_item_wait_resolution', 'reopen')
     if policy == 'manual':
@@ -159,6 +161,8 @@ def reconcile(project, role_name, *, limit):
             # use a fresh validated projection, never the scanned stale record.
             return store.get(item['id'])
         resolved += 1
+        if on_resolution is not None:
+            on_resolution()
         return opened
 
     return store._page_open_impl(cursor=None, limit=limit, readonly=True,

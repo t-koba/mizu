@@ -2527,7 +2527,8 @@ class Engine:
                     observation_sink=getattr(context, "_admission_observation_sink", None))
         context._slot_lease = True
 
-    def _dispatch_state(self, project, role_name, role, *, event_trigger, continuation=False):
+    def _dispatch_state(self, project, role_name, role, *, event_trigger, continuation=False,
+                        prior_wait_resolution=False, reconcile_waits=True):
         """Recompute scheduling inputs; a skipped attempt never claims execution.
 
         Used before queueing and again under dispatch locks. No events or
@@ -2543,6 +2544,21 @@ class Engine:
         decision_state = _decision_delivery_state(project, role_name, role)
         decision_events = decision_state["events"]
         receipt_diagnostics = decision_state["diagnostics"]
+        # Resolve only from this authoritative scheduler path, before either
+        # readiness projection can see an eligible holder. This is not a public
+        # read; the per-record transition repeats proof under its locks.
+        resolved_wait = bool(prior_wait_resolution)
+        waits_reconciled = False
+        caps = set(role.capabilities)
+        if (reconcile_waits and role.workspace == "write"
+                and {"work_order", "work_items_transition"} <= caps):
+            def note_resolution():
+                nonlocal resolved_wait
+                resolved_wait = True
+            from .work_item_resolution import reconcile
+            reconcile(project, role_name, limit=self.config.limits.work_items_prompt,
+                      on_resolution=note_resolution)
+            waits_reconciled = True
         # Reuse validated records only within this dispatch, never across rechecks.
         work_items = readonly_view(project.work_items)
         terminal_page = work_item_events.pending(
@@ -2553,13 +2569,15 @@ class Engine:
         ci_events, ci_manifest = ci_waits.delivery(work_items, role_name)
         proposal_events, proposal_manifest = proposal_waits.delivery(work_items, role_name)
         wait_events = project.insights.due_waits(role_name, snapshot) + ci_events + proposal_events
+        has_wait = bool(wait_events or check_jobs.wake_ready(project, role_name) or resolved_wait)
         # Dependency obligations addressed to this role ride along when
         # it runs for other reasons; they never admit a run on their
         # own, so no new wake source is implied.
         obligations = project.insights.pending_obligations(role_name)
         # Event-triggered dispatch (platform file triggers) admits only on a
-        # addressed operator record, subscribed decision/terminal event or due wait
-        # for this role. Decision routing uses decision_sources: own-source
+        # addressed operator record, subscribed decision/terminal event, due wait,
+        # or exact wait-resolution transition from the authoritative scan above.
+        # Decision routing uses decision_sources: own-source
         # deferrals ride along but do not admit; decision_sources="any" admits
         # on matching actions including deferrals. Terminal routing is already
         # filtered independently by work_item_sources above. Otherwise
@@ -2618,7 +2636,7 @@ class Engine:
                 has_record=bool(record_state[0]["wake_pending"]),
                 has_decision=bool(substantive_events or substantive_diagnostics),
                 has_work_item=bool(terminal_events),
-                has_wait=bool(wait_events or check_jobs.wake_ready(project, role_name)),
+                has_wait=has_wait,
                 has_ci=bool(ci_failures),
             ))
             if event_gate.skipped == "no-event":
@@ -2650,7 +2668,7 @@ class Engine:
             has_record=bool(record_state[0]["wake_pending"]),
             has_decision=bool(substantive_events or substantive_diagnostics),
             has_work_item=bool(terminal_events),
-            has_wait=bool(wait_events or check_jobs.wake_ready(project, role_name)),
+            has_wait=has_wait,
             has_ci=bool(ci_failures),
             operator_woke=bool(operator_woke and role.workspace != "write"),
             progress_self_admits=bool(progress_self_admits),
@@ -2659,7 +2677,8 @@ class Engine:
         if _dispatch.skipped == "unchanged":
             return {"skip": {"skipped": "unchanged", "snapshot": snapshot["id"],
                     "code_digest": snapshot["code_digest"]}}
-        return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_dispatch': _dispatch}
+        return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_resolved_wait': resolved_wait,
+                '_waits_reconciled': waits_reconciled, '_dispatch': _dispatch}
 
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
@@ -2708,10 +2727,14 @@ class Engine:
             lock_diagnostics.phase("editor-ingestion")
             project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
             lock_diagnostics.phase("pre-admission-dispatch")
+            pre_dispatch_wait_resolution = False
+            pre_dispatch_wait_reconciliation = False
             if (event_trigger or role.on_change) and not (
                     role.workspace == "write" and safe_point.pending_hint(project.snapshots)):
                 dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
                                                       continuation=intent is not None)
+                pre_dispatch_wait_resolution = bool(dispatch_state.get("_resolved_wait"))
+                pre_dispatch_wait_reconciliation = bool(dispatch_state.get("_waits_reconciled"))
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
             # Producer admission: hold only configured producer roles before
@@ -2791,8 +2814,11 @@ class Engine:
                     raise Denied("Safe-point recovery requires original writer finish authority")
                 role = dataclasses.replace(role, profile=recovery["profile"], selector="", engine_tools=(),
                     capabilities=tuple(c for c in role.capabilities if c in ("files", "read", "diff", "finish")))
-            dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
-                                                  continuation=continuation is not None or recovery is not None)
+            dispatch_state = self._dispatch_state(
+                project, role_name, role, event_trigger=event_trigger,
+                continuation=continuation is not None or recovery is not None,
+                prior_wait_resolution=pre_dispatch_wait_resolution,
+                reconcile_waits=not pre_dispatch_wait_reconciliation)
             if dispatch_state.get("skip"):
                 return dispatch_state["skip"]
             snapshot = dispatch_state['snapshot']

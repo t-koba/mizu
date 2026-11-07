@@ -109,13 +109,17 @@ class WaitResolutionTests(Fixture):
         self.assertEqual(before, after)
         self.assertEqual(self.store.get(item['id']), item)
 
-    def test_preparation_reconciles_before_projections_once_and_requires_existing_grants(self):
+    def test_scheduler_reconciles_before_projections_once_and_requires_existing_grants(self):
+        from mizu.runtime import Engine
         item = self.block()
         self.snapshot()
         context = self.context()
         with patch.object(self.store, 'transition', wraps=self.store.transition) as transition:
+            dispatch = Engine(self.config)._dispatch_state(
+                self.project, 'worker', context.role, event_trigger=False)
             opening = json.loads(prompt_for(context))
             prompt_for(context)
+        self.assertTrue(dispatch['_resolved_wait'])
         self.assertEqual(transition.call_count, 1)
         self.assertEqual(opening['open_work_items']['items'][0]['status'], 'open')
         self.assertEqual(opening['ready_work']['items'][0]['id'], item['id'])
@@ -128,6 +132,45 @@ class WaitResolutionTests(Fixture):
             c for c in context.role.capabilities if c != 'work_items_transition'))
         prompt_for(context)
         self.assertEqual(self.store.get(second['id'])['status'], 'blocked')
+
+    def test_unproven_publication_wait_does_not_become_an_event_wake(self):
+        from mizu.runtime import Engine
+        item = self.block(kind='publication_ci')
+        role = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        dispatch = Engine(self.config)._dispatch_state(
+            self.project, 'worker', role, event_trigger=True)
+        self.assertEqual(dispatch['skip']['skipped'], 'no-event')
+        self.assertEqual(self.store.get(item['id'])['status'], 'blocked')
+
+    def test_superseded_wait_resolves_before_ready_page_and_is_an_exact_event_wake(self):
+        from mizu.runtime import Engine
+        item = self.block(kind='publication_ci')
+        newer = self.snapshot()
+        self.receipt(newer)
+        self.assertNotIn(item['id'], {row['id'] for row in
+                                      self.store.page_ready(role_name='worker')['items']})
+        role = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        engine = Engine(self.config)
+        pre_dispatch = engine._dispatch_state(
+            self.project, 'worker', role, event_trigger=True)
+        self.assertNotIn('skip', pre_dispatch)
+        self.assertTrue(pre_dispatch['_resolved_wait'])
+        self.assertTrue(pre_dispatch['_waits_reconciled'])
+        dispatch = engine._dispatch_state(
+            self.project, 'worker', role, event_trigger=True,
+            prior_wait_resolution=pre_dispatch['_resolved_wait'], reconcile_waits=False)
+        self.assertNotIn('skip', dispatch)
+        self.assertTrue(dispatch['_resolved_wait'])
+        opened = self.store.get(item['id'])
+        self.assertEqual(opened['status'], 'open')
+        self.assertEqual(opened['holder'], 'worker')
+        self.assertEqual(opened['wait_resolution']['kind'], 'superseded')
+        self.assertIn(item['id'], {row['id'] for row in
+                                   self.store.page_ready(role_name='worker')['items']})
 
     def test_held_open_visibility_authorization_and_ordinary_release(self):
         item = self.block()
