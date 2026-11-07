@@ -5,10 +5,10 @@ import json
 import unittest
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery
+from support import Fixture, ScriptDriver, bind_delivery
 from mizu import work_item_resolution as resolution, work_order
 from mizu.distribution import public_source_identity
-from mizu.errors import ConfigError, Denied, LimitExceeded
+from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, digest, read_json, write_json
 from mizu.project import Project, check_project_settings
 from mizu.publication import Publication
@@ -159,10 +159,12 @@ class WaitResolutionTests(Fixture):
             self.project, 'worker', role, event_trigger=True)
         self.assertNotIn('skip', pre_dispatch)
         self.assertTrue(pre_dispatch['_resolved_wait'])
+        self.assertTrue(pre_dispatch['_pending_wait_resolution'])
         self.assertTrue(pre_dispatch['_waits_reconciled'])
         dispatch = engine._dispatch_state(
             self.project, 'worker', role, event_trigger=True,
-            prior_wait_resolution=pre_dispatch['_resolved_wait'], reconcile_waits=False)
+            prior_wait_resolution_pending=pre_dispatch['_pending_wait_resolution'],
+            reconcile_waits=False)
         self.assertNotIn('skip', dispatch)
         self.assertTrue(dispatch['_resolved_wait'])
         opened = self.store.get(item['id'])
@@ -171,6 +173,104 @@ class WaitResolutionTests(Fixture):
         self.assertEqual(opened['wait_resolution']['kind'], 'superseded')
         self.assertIn(item['id'], {row['id'] for row in
                                    self.store.page_ready(role_name='worker')['items']})
+
+    def parked(self, signature):
+        from mizu.fs import now
+        from mizu.snapshot import PROGRESS_SIGNALS
+        current = self.project.snapshots.get()
+        progress = {"schema": 3, "signals": {name: False for name in PROGRESS_SIGNALS},
+                    "selected": list(self.config.limits.progress_signals), "role": "worker",
+                    "has_progress": False, "no_progress_count": 0,
+                    "obligations_digest": "0" * 64, "recorded_at": now(),
+                    "ready_work": True, "ready_work_signature": signature}
+        snapshot = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=self.project.goal, state="Now: Parked", run=None, outcome="done",
+            summary="Inputs already delivered", progress=progress,
+            inbox_seen=self.project.insights.generation(),
+            wake_generation=self.project.control()["wake_generation"], parent=current['id'])
+        self.project.snapshots.publish(snapshot)
+        return self.project.snapshots.get()
+
+    def test_actual_daemon_gate_reconciles_hidden_wait_before_ready_observation(self):
+        from mizu.runtime import should_run
+        filler = self.store.create(actor='worker', idempotency_key='first', title='Earlier item')[
+            'record']['work_item']
+        item = self.block(kind='publication_ci')
+        self.receipt(self.snapshot())
+        page = self.store.page_ready(role_name='worker', limit=1)
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['items'][0]['id'], filler['id'])
+        parked = self.parked(page['signature'])
+        self.assertTrue(should_run(self.project, parked, role_name='worker'))
+        self.assertEqual(self.store.get(item['id'])['status'], 'open')
+        page = self.store.page_ready(role_name='worker', limit=1)
+        self.assertEqual(page['items'][0]['id'], filler['id'])
+        self.assertEqual(page['total'], 2)
+        self.assertTrue(page['_wait_resolution_pending'])
+
+    def test_daemon_unproven_wait_and_reconciliation_failure_preserve_other_wakes(self):
+        from mizu.runtime import should_run
+        item = self.block(kind='publication_ci')
+        parked = self.parked(self.store.page_ready(role_name='worker')['signature'])
+        self.assertFalse(should_run(self.project, parked, role_name='worker'))
+        self.assertEqual(self.store.get(item['id']), item)
+        self.store.create(actor='worker', idempotency_key='unrelated', title='Unrelated work')
+        with patch('mizu.work_item_resolution.reconcile', side_effect=Denied('Unavailable proof')):
+            self.assertTrue(should_run(self.project, parked, role_name='worker'))
+        self.assertEqual(self.store.get(item['id']), item)
+
+    def test_daemon_reconciliation_requires_writer_and_both_existing_grants(self):
+        from mizu.runtime import should_run
+        item = self.block(kind='publication_ci')
+        self.receipt(self.snapshot())
+        parked = self.parked(self.store.page_ready(role_name='worker')['signature'])
+        original = self.config.roles['worker']
+        for missing in ('work_order', 'work_items_transition'):
+            self.config.roles['worker'] = dataclasses.replace(original, capabilities=tuple(
+                cap for cap in original.capabilities if cap != missing))
+            self.assertFalse(should_run(self.project, parked, role_name='worker'))
+            self.assertEqual(self.store.get(item['id']), item)
+        self.config.roles['worker'] = dataclasses.replace(original, workspace='read')
+        should_run(self.project, parked, role_name='worker')
+        self.assertEqual(self.store.get(item['id']), item)
+
+    def test_busy_event_admission_recovers_resolution_after_restart_with_stale_ready_signature(self):
+        from mizu.runtime import Engine
+        item = self.store.create(actor='worker', idempotency_key='busy', title='Exact wait')[
+            'record']['work_item']
+        item = bind_delivery(self.project, item['id'], self.baseline['id'])
+        old_signature = self.store.page_ready(role_name='worker')['signature']
+        item = self.store.transition(item['id'], expected_rev=item['rev'], status='blocked',
+            actor='worker', wait={'kind': 'publication_ci', 'snapshot_id': self.baseline['id'],
+                                  'checks': ['unit']})
+        self.receipt(self.snapshot())
+        parked = self.parked(old_signature)
+        self.config.roles['worker'] = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        engine = Engine(self.config, driver=ScriptDriver())
+        with patch.object(engine, '_admit', side_effect=Busy('Workspace already held')) as admit:
+            with self.assertRaises(Busy):
+                engine.run(self.project, 'worker', event_trigger=True)
+        admit.assert_called_once()
+        self.assertFalse(engine.driver.calls)
+        self.assertEqual(self.project.snapshots.get()['id'], parked['id'])
+        opened = self.store.get(item['id'])
+        self.assertEqual(opened['status'], 'open')
+        page = self.store.page_ready(role_name='worker', limit=1)
+        self.assertNotEqual(page['signature'], old_signature)
+        self.assertFalse(self.store.page_ready(role_name='reviewer')['_wait_resolution_pending'])
+        # Fresh project and engine discard every in-process reconciliation hint.
+        self.project = Project(self.config, 'sample')
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        delivered = self.project.snapshots.get()
+        self.assertEqual(delivered['progress']['ready_work_signature'], page['signature'])
+        self.assertEqual(self.project.work_items.get(item['id']), opened)
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        self.assertFalse(engine.driver.calls)
 
     def test_held_open_visibility_authorization_and_ordinary_release(self):
         item = self.block()

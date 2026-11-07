@@ -79,7 +79,14 @@ operator-requested reevaluation when ordinary work is not due.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or an `open`/`doing` item held by
 that role, with no structured wait. Automatic wait reopening retains the holder;
-see [project wait-resolution policy](configuration.md#work-item-wait-resolution). Satisfied or dead blocked waits below are ready
+see [project wait-resolution policy](configuration.md#work-item-wait-resolution).
+The authoritative daemon `should_run` gate reconciles supported exact waits
+before collecting ready-work change for a named writer with both `work_order`
+and `work_items_transition`. This lets a proven superseded publication wait
+restore readiness even though the blocked item was excluded from `page_ready`.
+Reconciliation failure supplies no proof and does not suppress unrelated wakes.
+Public status, ready/open pages and read tools remain side-effect free.
+Satisfied or dead blocked waits below are ready
 for their holder, or claimable by any transition-capable role when unheld.
 Another role's held work never admits it. A changed eligible set (including terminal
 evidence bindings below) admits the writer
@@ -90,9 +97,10 @@ aggregate project view. Workspace mode is not a ready-work capability.
 
 Ready work is a change signal, not standing admission. The existing locked
 full-ledger scan computes a fixed 64-hex fingerprint of **all** eligible IDs
-and receipt-route terminal evidence bindings, including rows beyond the prompt
+and receipt-route terminal evidence and immutable `wait_resolution` proof
+bindings, including rows beyond the prompt
 limit. Unique domain-separated SHA-256 leaves (ID plus the terminal record
-reference when present) are summed modulo 2**256, then hashed with cardinality; the validated progress role binds the comparison,
+reference or resolution proof when present) are summed modulo 2**256, then hashed with cardinality; the validated progress role binds the comparison,
 scan order, other metadata changes, prompt size and equal totals cannot substitute
 for membership or exact terminal evidence. This probabilistic fingerprint is change evidence, not an
 authorization or collision-free set proof, and retains constant extra memory.
@@ -371,6 +379,22 @@ A run-level `wait` does not block unrelated ready ledger work: record a work
 item as blocked when it is not actionable. Thus leaving an `open`/`doing` item
 while finishing `wait` or `done` intentionally allows another writer unit at
 the configured cadence. Cache-affinity ordering is separate.
+
+An already reopened, holder-owned item with a validated `wait_resolution`
+also supplies an exact event cause for its writer (with both reconciliation
+grants), including a non-autonomous writer. The existing bounded ready scan
+aggregates `wait_resolution_pending` across the entire role-eligible set, not
+just the selected row. This internal flag alone is not a wake: the ready
+signature must differ from that role's delivered progress receipt. Binding the
+proof prevents a stale signature from when the same item was previously open
+from hiding its reopening. No generic ready-work event admission is enabled for
+explicit-only roles without such a proof; subscriptions and defaults are unchanged.
+
+Pre-admission dispatch and the locked recheck derive this cause from durable
+ledger proof, not an in-process transition callback. A busy admission, failure
+before delivery, or restart leaves it discoverable. Successful completion binds
+the input signature in existing progress evidence; an unchanged delivered set
+does not repeatedly admit. There is no additional event store, cursor or ack.
 
 ### Blocked-work liveness status
 

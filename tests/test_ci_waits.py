@@ -119,7 +119,7 @@ class CiWaitTests(CiWaitFixture):
                 self.poll()
             return due
 
-        with (patch("mizu.runtime._ready_work_observation", return_value=(False, False)),
+        with (patch("mizu.runtime._ready_work_observation", return_value=(False, False, False)),
               patch("mizu.runtime.check_jobs.wake_ready", return_value=False),
               patch("mizu.runtime._receipt_wait_due", side_effect=due_then_publish) as wait_due):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))

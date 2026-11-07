@@ -166,4 +166,5 @@ def reconcile(project, role_name, *, limit, on_resolution=None):
         return opened
 
     return store._page_open_impl(cursor=None, limit=limit, readonly=True,
-                                 order_fingerprint=True, _active_transform=resolve)
+                                 order_fingerprint=True, wait_resolution_role=role_name,
+                                 _active_transform=resolve)

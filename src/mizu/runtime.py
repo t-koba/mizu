@@ -235,16 +235,16 @@ def _has_ready_work(project, role=None) -> bool:
         return False
 
 
-def _ready_work_observation(project, record, role=None, *, work_items=None) -> tuple[bool, bool]:
-    """Return membership change and current nonempty state from one bounded scan.
+def _ready_work_observation(project, record, role=None, *, work_items=None) -> tuple[bool, bool, bool]:
+    """Return ready-set change, presence and a resolution-qualified change.
 
-    Current store/read or malformed progress errors close both facts. Valid
+    Current store/read or malformed progress errors close all three facts. Valid
     legacy records (or an undelivered input) admit nonempty sets once; empty
     legacy sets do not manufacture an event. The progress role and fingerprint
     scope prevent an observer from consuming another role's ready-work signal.
     """
     if role is not None and "work_items_transition" not in role.capabilities:
-        return False, False
+        return False, False, False
     try:
         previous = record.get("progress")
         if previous is not None:
@@ -256,14 +256,36 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
         total = page.get("total")
         if (not isinstance(signature, str) or not DIGEST.fullmatch(signature)
                 or type(total) is not int or total < 0):
-            return False, False
+            return False, False, False
         present = total > 0
+        pending = page.get("_wait_resolution_pending", False)
+        if type(pending) is not bool:
+            return False, False, False
         if (previous is None or previous.get("ready_work_signature") is None
                 or role is not None and previous["role"] != role.name):
-            return present, present
-        return signature != previous["ready_work_signature"], present
+            changed = present
+        else:
+            changed = signature != previous["ready_work_signature"]
+        return changed, present, changed and pending
     except Exception:
+        return False, False, False
+
+
+def _reconcile_work_item_waits(project, role, config):
+    """Return whether reconciliation ran and its holder-owned proof observation."""
+    if (role is None or role.name not in project.roles or role.workspace != "write"
+            or not {"work_order", "work_items_transition"} <= set(role.capabilities)):
         return False, False
+    from .work_item_resolution import reconcile
+    try:
+        page, _ = reconcile(project, role.name, limit=config.limits.work_items_prompt)
+        pending = page.get("_wait_resolution_pending")
+        return (True, pending) if type(pending) is bool else (False, None)
+    except (MizuError, OSError, ValueError, TypeError, KeyError, AttributeError,
+            OverflowError, RecursionError):
+        # A failed proof/read cannot reopen a waiter or suppress other wakes.
+        # Any successful append before the failure remains durably discoverable.
+        return False, None
 
 
 def _ready_work_changed(project, record, role=None, *, work_items=None) -> bool:
@@ -2529,7 +2551,7 @@ class Engine:
         context._slot_lease = True
 
     def _dispatch_state(self, project, role_name, role, *, event_trigger, continuation=False,
-                        prior_wait_resolution=False, reconcile_waits=True):
+                        prior_wait_resolution_pending=False, reconcile_waits=True):
         """Recompute scheduling inputs; a skipped attempt never claims execution.
 
         Used before queueing and again under dispatch locks. No events or
@@ -2545,21 +2567,11 @@ class Engine:
         decision_state = _decision_delivery_state(project, role_name, role)
         decision_events = decision_state["events"]
         receipt_diagnostics = decision_state["diagnostics"]
-        # Resolve only from this authoritative scheduler path, before either
-        # readiness projection can see an eligible holder. This is not a public
-        # read; the per-record transition repeats proof under its locks.
-        resolved_wait = bool(prior_wait_resolution)
-        waits_reconciled = False
-        caps = set(role.capabilities)
-        if (reconcile_waits and role.workspace == "write"
-                and {"work_order", "work_items_transition"} <= caps):
-            def note_resolution():
-                nonlocal resolved_wait
-                resolved_wait = True
-            from .work_item_resolution import reconcile
-            reconcile(project, role_name, limit=self.config.limits.work_items_prompt,
-                      on_resolution=note_resolution)
-            waits_reconciled = True
+        # Like daemon readiness, authoritative dispatch prepares waiters before
+        # projections. Public reads never resolve; each append rechecks proof.
+        waits_reconciled, pending_resolution = (
+            _reconcile_work_item_waits(project, role, self.config) if reconcile_waits
+            else (False, prior_wait_resolution_pending))
         # Reuse validated records only within this dispatch, never across rechecks.
         work_items = readonly_view(project.work_items)
         terminal_page = work_item_events.pending(
@@ -2570,14 +2582,14 @@ class Engine:
         ci_events, ci_manifest = ci_waits.delivery(work_items, role_name)
         proposal_events, proposal_manifest = proposal_waits.delivery(work_items, role_name)
         wait_events = project.insights.due_waits(role_name, snapshot) + ci_events + proposal_events
-        has_wait = bool(wait_events or check_jobs.wake_ready(project, role_name) or resolved_wait)
+        has_wait = bool(wait_events or check_jobs.wake_ready(project, role_name))
         # Dependency obligations addressed to this role ride along when
         # it runs for other reasons; they never admit a run on their
         # own, so no new wake source is implied.
         obligations = project.insights.pending_obligations(role_name)
         # Event-triggered dispatch (platform file triggers) admits only on a
         # addressed operator record, subscribed decision/terminal event, due wait,
-        # or exact wait-resolution transition from the authoritative scan above.
+        # or an undelivered, role-owned exact wait-resolution proof.
         # Decision routing uses decision_sources: own-source
         # deferrals ride along but do not admit; decision_sources="any" admits
         # on matching actions including deferrals. Terminal routing is already
@@ -2626,10 +2638,21 @@ class Engine:
                           or role.decision_events or role.work_item_events)
         unscheduled = not bool(role.daemon or role.interval_seconds or role.calendar)
         has_code_event = bool(role.on_change and unscheduled and not code_unchanged)
-        ready_work_changed, ready_work_present = (False, False)
+        ready_work_changed, ready_work_present, resolved_wait = (False, False, False)
         if not event_trigger or autonomous:
-            ready_work_changed, ready_work_present = _ready_work_observation(
-                project, snapshot if role.workspace == "write" else cursor, role, work_items=work_items)
+            ready_work_changed, ready_work_present, resolved_wait = _ready_work_observation(
+                project, snapshot if role.workspace == "write" else cursor, role,
+                work_items=work_items)
+        elif (pending_resolution is not False and role.workspace == "write"
+              and {"work_order", "work_items_transition"} <= set(role.capabilities)):
+            # Explicit-only event roles do not self-admit generic ready work.
+            # Reconciliation scans the durable ledger on every fresh attempt;
+            # only a pending proof justifies a ready-set comparison here.
+            _, _, resolved_wait = _ready_work_observation(
+                project, snapshot, role, work_items=work_items)
+        resolved_wait = bool(resolved_wait and role.workspace == "write"
+                             and {"work_order", "work_items_transition"} <= set(role.capabilities))
+        has_wait = has_wait or resolved_wait
         # Only publishers consume snapshot-wide generations. Observers consume
         # operator wakes independently, even when no new code is published.
         wake_base = snapshot if role.workspace == "write" else cursor
@@ -2697,6 +2720,7 @@ class Engine:
             or ready_work_present or explicit_wake
             or progress_self_admits or next_task or (role.on_change and not code_unchanged))
         return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_resolved_wait': resolved_wait,
+                '_pending_wait_resolution': pending_resolution,
                 '_waits_reconciled': waits_reconciled, '_dispatch': _dispatch,
                 '_has_other_scheduled_input': other_scheduled_input}
 
@@ -2757,8 +2781,8 @@ class Engine:
             # shows another scheduled input (subscribed decisions, terminal
             # work-item events, due waits/CI, operator records, ready work,
             # explicit wakes, progress or code change).
-            pre_dispatch_wait_resolution = False
             pre_dispatch_wait_reconciliation = False
+            pre_dispatch_wait_resolution_pending = False
             scheduled_gate_state = None
             if (scheduled_invocation and not event_trigger and role.scheduled_inputs
                     and intent is None and not (
@@ -2784,10 +2808,10 @@ class Engine:
                                 AttributeError, OverflowError, RecursionError):
                             scheduled_gate_state = None
                         if scheduled_gate_state is not None:
-                            pre_dispatch_wait_resolution = bool(
-                                scheduled_gate_state.get("_resolved_wait"))
                             pre_dispatch_wait_reconciliation = bool(
                                 scheduled_gate_state.get("_waits_reconciled"))
+                            pre_dispatch_wait_resolution_pending = bool(
+                                scheduled_gate_state.get("_pending_wait_resolution"))
                             if scheduled_gate_state.get("skip"):
                                 return scheduled_gate_state["skip"]
                             if not scheduled_gate_state.get("_has_other_scheduled_input", True):
@@ -2810,8 +2834,9 @@ class Engine:
                 else:
                     dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
                                                           continuation=intent is not None)
-                    pre_dispatch_wait_resolution = bool(dispatch_state.get("_resolved_wait"))
                     pre_dispatch_wait_reconciliation = bool(dispatch_state.get("_waits_reconciled"))
+                    pre_dispatch_wait_resolution_pending = bool(
+                        dispatch_state.get("_pending_wait_resolution"))
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
             # Producer admission: hold only configured producer roles before
@@ -2894,7 +2919,7 @@ class Engine:
             dispatch_state = self._dispatch_state(
                 project, role_name, role, event_trigger=event_trigger,
                 continuation=continuation is not None or recovery is not None,
-                prior_wait_resolution=pre_dispatch_wait_resolution,
+                prior_wait_resolution_pending=pre_dispatch_wait_resolution_pending,
                 reconcile_waits=not pre_dispatch_wait_reconciliation)
             if dispatch_state.get("skip"):
                 return dispatch_state["skip"]
@@ -4600,7 +4625,8 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             value = _operator_woke(control, role_record, observer=observer)
         elif needed == "ready_work_changed":
             if role_name is None or role is not None:
-                value, ready_work_present = _ready_work_observation(project, role_record, role)
+                _reconcile_work_item_waits(project, role, effective)
+                value, ready_work_present, _ = _ready_work_observation(project, role_record, role)
                 ready_work_observed = True
             else:
                 value = False

@@ -2441,7 +2441,9 @@ class WorkItems:
         page_open. Filter before selection/counting, scanning the ledger with
         O(limit) retained rows: blocked rows cannot hide ready work. ``signature``
         is a fixed 64-hex fingerprint of the full eligible ID set and terminal
-        evidence bindings (not just the selected page), after role filtering.
+        evidence and wait-resolution proof bindings (not just the selected page),
+        after role filtering. ``_wait_resolution_pending`` reports a validated
+        holder-owned resolution anywhere in that set, not a delivery receipt.
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
@@ -2604,7 +2606,7 @@ class WorkItems:
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False,
-                        _active_transform=None):
+                        wait_resolution_role: str | None = None, _active_transform=None):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -2636,6 +2638,7 @@ class WorkItems:
         unseeded_decisions = 0
         unknown_blocked = 0
         ready_sum = 0
+        wait_resolution_pending = False
         order_sum = 0
         for row in events:
             if cacheable:
@@ -2731,6 +2734,9 @@ class WorkItems:
                     item, since = transformed, None
                 if item["status"] not in ("open", "doing", "blocked"):
                     continue
+            if (wait_resolution_role is not None and item["status"] == "open"
+                    and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
+                wait_resolution_pending = True
             view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                     **self._hold_projection(since), **blocked_age(self, item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
@@ -2770,6 +2776,11 @@ class WorkItems:
                 leaf = b"ready-item-v1\0" + item["id"].encode()
                 if item["status"] == "blocked" and state["state"] == "terminal":
                     leaf += canonical(state["evidence"])
+                if "wait_resolution" in item:
+                    leaf += b"\0wait-resolution-v1\0" + canonical(item["wait_resolution"])
+                    holder = item.get("holder")
+                    if holder is not None and (role_name is None or holder == role_name):
+                        wait_resolution_pending = True
                 ready_sum = (ready_sum + int(digest(leaf), 16)) % (1 << 256)
             total += 1
             sort_key, row = self._open_row(item, view, wait_liveness=(
@@ -2803,6 +2814,8 @@ class WorkItems:
                     "coverage_complete": complete, "diagnostic": None if complete else "incomplete"}
             if include_open_count:
                 result["open_count"] = open_count
+        if ready_only or wait_resolution_role is not None:
+            result["_wait_resolution_pending"] = wait_resolution_pending
         if ready_only:
             complete = unseeded_decisions == 0 and unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked

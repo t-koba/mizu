@@ -286,6 +286,9 @@ def _capture_opening(context) -> dict:
         else:
             open_work_items = project.work_items.page_open(limit=limit_open)
             order_inventory = None
+        # Scheduler-only proof metadata is not part of the prompt or order hash.
+        if isinstance(open_work_items, dict):
+            open_work_items.pop("_wait_resolution_pending", None)
         if (not isinstance(open_work_items, dict)
                 or not isinstance(open_work_items.get("items"), list)
                 or not isinstance(open_work_items.get("total"), int)):
