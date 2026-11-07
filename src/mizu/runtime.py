@@ -40,7 +40,7 @@ from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _normalize_ci_wake_branches, read_ci_wake, write_ci_wake)
 from .budget import Budget
 from .config import (DAEMON_POLICIES, Config, Role, load,
-                     role_cooldown_seconds, role_daemon_spacing_seconds,
+                     role_cooldown_seconds, role_daemon_spacing_seconds, role_no_progress_backoff_seconds,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
@@ -58,7 +58,7 @@ from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
 from .project import Project
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
                        missing_finish_recovery_due, missing_finish_streak,
-                       no_progress_recovery_due, progress_disposition,
+                       no_progress_recovery_due, progress_disposition, progress_timestamp,
                        validate_progress)
 from .run_health import (_capture_cause, _clear_missing_finish_streak,
                          _record_health_failure, _record_missing_finish_only)
@@ -1941,6 +1941,9 @@ class Context:
             # A seal after a spend bound is a bounded end, never a fresh
             # verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
+        if self.role.workspace == "write" and args["outcome"] == "wait":
+            args["wait_liveness"] = _writer_wait_liveness(
+                self.project, self.role, releases=releases)
         self.close_exec()
         finished = {**args, "wait_seconds": wait, "recorded_at": now(),
                     **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
@@ -2631,7 +2634,7 @@ class Engine:
         next_task = _writer_next_task(project, snapshot, role_name) if role.workspace == "write" else None
         if role.workspace == "write":
             progress_self_admits = _writer_progress_fallback(
-                snapshot, self.config, role, ready_work_present, _dispatch_now)
+                snapshot, self.config, role, ready_work_present, _dispatch_now, project=project)
         else:
             progress_self_admits = _progress_self_admits(cursor, self.config, role_name)
         explicit_wake = operator_woke or (role.workspace == "write" and (
@@ -4036,16 +4039,75 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
         return None
 
 
-def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None) -> bool:
+def _writer_wait_liveness(project, role, *, releases=()) -> bool | None:
+    """Current bounded local evidence: True live, False absent/terminal, None unknown.
+
+    No adapter calls, new registrations or inferred remote completion. Incomplete
+    inventories can prove a positive witness, never absence. A pending CI wait
+    alone does not prove CI was requested; require its exact publication request.
+    """
+    try:
+        unknown = False
+        if "check_job" in role.capabilities:
+            from .acceptance import discover
+            jobs, invalid = discover(project)
+            if any(job["role"] == role.name and job["id"] not in releases
+                   and job["status"] in ("queued", "running") for job in jobs.values()):
+                return True
+            unknown = bool(invalid)
+        if project.insights.unresolved_counts(
+                [role.name], kind="question", addressee="operator")[role.name]:
+            return True
+        store = project.work_items
+        page = store.page_open_readonly(limit=project.config.limits.work_items_prompt)
+        unknown |= not page["coverage_complete"] or page["truncated"]
+        requests = None
+        for item in page["items"]:
+            if (item["holder"] != role.name or item["status"] != "blocked"
+                    or item["wait"]["kind"] not in ("ci", "publication_ci")):
+                continue
+            if ci_waits.evidence(store, item) is not None:
+                continue
+            wait = ci_waits._resolved(store, item["wait"])
+            if wait is None:
+                unknown = True
+                continue
+            if requests is None:
+                requests = CiRequests(project.root, project.config.ci_requests).daily()
+            if any(request["publication_id"] == wait["publication_id"]
+                   and request["sha"] == wait["sha"]
+                   for day in requests["days"] for request in day["items"]):
+                return True
+            # Missing dispatch evidence is not evidence of remote inactivity.
+            unknown = True
+        return None if unknown else False
+    except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return None
+
+
+def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
+                              *, project=None) -> bool:
     """Shared daemon/dispatch fallback, only with proven role-eligible ready work.
 
     Progress-driven Next handoffs remain independent. A timer or policy change
     cannot turn an empty/failed ready-work observation into permission to run.
     """
     if (role.workspace != "write" or not ready_work_present
-            or record.get("outcome") not in ("continue", "bounded")):
+            or record.get("outcome") not in ("continue", "bounded", "wait")):
         return False
     progress = record.get("progress")
+    if record["outcome"] == "wait":
+        try:
+            validate_progress(progress)
+            timestamp = progress_timestamp(progress)
+            backoff = role_no_progress_backoff_seconds(config, role)
+            current_time = time.time() if current_time is None else current_time
+            return (progress["role"] == role.name and timestamp is not None
+                    and backoff > 0 and current_time >= timestamp + backoff
+                    and project is not None
+                    and _writer_wait_liveness(project, role) is False)
+        except (Denied, AttributeError, TypeError, ValueError):
+            return False
     try:
         validate_progress(progress)
         policy_changed = set(progress["selected"]) != set(role_progress_signals(config, role))
@@ -4494,13 +4556,13 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             if observer:
                 value = _progress_self_admits(role_record, effective, role_name, current_time)
             elif role_name is None:
-                value = True
+                value = role_record.get("outcome") in ("continue", "bounded")
             else:
                 value = bool(_writer_next_task(project, snapshot, role_name))
                 if not value and role is not None:
                     value = _writer_progress_fallback(
                         snapshot, effective, role,
-                        ready_work_observed and ready_work_present, current_time)
+                        ready_work_observed and ready_work_present, current_time, project=project)
         else:
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})

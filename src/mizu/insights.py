@@ -993,13 +993,14 @@ replacement insight without implying rejected substance.
                 continue
         return out
 
-    def unresolved_counts(self, sources) -> dict:
+    def unresolved_counts(self, sources, *, kind=None, addressee=None) -> dict:
         """Count live unresolved inputs for each named source, fail-closed.
 
         One bounded read-only inbox scan under the project record lock for a
         consistent snapshot without the shared retention lock; undecided plus
         deferred revisions count, resolved and archive-only history do not.
-        Each inbox row is safely
+        Optional kind/addressee filters select exact metadata without using the
+        tolerant prompt listing for a negative liveness claim. Each inbox row is safely
         read within ``self.maximum`` and each decision within the decision
         event bound. Unsafe, unreadable, vanished or malformed live entries
         raise rather than undercount; a missing decision only leaves its
@@ -1054,7 +1055,10 @@ replacement insight without implying rejected substance.
                     continue
                 source = item["source"]
                 if source in wanted:
-                    counts[source] += 1
+                    metadata = insight_metadata(item) if kind is not None or addressee is not None else {}
+                    if ((kind is None or metadata.get("kind") == kind)
+                            and (addressee is None or metadata.get("addressee") == addressee)):
+                        counts[source] += 1
         return counts
 
     def unresolved_count(self, source: str) -> int:

@@ -70,11 +70,9 @@ class DaemonEvaluatorTests(unittest.TestCase):
             decision = evaluate_daemon(facts)
             self.assertEqual((decision.ready, decision.needed), (None, name))
             facts = dataclasses.replace(facts, **{name: False})
-        self.assertEqual((evaluate_daemon(facts).ready, evaluate_daemon(facts).reason),
-                         (False, "outcome"))
-        facts = dataclasses.replace(facts, outcome="continue")
-        decision = evaluate_daemon(facts)
-        self.assertEqual((decision.ready, decision.needed), (None, "progress_admits"))
+        for outcome in ("wait", "continue"):
+            decision = evaluate_daemon(dataclasses.replace(facts, outcome=outcome))
+            self.assertEqual((decision.ready, decision.needed), (None, "progress_admits"))
 
     def test_ready_work_changed_precedes_outcomes_but_not_control_or_explicit_wakes(self):
         for outcome in ("done", "wait", "continue", "bounded"):
@@ -112,8 +110,9 @@ class DaemonEvaluatorTests(unittest.TestCase):
             ("events", _daemon(outcome="wait", routed_events_due=True), True, "events"),
             ("ci", _daemon(outcome="wait", ci_due=True), True, "ci"),
             ("wait-expired", _daemon(outcome="wait", wait_expired=True), True, "wait"),
-            # Non-continue/bounded outcomes do not reach progress.
-            ("wait-not-expired", _daemon(outcome="wait", progress_admits=True), False, "outcome"),
+            # Runtime resolves source liveness, timer and ready work for wait fallback.
+            ("wait-fallback", _daemon(outcome="wait", progress_admits=True), True, "progress"),
+            ("wait-not-expired", _daemon(outcome="wait", progress_admits=False), False, "parked"),
             ("other-outcome", _daemon(outcome="failed", progress_admits=True), False, "outcome"),
             # Progress self-admission for continue/bounded.
             ("continue-admits", _daemon(outcome="continue", progress_admits=True), True, "progress"),

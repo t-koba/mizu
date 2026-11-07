@@ -152,17 +152,30 @@ declaration must differ from the exact published parent's Next. Legacy/missing/c
 closed. This reads at most one parent, adds no store or task lifecycle, and
 never changes WorkItems eligibility or any wait/event routing.
 
-The separate no-progress fallback applies only to `continue`/`bounded` records
+The separate no-progress fallback applies to `continue`/`bounded` records
 with no selected progress: `no_progress_continuations` permits its bounded
 configured immediate attempts, then `writer_no_progress_backoff_seconds`
 (default 300 seconds) permits a later admission only if the current role-filtered
-ready set is nonempty. The existing ready-set scan supplies both membership-change
-and presence facts, so the fallback adds no second ledger scan or poll loop.
-It does not change progress-driven immediate handoff, allow a timer to revive
-`done`/`wait`/`blocked`, or bypass producer and control gates. Progress records
-already expose `signals.tool`, `has_progress` and `no_progress_count`; the
-`idle_with_open_work` status is the recorded-at-finish diagnostic, not a live
-scheduler verdict.
+ready set is nonempty. The existing ready-set scan supplies membership-change
+and presence facts. This does not revive `done`/`blocked`, bypass producer/control
+gates, or change the daemon cadence or progress-driven immediate handoff.
+
+A writable writer's `wait` also uses that backoff when current bounded local
+reads prove no live external source remains and eligible ready work exists.
+This path always waits for the configured timer from the snapshot's progress
+timestamp, even if the unit made progress; no immediate allowance applies.
+The host records `finish.wait_liveness` in the existing finish intent/result:
+`true` for a live owned queued/running check, an own unresolved operator-addressed
+question, or a held CI wait with an exact publication/SHA dispatch request and
+no terminal evidence; `false` for proven absence/terminal sources; `null` for
+unknown evidence. Admission rechecks current liveness. Check discovery, strict
+insight counts and the configured work-item prompt page bound the local reads;
+incomplete, ambiguous, corrupt or unreadable evidence cannot prove absence.
+A CI wait alone, including an unpublished snapshot without request evidence,
+stays unknown. No provider is called or wait store created. Existing wait
+expiry, subscribed event wakes and default/maximum wait durations are unchanged;
+a timer fallback is not an event subscription. The `idle_with_open_work` status
+remains the recorded-at-finish diagnostic, not a live scheduler verdict.
 
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the

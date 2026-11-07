@@ -20,7 +20,7 @@ import dataclasses
 
 
 #: Outcomes whose daemon may self-admit on progress evidence.
-_PROGRESS_OUTCOMES = ("continue", "bounded")
+_PROGRESS_OUTCOMES = ("continue", "bounded", "wait")
 
 
 @dataclasses.dataclass(frozen=True)
