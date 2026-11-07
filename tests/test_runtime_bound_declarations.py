@@ -31,11 +31,13 @@ opt-in collection is policy, but it introduces no host-cost numeric bound.
 The `cli.py` module-level inventory is empty; its numeric page defaults remain
 explicit command-line presentation flags, not runtime bounds. The `config.py`
 module-level candidates are closed over the existing policy/default
-dictionaries and `CONFIG_MODULE_BOUNDS`: event polling and whole-file artifact
-reads retain configured defaults; `[services]` owns the systemd restart and stop
-deadline defaults (15 and 45 seconds); include, role-policy, resource, CI-wake-branch
-and workspace-depth ceilings are mechanism or safety bounds; protocol integers
-and wait-seconds retain their format ranges.
+dictionaries and `CONFIG_MODULE_BOUNDS`; symbolic `min` and canonical-length
+derivations use only their explicitly allowlisted operands in `SYMBOLIC_BOUNDS`.
+Event polling and whole-file artifact reads retain configured defaults;
+`[services]` owns the systemd restart and stop deadline defaults (15 and 45
+seconds); include, role-policy, resource, CI-wake-branch and workspace-depth
+ceilings are mechanism or safety bounds; protocol integers and wait-seconds
+retain their format ranges.
 The `web_worker.py` include-envelope bound derives from the fixed include
 byte ceiling. `lineage.py`'s full-ref length derives from its fixed prefix and
 branch-name format bound. `work_items.py` page, cursor, row, projection,
@@ -1072,6 +1074,21 @@ CONFIG_MODULE_BOUNDS = {
         '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
     'MAX_STORAGE_RUN_ENTRIES': (
         '100000', 'safety', 'config / aggregate per-project run-reference scan entry ceiling'),
+    'MAX_USAGE_POLICY_COUNT': (
+        'min(TOML_INTEGER_MAX, sys.maxsize)', 'safety',
+        'config / report counts fit the TOML integer and host collection-index ranges'),
+    'MAX_USAGE_RUNS_SCANNED': (
+        'MAX_USAGE_POLICY_COUNT - 1', 'safety',
+        'usage / reserves the extra candidate index that detects an incomplete history window'),
+    'MAX_DISPATCH_EVIDENCE_COUNT': (
+        'min(TOML_INTEGER_MAX, sys.maxsize)', 'safety',
+        'dispatch evidence / counts fit TOML integers and host collection indexes'),
+    'MAX_DISPATCH_EVIDENCE_BYTES': (
+        'min(TOML_INTEGER_MAX, sys.maxsize - 1)', 'safety',
+        'dispatch evidence / reserves a representable byte for safe_read growth detection'),
+    'MIN_DISPATCH_EVIDENCE_BYTES': (
+        "len(canonical({'schema': 1, 'dropped_attempts': TOML_INTEGER_MAX, 'attempts': []}))",
+        'format', 'dispatch evidence / minimum serialized empty schema-1 envelope'),
     'MAX_RESOURCES': (
         '64', 'safety', 'config / bounded per-profile local resource list'),
     'MAX_CI_WAKE_EXTRA_BRANCHES': (
@@ -1434,9 +1451,32 @@ def numeric(node, symbolic=()):
     if isinstance(node, ast.BinOp):
         return numeric(node.left, symbolic) and numeric(node.right, symbolic)
     if isinstance(node, ast.Call):
-        return (isinstance(node.func, ast.Name) and node.func.id == 'len'
-                and len(node.args) == 1 and not node.keywords
-                and isinstance(node.args[0], ast.Name) and node.args[0].id in symbolic)
+        if node.keywords:
+            return False
+        if isinstance(node.func, ast.Name) and node.func.id == 'min':
+            return len(node.args) >= 2 and all(numeric(arg, symbolic) for arg in node.args)
+        if (isinstance(node.func, ast.Name) and node.func.id == 'len'
+                and len(node.args) == 1):
+            argument = node.args[0]
+            if isinstance(argument, ast.Name) and argument.id in symbolic:
+                return True
+            if (isinstance(argument, ast.Call) and isinstance(argument.func, ast.Name)
+                    and argument.func.id == 'canonical' and len(argument.args) == 1
+                    and not argument.keywords and isinstance(argument.args[0], ast.Dict)):
+                envelope = argument.args[0]
+                if not all(isinstance(key, ast.Constant) and isinstance(key.value, str)
+                           for key in envelope.keys):
+                    return False
+                for value in envelope.values:
+                    if isinstance(value, ast.List) and not value.elts:
+                        continue
+                    if isinstance(value, ast.Constant) and type(value.value) in (str, int):
+                        continue
+                    if isinstance(value, ast.Name) and value.id in symbolic:
+                        continue
+                    return False
+                return True
+        return False
     if isinstance(node, ast.Attribute):
         return ast.unparse(node) in symbolic
     return isinstance(node, ast.Name) and node.id in symbolic
@@ -1479,6 +1519,13 @@ def range_argument_inventory(tree):
 
 
 SYMBOLIC_BOUNDS = {
+    'config.py': {
+        'MAX_USAGE_POLICY_COUNT': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),
+        'MAX_USAGE_RUNS_SCANNED': frozenset({'MAX_USAGE_POLICY_COUNT'}),
+        'MAX_DISPATCH_EVIDENCE_COUNT': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),
+        'MAX_DISPATCH_EVIDENCE_BYTES': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),
+        'MIN_DISPATCH_EVIDENCE_BYTES': frozenset({'TOML_INTEGER_MAX'}),
+    },
     'lineage.py': {
         'TARGET_REF_MAX': frozenset({'TARGET_REF_PREFIX', 'TARGET_BRANCH_MAX'}),
     },
@@ -1797,7 +1844,7 @@ def no_defaults(limit, /, count, *, size):
 
     def test_config_module_bounds_are_fully_declared(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
-        found = inventory(tree)
+        found = inventory(tree, symbolic_bounds=SYMBOLIC_BOUNDS.get('config.py'))
         declared = set(CONFIG_MODULE_BOUNDS)
         for special in (CHECK_RETENTION, HISTORY_TEMPORARIES, DECISION_PROJECTION,
                         DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION, SMOKE_RETENTION_SCAN):
