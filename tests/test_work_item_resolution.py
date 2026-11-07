@@ -330,6 +330,85 @@ class WaitResolutionTests(Fixture):
         self.assertEqual(idle['skipped'], 'no-event')
         self.assertFalse(idle_driver.calls)
 
+    def test_explicit_resolution_delivery_accumulates_across_more_than_two_pages(self):
+        from mizu.runtime import Engine
+        limits = dataclasses.replace(self.config.limits, work_items_prompt=1)
+        self.config = dataclasses.replace(self.config, limits=limits)
+        self.config.roles['worker'] = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        self.project = Project(self.config, 'sample')
+        self.store = self.project.work_items
+        self.baseline = self.project.snapshots.get()
+        items = [self.block(f'page-overflow-{index}') for index in range(3)]
+        self.snapshot('all three waits are due')
+        expected = {f"{item['id']}:{item['rev']}" for item in items}
+        item_ids = {item['id'] for item in items}
+        delivered_ids = set()
+
+        for _ in range(3):
+            driver = ScriptDriver()
+            result = Engine(self.config, driver=driver).run(
+                self.project, 'worker', event_trigger=True)
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(len(driver.calls), 1)
+            prompt = json.loads(driver.calls[0][1])
+            shown_ids = {
+                item['id']
+                for page_name in ('open_work_items', 'ready_work')
+                for item in prompt[page_name]['items']
+            }
+            active_resolution_ids = {
+                item_id for item_id in item_ids
+                if "wait_resolution" in self.store.get(item_id)
+            }
+            shown_resolution_ids = shown_ids & active_resolution_ids
+            self.assertTrue(shown_resolution_ids - delivered_ids)
+            delivered_ids.update(shown_resolution_ids)
+            progress = set(self.project.snapshots.get()['progress']['wait_resolution_tokens'])
+            self.assertEqual(progress, {
+                token for token in expected if token.split(":", 1)[0] in delivered_ids
+            })
+
+        self.assertEqual(delivered_ids, item_ids)
+        self.assertEqual(progress, expected)
+        idle_driver = ScriptDriver()
+        idle = Engine(self.config, driver=idle_driver).run(
+            self.project, 'worker', event_trigger=True)
+        self.assertEqual(idle['skipped'], 'no-event')
+        self.assertFalse(idle_driver.calls)
+
+    def test_wait_resolution_progress_prunes_proofs_after_item_leaves_open_state(self):
+        from mizu.runtime import Engine
+        limits = dataclasses.replace(self.config.limits, work_items_prompt=1)
+        self.config = dataclasses.replace(self.config, limits=limits)
+        self.config.roles['worker'] = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        self.project = Project(self.config, 'sample')
+        self.store = self.project.work_items
+        self.baseline = self.project.snapshots.get()
+        first = self.block('prune-first')
+        self.snapshot('first wait is due')
+        first_driver = ScriptDriver()
+        self.assertEqual(Engine(self.config, driver=first_driver).run(
+            self.project, 'worker', event_trigger=True)['status'], 'completed')
+        first_token = f"{first['id']}:{first['rev']}"
+        self.assertEqual(self.project.snapshots.get()['progress']['wait_resolution_tokens'],
+                         [first_token])
+
+        current_first = self.store.get(first['id'])
+        self.store.transition(first['id'], expected_rev=current_first['rev'],
+                              status='doing', actor='worker')
+        second = self.block('prune-second')
+        self.snapshot('second wait is due')
+        second_driver = ScriptDriver()
+        self.assertEqual(Engine(self.config, driver=second_driver).run(
+            self.project, 'worker', event_trigger=True)['status'], 'completed')
+        progress = self.project.snapshots.get()['progress']['wait_resolution_tokens']
+        self.assertIn(f"{second['id']}:{second['rev']}", progress)
+        self.assertNotIn(first_token, progress)
+
     def test_held_open_visibility_authorization_and_ordinary_release(self):
         item = self.block()
         self.snapshot()

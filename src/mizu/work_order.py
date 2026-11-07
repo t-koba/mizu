@@ -298,7 +298,7 @@ def _capture_opening(context) -> dict:
             and {"work_order", "work_items_transition"} <= caps)
         ready_args = {"limit": limit_open, "role_name": context.role.name}
         if records_resolution_delivery:
-            from .snapshot import validate_progress
+            from .snapshot import MAX_WAIT_RESOLUTION_TOKENS, validate_progress
             from .work_items import wait_resolution_tokens
             previous_progress = context.snapshot.get("progress")
             if previous_progress is not None:
@@ -325,7 +325,9 @@ def _capture_opening(context) -> dict:
         ready_work = _ready_work_projection(raw_ready, context=context)
         if records_resolution_delivery:
             context.wait_resolution_tokens = wait_resolution_tokens(
-                open_work_items, raw_ready, role_name=context.role.name)
+                open_work_items, raw_ready, role_name=context.role.name,
+                retained=raw_ready.get("_wait_resolution_delivered_current"),
+                maximum_tokens=MAX_WAIT_RESOLUTION_TOKENS)
         limit_pending = config.limits.pending_insights
         if "insights" in caps or "decide" in caps:
             proj = project.insights.projection(limit=limit_pending)

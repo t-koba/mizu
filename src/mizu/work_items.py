@@ -110,9 +110,19 @@ def wait_resolution_token(item: dict) -> str:
     return f"{item_id}:{wait_rev}"
 
 
-def wait_resolution_tokens(*pages, role_name: str) -> list[str]:
-    """Capture the bounded proofs visibly offered in this role's opening pages."""
-    tokens = set()
+def wait_resolution_tokens(*pages, role_name: str, retained=(),
+                           maximum_tokens=2 * MAX_OPEN_PAGE_ROWS) -> list[str]:
+    """Capture shown proofs and still-current delivered proofs within one bound."""
+    if (type(maximum_tokens) is not int or not 0 <= maximum_tokens <= 2 * MAX_OPEN_PAGE_ROWS
+            or not isinstance(retained, (list, tuple, set, frozenset))
+            or len(retained) > maximum_tokens
+            or any(not isinstance(token, str)
+                   or _WAIT_RESOLUTION_TOKEN.fullmatch(token) is None
+                   or not 1 <= int(token.rsplit(":", 1)[1]) <= MAX_REVISIONS
+                   for token in retained)
+            or len(set(retained)) != len(retained)):
+        raise Denied("Invalid retained wait-resolution tokens")
+    tokens = set(retained)
     for page in pages:
         if not isinstance(page, dict) or not isinstance(page.get("items"), list):
             raise Denied("Invalid wait-resolution delivery page")
@@ -121,8 +131,8 @@ def wait_resolution_tokens(*pages, role_name: str) -> list[str]:
                 raise Denied("Invalid wait-resolution delivery row")
             if item.get("holder") == role_name and "wait_resolution" in item:
                 tokens.add(wait_resolution_token(item))
-    if len(tokens) > 2 * MAX_OPEN_PAGE_ROWS:
-        raise Denied("Wait-resolution delivery exceeds page bound")
+                if len(tokens) > maximum_tokens:
+                    raise Denied("Wait-resolution delivery exceeds progress bound")
     return sorted(tokens)
 
 
@@ -2480,11 +2490,12 @@ class WorkItems:
         evidence and wait-resolution proof bindings (not just the selected page),
         after role filtering. ``_wait_resolution_pending`` reports a validated
         holder-owned resolution anywhere in that set, not a delivery receipt.
-        Host dispatch may supply its prior exact delivered-token set; then the
-        private ``_wait_resolution_undelivered`` flag reports whether a current
-        eligible proof is new to that input; those unseen proof rows sort first
-        so bounded prompt pages advance through overflow. Ordinary read pages
-        omit this flag and keep their normal ordering.
+        Host dispatch may supply its bounded exact delivered-token set; then
+        ``_wait_resolution_undelivered`` reports a current eligible proof new to
+        that input, ``_wait_resolution_delivered_current`` returns only supplied
+        tokens still present in the full eligible scan, and unseen proof rows sort
+        first so bounded prompt pages advance through overflow. Ordinary read
+        pages omit these private fields and keep their normal ordering.
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
@@ -2696,6 +2707,7 @@ class WorkItems:
         ready_sum = 0
         wait_resolution_pending = False
         wait_resolution_undelivered = False
+        delivered_resolution_current = set()
         order_sum = 0
         for row in events:
             if cacheable:
@@ -2838,9 +2850,13 @@ class WorkItems:
                     holder = item.get("holder")
                     if holder is not None and (role_name is None or holder == role_name):
                         wait_resolution_pending = True
-                        if (delivered_resolution_tokens is not None
-                                and wait_resolution_token(item) not in delivered_resolution_tokens):
-                            wait_resolution_undelivered = True
+                        token = wait_resolution_token(item)
+                        if delivered_resolution_tokens is not None:
+                            if (item["status"] == "open"
+                                    and token in delivered_resolution_tokens):
+                                delivered_resolution_current.add(token)
+                            elif token not in delivered_resolution_tokens:
+                                wait_resolution_undelivered = True
                 ready_sum = (ready_sum + int(digest(leaf), 16)) % (1 << 256)
             total += 1
             sort_key, row = self._open_row(item, view, wait_liveness=(
@@ -2884,6 +2900,7 @@ class WorkItems:
             result["_wait_resolution_pending"] = wait_resolution_pending
         if ready_only and delivered_resolution_tokens is not None:
             result["_wait_resolution_undelivered"] = wait_resolution_undelivered
+            result["_wait_resolution_delivered_current"] = sorted(delivered_resolution_current)
         if ready_only:
             complete = unseeded_decisions == 0 and unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked
