@@ -71,6 +71,11 @@ Otherwise it checks changed goal digest and operator wake-generation, then an
 independent ready-set change, owned check-result wake / receipt-pinned CI wait, and eligible operator-record
 read in evaluator order. Owned check results and operator records are checked before the `done` gate;
 the existing project wake-generation cursor remains a separate signal.
+`mizu arm` and explicit `mizu wake` advance the operator wake generation;
+`mizu resume` only clears pause/drain and resets health, leaving that generation
+unchanged. Work that became due while paused and delivered inputs still admit
+through their own readiness checks. Use `mizu wake` only for an additional
+operator-requested reevaluation when ordinary work is not due.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or a `doing` item held by
 that role, with no structured wait. Satisfied or dead blocked waits below are ready

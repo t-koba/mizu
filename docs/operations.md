@@ -72,13 +72,14 @@ forgeries.
 mizu status demo   # プロジェクトの制御状態、スナップショット、予算、ヘルスを表示
 mizu pause demo    # タスクを一時停止（協調的キャンセルを通知、arm 状態は維持）
 mizu drain demo    # 新規実行を止め、永続セッションは安全なリクエスト境界で wrap-up (active が空で静止)
-mizu resume demo   # 一時停止・drain を解除してタスクを再開
+mizu resume demo   # 一時停止・drain を解除してスケジュールを再開（追加の wake は行わない）
 mizu disarm demo   # arm 状態を解除して安全な停止状態にする
-mizu wake demo     # completed や blocked 状態のタスクに対して目標の再検討を指示
+mizu wake demo     # 明示的に operator wake を発行して追加の再検討を要求
 mizu cleanup demo  # 終了後に残存したラベル付きコンテナを停止・削除
 ```
 
 - **状態の永続化**: arm/pause/disarm の状態はディスク上の `control.json` に記録され、OS やプロセスの再起動で勝手に解除されることはありません。
+- **resume と wake の区別**: `mizu resume` は pause/drain を解除して失敗カウンターをリセットしますが、wake generation は変更しません。停止中に due となったスケジュールや通常の入力・イベントは既存の readiness 判定で処理されます。何も due でないロールに追加の再検討を要求する場合だけ `mizu wake` を使います。
 - **実行権限の制約**: 自律モデル自身には停止状態を解除したり、自分自身を arm する権限はありません。
 - **二重起動防止**: 単一 Writer ロックにより、同一プロジェクトへの重複書き込みは排他制御されます。
 - **待機中の表示**: `mizu status` は `admission` で実行枠を待っているロールを示します（待ちのスロット番号、待っているロール、待ち始めた時刻）。実行中（`active`）とも、一度も受付されなかったロールとも区別できます。待ちの記録は読めない場合は誰も待っていないものとして表示します。

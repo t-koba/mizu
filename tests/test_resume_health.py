@@ -11,7 +11,7 @@ import dataclasses
 import sys
 from types import SimpleNamespace
 from support import Fixture, ScriptDriver, ROOT
-from mizu.cli import _cmd_resume
+from mizu.cli import _cmd_resume, _cmd_wake
 from mizu.errors import Busy, InfraExceeded, LimitExceeded, ProtocolError
 from mizu.fs import read_json, write_json
 from mizu.project import Project
@@ -124,13 +124,21 @@ class ResumeHealthTests(Fixture):
             with self.assertRaises(ProtocolError):
                 Engine(self.config, driver=ScriptDriver(fails)).run(self.project, "worker")
         self.assertTrue(self.project.control()["paused"])
+        self.project.set_control(wake_generation="pending-before-resume")
         _cmd_resume(self.config, self.project, SimpleNamespace())
+        self.assertEqual(self.project.control()["wake_generation"], "pending-before-resume")
         self.assertFalse(self.project.control()["paused"])
         self.assertEqual(self._failures(), 0)
         with self.assertRaises(ProtocolError):
             Engine(self.config, driver=ScriptDriver(fails)).run(self.project, "worker")
         self.assertFalse(self.project.control()["paused"])
         self.assertEqual(self._failures(), 1)
+
+    def test_explicit_wake_advances_operator_generation(self):
+        self.project.set_control(wake_generation="before-explicit-wake")
+        result = _cmd_wake(self.config, self.project, SimpleNamespace())
+        self.assertNotEqual(result["wake_generation"], "before-explicit-wake")
+        self.assertEqual(self.project.control()["wake_generation"], result["wake_generation"])
 
     def test_resume_keeps_last_run_evidence(self):
         write_json(self.project.root / "health" / "worker.json",

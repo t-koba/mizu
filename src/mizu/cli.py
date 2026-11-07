@@ -49,8 +49,8 @@ def parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help={"status": "Show control, snapshot, budget and health",
                                        "arm": "Arm after reviewing configuration",
                                        "pause": "Pause without disarming",
-                                       "resume": "Resume an armed project",
-                                       "wake": "Request another work unit",
+                                       "resume": "Resume scheduling without an extra operator wake",
+                                       "wake": "Explicitly request another operator wake",
                                        "disarm": "Disarm and pause",
                                        "drain": "Stop new runs; persistent units wrap up at safe boundaries when enabled"}[name])
         p.add_argument("project", help="Managed project name")
@@ -269,7 +269,7 @@ def _cmd_resume(config, project, args):
     if not project.control().get("armed"):
         raise Denied("Project is unarmed; use arm after reviewing its configuration")
     project.reset_health()
-    return project.set_control(paused=False, draining=False, reason="Operator resumed", wake_generation=uuid.uuid4().hex)
+    return project.set_control(paused=False, draining=False, reason="Operator resumed")
 
 
 def _cmd_wake(config, project, args):
