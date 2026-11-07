@@ -238,9 +238,11 @@ def _has_ready_work(project, role=None) -> bool:
 def _ready_work_observation(project, record, role=None, *, work_items=None) -> tuple[bool, bool, bool]:
     """Return ready-set change, presence and a resolution-qualified change.
 
-    Current store/read or malformed progress errors close all three facts. Valid
-    legacy records (or an undelivered input) admit nonempty sets once; empty
-    legacy sets do not manufacture an event. The progress role and fingerprint
+    Current store/read or malformed progress errors close all three facts. The
+    full signature reports ready-set change; schema-4 writer progress separately
+    qualifies resolution wakes by exact item/revision tokens actually shown in
+    the opening pages. Legacy progress retains its conservative changed-set
+    fallback because it has no delivery tokens. The progress role and fingerprint
     scope prevent an observer from consuming another role's ready-work signal.
     """
     if role is not None and "work_items_transition" not in role.capabilities:
@@ -250,8 +252,15 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
         if previous is not None:
             validate_progress(previous)
         store = project.work_items if work_items is None else work_items
-        page = store.page_ready(
-            limit=1, **({"role_name": role.name} if role is not None else {}))
+        delivered_tokens = None
+        if (role is not None and isinstance(previous, dict)
+                and previous.get("schema") == 4):
+            delivered_tokens = (previous["wait_resolution_tokens"]
+                                if previous["role"] == role.name else [])
+        ready_args = {"limit": 1, **({"role_name": role.name} if role is not None else {})}
+        if delivered_tokens is not None:
+            ready_args["_delivered_wait_resolution_tokens"] = delivered_tokens
+        page = store.page_ready(**ready_args)
         signature = page.get("signature")
         total = page.get("total")
         if (not isinstance(signature, str) or not DIGEST.fullmatch(signature)
@@ -266,7 +275,15 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
             changed = present
         else:
             changed = signature != previous["ready_work_signature"]
-        return changed, present, changed and pending
+        if delivered_tokens is not None:
+            resolution_changed = page.get("_wait_resolution_undelivered")
+            if type(resolution_changed) is not bool:
+                return False, False, False
+        else:
+            # Older progress records do not identify which resolution proofs
+            # their prompt actually delivered; retain their conservative wake.
+            resolution_changed = changed and pending
+        return changed, present, resolution_changed
     except Exception:
         return False, False, False
 
@@ -3440,7 +3457,9 @@ class Engine:
                                                observed_progress, finished["outcome"],
                                                obligations_digest=context.progress_obligations_digest,
                                                ready_work=ready_work_at_finish,
-                                               ready_work_signature=getattr(context, "ready_work_signature", None))
+                                               ready_work_signature=getattr(context, "ready_work_signature", None),
+                                               wait_resolution_tokens=getattr(
+                                                   context, "wait_resolution_tokens", _READY_WORK_UNSET))
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
@@ -3531,7 +3550,9 @@ class Engine:
                                 signals, finished["outcome"],
                                 obligations_digest=context.progress_obligations_digest,
                                 ready_work=None,
-                                ready_work_signature=getattr(context, "ready_work_signature", None)))
+                                ready_work_signature=getattr(context, "ready_work_signature", None),
+                                wait_resolution_tokens=getattr(
+                                    context, "wait_resolution_tokens", _READY_WORK_UNSET)))
                     if role.workspace == "write":
                         write_json(project.root / "observed" / f"{role_name}.json", observed)
                 selected_tokens = set(finished.get("ack_events", []))
@@ -4528,7 +4549,8 @@ _READY_WORK_UNSET: object = object()
 def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None,
                     ready_work: bool | None | object = _READY_WORK_UNSET,
-                    ready_work_signature: str | None | object = _READY_WORK_UNSET) -> dict:
+                    ready_work_signature: str | None | object = _READY_WORK_UNSET,
+                    wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET) -> dict:
     """Build compact unit evidence and its bounded consecutive no-progress count.
 
     ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
@@ -4537,6 +4559,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     the legacy schema-1 shape for direct callers without an observation.
     An explicit ready_work_signature produces schema 3, binding admission to
     the ready set shown in the unit input rather than the finish-time probe.
+    Schema 4 also records the bounded exact wait-resolution causes offered to
+    the writer, so an old proof cannot re-admit on an unrelated ready-set change.
     """
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
@@ -4558,6 +4582,9 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         # sufficient to preserve the parked disposition without unbounded growth.
         count = min(101, previous_count + 1)
     obligations_digest = obligations_digest or _progress_obligations_digest(())
+    if (wait_resolution_tokens is not _READY_WORK_UNSET
+            and ready_work_signature is _READY_WORK_UNSET):
+        raise Denied("Wait-resolution delivery requires a ready-work observation")
     if ready_work_signature is not _READY_WORK_UNSET and ready_work is _READY_WORK_UNSET:
         ready_work = None
     if ready_work is _READY_WORK_UNSET:
@@ -4579,6 +4606,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
               "ready_work": ready_work}
     if ready_work_signature is not _READY_WORK_UNSET:
         record.update(schema=3, ready_work_signature=ready_work_signature)
+    if wait_resolution_tokens is not _READY_WORK_UNSET:
+        record.update(schema=4, wait_resolution_tokens=wait_resolution_tokens)
     return validate_progress(record)
 
 

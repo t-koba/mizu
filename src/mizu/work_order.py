@@ -302,6 +302,11 @@ def _capture_opening(context) -> dict:
         ready_signature = raw_ready["signature"]
         from .unit_prompts import _ready_work_projection
         ready_work = _ready_work_projection(raw_ready, context=context)
+        if (context.role.workspace == "write"
+                and {"work_order", "work_items_transition"} <= caps):
+            from .work_items import wait_resolution_tokens
+            context.wait_resolution_tokens = wait_resolution_tokens(
+                open_work_items, raw_ready, role_name=context.role.name)
         limit_pending = config.limits.pending_insights
         if "insights" in caps or "decide" in caps:
             proj = project.insights.projection(limit=limit_pending)

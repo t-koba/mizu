@@ -39,6 +39,9 @@ def _exclude_matcher(excludes):
 
 
 PROGRESS_SIGNALS = ("tool", "code", "state", "decision", "insight", "input")
+_WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
+# The two opening pages are each bounded to at most 100 rows.
+MAX_WAIT_RESOLUTION_TOKENS = 200
 _PROGRESS_TIMESTAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
 
@@ -58,24 +61,34 @@ def validate_progress(value: dict) -> dict:
               "no_progress_count", "obligations_digest", "recorded_at"}
     fields_v2 = fields_v1 | {"ready_work"}
     fields_v3 = fields_v2 | {"ready_work_signature"}
+    fields_v4 = fields_v3 | {"wait_resolution_tokens"}
     if not isinstance(value, dict):
         raise Denied("Invalid snapshot progress record")
     schema = value.get("schema")
-    if type(schema) is not int or schema not in (1, 2, 3):
+    if type(schema) is not int or schema not in (1, 2, 3, 4):
         raise Denied("Invalid snapshot progress schema")
     if schema == 1:
         if set(value) != fields_v1:
             raise Denied("Invalid snapshot progress record")
     else:
-        if set(value) != (fields_v2 if schema == 2 else fields_v3):
+        expected = {2: fields_v2, 3: fields_v3, 4: fields_v4}[schema]
+        if set(value) != expected:
             raise Denied("Invalid snapshot progress record")
         ready = value.get("ready_work")
         if ready is not None and type(ready) is not bool:
             raise Denied("Invalid snapshot ready-work observation")
-    if schema == 3:
+    if schema >= 3:
         signature = value["ready_work_signature"]
         if signature is not None and (not isinstance(signature, str) or not DIGEST.fullmatch(signature)):
             raise Denied("Invalid snapshot ready-work signature")
+    if schema == 4:
+        tokens = value["wait_resolution_tokens"]
+        if (not isinstance(tokens, list) or len(tokens) > MAX_WAIT_RESOLUTION_TOKENS
+                or any(not isinstance(token, str)
+                       or _WAIT_RESOLUTION_TOKEN.fullmatch(token) is None
+                       or int(token.rsplit(":", 1)[1]) > 256 for token in tokens)
+                or len(tokens) != len(set(tokens))):
+            raise Denied("Invalid snapshot wait-resolution delivery")
     signals = value["signals"]
     if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
             or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
@@ -132,8 +145,10 @@ def progress_projection(value: dict | None) -> dict | None:
                  "recorded_at": value["recorded_at"]}
     if value["schema"] >= 2:
         projected["ready_work"] = value["ready_work"]
-    if value["schema"] == 3:
+    if value["schema"] >= 3:
         projected["ready_work_signature"] = value["ready_work_signature"]
+    if value["schema"] == 4:
+        projected["wait_resolution_tokens"] = list(value["wait_resolution_tokens"])
     return projected
 
 

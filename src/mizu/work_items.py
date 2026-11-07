@@ -88,11 +88,40 @@ MAX_CLOSED_PAGE_BYTES = MAX_OPEN_PAGE_BYTES
 _TEMP_NAME = re.compile(r"\.new-[A-Za-z0-9_]{8}\Z")
 _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
+_WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 _HISTORY_UNSET = object()
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 _SIDECAR_SCHEMA = 1
 _SIDECAR_DIR = "work-item-state"
 _SIDECAR_MAX_BYTES = PREVIEW_BYTES * 2 + 4096
+
+
+def wait_resolution_token(item: dict) -> str:
+    """Identify one immutable wait resolution, distinct across item waits."""
+    item_id = item.get("id") if isinstance(item, dict) else None
+    if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
+        raise Denied("Invalid wait-resolution item identity")
+    proof = item.get("wait_resolution")
+    wait_rev = proof.get("wait_rev") if isinstance(proof, dict) else None
+    if type(wait_rev) is not int or not 1 <= wait_rev <= MAX_REVISIONS:
+        raise Denied("Invalid wait-resolution revision")
+    return f"{item_id}:{wait_rev}"
+
+
+def wait_resolution_tokens(*pages, role_name: str) -> list[str]:
+    """Capture the bounded proofs visibly offered in this role's opening pages."""
+    tokens = set()
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise Denied("Invalid wait-resolution delivery page")
+        for item in page["items"]:
+            if not isinstance(item, dict):
+                raise Denied("Invalid wait-resolution delivery row")
+            if item.get("holder") == role_name and "wait_resolution" in item:
+                tokens.add(wait_resolution_token(item))
+    if len(tokens) > 2 * MAX_OPEN_PAGE_ROWS:
+        raise Denied("Wait-resolution delivery exceeds page bound")
+    return sorted(tokens)
 
 
 def _reject_json_constant(value: str):
@@ -2438,7 +2467,8 @@ class WorkItems:
             return self._page_open_impl(cursor=None, limit=limit, readonly=False,
                                         order_fingerprint=True)
 
-    def page_ready(self, *, limit=25, role_name=None) -> dict:
+    def page_ready(self, *, limit=25, role_name=None,
+                   _delivered_wait_resolution_tokens=None) -> dict:
         """Return open/doing work and blocked work needing replanning.
 
         Same bounds, ordering, recovery, lock and fail-closed contract as
@@ -2448,6 +2478,9 @@ class WorkItems:
         evidence and wait-resolution proof bindings (not just the selected page),
         after role filtering. ``_wait_resolution_pending`` reports a validated
         holder-owned resolution anywhere in that set, not a delivery receipt.
+        Host dispatch may supply its prior exact delivered-token set; then the
+        private ``_wait_resolution_undelivered`` flag reports whether a current
+        eligible proof is new to that input. Ordinary read pages omit this flag.
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
@@ -2467,8 +2500,10 @@ class WorkItems:
         if role_name is not None:
             identifier(role_name)
         with lock(self.root / "locks" / "insights.lock"):
-            return self._page_open_impl(cursor=None, limit=limit, readonly=False,
-                                        ready_only=True, role_name=role_name)
+            return self._page_open_impl(
+                cursor=None, limit=limit, readonly=False, ready_only=True,
+                role_name=role_name,
+                delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
     def _seed_for_event(self, event_id: str, event: dict, *, readonly: bool):
         """Resolve the seed for one committed event with an explicit mode.
@@ -2610,7 +2645,8 @@ class WorkItems:
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False,
-                        wait_resolution_role: str | None = None, _active_transform=None):
+                        wait_resolution_role: str | None = None, _active_transform=None,
+                        delivered_wait_resolution_tokens=None):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -2626,6 +2662,18 @@ class WorkItems:
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
         cursor_key = _open_cursor_key(cursor)
+        if delivered_wait_resolution_tokens is None:
+            delivered_resolution_tokens = None
+        else:
+            if (not isinstance(delivered_wait_resolution_tokens, (list, tuple, set, frozenset))
+                    or len(delivered_wait_resolution_tokens) > 2 * MAX_OPEN_PAGE_ROWS
+                    or any(not isinstance(token, str)
+                           or _WAIT_RESOLUTION_TOKEN.fullmatch(token) is None
+                           or not 1 <= int(token.rsplit(":", 1)[1]) <= MAX_REVISIONS
+                           for token in delivered_wait_resolution_tokens)
+                    or len(set(delivered_wait_resolution_tokens)) != len(delivered_wait_resolution_tokens)):
+                raise Denied("Invalid delivered wait-resolution tokens")
+            delivered_resolution_tokens = frozenset(delivered_wait_resolution_tokens)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         cacheable = (readonly or ready_only) and not IS_WINDOWS
@@ -2643,6 +2691,7 @@ class WorkItems:
         unknown_blocked = 0
         ready_sum = 0
         wait_resolution_pending = False
+        wait_resolution_undelivered = False
         order_sum = 0
         for row in events:
             if cacheable:
@@ -2785,6 +2834,9 @@ class WorkItems:
                     holder = item.get("holder")
                     if holder is not None and (role_name is None or holder == role_name):
                         wait_resolution_pending = True
+                        if (delivered_resolution_tokens is not None
+                                and wait_resolution_token(item) not in delivered_resolution_tokens):
+                            wait_resolution_undelivered = True
                 ready_sum = (ready_sum + int(digest(leaf), 16)) % (1 << 256)
             total += 1
             sort_key, row = self._open_row(item, view, wait_liveness=(
@@ -2820,6 +2872,8 @@ class WorkItems:
                 result["open_count"] = open_count
         if ready_only or wait_resolution_role is not None:
             result["_wait_resolution_pending"] = wait_resolution_pending
+        if ready_only and delivered_resolution_tokens is not None:
+            result["_wait_resolution_undelivered"] = wait_resolution_undelivered
         if ready_only:
             complete = unseeded_decisions == 0 and unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked

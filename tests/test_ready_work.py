@@ -570,7 +570,7 @@ class ReadySetChangeTests(Fixture):
         engine = self.engine()
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
         snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 3)
+        self.assertEqual(snapshot['progress']['schema'], 4)
         self.assertEqual(snapshot['progress']['ready_work_signature'], self.signature())
         self.assertTrue(self.project.status()['idle_with_open_work']['ready_work'])
         for _ in range(3):
@@ -686,7 +686,7 @@ class ReadySetChangeTests(Fixture):
         engine = self.engine()
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 3)
+        self.assertEqual(snapshot['progress']['schema'], 4)
         self.assertFalse(_ready_work_changed(self.project, snapshot, role))
         # Invalid evidence closes, never reinterpreted as permissive legacy.
         for bad in ({}, {**snapshot['progress'], 'ready_work_signature': 'bad'}):
@@ -697,6 +697,12 @@ class ReadySetChangeTests(Fixture):
         self.engine().run(self.project, 'worker')
         progress = self.project.snapshots.get()['progress']
         self.assertEqual(progress_projection(progress)['ready_work_signature'], self.signature())
+        self.assertEqual(progress_projection(progress)['wait_resolution_tokens'], [])
+        for tokens in (['bad'], ['wi_' + 'a' * 32 + ':0'],
+                       ['wi_' + 'a' * 32 + ':1'] * 2,
+                       [f'wi_{index:032x}:1' for index in range(201)]):
+            with self.subTest(tokens=len(tokens)), self.assertRaises(Denied):
+                validate_progress({**progress, 'wait_resolution_tokens': tokens})
         for bad in ('', 'a' * 65, 'A' * 64, 1, [], {}):
             with self.subTest(bad=bad), self.assertRaises(Denied):
                 validate_progress({**progress, 'ready_work_signature': bad})

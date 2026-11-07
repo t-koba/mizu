@@ -269,10 +269,30 @@ class WaitResolutionTests(Fixture):
         self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
         delivered = self.project.snapshots.get()
         self.assertEqual(delivered['progress']['ready_work_signature'], page['signature'])
+        self.assertEqual(delivered['progress']['wait_resolution_tokens'],
+                         [f"{item['id']}:{item['rev']}"])
         self.assertEqual(self.project.work_items.get(item['id']), opened)
         engine = Engine(self.config, driver=ScriptDriver())
         self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
         self.assertFalse(engine.driver.calls)
+        self.store.create(actor='worker', idempotency_key='unrelated-after-delivery',
+                          title='Unrelated open item')
+        self.assertNotEqual(self.store.page_ready(role_name='worker')['signature'],
+                            delivered['progress']['ready_work_signature'])
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        self.assertFalse(engine.driver.calls)
+
+        second = self.store.create(actor='worker', idempotency_key='second-resolution',
+                                   title='A later wait')['record']['work_item']
+        second = bind_delivery(self.project, second['id'], delivered['id'])
+        second = self.store.transition(second['id'], expected_rev=second['rev'], status='blocked',
+            actor='worker', wait={'kind': 'code_change'})
+        self.snapshot('second wait becomes due')
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertTrue(engine.driver.calls)
+        self.assertEqual(self.store.get(second['id'])['wait_resolution']['wait_rev'], second['rev'])
 
     def test_held_open_visibility_authorization_and_ordinary_release(self):
         item = self.block()

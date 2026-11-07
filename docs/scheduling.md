@@ -105,11 +105,25 @@ scan order, other metadata changes, prompt size and equal totals cannot substitu
 for membership or exact terminal evidence. This probabilistic fingerprint is change evidence, not an
 authorization or collision-free set proof, and retains constant extra memory.
 Full and resumed/delta inputs capture that scan's signature when the ready
-projection is built. Successful writer snapshots and observer completion
-cursors store it in validated progress schema 3 as `ready_work_signature`
-(64 lowercase hex, or null for no delivered input). Finish-time `ready_work`
+projection is built. Writer snapshots store it in validated progress schema 3,
+or schema 4 when exact resolution-delivery tokens are also present; observer
+completion cursors store it in schema 3 as `ready_work_signature` (64 lowercase
+hex, or null for no delivered input). Finish-time `ready_work`
 remains the separate True/False/null idle diagnostic, not an admission cursor.
 Work added or becoming ready during execution therefore remains new input.
+
+A writable role with both `work_order` and `work_items_transition` also records
+progress schema 4's bounded `wait_resolution_tokens`: exact item/revision keys
+for holder-owned resolution proofs actually shown in its opening pages. On an
+explicit event, only a currently eligible resolution absent from that delivered
+set can admit a one-shot resolution wake. Thus an old proof cannot turn an
+unrelated ready-set change into another explicit-only run; an unseen proof, a
+new resolution revision, or a proof that could not fit the opening pages remains
+eligible for delivery. Legacy progress without these tokens keeps the conservative
+existing wake behavior until a schema-4 prompt is delivered. The token list is
+bounded by the configured opening-page size (at most 200 tokens total) and is
+carried in the existing immutable snapshot progress record; it adds no separate
+store, cursor, acknowledgement, or generic ready-work event.
 
 An unchanged set after `wait` parks until independent input, wait expiry or
 another genuine wake; unchanged ready work does not bypass the existing
@@ -382,19 +396,22 @@ the configured cadence. Cache-affinity ordering is separate.
 
 An already reopened, holder-owned item with a validated `wait_resolution`
 also supplies an exact event cause for its writer (with both reconciliation
-grants), including a non-autonomous writer. The existing bounded ready scan
-aggregates `wait_resolution_pending` across the entire role-eligible set, not
-just the selected row. This internal flag alone is not a wake: the ready
-signature must differ from that role's delivered progress receipt. Binding the
-proof prevents a stale signature from when the same item was previously open
-from hiding its reopening. No generic ready-work event admission is enabled for
-explicit-only roles without such a proof; subscriptions and defaults are unchanged.
+grants), including a non-autonomous writer. Pre-admission dispatch compares
+current eligible proof identities (`item_id:wait_rev`) with the exact bounded
+tokens shown in that role's opening pages and recorded in schema-4 snapshot
+progress. A new or previously unseen resolution admits once; an unrelated ready
+set change cannot revive a proof already delivered. Older progress lacks these
+tokens and retains the conservative signature-change behavior until a schema-4
+input is successfully delivered. No generic ready-work event admission is
+enabled for explicit-only roles without a new resolution proof; subscriptions
+and defaults are unchanged.
 
-Pre-admission dispatch and the locked recheck derive this cause from durable
+Pre-admission dispatch and its locked recheck derive this cause from durable
 ledger proof, not an in-process transition callback. A busy admission, failure
 before delivery, or restart leaves it discoverable. Successful completion binds
-the input signature in existing progress evidence; an unchanged delivered set
-does not repeatedly admit. There is no additional event store, cursor or ack.
+the input tokens in the existing immutable progress record; a later change to
+the ready set alone does not repeat the event. No separate event store, cursor,
+or acknowledgement is introduced.
 
 ### Blocked-work liveness status
 

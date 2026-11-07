@@ -193,7 +193,7 @@ class IdleWithOpenWorkTests(Fixture):
         with patch.object(self.project.work_items, "page_ready", side_effect=probe):
             snap = self.run_writer("wait")
         self.assertEqual(seen.get("limit"), 1)
-        self.assertEqual(snap["progress"]["schema"], 3)
+        self.assertEqual(snap["progress"]["schema"], 4)
         self.assertIs(snap["progress"]["ready_work"], True)
         idle = self.status_idle()
         self.assertTrue(idle["active"])
@@ -217,7 +217,7 @@ class IdleWithOpenWorkTests(Fixture):
 
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
             snap = self.run_writer("wait")
-        self.assertEqual(snap["progress"]["schema"], 3)
+        self.assertEqual(snap["progress"]["schema"], 4)
         self.assertIs(snap["progress"]["ready_work"], None)
         idle = self.status_idle()
         self.assertFalse(idle["active"])
