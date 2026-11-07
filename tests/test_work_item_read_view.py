@@ -345,7 +345,8 @@ class ReadViewTests(Fixture):
                     actual = self.dispatch(event_trigger=event_trigger, continuation=continuation)
                     self.assertEqual(actual, expected)
                     self.assertEqual(len(actual["terminal_events"]), 3)
-                    self.assertEqual(len(calls), 2)  # current pointer + shared delivery snapshot
+                    expected_validations = 5 if work_items_module.IS_WINDOWS else 2
+                    self.assertEqual(len(calls), expected_validations)
                     self.assertLess(len(calls), uncached)
                     calls.clear()
         self.assertIs(self.project.work_items, store)
