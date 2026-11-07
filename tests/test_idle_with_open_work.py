@@ -186,9 +186,10 @@ class IdleWithOpenWorkTests(Fixture):
         seen = {}
         real = self.project.work_items.page_ready
 
-        def probe(*, limit=25, role_name=None):
+        def probe(*, limit=25, role_name=None, _delivered_wait_resolution_tokens=None):
             seen["limit"] = limit
-            return real(limit=limit, role_name=role_name)
+            return real(limit=limit, role_name=role_name,
+                        _delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
         with patch.object(self.project.work_items, "page_ready", side_effect=probe):
             snap = self.run_writer("wait")
@@ -210,10 +211,12 @@ class IdleWithOpenWorkTests(Fixture):
         self.item("ready-but-unreadable")
         real = self.project.work_items.page_ready
 
-        def unreadable_finish_probe(*, limit=25, role_name=None):
+        def unreadable_finish_probe(*, limit=25, role_name=None,
+                                    _delivered_wait_resolution_tokens=None):
             if limit == 1:
                 raise Denied("unsafe")
-            return real(limit=limit, role_name=role_name)
+            return real(limit=limit, role_name=role_name,
+                        _delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
             snap = self.run_writer("wait")
@@ -305,10 +308,12 @@ class IdleWithOpenWorkTests(Fixture):
         self.item("ready-unreadable")
         real = self.project.work_items.page_ready
 
-        def unreadable_finish_probe(*, limit=25, role_name=None):
+        def unreadable_finish_probe(*, limit=25, role_name=None,
+                                    _delivered_wait_resolution_tokens=None):
             if limit == 1:
                 raise OSError("gone")
-            return real(limit=limit, role_name=role_name)
+            return real(limit=limit, role_name=role_name,
+                        _delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
             snap = self.run_writer("wait")

@@ -77,6 +77,8 @@ DELIVERY_EVENT_FIELDS = SCOPED_EVENT_FIELDS | {"delivery_schema", "delivery", "v
 MAX_EVENT_BYTES = PREVIEW_BYTES + MAX_RESOLUTION_BYTES
 MAX_PROJECTION_BYTES = MAX_EVENT_BYTES + 256
 MAX_OPEN_PAGE_ROWS = 100
+# Prior progress plus the current open page can contribute the dispatch set.
+MAX_DELIVERED_WAIT_RESOLUTION_TOKENS = 3 * MAX_OPEN_PAGE_ROWS
 MAX_OPEN_CURSOR_CHARS = 128
 MAX_OPEN_ROW_BYTES = 8192
 OPEN_STATUS_ORDER = {"doing": 0, "blocked": 1, "open": 2}
@@ -2480,7 +2482,9 @@ class WorkItems:
         holder-owned resolution anywhere in that set, not a delivery receipt.
         Host dispatch may supply its prior exact delivered-token set; then the
         private ``_wait_resolution_undelivered`` flag reports whether a current
-        eligible proof is new to that input. Ordinary read pages omit this flag.
+        eligible proof is new to that input; those unseen proof rows sort first
+        so bounded prompt pages advance through overflow. Ordinary read pages
+        omit this flag and keep their normal ordering.
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
@@ -2666,7 +2670,7 @@ class WorkItems:
             delivered_resolution_tokens = None
         else:
             if (not isinstance(delivered_wait_resolution_tokens, (list, tuple, set, frozenset))
-                    or len(delivered_wait_resolution_tokens) > 2 * MAX_OPEN_PAGE_ROWS
+                    or len(delivered_wait_resolution_tokens) > MAX_DELIVERED_WAIT_RESOLUTION_TOKENS
                     or any(not isinstance(token, str)
                            or _WAIT_RESOLUTION_TOKEN.fullmatch(token) is None
                            or not 1 <= int(token.rsplit(":", 1)[1]) <= MAX_REVISIONS
@@ -2845,6 +2849,12 @@ class WorkItems:
                 sort_key = (state["state"] in ("pending", "receipt_bound"), *sort_key)
                 row = {key: item[key] for key in ("id", "rev", "holder")}
                 row.update(state)
+            if ready_only and delivered_resolution_tokens is not None:
+                unseen_resolution = (
+                    item.get("holder") == role_name
+                    and "wait_resolution" in item
+                    and wait_resolution_token(item) not in delivered_resolution_tokens)
+                sort_key = (0 if unseen_resolution else 1, *sort_key)
             if cursor_key is not None and sort_key <= cursor_key:
                 continue
             eligible += 1

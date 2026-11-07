@@ -294,6 +294,42 @@ class WaitResolutionTests(Fixture):
         self.assertTrue(engine.driver.calls)
         self.assertEqual(self.store.get(second['id'])['wait_resolution']['wait_rev'], second['rev'])
 
+    def test_explicit_resolution_delivery_advances_across_bounded_prompt_pages(self):
+        from mizu.runtime import Engine
+        limits = dataclasses.replace(self.config.limits, work_items_prompt=1)
+        self.config = dataclasses.replace(self.config, limits=limits)
+        self.config.roles['worker'] = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        self.project = Project(self.config, 'sample')
+        self.store = self.project.work_items
+        self.baseline = self.project.snapshots.get()
+        first = self.block('page-overflow-first')
+        second = self.block('page-overflow-second')
+        self.snapshot('both waits are due')
+
+        driver = ScriptDriver()
+        result = Engine(self.config, driver=driver).run(
+            self.project, 'worker', event_trigger=True)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(len(driver.calls), 1)
+        prompt = json.loads(driver.calls[0][1])
+        open_id = prompt['open_work_items']['items'][0]['id']
+        ready_id = prompt['ready_work']['items'][0]['id']
+        ids = {first['id'], second['id']}
+        self.assertIn(open_id, ids)
+        self.assertIn(ready_id, ids)
+        self.assertNotEqual(open_id, ready_id)
+        delivered = self.project.snapshots.get()['progress']['wait_resolution_tokens']
+        self.assertEqual(set(delivered), {
+            f"{first['id']}:{first['rev']}", f"{second['id']}:{second['rev']}"})
+
+        idle_driver = ScriptDriver()
+        idle = Engine(self.config, driver=idle_driver).run(
+            self.project, 'worker', event_trigger=True)
+        self.assertEqual(idle['skipped'], 'no-event')
+        self.assertFalse(idle_driver.calls)
+
     def test_held_open_visibility_authorization_and_ordinary_release(self):
         item = self.block()
         self.snapshot()

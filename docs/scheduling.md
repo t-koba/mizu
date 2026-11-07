@@ -116,10 +116,12 @@ A writable role with both `work_order` and `work_items_transition` also records
 progress schema 4's bounded `wait_resolution_tokens`: exact item/revision keys
 for holder-owned resolution proofs actually shown in its opening pages. On an
 explicit event, only a currently eligible resolution absent from that delivered
-set can admit a one-shot resolution wake. Thus an old proof cannot turn an
-unrelated ready-set change into another explicit-only run; an unseen proof, a
-new resolution revision, or a proof that could not fit the opening pages remains
-eligible for delivery. Legacy progress without these tokens keeps the conservative
+set can admit a one-shot resolution wake. The ready-work page prioritizes
+unseen proofs not already shown by the open-work page, so bounded page overflow
+advances instead of repeating the same first proof. If more causes remain than
+both pages can show, they stay eligible for later event passes. Thus an old proof
+cannot turn an unrelated ready-set change into another explicit-only run. Legacy
+progress without these tokens keeps the conservative
 existing wake behavior until a schema-4 prompt is delivered. The token list is
 bounded by the configured opening-page size (at most 200 tokens total) and is
 carried in the existing immutable snapshot progress record; it adds no separate

@@ -293,8 +293,29 @@ def _capture_opening(context) -> dict:
                 or not isinstance(open_work_items.get("items"), list)
                 or not isinstance(open_work_items.get("total"), int)):
             raise Denied("Invalid open-work page")
-        raw_ready = project.work_items.page_ready(
-            limit=limit_open, role_name=context.role.name)
+        records_resolution_delivery = (
+            context.role.workspace == "write"
+            and {"work_order", "work_items_transition"} <= caps)
+        ready_args = {"limit": limit_open, "role_name": context.role.name}
+        if records_resolution_delivery:
+            from .snapshot import validate_progress
+            from .work_items import wait_resolution_tokens
+            previous_progress = context.snapshot.get("progress")
+            if previous_progress is not None:
+                validate_progress(previous_progress)
+            previous_tokens = (
+                previous_progress["wait_resolution_tokens"]
+                if isinstance(previous_progress, dict)
+                and previous_progress["schema"] == 4
+                and previous_progress["role"] == context.role.name else [])
+            # The open-work page has already shown these proof rows. Prefer
+            # other unseen proofs in the bounded ready-work page so overflow
+            # advances within this same prompt instead of repeating a no-op.
+            opening_tokens = wait_resolution_tokens(
+                open_work_items, role_name=context.role.name)
+            ready_args["_delivered_wait_resolution_tokens"] = sorted(
+                set(previous_tokens) | set(opening_tokens))
+        raw_ready = project.work_items.page_ready(**ready_args)
         if (not isinstance(raw_ready, dict)
                 or not isinstance(raw_ready.get("signature"), str)
                 or DIGEST.fullmatch(raw_ready["signature"]) is None):
@@ -302,9 +323,7 @@ def _capture_opening(context) -> dict:
         ready_signature = raw_ready["signature"]
         from .unit_prompts import _ready_work_projection
         ready_work = _ready_work_projection(raw_ready, context=context)
-        if (context.role.workspace == "write"
-                and {"work_order", "work_items_transition"} <= caps):
-            from .work_items import wait_resolution_tokens
+        if records_resolution_delivery:
             context.wait_resolution_tokens = wait_resolution_tokens(
                 open_work_items, raw_ready, role_name=context.role.name)
         limit_pending = config.limits.pending_insights
