@@ -1,4 +1,4 @@
-"""First runtime-bound inventory, not a general numeric-literal linter.
+"""Partial runtime-bound inventory, not a general numeric-literal linter.
 
 The `src/mizu` files below cover named, direct module-level Assign/AnnAssign
 bounds and direct numeric literal/arithmetic values at a short resource-call
@@ -11,9 +11,9 @@ ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. The `insights.py` module
 constants are fixed record and evidence safety bounds; its constructor policy
-defaults are named config defaults already inventoried or are supplied by
-`Project`, including the configured malformed-receipt diagnostic sample. The
-`runtime.py` literals are fixed run-local memory, one-row probe and public page
+defaults include policy supplied by `Project`, including the configured
+malformed-receipt diagnostic sample; literal bound-parameter defaults are
+classified separately below. The `runtime.py` literals are fixed run-local memory, one-row probe and public page
 bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
@@ -75,12 +75,12 @@ per-classifier tables are their owning configuration. Every current
 its own field-scoped table), so a new module with such a bound fails until it
 is declared. Every module with a detected numeric argument at the listed
 resource-call keywords is covered in `CALLS` too, so a new host deadline or
-read bound at those call sites fails until it is declared. The inventory
-remains name- and numeric-scoped and therefore partial; absence from the tables
+read bound at those call sites fails until it is declared. The module and call
+inventories remain name- and numeric-scoped and therefore partial; absence from the tables
 is not evidence that a value is not a decision. Expressions are inventoried
-without evaluating source. This does not lint arbitrary numeric literals,
-aliases, nested declarations, call arguments outside the listed keyword set,
-local arithmetic or other modules. Expand coverage as the behavior-based
+without evaluating source. Those detectors do not lint arbitrary numeric
+literals, aliases, nested assignments, call arguments outside the listed
+keyword set, or local arithmetic. Expand coverage as the behavior-based
 inventory reaches other owners. The configured slice checks Usage, SchedulerEvidence,
 CiRequestEvidence, PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults,
 VCS polling fallback defaults, the retained-check Limits field and ceiling, and explicitly
@@ -97,6 +97,24 @@ and, where a field exists, a validated range. The declaration tables assert the
 field or default expression, and the focused config tests exercise the range.
 Safety classifications here are defensive read or validation bounds, not
 intrinsic format limits.
+
+The parameter-default slice recursively scans every Python file under `src/mizu`
+for named sync/async functions and methods, including nested scopes. It matches
+whole underscore-delimited bound words (see PARAMETER_BOUND), not arbitrary
+substrings. It records exact file, class/function scope, parameter and unparsed
+numeric expression in PARAMETER_DEFAULTS. Positional-only and positional defaults
+are right-aligned together; keyword-only defaults are paired individually.
+Numeric means int/float literals (not bool), unary expressions and arithmetic
+composed solely of them, as in the other detectors; aliases, calls, None,
+lambdas, dataclass fields and names outside the vocabulary are excluded. Exact
+inventory equality rejects additions, removals and expression changes, and
+repeated detected scope/parameter keys are refused rather than overwritten.
+Zero offsets and depth counters are mechanism state, not capacity decisions.
+Caller-selected page sizes and host timing remain policy even when a separate
+validation ceiling exists. `configured policy` names an existing config/CLI
+owner; `policy` marks a caller-controlled or still hard-coded choice, not a
+claim that it is configured. This slice classifies current defaults only and
+does not change behavior, config or adapter contracts.
 """
 import ast
 from pathlib import Path
@@ -1146,6 +1164,128 @@ CALLS = {
 }
 
 
+# Whole underscore-delimited words; avoid unrelated names such as "discount".
+PARAMETER_BOUND = re.compile(
+    r'(?:^|_)(?:limits?|max(?:imum)?|caps?|timeouts?|seconds?|days?|bytes?|size|'
+    r'depth|counts?|entries|rows?|offset|retries|budget|retention|threshold)(?:_|$)'
+)
+# (relative file, qualified class/function scope, parameter):
+#     (exact ast.unparse(default), classification, owner / rationale)
+PARAMETER_DEFAULTS = {
+    ('budget.py', 'Budget.__init__', 'retention_days'): (
+        '31', 'configured policy', 'budget / [limits] retention_days fallback'),
+    ('check_jobs.py', 'logs', 'offset'): (
+        '0', 'mechanism', 'check jobs / initial evidence page position'),
+    ('check_jobs.py', 'logs', 'limit'): (
+        '8192', 'policy', 'check jobs / caller-selected evidence page length'),
+    ('ci_requests.py', 'CiRequests.daily', 'limit'): (
+        '100', 'policy', 'CI requests / caller-selected daily request projection size'),
+    ('ci_requests.py', 'CiRequests.page', 'limit'): (
+        '8', 'policy', 'CI requests / caller-selected cost-view dispatch page size'),
+    ('ci_requests.py', 'CiRequests.page', 'offset'): (
+        '0', 'mechanism', 'CI requests / initial dispatch page position'),
+    ('ci_waits.py', 'pending', 'limit'): (
+        '10', 'policy', 'CI waits / caller-selected pending delivery batch'),
+    ('ci_waits.py', 'readiness_init', 'limit'): (
+        '10', 'policy', 'CI waits / caller-selected readiness candidate batch'),
+    ('ci_waits.py', '_shared_page', 'limit'): (
+        '10', 'policy', 'CI waits / caller-selected shared delivery batch'),
+    ('ci_waits.py', 'delivery', 'limit'): (
+        '10', 'policy', 'CI waits / caller-selected frozen delivery batch'),
+    ('fs.py', 'page', 'offset'): (
+        '0', 'mechanism', 'fs / initial list projection position'),
+    ('fs.py', 'page', 'limit'): (
+        '1000', 'policy', 'fs / caller-selected list projection size'),
+    ('fs.py', 'text_preview', 'maximum'): (
+        '8192', 'safety', 'fs / fallback bounded text preview, callers may narrow or override'),
+    ('insights.py', 'Insights.__init__', 'retention_days'): (
+        '31', 'configured policy', 'insights / Project supplies [limits] retention_days'),
+    ('insights.py', 'Insights.__init__', 'cursor_ttl_seconds'): (
+        '86400', 'configured policy', 'insights / Project supplies [limits] insight_cursor_ttl_seconds'),
+    ('insights.py', 'Insights.projection', 'limit'): (
+        '30', 'policy', 'insights / caller-selected live projection size'),
+    ('insights.py', 'Insights.list', 'limit'): (
+        '30', 'policy', 'insights / caller-selected live list size'),
+    ('insights.py', 'Insights.list_page', 'limit'): (
+        '30', 'policy', 'insights / caller-selected live/archive cursor page size'),
+    ('insights.py', 'Insights.due_waits', 'limit'): (
+        '10', 'policy', 'insights / caller-selected due-wait delivery batch'),
+    ('insights.py', 'Insights.pending_obligations', 'limit'): (
+        '10', 'policy', 'insights / caller-selected obligation delivery batch'),
+    ('insights.py', 'Insights.decision_events', 'limit'): (
+        '10', 'policy', 'insights / caller-selected decision-event batch'),
+    ('insights.py', 'Insights.pending_insight_events', 'limit'): (
+        '10', 'policy', 'insights / caller-selected pending insight-event batch'),
+    ('insights.py', 'Insights.shared_decision_page', 'limit'): (
+        '10', 'policy', 'insights / caller-selected shared decision page size'),
+    ('insights.py', 'Insights.decision_events_with_diagnostics', 'limit'): (
+        '10', 'policy', 'insights / caller-selected decision-event diagnostic projection size'),
+    ('pi_durable_store.py', 'project_context', 'max_bytes'): (
+        '65536', 'policy', 'Pi durable store / caller-selected summary truncation marker threshold, not a read cap'),
+    ('platform.py', 'wait_pipe', 'timeout'): (
+        '0.1', 'policy', 'platform / host-dependent pipe wait and cancellation responsiveness'),
+    ('proposal_waits.py', 'delivery', 'limit'): (
+        '10', 'policy', 'proposal waits / caller-selected frozen delivery batch'),
+    ('proposal_waits.py', 'pending', 'limit'): (
+        '10', 'policy', 'proposal waits / caller-selected pending delivery batch'),
+    ('proposal_waits.py', 'readiness_init', 'limit'): (
+        '10', 'policy', 'proposal waits / caller-selected readiness candidate batch'),
+    ('protocol.py', 'text', 'maximum'): (
+        '32768', 'safety', 'protocol / default schema string validation ceiling'),
+    ('protocol.py', 'array', 'maximum'): (
+        '30', 'safety', 'protocol / default schema array validation ceiling'),
+    ('publication.py', 'Publication.list_receipts', 'limit'): (
+        '100', 'policy', 'publication / caller-selected receipt listing size'),
+    ('runtime.py', '_receipt_wait_due', 'limit'): (
+        '1', 'mechanism', 'runtime / existence probe needs one ready candidate per route'),
+    ('selection.py', 'validate_condition', 'depth'): (
+        '0', 'mechanism', 'selection / root nesting counter, not the nesting ceiling'),
+    ('shared_records.py', '_json', 'depth'): (
+        '0', 'mechanism', 'shared records / root JSON nesting counter, not the nesting ceiling'),
+    ('shared_records.py', 'SharedRecords.read_page', 'offset'): (
+        '0', 'mechanism', 'shared records / initial envelope character position'),
+    ('snapshot.py', 'Snapshots.history', 'limit'): (
+        '8', 'policy', 'snapshots / caller-selected anchored history projection size'),
+    ('storage.py', 'restore', 'max_bytes'): (
+        '1073741824', 'configured policy', 'storage / CLI restore --max-bytes fallback'),
+    ('storage_runs.py', 'Scan.preflight', 'depth'): (
+        '0', 'mechanism', 'run storage / root traversal depth counter, not the depth ceiling'),
+    ('vcs.py', 'parse_artifact', 'offset'): (
+        '0', 'mechanism', 'VCS / initial artifact byte position; whole-file mode requires zero'),
+    ('work_item_events.py', 'pending', 'limit'): (
+        '10', 'policy', 'work-item events / caller-selected terminal delivery batch'),
+    ('work_item_events.py', 'progress', 'limit'): (
+        '100', 'policy', 'work-item events / caller-selected role summary count'),
+    ('work_item_events.py', 'closed_page', 'limit'): (
+        '10', 'policy', 'work-item events / caller-selected closed-item delivery page size'),
+    ('work_items.py', 'WorkItems.__init__', 'doing_limit'): (
+        '1', 'configured policy', 'work items / Project supplies [limits] work_items_doing'),
+    ('work_items.py', 'WorkItems.__init__', 'stale_seconds'): (
+        '86400', 'configured policy', 'work items / Project supplies [limits] work_items_stale_seconds'),
+    ('work_items.py', 'WorkItems.__init__', 'blocked_max_age_seconds'): (
+        '604800', 'configured policy',
+        'work items / Project supplies [limits] work_items_blocked_max_age_seconds'),
+    ('work_items.py', 'WorkItems.page_legacy', 'limit'): (
+        '25', 'policy', 'work items / caller-selected legacy listing size'),
+    ('work_items.py', 'WorkItems.explain', 'limit'): (
+        '25', 'policy', 'work items / caller-selected explanation history size'),
+    ('work_items.py', 'WorkItems.page_open', 'limit'): (
+        '25', 'policy', 'work items / caller-selected open-item page size'),
+    ('work_items.py', 'WorkItems.page_open_for_order', 'limit'): (
+        '25', 'policy', 'work items / caller-selected work-order open-item page size'),
+    ('work_items.py', 'WorkItems.page_ready', 'limit'): (
+        '25', 'policy', 'work items / caller-selected ready-item page size'),
+    ('work_items.py', 'WorkItems.page_open_readonly', 'limit'): (
+        '25', 'policy', 'work items / caller-selected read-only open-item page size'),
+    ('work_items.py', 'WorkItems.blocked_liveness_readonly', 'limit'): (
+        '25', 'policy', 'work items / caller-selected blocked-liveness diagnostic sample'),
+    ('work_items.py', 'WorkItems.open_state_readonly', 'limit'): (
+        '25', 'policy', 'work items / caller-selected open-state projection size'),
+    ('work_items.py', 'WorkItems.page_closed_readonly', 'limit'): (
+        '10', 'policy', 'work items / caller-selected read-only closed-item page size'),
+}
+
+
 def numeric(node, symbolic=()):
     if isinstance(node, ast.Constant):
         return type(node.value) in (int, float)
@@ -1223,7 +1363,108 @@ def call_inventory(tree):
     return found
 
 
+def parameter_default_inventory(tree):
+    found = {}
+
+    class Parameters(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = []
+
+        def visit_ClassDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node):
+            self.scope.append(node.name)
+            positional = node.args.posonlyargs + node.args.args
+            # Defaults belong to the last N positional parameters, across '/'.
+            start = len(positional) - len(node.args.defaults)
+            pairs = list(zip(positional[start:], node.args.defaults))
+            pairs.extend(zip(node.args.kwonlyargs, node.args.kw_defaults))
+            for parameter, default in pairs:
+                if not PARAMETER_BOUND.search(parameter.arg) or not numeric(default):
+                    continue
+                site = ('.'.join(self.scope), parameter.arg)
+                if site in found:
+                    raise AssertionError(f'Duplicate parameter default site: {site}')
+                found[site] = ast.unparse(default)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+    Parameters().visit(tree)
+    return found
+
+
 class RuntimeBoundDeclarationTests(unittest.TestCase):
+    def test_parameter_default_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for expression, category, rationale in PARAMETER_DEFAULTS.values():
+            self.assertIn(category, categories)
+            self.assertTrue(rationale.strip())
+        found = {}
+        for path in sorted(ROOT.rglob('*.py')):
+            filename = path.relative_to(ROOT).as_posix()
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for (scope, parameter), expression in parameter_default_inventory(tree).items():
+                found[(filename, scope, parameter)] = expression
+        self.assertEqual(found, {site: entry[0] for site, entry in PARAMETER_DEFAULTS.items()})
+
+    def test_parameter_detector_alignment_scope_and_vocabulary(self):
+        source = '''
+def outer(unrelated, max_bytes=2 * 1024, /, offset=0, *args,
+          required, limit=3, timeout=None, depth=-1, count=True,
+          size=DEFAULT_SIZE, rows=int(4), discount=5, **kwargs):
+    async def nested(*, seconds=0.5):
+        pass
+    class Inner:
+        def method(self, retention_days=31):
+            pass
+
+class Reader:
+    async def read(self, required, /, *, bytes=8):
+        pass
+
+def no_defaults(limit, /, count, *, size):
+    pass
+'''
+        self.assertEqual(parameter_default_inventory(ast.parse(source)), {
+            ('outer', 'max_bytes'): '2 * 1024',
+            ('outer', 'offset'): '0',
+            ('outer', 'limit'): '3',
+            ('outer', 'depth'): '-1',
+            ('outer.nested', 'seconds'): '0.5',
+            ('outer.Inner.method', 'retention_days'): '31',
+            ('Reader.read', 'bytes'): '8',
+        })
+        names = ['limit', 'max', 'maximum', 'cap', 'timeout', 'seconds', 'days',
+                 'bytes', 'size', 'depth', 'count', 'entries', 'rows', 'offset',
+                 'retries', 'budget', 'retention', 'threshold', 'file_limit',
+                 'max_items', 'timeout_ms', 'retention_days', 'byte_limit']
+        source = 'def bounds(' + ', '.join(f'{name}=1' for name in names) + '): pass'
+        self.assertEqual(parameter_default_inventory(ast.parse(source)), {
+            ('bounds', name): '1' for name in names
+        })
+
+    def test_parameter_detector_rejects_drift_and_duplicate_sites(self):
+        source = 'def read(required, /, limit=2 * 1024, *, offset=0): pass'
+        expected = parameter_default_inventory(ast.parse(source))
+        for changed in (
+                source.replace('offset=0', 'offset=0, timeout=1'),
+                source.replace('limit=2 * 1024, ', ''),
+                source.replace('2 * 1024', '2048'),
+                source.replace('def read', 'def renamed'),
+                source.replace('limit=', 'cap=')):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                self.assertEqual(parameter_default_inventory(ast.parse(changed)), expected)
+        with self.assertRaisesRegex(AssertionError, 'Duplicate parameter default site'):
+            parameter_default_inventory(ast.parse(
+                'class Reader:\n'
+                '    def read(self, *, limit=1): pass\n'
+                '    async def read(self, *, limit=2): pass\n'))
+
     def test_declared_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
         for filename, declarations in DECLARATIONS.items():
