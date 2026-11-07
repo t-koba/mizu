@@ -114,7 +114,7 @@ not_yet_proven = [
   "DelegationJobs has a supervisor-only directory/resource binding, but runtime does not bind Engine.run or its authority to it.",
   "Driver quiescence only observes the direct process and reader threads; descendant/container recovery after supervisor death is absent.",
   "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
-  "Atomic ordering between reservation validation, tool gating, and workspace capture is not implemented.",
+  "workspace_start serializes trusted source preparation/start against writable admission; admitted-parent lease handoff and atomic Context reservation refresh/tool gating remain unintegrated.",
 ]
 
 [child_authority]
@@ -128,6 +128,7 @@ required_bindings = [
 mismatch_action = "Refuse launch or retain the existing reservation; never infer equivalence from role/profile names."
 
 [observed_lifecycle]
+workspace_start = "DelegationJobs.workspace_start takes workspace.lock nonblocking before checking existing state and yielding a store for trusted capture/start. It retains the lock through durable start and releases only the process lock on exceptions; uncertain commits stay reserved. This is a host critical section, not an admitted-parent lease transfer, runtime runner or quiescence proof."
 project_initialize = "Creates a staged new project and refuses overwrite. Managed workspace imports (including resolved aliases and lexical escape attempts) and exact managed project-root imports take the source workspace.lock before the non-initializing DelegationJobs.guard and retain it through source inspection and clone/copy. Collection-level sources that include managed projects fail closed rather than choosing one lock. Active, corrupt, incomplete, unsafe or unreadable state refuses before target publication; ordinary external-directory imports are unchanged. These guards prove source-import serialization only; they do not prove runtime reservation wiring, child authority or process/container quiescence."
 project_restore = "Restores from an archive into a new unarmed project and refuses an existing destination; backup creation uses storage.quiescent before capture."
 probe = "probes.service_due uses a per-probe empty workspace and acquires workspace.lock for write roles; reservation must exclude this lock participant."

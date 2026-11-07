@@ -1,8 +1,9 @@
 """Private durable state for the single-child async-delegation pilot.
 
-This is not a scheduler, tool API, workspace lock, or check-job authority. The
+This is not a scheduler, tool API, runner, or check-job authority. The
 trusted host supplies a dedicated project-state root (never the live tree),
-holds the real workspace lock while starting, and must fence tree access while
+uses ``workspace_start`` (or retains its existing admission workspace lock)
+while preparing and starting, and must fence tree access while
 ``reservation()`` is non-null. All callers must share this store. Only trusted
 supervisor code may use ``reservation`` or ``runner_*``: the stored random token
 is a runner binding, not a grant exposed to a model. The state directory and its
@@ -256,6 +257,32 @@ class DelegationJobs:
                        exclusive=True)
         with self._locked():
             self._load()
+
+    @classmethod
+    @contextlib.contextmanager
+    def workspace_start(cls, project_root: Path):
+        """Fence preparation and reservation against live-writer admission.
+
+        Trusted coordinator API, not a model grant or runner: acquire the same
+        workspace.lock as Engine admission, refuse existing/unknown reservations
+        BEFORE yielding for source capture, and retain the lock through start's
+        durable commit. Lock order is workspace then store. Contention is Busy,
+        with no waiting, capture, or store initialization. The caller must start
+        inside this scope; no tree access or launch authority escapes with it.
+
+        An already admitted writer must retain its original workspace lock,
+        not release/reacquire it with this API (locks are not reentrant). This
+        component does not transfer that lease or refresh Context gates. On ANY
+        exception, release only the process lock, never clear durable state:
+        commit acknowledgement may be uncertain, and only reconciliation plus
+        proven quiescence can release a committed reservation. Inspect owner status;
+        retry exact low-level start under workspace exclusion, never repeat
+        preparation against a held reservation.
+        """
+        project_root = Path(project_root)
+        with lock(project_root / 'locks' / 'workspace.lock', blocking=False):
+            cls.guard(project_root)
+            yield cls(project_root)
 
     @classmethod
     def existing_reservation(cls, project_root: Path):

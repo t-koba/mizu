@@ -1876,6 +1876,33 @@ serializes them. The supplied Maintainer belongs to its own candidate project.
 Editor is intentionally not an autonomous role table: it is a separate,
 human-triggered stock harness connected through a readonly capsule.
 
+### Asynchronous delegation prerequisite (not enabled)
+
+The `delegate` tool remains synchronous; there is no async mode or fan-out grant.
+The private trusted-host API `DelegationJobs.workspace_start(project_root)` is a
+reservation-preparation critical section, not a runner or model tool. It takes
+`locks/workspace.lock` nonblocking, then checks the durable reservation before
+initializing a store or yielding it. Inside that scope the coordinator can
+capture the source and call `store.start(owner, key, request)`; it must not defer
+capture or start until after scope exit. The request/schema and bounded,
+owner-keyed idempotency contract are unchanged. Lock order is workspace then
+store; writable Engine admission uses that same workspace lock and rechecks
+the reservation before live-tree work. Contention returns `Busy`; active,
+corrupt, unreadable or interrupted reservation state denies preparation.
+
+Exceptions release only the process lock, never roll back durable state. After
+an uncertain start acknowledgement, inspect the existing job or retry the exact
+low-level start under the host's workspace exclusion; do not repeat preparation
+against a held reservation or delete the ledger. Terminal execution alone does
+not release it. An admitted writer must retain its original admission lock,
+not release and reacquire it through this non-reentrant API. Parent lease
+handoff, atomic Context-gate refresh, exact-job wait, effective child-authority
+binding, concurrent model-slot/shared-spend accounting, and durable descendant/
+container quiescence are still integration blockers. The closed runtime policy
+in [the access contract](async-delegation-gates.toml) remains in force. Focused
+in-process tests cover this critical section and failure before/after durable
+replacement; they do not demonstrate async runner or production quiescence.
+
 ## Pi extensions
 
 Select reviewed extension resources in `[[profiles.NAME.resources]]` with
