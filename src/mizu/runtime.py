@@ -1366,8 +1366,10 @@ class Context:
             raise Denied("This role has no workspace")
         if args["op"] == "ci_costs":
             return self._op_vcs_read_ci_costs(args)
-        if args["op"] != "artifact" and ("limit" in args or "offset" in args):
-            raise Denied("limit and offset are only valid for CI costs or artifact pages")
+        if "offset" in args and args["op"] != "artifact":
+            raise Denied("offset is only valid for CI costs or artifact byte pages")
+        if "limit" in args and args["op"] not in {"artifact", "artifacts"}:
+            raise Denied("limit is only valid for CI costs or artifact reads/listings")
         if "code_digest" in args:
             # The digest filter belongs to the local publications listing
             # only; an addressed read never accepts it.
@@ -1398,7 +1400,7 @@ class Context:
             params["check"] = args["check"]
         if "artifact" in args:
             params["artifact"] = args["artifact"]
-        if args["op"] == "artifact":
+        if args["op"] in {"artifact", "artifacts"}:
             params.update({key: args[key] for key in ("offset", "limit") if key in args})
         diagnose_waits = (publication is not None
                           and {"vcs_read", "work_items_read"} <= set(self.role.capabilities))

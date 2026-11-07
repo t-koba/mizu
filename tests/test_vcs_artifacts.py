@@ -327,15 +327,78 @@ class ArtifactTests(Fixture):
         with self.assertRaises(Denied):
             vcs.read_via(settings, "artifact", params)
 
-    def test_artifacts_list_normalized(self):
-        payload = {"artifacts": [
-            {"artifact": NAME, "size": 12}, {"artifact": "profiles/callgrind.out"},
-        ]}
-        out = vcs.read_via(adapter_settings(serving_code(payload)), "artifacts", {"branch": "mizu"})
-        self.assertEqual(out["branch"], "mizu")
-        self.assertEqual([r["artifact"] for r in out["artifacts"]],
-                         [NAME, "profiles/callgrind.out"])
-        self.assertEqual(out["trust"], "external-untrusted")
+    def test_artifacts_exact_pages_and_eof(self):
+        # Opaque cursor characters are not decoded or rewritten by Mizu.
+        cursor = "é /+=?" + "x" * 250
+        self.assertEqual(len(cursor), 256)
+        params = {"branch": "mizu", "sha": SHA_A, "limit": 1}
+        for rows, next_cursor, request_cursor in (
+                ([], cursor, None), ([{"artifact": NAME, "size": 12}], None, cursor)):
+            request = {"op": "artifacts", **params}
+            if request_cursor is not None:
+                request["cursor"] = request_cursor
+            payload = {"branch": "mizu", "sha": SHA_A,
+                       "artifacts": rows, "next_cursor": next_cursor}
+            out = vcs.read_via(adapter_settings(serving_code(payload, request)),
+                               "artifacts", {k: v for k, v in request.items() if k != "op"})
+            self.assertEqual(out, {"op": "artifacts", "branch": "mizu", "sha": SHA_A,
+                                   "artifacts": [{**r, "digest": None} for r in rows],
+                                   "next_cursor": next_cursor, "trust": "external-untrusted"})
+        # Omission sends the existing per-page cap explicitly, without sha/cursor.
+        rows = [{"artifact": NAME}, {"artifact": "profiles/callgrind.out",
+                                    "digest": "b" * 64}]
+        payload = {"branch": "mizu", "artifacts": rows, "next_cursor": None}
+        out = vcs.read_via(adapter_settings(serving_code(payload,
+                           {"op": "artifacts", "branch": "mizu", "limit": vcs.MAX_ARTIFACTS})),
+                           "artifacts", {"branch": "mizu"})
+        self.assertEqual(out["artifacts"], [
+            {"artifact": NAME, "size": None, "digest": None},
+            {"artifact": "profiles/callgrind.out", "size": None, "digest": "b" * 64}])
+        self.assertNotIn("sha", out)
+        self.assertIsNone(out["next_cursor"])
+        narrowed = {"branch": "mizu", "sha": SHA_A,
+                    "artifacts": [], "next_cursor": None}
+        with self.assertRaises(Denied):
+            vcs.read_via(adapter_settings(serving_code(narrowed)), "artifacts",
+                         {"branch": "mizu"})
+
+    def test_artifacts_stale_cursor_refusal_propagates(self):
+        params = {"branch": "mizu", "sha": SHA_A, "limit": 1, "cursor": "stale"}
+        code = ("import sys,json; assert json.load(sys.stdin) == %r; "
+                "sys.exit('stale or changed inventory cursor')" % {"op": "artifacts", **params})
+        with self.assertRaises(Denied):
+            vcs.read_via(adapter_settings(code), "artifacts", params)
+
+    def test_artifacts_bad_requests_never_invoke_adapter(self):
+        changes = ([{"limit": v} for v in (None, True, 0, -1, 257, 1.5, "1")]
+                   + [{"cursor": v} for v in (None, True, 1, "", "x" * 257, "a\n", "a\x1b")]
+                   + [{"branch": ""}, {"sha": "not-a-sha"}, {"offset": 0},
+                      {"id": "not-an-artifact-filter"}, {"scope": "head"}])
+        with patch.object(vcs, "invoke") as invoke:
+            for change in changes:
+                with self.subTest(change=change), self.assertRaises(Denied):
+                    vcs.read_via({}, "artifacts", {"branch": "mizu", **change})
+            invoke.assert_not_called()
+
+    def test_artifacts_malformed_pages_fail_closed(self):
+        page = {"branch": "mizu", "sha": SHA_A, "artifacts": [], "next_cursor": None}
+        bad = [None, [], {"artifacts": []}]
+        bad += [{k: v for k, v in page.items() if k != missing}
+                for missing in ("branch", "sha", "artifacts", "next_cursor")]
+        bad += [{**page, **change} for change in (
+            {"branch": "other"}, {"branch": None}, {"sha": "b" * 40}, {"sha": None},
+            {"artifacts": None}, {"artifacts": [{"artifact": NAME}] * 2},
+            {"artifacts": [{"artifact": NAME}] * (vcs.MAX_ARTIFACTS + 1)},
+            {"artifacts": [{"artifact": "../escape"}]},
+            {"artifacts": [{"artifact": NAME, "size": True}]},
+            {"artifacts": [{"artifact": NAME, "digest": "invalid"}]},
+            {"artifacts": [{"artifact": NAME, "unknown": 1}]})]
+        bad += [{**page, "next_cursor": v} for v in
+                (True, 1, [], {}, "", "x" * 257, "a\n", "a\x1b")]
+        for payload in bad:
+            with self.subTest(payload=payload), self.assertRaises(Denied):
+                vcs.read_via(adapter_settings(serving_code(payload)), "artifacts",
+                             {"branch": "mizu", "sha": SHA_A, "limit": 1})
 
     def test_artifact_full_read_request_compatibility_and_metadata(self):
         payload = artifact('{"bench": "é😀"}\n')
@@ -397,6 +460,7 @@ class ArtifactTests(Fixture):
         from mizu.protocol import DEFINITIONS
         from mizu.runtime import Context
         schema = DEFINITIONS["vcs_read"][1]["properties"]
+        self.assertEqual(schema["cursor"]["maxLength"], vcs.MAX_ARTIFACT_CURSOR)
         self.assertEqual(schema["offset"]["maximum"], 2**63 - 1)
         self.assertEqual(schema["limit"]["maximum"], 16777216 // 8)
         settings = adapter_settings(PAGING_ADAPTER)
@@ -419,8 +483,23 @@ class ArtifactTests(Fixture):
         for key in ("offset", "limit"):
             with self.subTest(missing=key), self.assertRaises(Denied):
                 ctx.handle("vcs_read", {k: v for k, v in args.items() if k != key})
+        page = {"branch": "mizu", "sha": SHA_A, "artifacts": [], "next_cursor": "next"}
+        listing = {"op": "artifacts", "branch": "mizu", "sha": SHA_A,
+                   "limit": 2, "cursor": "opaque"}
+        # Test runtime -> read_via -> controlled adapter, not a host integration.
+        with patch.object(ctx.project, "vcs_settings", return_value=adapter_settings(
+                serving_code(page, listing))):
+            out = ctx.handle("vcs_read", listing)["result"]
+        self.assertEqual(out, {"op": "artifacts", **page, "trust": "external-untrusted"})
+        with patch.object(vcs, "invoke") as invoke:
+            for change in ({"offset": 0}, {"limit": 257}, {"cursor": ""}):
+                with self.subTest(change=change), self.assertRaises(Denied):
+                    ctx.handle("vcs_read", {**listing, **change})
+            invoke.assert_not_called()
         # Shared schema widening must not relax other operations' bounds.
         for other in ({"op": "status", "branch": "mizu", "offset": 0, "limit": 1},
+                      {"op": "log", "branch": "mizu", "limit": 1},
+                      {"op": "proposals", "limit": 1},
                       {"op": "ci_costs", "offset": 1000, "limit": 1},
                       {"op": "ci_costs", "offset": 0, "limit": 9}):
             with self.subTest(other=other), self.assertRaises(Denied):

@@ -449,6 +449,7 @@ DECLARATIONS = {
         'MAX_REFS': ('4096', 'mechanism', 'VCS refs / adapter-shape fetch and injection bound'),
         'MAX_ACQUIRE_CONTENT': (
             '524288', 'safety', 'VCS acquire / bounded acquired content; callers narrow scope'),
+        'MAX_ARTIFACT_CURSOR': ('256', 'format', 'VCS artifacts / tool-schema opaque cursor character bound'),
         'MAX_ARTIFACTS': ('256', 'mechanism', 'VCS artifacts / bounded true artifact entries'),
         'MAX_ARTIFACT_NAME': (
             '512', 'mechanism', 'VCS artifacts / bounded relative file-name chars'),

@@ -573,6 +573,8 @@ ACQUIRE_SCOPES = frozenset({"head", "full"})
 
 #: Maximum CI artifact entries per ``artifacts`` response.
 MAX_ARTIFACTS = 256
+#: Tool-schema maximum opaque artifact-list cursor characters.
+MAX_ARTIFACT_CURSOR = 256
 #: Maximum CI artifact file-name chars (relative Unix path, no traversal).
 MAX_ARTIFACT_NAME = 512
 #: Intrinsic signed-64-bit adapter byte-position/size arithmetic range.
@@ -622,20 +624,39 @@ def check_artifact_name(name: str) -> str:
     return name
 
 
-def parse_artifacts(data: dict) -> list:
-    """Validate an ``artifacts`` adapter response into normalized rows.
+def check_artifacts_cursor(cursor: str) -> str:
+    """Validate an opaque adapter cursor without interpreting or storing it."""
+    if not isinstance(cursor, str) or not cursor or len(cursor) > MAX_ARTIFACT_CURSOR:
+        raise Denied("Invalid VCS artifacts cursor")
+    _reject_terminal_controls(cursor, "Invalid VCS artifacts cursor")
+    return cursor
 
-    Schema: ``{"artifacts": [{artifact, size?, digest?}]}``; ``artifact``
-    per ``check_artifact_name``, ``size`` an int >= 0 when present,
-    ``digest`` 64 lowercase hex when present. Bounds: at most 256 rows.
-    Trust: adapter facts stay external-untrusted; this only validates
-    shape. Failure: ``Denied``.
+
+def parse_artifacts(data: dict, *, branch: str, sha=None,
+                    limit: int = MAX_ARTIFACTS) -> dict:
+    """Validate an ``artifacts`` adapter response into one normalized page.
+
+    Schema: ``{branch, sha?, artifacts: [{artifact, size?, digest?}], next_cursor}``.
+    Scope echoes must match the request; ``next_cursor`` is null only at EOF.
+    Rows retain path/size/digest validation and may not exceed the requested
+    limit (at most MAX_ARTIFACTS). Trust: external-untrusted adapter facts.
+    Failure: ``Denied``; no legacy unpaged fallback or inferred completeness.
     """
     if not isinstance(data, dict):
         raise Denied("VCS artifacts must be a JSON object")
+    response_sha = data.get("sha")
+    if (data.get("branch") != branch or
+            (sha is not None and response_sha != sha) or
+            (sha is None and response_sha is not None)):
+        raise Denied("VCS artifacts must echo the requested branch and sha scope")
+    if "next_cursor" not in data:
+        raise Denied("VCS artifacts must carry next_cursor")
+    cursor = data["next_cursor"]
+    if cursor is not None:
+        check_artifacts_cursor(cursor)
     rows = data.get("artifacts")
-    if not isinstance(rows, list) or len(rows) > MAX_ARTIFACTS:
-        raise Denied("VCS artifacts must carry an array with at most 256 entries")
+    if not isinstance(rows, list) or len(rows) > min(limit, MAX_ARTIFACTS):
+        raise Denied("VCS artifacts must carry an array within the requested limit")
     out = []
     for entry in rows:
         if not isinstance(entry, dict) or set(entry) - {"artifact", "size", "digest"}:
@@ -649,7 +670,7 @@ def parse_artifacts(data: dict) -> list:
                 not isinstance(content_digest, str) or not _SHA.fullmatch(content_digest)):
             raise Denied("Invalid VCS artifact digest")
         out.append({"artifact": name, "size": size, "digest": content_digest})
-    return out
+    return {"artifacts": out, "next_cursor": cursor}
 
 
 def check_artifact_range(params: dict, settings: dict | None = None) -> dict:
@@ -838,7 +859,10 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     base must echo back unchanged; an unpinned ``"full"`` acquisition
     binds whatever base the adapter served, so review evidence always
     names both revisions. ``artifacts`` lists CI-recorded files for a
-    branch revision (``{"branch", optional "sha"}``); ``artifact`` reads
+    branch revision with optional ``sha``, row ``limit`` (default/max
+    MAX_ARTIFACTS) and opaque ``cursor``. Each page requires exact scope
+    echoes, ``artifacts`` and ``next_cursor`` (null at EOF); no row count
+    implies completeness. Adapter cursor refusals propagate. ``artifact`` reads
     one listed text file (``{"branch", "artifact", optional "sha"}``)
     or a UTF-8 byte page with paired ``offset``/``limit``. Page hashes are
     recomputed locally; the whole-file hash is checked only for complete
@@ -892,10 +916,14 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
                 "digest": acquired["digest"], "content": acquired["content"],
                 "trust": "external-untrusted"}
     if op == "artifacts":
-        # CI artifact listing: which measured files the product recorded
-        # for a branch revision (benchmark JSONL, profiles, allocation
-        # reports). The optional sha narrows to one run revision; the
-        # receipt echoes the requested pair so diagnosis cites it.
+        # Stateless page forwarding: the adapter owns inventory/cursor validity.
+        if set(params) - {"branch", "sha", "limit", "cursor"}:
+            raise Denied("Invalid VCS artifact listing parameters")
+        if "offset" in params:
+            raise Denied("offset is not valid for artifact listings")
+        limit = params.get("limit", MAX_ARTIFACTS)
+        if type(limit) is not int or not 1 <= limit <= MAX_ARTIFACTS:
+            raise Denied("Invalid VCS artifacts row limit")
         branch = params.get("branch")
         check_branch(branch)
         sha = params.get("sha")
@@ -904,9 +932,12 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         request = {"op": op, "branch": branch}
         if sha is not None:
             request["sha"] = sha
-        rows = parse_artifacts(invoke(settings, request, cancel=cancel))
-        out = {"op": op, "branch": branch, "artifacts": rows,
-               "trust": "external-untrusted"}
+        request["limit"] = limit
+        if "cursor" in params:
+            request["cursor"] = check_artifacts_cursor(params["cursor"])
+        page = parse_artifacts(invoke(settings, request, cancel=cancel),
+                               branch=branch, sha=sha, limit=limit)
+        out = {"op": op, "branch": branch, **page, "trust": "external-untrusted"}
         if sha is not None:
             out["sha"] = sha
         return out
