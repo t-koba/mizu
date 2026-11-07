@@ -39,8 +39,9 @@ declared bases rather than introducing separate literals.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
 character-count and maximum suffixes match the read-page and script-input names,
-so they are ordinary declarations; `EXTRA_CANDIDATES` currently holds only the
-probe header-pair count, whose name falls outside the pattern. Lock waits stay
+so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
+header-pair count and model-catalog provider-command output ceiling, whose names
+fall outside the pattern. Lock waits stay
 fixed until the scheduled-contention work proves a replay-safe boundary.
 Container cleanup and systemd-analyze verification walls are host-dependent
 policy pending container-runtime measurement; their output reads are safety.
@@ -136,6 +137,7 @@ CANDIDATE = re.compile(
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
+    'model_catalog.py': frozenset({'MAXIMUM'}),
     'web.py': frozenset({'PROBE_MAX_HEADERS'}),
 }
 # Non-numeric module-level policy defaults checked by their exact literal value.
@@ -583,6 +585,9 @@ DECLARATIONS = {
             'materialize / bounded adapter output read'),
     },
     'model_catalog.py': {
+        'MAXIMUM': (
+            '1024 * 1024', 'safety',
+            'model catalog / caps untrusted provider-command output at run(..., maximum=MAXIMUM)'),
         'OBSERVATION_BYTES': (
             '64 * 1024', 'safety',
             'model catalog / bounded observation text'),
@@ -1027,7 +1032,7 @@ CALLS = {
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
-        ('_ready_work_changed', 'store.page_ready', 'limit', 0): (
+        ('_ready_work_observation', 'store.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness fingerprint check'),
         ('Context._op_vcs_read_publications', 'Publication.list_receipts', 'limit', 0): (
             '100', 'mechanism', 'runtime / publication receipt public page bound'),
