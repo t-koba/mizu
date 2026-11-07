@@ -9,7 +9,77 @@ configuration default can activate that cutover. Operator-written `answer` and
 `operator.notice` records are a separate active SharedRecords slice, enabled
 only by their explicitly declared `operator_records` kind policy. Declared host
 publisher outcomes use the same store and the existing work-item wait delivery;
+explicitly declared role-authenticated data writes with author-only retrieval are opt-in and unrouted; all
 other source families retain their existing authorities.
+
+## Role-authenticated data writes and author-only retrieval
+
+Role-owned writes and reads are opt-in. Writing requires an explicit `record_write`
+role grant and a matching `record_kinds` declaration; omitted/unknown kinds or
+another writer's kind are refused. Author-only retrieval separately requires an
+explicit `record_read` role grant. The existing `ack_token` mode remains bound to
+a frozen operator-record manifest; a manifest-derived read capability does not
+authorize role-owned lookup. `record_kinds` defaults to `{}`. For example, an
+operator may declare:
+
+```toml
+[record_kinds."role.note"]
+writer = "role.worker"
+route = "none"
+wake = false
+retention = "permanent"
+acknowledgement = "explicit"
+subject = "object"
+maximum = 8192
+```
+
+Add `"record_write"` to `[roles.worker].capabilities` to write and `"record_read"` to read that role's own records separately. These are the
+exact declaration keys; `writer` must be `role.<valid role name>`, `route` must be
+`none`, `wake` must be false, and retention/acknowledgement/subject must have the
+values shown. `maximum` is a positive integer at most `PREVIEW_BYTES` (128 KiB),
+bounding the entire canonical envelope. The existing schema-v1 ceiling of 16
+kind declarations also covers these entries. No validator code or source-specific
+route is accepted. Subject and payload are data, not authoritative snapshot,
+Insight, question, CI or work-item references; they retain no external objects.
+
+The tool `mizu_record_write` accepts exactly four required strings:
+
+```json
+{"kind":"role.note","id":"note1","subject":"{\"topic\":\"example\"}","payload":"{\"body\":\"A note\"}"}
+```
+
+`kind` and `id` each have a 256-character input bound. Subject/payload are each
+at most 131072 characters of JSON text, decoded as finite JSON objects using
+the existing JSON nesting bound, then checked against the envelope byte maximum.
+This encoding keeps the broker schema closed and data-only. The runtime derives
+`writer = "role." + authenticated_role.name`; the caller cannot supply `writer`,
+`created_at` or any other envelope field. Neither a capability nor a declaration
+permits impersonating `operator.cli`, `publisher.cli` or another role. Consultation
+and delegation-child grants exclude this shared-state write capability.
+
+The runtime constructs the ID `role/<role>/<kind>/<id>`; the complete ID must
+satisfy SharedRecords' name grammar and 256-character bound. This namespace cannot
+write an existing operator, publisher, decision, CI or work-item source identity.
+The ordinary SharedRecords store validates and writes the canonical create-only
+envelope, returning `{record, record_digest}`. There is no parallel store, index,
+cursor or source migration. Writes serialize under the existing kernel-lock
+mechanism (`role-records.lock`); cancellation before dispatch writes nothing,
+while interruption/I/O failure may leave a committed record. Retry uncertain
+writes with the same kind, ID, subject and payload. Canonically equal retries
+reuse the original timestamp/digest, repair directory sync and create no second
+copy; conflicting content is refused without rewriting evidence. Invalid,
+undeclared, oversized or corrupt records fail closed.
+
+The tool `mizu_record_read` with `{"kind":"role.note","id":"note1"}` plus optional `offset`/`limit` reads one own record by exact kind and stable id. The runtime derives `writer = "role." + authenticated_role.name`, requires that writer to match the declared kind, constructs the exact ID `role/<role>/<kind>/<id>` and refuses other authors, undeclared kinds, ID-namespace escapes and digest/plaintext mismatches. Paging counts Unicode characters with `limit` 1-8192 and revalidates the exact full-envelope digest on every page; reads use the existing store only, with no listing, index, cursor, routing, wake or acknowledgement. A role needs the explicit `record_read` grant for this mode; the `ack_token` manifest mode for operator answers/notices is unchanged and the two modes never mix.
+
+These declarations provide no routing, wake or delivery authority. Records
+are permanent immutable audit data in the existing backup/restore members; there
+is no TTL, cancellation/deletion operation or automatic acknowledgement. A write,
+replay or role read selects no receipt. Any trusted host consumer using SharedRecords must
+still freeze its intended recipient's exact manifest and require explicit,
+identity-bound acknowledgement selections; existing `finish.ack_events` source
+authorities are unchanged. Operator answers/notices and publisher outcomes retain
+their dedicated host-authenticated entry points and validators below.
 
 ## Declared host publisher outcomes
 
@@ -38,7 +108,7 @@ The declaration names the kind, authenticated writer, supported route, wake
 policy, retention, acknowledgement and exact subject format. Schema-v1 allows at
 most 16 kind/variant/field entries per mapping, exact keys and no optional payload
 fields. Kind/field/tag names follow SharedRecords name grammar; the resulting
-record ID also fits its 256-character bound. Only the implemented publisher
+record ID also fits its 256-character bound. For publisher outcomes only the implemented publisher
 principal and publication-wait route are supported, with one declared kind for
 that route (never a search among competing authorities). Maximum envelope bytes
 and nonblank text character bounds are explicit, positive integers at most
@@ -64,7 +134,7 @@ For supersession the payload is
 `{"outcome":"superseded","replacement":{"snapshot_id":"<newer ID>","code_digest":"<newer digest>"}}`.
 Host configuration/data access is the authentication boundary, as for the existing
 operator CLI. The command fixes `publisher.cli`: no writer/timestamp parameter,
-model-writable tool or role capability is added. This is an endpoint for the
+and no model role can use this publisher route. This is an endpoint for the
 external publisher's authoritative observation, not a new observer; the adapter
 must adopt it. The harness neither infers outcomes nor changes publication,
 promotion or CI dispatch.
@@ -298,7 +368,7 @@ A minimal proposed record is:
 
 The record digest is `sha256(canonical(record))`; it is recomputed, not self-asserted. A separate receipt is `{role, record_id, record_digest, acknowledged_at}`. The authenticated `writer` is the principal authorized to project the source event, not the insight's origin/submitter or the payload's claimed author. Source origin is separately validated for `own`/`any` routing; it never grants writer authority. The subject above is illustrative, not a universal three-field schema: each kind must bind its exact insight/decision revision, task transition, wait/revision/holder and wait digest, snapshot/whole-capture digest, or publication receipt/branch/SHA/check set as applicable. Project/source namespaces prevent cross-project or cross-source identity collisions.
 
-Kind policy declares a closed payload validator/size bound, authorized writer, structured route, role subscription/filter, whether a wake is permitted, the source-current eligibility predicate, and retention. These are declarations, not executable expressions. Resolved recipient sets are not immutable record fields (typed addressee/source fields may be): current trusted policy resolves delivery and wake independently. New subscribers see retained events that are still source-eligible; removed recipients receive no new deliveries or wakes. Remove/re-add does not erase a role's exact prior receipts. Policy changes cannot rewrite an already-frozen delivery manifest or let one role acknowledge another's delivery. No model-facing generic record-write capability is added.
+Kind policy declares a closed payload validator/size bound, authorized writer, structured route, role subscription/filter, whether a wake is permitted, the source-current eligibility predicate, and retention. These are declarations, not executable expressions. Resolved recipient sets are not immutable record fields (typed addressee/source fields may be): current trusted policy resolves delivery and wake independently. New subscribers see retained events that are still source-eligible; removed recipients receive no new deliveries or wakes. Remove/re-add does not erase a role's exact prior receipts. Policy changes cannot rewrite an already-frozen delivery manifest or let one role acknowledge another's delivery. The opt-in `record_write` capability above writes only unrouted data; it cannot activate or impersonate these source families.
 
 Source-current eligibility is distinct from retention and acknowledgement. A retained obsolete insight decision or CI result whose wait revision/holder moved must not be newly delivered or woken, even without a receipt. Revalidate eligibility and current routing at delivery/wake; neither retention nor absence of a receipt proves eligibility. Conversely, a source policy may permit an immutable event already delivered in the current unit to be explicitly acknowledged by its manifest identity after source movement (insight decisions do; CI waits and terminal work items retain their current-revision refusal); this records handling of that delivery only and never mutates or revives the source. Retention keeps evidence, not delivery authority.
 

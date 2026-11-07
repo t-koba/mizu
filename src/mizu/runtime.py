@@ -296,7 +296,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                "research", "materialize", "work_items_create", "work_items_transition", "work_items_reconcile",
-                               "work_order"})
+                               "work_order", "record_write"})
 
 
 #: Capabilities a delegation child must never hold. The child works in the
@@ -310,7 +310,7 @@ DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                 "work_items_create", "work_items_transition", "work_items_reconcile",
-                                "work_order"})
+                                "work_order", "record_write"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -1214,8 +1214,23 @@ class Context:
     def _op_work_order(self, args: dict) -> dict:
         return work_order_ops.record(self, args)
 
+    def _op_record_write(self, args: dict) -> dict:
+        from .host_records import write_role
+        return write_role(self, args)
+
     def _op_record_read(self, args: dict) -> dict:
-        return operator_records.read(self, args)
+        # Ack-token manifest reads stay byte-for-byte on the operator path;
+        # kind+id reads are author-only role retrieval with no new authority.
+        if 'ack_token' in args:
+            if 'kind' in args or 'id' in args:
+                from .errors import Denied
+                raise Denied('Record read takes either ack_token or kind+id, not both')
+            return operator_records.read(self, args)
+        if {'kind', 'id'} <= set(args):
+            from .host_records import read_role
+            return read_role(self, args)
+        from .errors import Denied
+        raise Denied('Record read requires either ack_token or kind+id')
 
     def _op_decision_read(self, args: dict) -> dict:
         return decision_delivery.read(self, args)
@@ -1934,7 +1949,7 @@ class Context:
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
-        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read,
+        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
         "work_items_reconcile": _op_work_items_reconcile,

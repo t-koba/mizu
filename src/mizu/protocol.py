@@ -5,7 +5,7 @@ import re
 
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
-from .fs import READ_PAGE_CHARS, SCRIPT_MAX
+from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
 from .work_item_seed import MAX_DECISION_TASKS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
@@ -165,9 +165,13 @@ DEFINITIONS = {
                    "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}})),
     "search": ("Search configured feeds or the operator's search adapter. Returns results with stated scope and coverage. Continue with result_id and offset/limit instead of query; replay never searches again.",
                obj({"query": text(1000), "result_id": text(64), **PAGE_FIELDS})),
-    "record_read": ("Read an operator answer/notice through this unit's frozen SharedRecords manifest. Pages count Unicode characters and revalidate the exact digest. Reading is not acknowledgement: explicitly select handled ack_tokens in finish.ack_events. No write authority.",
-                    obj({"ack_token": text(64), "offset": PAGE_FIELDS["offset"],
-                         "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}, ("ack_token",))),
+    "record_write": ("Create one immutable SharedRecords record of an explicitly declared role-writable kind. Writer is the authenticated runtime role, never caller input. id is a stable retry key within role/<role>/<kind>/; the full ID fits within 256 characters. subject and payload are finite JSON object strings, bounded by the declared canonical envelope maximum. Exact retries reuse the timestamp and digest; conflicting content is refused. Returns record and record_digest. No routing, wake, source authority or implicit acknowledgement.",
+                     obj({"kind": text(256), "id": text(256),
+                          "subject": text(PREVIEW_BYTES), "payload": text(PREVIEW_BYTES)},
+                         ("kind", "id", "subject", "payload"))),
+    "record_read": ("Read one immutable record by exactly one mode. With ack_token, read an operator answer/notice through this unit's frozen SharedRecords manifest. With kind+id, read one own role-authenticated record of an explicitly declared kind by stable id; writer is the authenticated runtime role, the full ID role/<role>/<kind>/<id> fits within 256 characters, and this mode requires an explicit record_read role grant (manifest-derived access grants ack_token mode only). Either mode pages canonical text by Unicode-character offset and limit 1-8192 and revalidates the exact digest. Reading is not acknowledgement: explicitly select handled ack_tokens in finish.ack_events for operator reads; role reads select no receipt. No write, routing, wake or cross-role authority.",
+                    obj({"ack_token": text(64), "kind": text(256), "id": text(256), "offset": PAGE_FIELDS["offset"],
+                         "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}})),
     "decision_read": ("Read the exact immutable shared decision or insight.pending envelope delivered in this unit by ack_token. Only this role's host-frozen manifest permits access, even after source or routing movement. Offset/limit count Unicode characters; limit 1-8192 (default 8192). Each page revalidates record_digest. Reading acknowledges nothing; finish.ack_events explicitly selects handled tokens. No activation or record-write authority.",
                       obj({"ack_token": text(64), "offset": PAGE_FIELDS["offset"],
                            "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}, ("ack_token",))),

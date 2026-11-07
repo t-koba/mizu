@@ -9,7 +9,7 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu import operator_records as records, decision_delivery
 from mizu.cli import parser, execute
-from mizu.config import load, CAPABILITIES
+from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.fs import canonical, read_json
 from mizu.protocol import DEFINITIONS as TOOLS
@@ -55,7 +55,7 @@ class OperatorRecordTests(Fixture):
         self.assertEqual(result, self.answer())
         self.assertEqual(result['record']['writer'], 'operator.cli')
         self.assertEqual(result['record']['payload']['addressee'], 'reviewer')
-        self.assertNotIn('record_write', CAPABILITIES | TOOLS.keys())
+        self.assertNotIn('record_write', self.config.roles['reviewer'].capabilities)
         self.assertNotIn('record', TOOLS)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser().parse_args(['record', 'sample', 'publish', '--kind', 'answer',

@@ -127,6 +127,19 @@ wake = true
 route = "addressee"
 retention = "permanent"
 
+# Role writes and author-only reads default closed: no role-writable kind, record_write or record_read grant is enabled.
+# To opt in, add "record_write" (to write) and "record_read" (to read that role's own records)
+# to the intended role's capabilities AND declare (uncomment to enable):
+#   [record_kinds."role.note"]
+#   writer = "role.worker"       # Authenticated role principal, not tool input.
+#   route = "none"               # Data only; no delivery, source migration or wake.
+#   wake = false
+#   retention = "permanent"
+#   acknowledgement = "explicit"
+#   subject = "object"           # Subject and payload are bounded finite JSON objects.
+#   maximum = 8192               # Canonical envelope bytes, 1-131072.
+# See docs/shared-records.md#role-authenticated-data-writes-and-author-only-retrieval for the tool schemas.
+
 [limits]
 # Provisional project cap on open/doing/blocked work; 0 disables.
 # Existing over-limit items are preserved; only new seeds are refused.

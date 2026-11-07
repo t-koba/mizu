@@ -44,7 +44,7 @@ parent_denied = [
   "files", "read", "command_evidence_read", "experiment_evidence_read",
   "exec", "experiment", "verify", "check_job", "sync", "vcs_publish",
   "vcs_request", "vcs_retire", "vcs_dispose", "materialize", "delegate",
-  "report",
+  "report", "record_write",
 ]
 
 [parameterized.vcs_read]

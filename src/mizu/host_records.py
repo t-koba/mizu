@@ -1,15 +1,16 @@
-"""Declared host records in SharedRecords; no role writer or second source store.
+"""Declared publisher and role records in the existing SharedRecords store.
 
 The publisher CLI is a trusted host entry point, not a model capability. Its
 principal is fixed here. Declarations are data: exact snapshot subjects and
-bounded discriminated payloads, with no executable policy.
+bounded discriminated publisher payloads or unrouted role JSON objects, with no
+executable policy.
 """
 import contextlib
 import os
 from functools import partial
 
 from .errors import ConfigError, Denied
-from .fs import DIGEST, PREVIEW_BYTES, canonical, digest, lock, mkdir, now, sync_dir
+from .fs import DIGEST, PREVIEW_BYTES, READ_PAGE_CHARS, canonical, digest, identifier, loads_finite, lock, mkdir, now, sync_dir
 from .shared_records import KindPolicy, RECORD_BYTES, SharedRecords, _name
 
 PUBLISHER = 'publisher.cli'
@@ -28,6 +29,17 @@ def configuration(raw=None):
         routes = set()
         for kind, row in raw.items():
             _name(kind, kind=True)
+            if (type(row) is dict and isinstance(row.get('writer'), str)
+                    and row['writer'].startswith('role.')):
+                identifier(row['writer'][5:])
+                if (set(row) != {'writer', 'route', 'wake', 'retention',
+                                 'acknowledgement', 'subject', 'maximum'}
+                        or row['route'] != 'none' or row['wake'] is not False
+                        or row['retention'] != 'permanent'
+                        or row['acknowledgement'] != 'explicit' or row['subject'] != 'object'
+                        or type(row['maximum']) is not int or not 1 <= row['maximum'] <= PREVIEW_BYTES):
+                    raise ValueError
+                continue
             _name(f'host/{kind}/' + 'a' * 64)
             if (type(row) is not dict or set(row) != {
                     'writer', 'route', 'wake', 'retention', 'acknowledgement',
@@ -63,7 +75,7 @@ def configuration(raw=None):
                 raise ValueError
         return raw
     except (ValueError, TypeError, Denied) as exc:
-        raise ConfigError('Invalid declared host record policy') from exc
+        raise ConfigError('Invalid declared record policy') from exc
 
 
 def _snapshot(snapshots, value):
@@ -77,6 +89,8 @@ def _snapshot(snapshots, value):
 
 
 def _validate(snapshots, policy, subject, payload):
+    if policy['route'] == 'none':
+        return  # SharedRecords validates bounded JSON objects; no source authority.
     _snapshot(snapshots, subject)
     if type(payload) is not dict or type(payload.get('outcome')) is not str:
         raise Denied('Host record outcome is required')
@@ -140,6 +154,76 @@ def write_publisher(project, *, kind, subject, payload):
             mkdir(directory)
             os.utime(directory, None, follow_symlinks=False)
     return {'record': envelope, 'record_digest': computed}
+
+
+def write_role(context, args):
+    """Runtime-authenticated, unrouted data; no caller principal or source IDs."""
+    if "record_write" not in context.role.capabilities:
+        raise Denied("Role record writing requires the record_write grant")
+    if set(args) != {'kind', 'id', 'subject', 'payload'}:
+        raise Denied('Role record write requires exactly kind, id, subject and payload')
+    writer = 'role.' + identifier(context.role.name)
+    policies = configuration(context.config.record_kinds)
+    kind = args['kind']
+    if type(kind) is not str or kind not in policies or policies[kind]['writer'] != writer:
+        raise Denied('Role record kind or writer is undeclared')
+    raw_id = args['id']
+    if type(raw_id) is not str:
+        raise Denied('Expected a bounded record name')
+    record_id = _name(f"role/{context.role.name}/{kind}/{raw_id}")
+    try:
+        subject, payload = (loads_finite(args[key]) for key in ('subject', 'payload'))
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise Denied('Role record subject and payload must be JSON objects') from exc
+    shared = store(context.project.root, context.project.snapshots, policies)
+    with lock(context.project.root / 'locks' / 'role-records.lock'):
+        envelope = dict(schema=1, id=record_id, kind=kind, writer=writer,
+                        created_at=now(), subject=subject, payload=payload)
+        existing = any(shared._read(name, RECORD_BYTES) is not None
+                       for name in shared._record_names(record_id))
+        if existing:
+            envelope['created_at'] = shared.get(record_id)[0]['created_at']
+        computed = shared.put(envelope, writer=writer)
+        if existing:
+            _sync(shared, record_id)
+    return {'record': envelope, 'record_digest': computed}
+
+
+def read_role(context, args):
+    """Author-only exact retrieval; no listing, routing, wake or acknowledgement."""
+    configured_role = context.config.roles.get(context.role.name)
+    if configured_role is None or "record_read" not in configured_role.capabilities:
+        raise Denied("Role record reading requires an explicit record_read grant")
+    if 'ack_token' in args:
+        raise Denied('Role record read takes kind and id, not ack_token')
+    if set(args) - {'kind', 'id', 'offset', 'limit'} or {'kind', 'id'} - set(args):
+        raise Denied('Role record read requires exactly kind and id with optional paging')
+    writer = 'role.' + identifier(context.role.name)
+    policies = configuration(context.config.record_kinds)
+    kind = args['kind']
+    if type(kind) is not str or kind not in policies or policies[kind]['writer'] != writer:
+        raise Denied('Role record kind or writer is undeclared')
+    raw_id = args['id']
+    if type(raw_id) is not str:
+        raise Denied('Expected a bounded record name')
+    record_id = _name(f"role/{context.role.name}/{kind}/{raw_id}")
+    offset = args.get('offset', 0)
+    limit = args.get('limit', READ_PAGE_CHARS)
+    if (type(offset) is not int or offset < 0 or type(limit) is not int
+            or not 1 <= limit <= READ_PAGE_CHARS):
+        raise Denied('Invalid shared record page bounds')
+    shared = store(context.project.root, context.project.snapshots, policies)
+    envelope, computed = shared.get(record_id)
+    if envelope['kind'] != kind or envelope['writer'] != writer or envelope['id'] != record_id:
+        raise Denied('Shared record canonical identity mismatch')
+    text = canonical(envelope).decode('utf-8')
+    if offset > len(text):
+        raise Denied('Shared record offset exceeds text length')
+    end = min(offset + limit, len(text))
+    return {'record_id': record_id, 'record_digest': computed,
+            'offset': offset, 'total_chars': len(text),
+            'next_offset': end if end < len(text) else None,
+            'text': text[offset:end]}
 
 
 def _sync(shared, record_id):
