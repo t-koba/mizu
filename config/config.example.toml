@@ -130,6 +130,7 @@ retention = "permanent"
 # Role writes and author-only reads default closed: no role-writable kind, record_write or record_read grant is enabled.
 # To opt in, add "record_write" (to write) and "record_read" (to read that role's own records)
 # to the intended role's capabilities AND declare (uncomment to enable):
+# Role-writable kind names cannot contain '/'; record IDs may use slash-separated segments.
 #   [record_kinds."role.note"]
 #   writer = "role.worker"       # Authenticated role principal, not tool input.
 #   route = "none"               # Data only; no delivery, source migration or wake.

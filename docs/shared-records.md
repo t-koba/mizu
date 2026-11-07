@@ -58,8 +58,12 @@ permits impersonating `operator.cli`, `publisher.cli` or another role. Consultat
 and delegation-child grants exclude this shared-state write capability.
 
 The runtime constructs the ID `role/<role>/<kind>/<id>`; the complete ID must
-satisfy SharedRecords' name grammar and 256-character bound. This namespace cannot
-write an existing operator, publisher, decision, CI or work-item source identity.
+satisfy SharedRecords' name grammar and 256-character bound. A role-writable
+kind cannot contain `/`, because that character separates the configured kind
+from the caller ID; caller IDs may contain slash-separated segments. This keeps
+the boundary unambiguous: `(kind=role.note, id=foo/bar)` is accepted, while
+`kind=role.note/foo` is rejected rather than aliasing that record. This namespace
+cannot write an existing operator, publisher, decision, CI or work-item source identity.
 The ordinary SharedRecords store validates and writes the canonical create-only
 envelope, returning `{record, record_digest}`. There is no parallel store, index,
 cursor or source migration. Writes serialize under the existing kernel-lock

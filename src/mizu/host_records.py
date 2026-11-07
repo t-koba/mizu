@@ -31,6 +31,11 @@ def configuration(raw=None):
             _name(kind, kind=True)
             if (type(row) is dict and isinstance(row.get('writer'), str)
                     and row['writer'].startswith('role.')):
+                # Role record IDs use '/' as the boundary between the kind and
+                # caller ID. Keep that boundary injective while still allowing
+                # slash-separated caller IDs.
+                if '/' in kind:
+                    raise ValueError
                 identifier(row['writer'][5:])
                 if (set(row) != {'writer', 'route', 'wake', 'retention',
                                  'acknowledgement', 'subject', 'maximum'}

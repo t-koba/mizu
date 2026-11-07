@@ -69,6 +69,20 @@ class RoleRecordTests(Fixture):
         self.assertTrue(shared.received('worker', record['id'], computed))
         self.assertEqual(context.handle('record_write', ARGS), result)
 
+    def test_role_kind_id_boundary_cannot_alias(self):
+        context = self.context()
+        args = {**ARGS, 'id': 'foo/bar'}
+        written = context.handle('record_write', args)
+        read = context.handle('record_read', {'kind': 'role.note', 'id': 'foo/bar'})
+        self.assertEqual(written['record']['id'], 'role/worker/role.note/foo/bar')
+        self.assertEqual(read['record_id'], written['record']['id'])
+        self.assertEqual(read['record_digest'], written['record_digest'])
+        self.assertEqual(read['text'], canonical(written['record']).decode('utf-8'))
+
+        policy = self.config.record_kinds['role.note']
+        with self.assertRaises(ConfigError):
+            host_records.configuration({'role.note': policy, 'role.note/foo': policy})
+
     def test_missing_grant_policy_wrong_role_and_spoofing_refuse(self):
         ungranted = self.context('reviewer')
         with self.assertRaisesRegex(Denied, 'no capability'):
