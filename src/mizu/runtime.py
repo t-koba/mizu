@@ -3388,7 +3388,8 @@ class Engine:
                                 obligations_digest=context.progress_obligations_digest,
                                 ready_work=None,
                                 ready_work_signature=getattr(context, "ready_work_signature", None)))
-                    write_json(project.root / "observed" / f"{role_name}.json", observed)
+                    if role.workspace == "write":
+                        write_json(project.root / "observed" / f"{role_name}.json", observed)
                 selected_tokens = set(finished.get("ack_events", []))
                 operator_records.acknowledge(context, selected_tokens &
                     {entry.ack_token for entry in context.operator_record_manifest})
@@ -3434,6 +3435,10 @@ class Engine:
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "consecutive_missing_finish": 0,
                             "last_run": run_id, "updated_at": now()})
+                # Do not consume a read-only observation until finalization
+                # succeeds: an interrupted finish must remain runnable.
+                if role.workspace != "write" and not finished.get("wait_for_check"):
+                    write_json(project.root / "observed" / f"{role_name}.json", observed)
                 return result
             except BaseException as exc:
                 if continuation is not None and context is None:
