@@ -115,6 +115,12 @@ validation ceiling exists. `configured policy` names an existing config/CLI
 owner; `policy` marks a caller-controlled or still hard-coded choice, not a
 claim that it is configured. This slice classifies current defaults only and
 does not change behavior, config or adapter contracts.
+
+The direct-range slice inventories every numeric positional argument to
+built-in `range(...)` calls by file, scope, argument and occurrence. It makes
+literal loop, retry and protocol-index bounds reviewable without treating all
+numeric literals as policy. It remains partial: symbolic arguments, arbitrary
+loop conditions, slices and numeric literals in other contexts are outside it.
 """
 import ast
 from pathlib import Path
@@ -1286,6 +1292,41 @@ PARAMETER_DEFAULTS = {
 }
 
 
+# (relative file, qualified scope, positional argument, occurrence):
+#     (exact ast.unparse(argument), classification, owner / rationale)
+RANGE_ARGUMENTS = {
+    ('check_jobs.py', 'submit.request_slot', 0, 0): (
+        '1025', 'safety',
+        'check jobs / identity search is one candidate beyond MAX_CHECK_RETAINED'),
+    ('decision_delivery.py', 'pending', 1, 0): (
+        '-1', 'mechanism', 'decision delivery / reverse-range sentinel'),
+    ('decision_delivery.py', 'pending', 2, 0): (
+        '-1', 'mechanism', 'decision delivery / reverse-range step'),
+    ('fs.py', '_safe_write_openat', 0, 0): (
+        '8', 'safety',
+        'fs / bounded UUID temporary-name collision attempts; fail closed if all eight collide'),
+    ('scheduler_evidence.py', 'summarize', 0, 0): (
+        '1', 'mechanism', 'scheduler evidence / begin comparison at the second entry'),
+    ('scheduler_evidence.py', 'summarize', 0, 1): (
+        '0', 'mechanism', 'scheduler evidence / begin disjoint adjacent-pair grouping at the first entry'),
+    ('scheduler_evidence.py', 'summarize', 2, 0): (
+        '2', 'mechanism', 'scheduler evidence / adjacent-pair stride'),
+    ('snapshot.py', 'Snapshots.merge', 0, 0): (
+        '1', 'mechanism', 'snapshot merge / begin path-component traversal after the root'),
+    ('snapshot.py', 'Snapshots.validate_paths', 0, 0): (
+        '1', 'mechanism', 'snapshot paths / begin ancestor checks after the root component'),
+    ('web.py', 'Web.fetch', 0, 0): (
+        '4', 'safety',
+        'web fetch / fixed redirect-hop ceiling; every hop revalidates the destination'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 0, 0): (
+        '2', 'format', 'work items / revision files begin after immutable seed revision 1'),
+    ('work_items.py', 'WorkItems._iter_chain', 0, 0): (
+        '2', 'format', 'work items / revision files begin after immutable seed revision 1'),
+    ('work_items.py', 'WorkItems._iter_chain', 0, 1): (
+        '2', 'format', 'work items / replay revision files begin after immutable seed revision 1'),
+}
+
+
 def numeric(node, symbolic=()):
     if isinstance(node, ast.Constant):
         return type(node.value) in (int, float)
@@ -1294,6 +1335,42 @@ def numeric(node, symbolic=()):
     if isinstance(node, ast.BinOp):
         return numeric(node.left, symbolic) and numeric(node.right, symbolic)
     return isinstance(node, ast.Name) and node.id in symbolic
+
+
+def range_argument_inventory(tree):
+    found, occurrences = {}, {}
+
+    class RangeArguments(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = []
+
+        def visit_ClassDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id == 'range':
+                scope = '.'.join(self.scope) or '<module>'
+                for index, argument in enumerate(node.args):
+                    if not numeric(argument):
+                        continue
+                    base = (scope, index)
+                    occurrence = occurrences.get(base, 0)
+                    occurrences[base] = occurrence + 1
+                    site = (*base, occurrence)
+                    found[site] = ast.unparse(argument)
+            self.generic_visit(node)
+
+    RangeArguments().visit(tree)
+    return found
 
 
 SYMBOLIC_BOUNDS = {
@@ -1411,6 +1488,49 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             for (scope, parameter), expression in parameter_default_inventory(tree).items():
                 found[(filename, scope, parameter)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in PARAMETER_DEFAULTS.items()})
+
+    def test_range_argument_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for expression, category, rationale in RANGE_ARGUMENTS.values():
+            self.assertIn(category, categories)
+            self.assertTrue(rationale.strip())
+        found = {}
+        for path in sorted(ROOT.rglob('*.py')):
+            filename = path.relative_to(ROOT).as_posix()
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for (scope, argument, occurrence), expression in range_argument_inventory(tree).items():
+                found[(filename, scope, argument, occurrence)] = expression
+        self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
+
+    def test_range_detector_scope_argument_alignment_and_numeric_vocabulary(self):
+        source = '''
+def outer(count):
+    range(1, count, 2 * 1024)
+    def nested():
+        return range(-1, -1)
+class Reader:
+    def read(self):
+        return range(0, 4)
+'''
+        self.assertEqual(range_argument_inventory(ast.parse(source)), {
+            ('outer', 0, 0): '1',
+            ('outer', 2, 0): '2 * 1024',
+            ('outer.nested', 0, 0): '-1',
+            ('outer.nested', 1, 0): '-1',
+            ('Reader.read', 0, 0): '0',
+            ('Reader.read', 1, 0): '4',
+        })
+
+    def test_range_detector_rejects_drift(self):
+        source = 'def read(count): return range(1, count, 4)'
+        expected = range_argument_inventory(ast.parse(source))
+        for changed in (
+                source.replace('range(1, count, 4)', 'range(1, count, 8)'),
+                source.replace('range(1, count, 4)', 'range(1, count)'),
+                source.replace('return range', 'return list'),
+                source.replace('def read', 'def renamed')):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                self.assertEqual(range_argument_inventory(ast.parse(changed)), expected)
 
     def test_parameter_detector_alignment_scope_and_vocabulary(self):
         source = '''
