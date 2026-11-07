@@ -48,8 +48,8 @@ The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
 character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
-header-pair count and model-catalog provider-command output ceiling, whose names
-fall outside the pattern. Lock waits stay
+header-pair count, model-catalog provider-command output ceiling, and runtime
+wrap-up allowance defaults, whose names fall outside the pattern. Lock waits stay
 fixed until the scheduled-contention work proves a replay-safe boundary.
 Container cleanup walls remain host-dependent policy pending container-runtime
 measurement; the systemd-analyze verification wall is configured in `[services]`.
@@ -155,6 +155,7 @@ EXTRA_CANDIDATES = {
     'model_catalog.py': frozenset({'MAXIMUM'}),
     'web.py': frozenset({'PROBE_MAX_HEADERS'}),
     'work_items.py': frozenset({'_SIDECAR_MAX_BYTES'}),
+    'runtime.py': frozenset({'WRAP_UP_REQUESTS', 'WRAP_UP_TOOLS'}),
 }
 # Non-numeric module-level policy defaults checked by their exact literal value.
 POLICY_DEFAULTS = {
@@ -368,6 +369,12 @@ DECLARATIONS = {
             'lock diagnostics / fixed signed-32-bit duration saturation'),
     },
     'runtime.py': {
+        'WRAP_UP_REQUESTS': (
+            '3', 'configured policy',
+            'runtime / fallback for [limits] wrap_up_requests; project default with per-role override'),
+        'WRAP_UP_TOOLS': (
+            '5', 'configured policy',
+            'runtime / fallback for [limits] wrap_up_tools; project default with per-role override'),
         'MAX_ENGINE_TOOL_INVOCATIONS': (
             '4096', 'safety', 'runtime / fixed run-local engine-tool admission identity memory bound'),
         'MAX_ENGINE_TOOL_ID': (
@@ -743,6 +750,9 @@ DECLARATIONS = {
             'smoke refs / fixed per-item reference count'),
     },
     'snapshot.py': {
+        'MAX_WAIT_RESOLUTION_TOKENS': (
+            '200', 'mechanism',
+            'snapshot progress / one token per row across the two public 100-row work-item pages'),
         '_PATH_VALIDATION_CACHE_LIMIT': (
             '256', 'safety',
             'snapshot / bounded in-process path-validation cache'),
@@ -1154,8 +1164,6 @@ CALLS = {
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
-        ('_ready_work_observation', 'store.page_ready', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row readiness fingerprint check'),
         ('Context._op_vcs_read_publications', 'Publication.list_receipts', 'limit', 0): (
             '100', 'mechanism', 'runtime / publication receipt public page bound'),
         ('Context._op_vcs_read_ci_requests',
