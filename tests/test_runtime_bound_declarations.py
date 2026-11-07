@@ -51,8 +51,9 @@ so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
 header-pair count and model-catalog provider-command output ceiling, whose names
 fall outside the pattern. Lock waits stay
 fixed until the scheduled-contention work proves a replay-safe boundary.
-Container cleanup and systemd-analyze verification walls are host-dependent
-policy pending container-runtime measurement; their output reads are safety.
+Container cleanup walls remain host-dependent policy pending container-runtime
+measurement; the systemd-analyze verification wall is configured in `[services]`.
+Their output reads are safety.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
 not-yet-wired single-child delegation pilot. Its 1024-job history cap is
 shared project-state capacity policy pending the pilot's configuration section:
@@ -1278,11 +1279,6 @@ CALLS = {
         ('_remove_containers', 'run', 'maximum', 1): (
             '65536', 'safety', 'sandbox / bounded bulk removal output'),
     },
-    'services.py': {
-        ('install', 'subprocess.run', 'timeout', 0): (
-            '60', 'policy', 'services / host-dependent systemd-analyze verification wall; '
-            'policy pending measurement'),
-    },
 }
 
 
@@ -1857,7 +1853,7 @@ def no_defaults(limit, /, count, *, size):
                 self.assertIn(category, categories)
                 self.assertTrue(rationale.strip())
 
-    def test_systemd_service_deadlines_are_configured_policy(self):
+    def test_systemd_service_settings_are_configured_policy(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
         settings = next(node for node in tree.body
                         if isinstance(node, ast.ClassDef) and node.name == 'ServiceSettings')
@@ -1870,6 +1866,9 @@ def no_defaults(limit, /, count, *, size):
             'systemd_stop_timeout_seconds': (
                 '45', 'configured policy',
                 'services / systemd deployment graceful-stop timeout default'),
+            'systemd_verify_timeout_seconds': (
+                '60', 'configured policy',
+                'services / systemd-analyze verification wall-time default'),
         }
         self.assertEqual(set(fields), set(expected))
         for name, (default, category, rationale) in expected.items():

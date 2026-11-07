@@ -1,4 +1,4 @@
-"""Systemd service-manager deadline configuration preserves defaults and rejects invalid values."""
+"""Systemd deployment and validation settings preserve defaults and reject invalid values."""
 import dataclasses
 from pathlib import Path
 
@@ -12,6 +12,7 @@ class ServiceSettingsTests(Fixture):
         expected = {
             "systemd_restart_delay_seconds": 15,
             "systemd_stop_timeout_seconds": 45,
+            "systemd_verify_timeout_seconds": 60,
         }
         self.assertEqual(dataclasses.asdict(self.config.services), expected)
         self.assertEqual(dataclasses.asdict(ServiceSettings()), expected)
@@ -47,6 +48,7 @@ class ServiceSettingsTests(Fixture):
         self.assertIn("# [services]", text)
         self.assertIn("# systemd_restart_delay_seconds = 15", text)
         self.assertIn("# systemd_stop_timeout_seconds = 45", text)
+        self.assertIn("# systemd_verify_timeout_seconds = 60", text)
 
 
 if __name__ == "__main__":

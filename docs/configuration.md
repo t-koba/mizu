@@ -1088,17 +1088,18 @@ Rendering does not install or enable units; replacing existing installed file
 triggers is an operator deployment step. There is no new retry or cancellation
 mechanism; periodic triggers simply re-evaluate existing pending state.
 
-The optional `[services]` table controls only systemd service-manager
-deadlines. `systemd_restart_delay_seconds` (default 15) sets `RestartSec` for
+The optional `[services]` table controls systemd deployment and validation
+policy only. `systemd_restart_delay_seconds` (default 15) sets `RestartSec` for
 daemon units; `systemd_stop_timeout_seconds` (default 45) sets `TimeoutStopSec`
-for role, event-dispatch, and check-runner units. Both are positive integer
-seconds within TOML's signed-64-bit integer representation; systemd's own
-time-span syntax also applies. `mizu service install` runs
-`systemd-analyze verify` when available and otherwise reports validation
-unavailable. They preserve current defaults,
-do not change Mizu run deadlines or schedule cadence, and have no effect on
-macOS or Windows definitions. Regenerate and reinstall units after changing
-them; rendering alone never changes installed services.
+for role, event-dispatch, and check-runner units. `systemd_verify_timeout_seconds`
+(default 60) bounds the optional `systemd-analyze verify` command during
+`mizu service install`; the install fails closed if verification times out.
+All three settings are positive integer seconds within TOML's signed-64-bit
+integer representation; systemd's own time-span syntax also applies to the
+unit fields. The settings preserve current behavior, do not change Mizu run
+deadlines or schedule cadence, and have no effect on macOS or Windows
+service definitions. Regenerate and reinstall units after changing restart or
+stop policy; rendering alone never changes installed services.
 
 Event-triggered dispatch with nothing due returns `skipped: no-event` without
 consuming anything; a non-event `on_change` dispatch with an unchanged `code_digest` reports

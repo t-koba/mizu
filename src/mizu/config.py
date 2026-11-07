@@ -693,9 +693,10 @@ class Doctor:
 
 @dataclasses.dataclass(frozen=True)
 class ServiceSettings:
-    #: Systemd deployment policy; defaults preserve the existing unit output.
+    #: Systemd deployment and validation policy; defaults preserve current behavior.
     systemd_restart_delay_seconds: int = 15
     systemd_stop_timeout_seconds: int = 45
+    systemd_verify_timeout_seconds: int = 60
 
 
 @dataclasses.dataclass(frozen=True)

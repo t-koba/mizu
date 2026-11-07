@@ -518,11 +518,13 @@ class OperationsTests(Fixture):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             run = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            services = dataclasses.replace(self.config.services, systemd_verify_timeout_seconds=7)
+            config = dataclasses.replace(self.config, services=services)
             with unittest.mock.patch("mizu.services.shutil.which", return_value="/usr/bin/systemd-analyze"), \
                  unittest.mock.patch("mizu.services.subprocess.run", return_value=run) as runner:
-                result = install(self.config, self.project, ROOT / "bin/mizu", directory, system="linux")
+                result = install(config, self.project, ROOT / "bin/mizu", directory, system="linux")
                 self.assertEqual(result["verification"], "pass")
-                self.assertTrue(runner.called)
+                self.assertEqual(runner.call_args.kwargs["timeout"], 7)
             failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="bad unit")
             with unittest.mock.patch("mizu.services.shutil.which", return_value="/usr/bin/systemd-analyze"), \
                  unittest.mock.patch("mizu.services.subprocess.run", return_value=failed):

@@ -487,7 +487,9 @@ def install(config: Config, project: Project, executable: Path, destination: Pat
                 if analyzer:
                     try:
                         result = subprocess.run([analyzer, "verify", *(str(stage / u) for u in sorted(units))],
-                                                capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+                                                capture_output=True, text=True,
+                                                timeout=config.services.systemd_verify_timeout_seconds,
+                                                stdin=subprocess.DEVNULL)
                     except (OSError, subprocess.SubprocessError) as exc:
                         raise Denied(f"Unit verification could not run: {exc}") from exc
                     if result.returncode:
