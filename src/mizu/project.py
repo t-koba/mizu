@@ -129,19 +129,8 @@ class Project:
             _directory_identity(self.root.parent)
             _directory_identity(self.root)
         self.workspace = self.root / "workspace"
-        try:
-            if read_only:
-                raw_settings = safe_read(self.root, "project.toml", 65536)
-                self.settings = tomllib.loads(raw_settings.decode("utf-8"))
-            else:
-                self.settings = tomllib.loads((self.root / "project.toml").read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, Denied, LimitExceeded) as exc:
-            complaint = "Cannot read bounded project settings" if read_only else f"Project is not initialized: {name}"
-            raise ConfigError(complaint) from exc
-        (self.roles, self.verify, self.recorded_batches,
-         self.lineage_target) = check_project_settings(self.settings)
-        if not self.roles or any(r not in config.roles for r in self.roles):
-            raise ConfigError("Project roles must refer to configured roles")
+        self._settings_read_only = read_only
+        self.refresh_settings()
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days,
                                  open_work_items=config.limits.open_work_items,
@@ -168,6 +157,46 @@ class Project:
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
                                          max_bytes=config.limits.role_state_bytes)
+
+    def _clear_settings(self) -> None:
+        """Disable stale project authority after a settings read or validation failure."""
+        self.settings = {}
+        self.roles = []
+        self.verify = ()
+        self.recorded_batches = {}
+        self.lineage_target = None
+
+    def refresh_settings(self) -> None:
+        """Reload and validate mutable project.toml without rebuilding stores.
+
+        Daemons retain expensive process-local history caches across polls, but
+        project.toml controls role admission, verification, and trusted VCS
+        targets. A failed refresh clears those settings before raising so stale
+        authority cannot be used after a caller handles the error.
+        """
+        try:
+            if self._settings_read_only:
+                raw_settings = safe_read(self.root, "project.toml", 65536)
+                settings = tomllib.loads(raw_settings.decode("utf-8"))
+            else:
+                settings = tomllib.loads((self.root / "project.toml").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, Denied, LimitExceeded) as exc:
+            self._clear_settings()
+            complaint = ("Cannot read bounded project settings" if self._settings_read_only
+                         else f"Project is not initialized: {self.name}")
+            raise ConfigError(complaint) from exc
+        try:
+            roles, verify, recorded_batches, lineage_target = check_project_settings(settings)
+            if not roles or any(role not in self.config.roles for role in roles):
+                raise ConfigError("Project roles must refer to configured roles")
+        except ConfigError:
+            self._clear_settings()
+            raise
+        self.settings = settings
+        self.roles = roles
+        self.verify = verify
+        self.recorded_batches = recorded_batches
+        self.lineage_target = lineage_target
 
     def vcs_settings(self, config: Config | None = None) -> dict:
         """Shared adapter policy with this project's trusted target, if configured."""

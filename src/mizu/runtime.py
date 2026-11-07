@@ -4657,9 +4657,12 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     probe = service_due(config, name, stop)
                     if probe is not None:
                         print(json.dumps(probe, ensure_ascii=False), flush=True)
-                    # Retain process-local validation caches across unchanged reloads.
+                    # Retain process-local history caches across unchanged reloads,
+                    # but revalidate mutable project settings on every daemon poll.
                     if project is None or project.config != config:
                         project = Project(config, name)
+                    else:
+                        project.refresh_settings()
                     project.insights.ingest_editor(keep_days=config.limits.retention_days)
                     if vcs_poll_enabled(config):
                         interval = vcs_poll_interval(config)
