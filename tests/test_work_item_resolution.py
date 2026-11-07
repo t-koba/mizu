@@ -3,6 +3,8 @@ import copy
 import dataclasses
 import json
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, bind_delivery
@@ -569,9 +571,24 @@ class WaitResolutionTests(Fixture):
                 # Unrelated additions must not invalidate an exact proof.
                 unrelated = directory / f"{'e' * 64}.{kind}.json"
                 unrelated.write_text('{}')
-                with patch.object(self.store, '_iter_chain', wraps=self.store._iter_chain) as replay:
-                    self.assertEqual(self.store.page_ready(role_name='worker')['items'][0]['id'], item['id'])
-                    self.store.page_open_readonly()
+                original_lstat = Path.lstat
+
+                def apfs_lstat(path):
+                    info = original_lstat(path)
+                    if path == directory and unrelated.exists():
+                        return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+                            st_mode=info.st_mode, st_nlink=info.st_nlink + 1,
+                            st_file_attributes=getattr(info, 'st_file_attributes', 0),
+                            st_mtime_ns=info.st_mtime_ns, st_ctime_ns=info.st_ctime_ns,
+                            st_size=info.st_size)
+                    return info
+
+                with patch.object(Path, 'lstat', apfs_lstat):
+                    with patch.object(
+                            self.store, '_iter_chain', wraps=self.store._iter_chain) as replay:
+                        row = self.store.page_ready(role_name='worker')['items'][0]
+                        self.assertEqual(row['id'], item['id'])
+                        self.store.page_open_readonly()
                 self.assertEqual(replay.call_count, 0)
                 conflict = directory / f"{receipt['publication_id']}.{kind}.json"
                 conflict.write_text('{}')

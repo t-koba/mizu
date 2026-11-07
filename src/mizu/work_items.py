@@ -419,14 +419,18 @@ class WorkItems:
                 if (stat.S_ISLNK(info.st_mode)
                         or getattr(info, "st_file_attributes", 0) & 0x400):
                     return None
-                base = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink)
+                base = (info.st_dev, info.st_ino, info.st_mode)
                 if path == root / relative:
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         return None
-                    identities.append((*base, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+                    identities.append((*base, info.st_nlink, info.st_mtime_ns,
+                                       info.st_ctime_ns, info.st_size))
                 else:
                     if not stat.S_ISDIR(info.st_mode):
                         return None
+                    # Directory st_nlink is not portable: APFS includes all
+                    # entries, so unrelated sibling files would invalidate an
+                    # exact missing-leaf witness. The inode still pins the path.
                     identities.append(base)
             return tuple(identities)
         except (OSError, AttributeError, NotImplementedError):
