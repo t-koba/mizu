@@ -1035,6 +1035,138 @@ class CiFailureProjectionTests(Fixture):
         self.assertTrue(cleaned["ci_failures_may_be_truncated"])
         self.assertEqual(len(state3["failures"]["old-branch"]), 16)
 
+class CiCacheRetentionTests(Fixture):
+    def _config(self, branches, checks, **settings):
+        return dataclasses.replace(self.config, vcs={
+            **self.config.vcs, "ci_cache_max_branches": branches,
+            "ci_cache_max_checks_per_branch": checks, **settings})
+
+    def _rows(self, count):
+        return [{"sha": SHA_A, "check": f"check-{i:04d}"} for i in range(count)]
+
+    def test_load_defaults_ranges_and_effective_product(self):
+        from mizu.config import load
+        from mizu.errors import ConfigError
+        from mizu.ci_observation import ci_cache_limits
+        self.assertEqual(ci_cache_limits(self.config), (128, 16))
+        base = self.file.read_text()
+        # Replace only the two example settings; all other policy stays intact.
+        base = "\n".join(line for line in base.splitlines()
+                         if not line.startswith(("ci_cache_max_branches =",
+                                                 "ci_cache_max_checks_per_branch =")))
+        self.file.write_text(base)
+        self.assertEqual(ci_cache_limits(load(self.file)), (128, 16))
+        for branches, checks, extras, expected in (
+                (256, 8, [], (256, 8)), (2048, 1, [], (2048, 1)),
+                (2, 1024, [], (2, 1024)), (1, 1024, ["a", "a", "b"], (2, 1024)),
+                (1, 1, ["a", "b"], (2, 1))):
+            text = (f"ci_cache_max_branches = {branches}\n"
+                    f"ci_cache_max_checks_per_branch = {checks}\n")
+            # Empty primary here isolates deduplication of the extra set.
+            text += 'ci_branch = ""\nci_wake_extra_branches = ' + json.dumps(extras) + '\n'
+            clean = "\n".join(line for line in base.splitlines()
+                              if not line.startswith(("ci_branch =", "ci_wake_extra_branches =")))
+            self.file.write_text(clean.replace("[vcs]\n", "[vcs]\n" + text))
+            self.assertEqual(ci_cache_limits(load(self.file)), expected)
+        for key in ("ci_cache_max_branches", "ci_cache_max_checks_per_branch"):
+            for bad in ("0", "-1", "true", '"16"', "1.5", "2049"):
+                self.file.write_text(base.replace("[vcs]\n", f"[vcs]\n{key} = {bad}\n"))
+                with self.subTest(key=key, bad=bad), self.assertRaises(ConfigError):
+                    load(self.file)
+        for settings in (
+                'ci_cache_max_branches = 129\nci_cache_max_checks_per_branch = 16',
+                'ci_cache_max_branches = 1\nci_cache_max_checks_per_branch = 1025',
+                'ci_cache_max_branches = 1\nci_cache_max_checks_per_branch = 1024\n'
+                'ci_branch = "primary"\nci_wake_extra_branches = ["a", "b"]'):
+            clean = "\n".join(line for line in base.splitlines()
+                              if not line.startswith(("ci_branch =", "ci_wake_extra_branches =")))
+            self.file.write_text(clean.replace("[vcs]\n", "[vcs]\n" + settings + "\n"))
+            with self.subTest(settings=settings), self.assertRaises(ConfigError):
+                load(self.file)
+
+    def test_default_helpers_and_malformed_runtime_fallback(self):
+        from mizu.ci_observation import _clean_ci_failures, ci_cache_limits
+        from mizu.ci_polling import _merge_ci_success_maps
+        value = {f"branch-{i:03d}": self._rows(17) for i in range(129)}
+        expected = {name: rows[:16] for name, rows in list(value.items())[:128]}
+        self.assertEqual(_clean_ci_failures(value), expected)
+        self.assertEqual(_merge_ci_success_maps({}, value), expected)
+        for branches, checks in ((True, 16), (128, "bad"), (0, 1), (1, 1025), (129, 16)):
+            config = self._config(branches, checks)
+            self.assertEqual(ci_cache_limits(config), (128, 16))
+            self.assertEqual(_clean_ci_failures(value, config), expected)
+
+    def test_redistribution_survives_refresh_poll_persist_and_projection(self):
+        from mizu.ci_observation import ci_failures_projection
+        from mizu.fs import read_json, write_json
+        from mizu.runtime import poll_project_vcs
+        # A 256 x 8 map would be silently cut by any forgotten default helper.
+        value = {f"branch-{i:03d}": self._rows(8) for i in range(256)}
+        config = self._config(256, 8)
+        write_json(self.project.root / "vcs-poll.json", {"failures": value, "successes": value})
+        state = {}
+        poll_project_vcs(config, self.project, state, now=100.0, interval=15.0)
+        stored = read_json(self.project.root / "vcs-poll.json")
+        for key in ("failures", "successes"):
+            self.assertEqual(state["ci"][key], value)
+            self.assertEqual(stored[key], value)
+        rows, truncated = ci_failures_projection(self.project, limit=2048, config=config)
+        self.assertEqual(len(rows), 2048)
+        self.assertTrue(truncated)
+        self.assertTrue(all(row["nondeterministic"] for row in rows))
+        # Presentation still defaults to 32 rows, independently of retention.
+        self.assertEqual(len(ci_failures_projection(self.project, config=config)[0]), 32)
+
+    def test_reduced_retention_preserves_selected_branches_through_pruning(self):
+        from mizu.ci_observation import ci_cache_limits, _clean_ci_failures
+        config = self._config(1, 2, command=["synthetic"], ci_branch="selected-a",
+                              ci_wake_extra_branches=["selected-b", "selected-b"])
+        self.assertEqual(ci_cache_limits(config), (2, 2))
+        value = {"unrelated": self._rows(3), "selected-b": self._rows(3),
+                 "selected-a": self._rows(3)}
+        expected = {branch: self._rows(2) for branch in ("selected-a", "selected-b")}
+        self.assertEqual(_clean_ci_failures(value, config), expected)
+        state = {"failures": value, "successes": value}
+        def reader(settings, op, params):
+            return {"checks": [{**row, "state": status}
+                               for status in ("failure", "success") for row in self._rows(3)]}
+        # Explicit targets exercise sorted-name eviction after the incoming merge.
+        out = poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                      branches=["new"], reader=reader)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["ci_failures_may_be_truncated"])
+        self.assertEqual(state["failures"], expected)
+        self.assertEqual(state["successes"], expected)
+        # Refreshed selected rows use the configured check cap too.
+        poll_ci(config, self.project, state, now=15.0, interval=15.0,
+                branches=["selected-a"], reader=reader)
+        self.assertEqual(state["failures"], expected)
+        self.assertEqual(state["successes"], expected)
+        # Selected branches absent from live refs survive live-ref pruning too.
+        vcs.inject_refs(self.project.root, {"new": SHA_B})
+        poll_ci(config, self.project, state, now=30.0, interval=15.0, reader=reader)
+        self.assertEqual(state["failures"], expected)
+        self.assertEqual(state["successes"], expected)
+
+    def test_wake_covers_total_envelope_not_the_old_65_times_16_limit(self):
+        from mizu.ci_observation import wake_ci_failures, ci_failures_projection
+        from mizu.fs import write_json
+        config = self._config(1, 1024, command=["synthetic"], ci_branch="primary",
+                              ci_wake_extra_branches=["extra"])
+        state = {}
+        def reader(settings, op, params):
+            return {"checks": [{**row, "state": "failure"} for row in self._rows(1024)]}
+        result = poll_ci(config, self.project, state, now=0.0, interval=15.0,
+                         branches=["primary", "extra"], reader=reader)
+        self.assertTrue(result["ok"])
+        write_json(self.project.root / "vcs-poll.json", state)
+        rows = wake_ci_failures(self.project, config)
+        self.assertEqual(len(rows), 2048)
+        self.assertEqual({row["branch"] for row in rows}, {"primary", "extra"})
+        self.assertEqual(rows[-1]["check"], "check-1023")
+        self.assertEqual(len(ci_failures_projection(self.project, config=config)[0]), 32)
+
+
 class CiWakeExtraBranchTests(Fixture):
     def _cache(self, failures):
         from mizu.fs import write_json

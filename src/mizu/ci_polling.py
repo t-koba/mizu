@@ -9,8 +9,7 @@ wake records/due policy stay in ``ci_wake``. This module never imports runtime.
 from __future__ import annotations
 
 from . import vcs as _vcs
-from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH,
-                             MAX_CI_FAILURE_BRANCHES, _clean_ci_failures,
+from .ci_observation import (ci_cache_limits, _clean_ci_failures,
                              _clean_ci_successes, _valid_ci_run)
 from .ci_wake import effective_ci_wake_branches
 from .errors import Denied
@@ -19,8 +18,9 @@ from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                               vcs_poll_max_branches, vcs_poll_status_timeout)
 
 
-def _merge_ci_success_rows(existing, incoming) -> list:
+def _merge_ci_success_rows(existing, incoming, config=None) -> list:
     """Keep the newest same-branch evidence first, unique by sha/check."""
+    _, max_checks = ci_cache_limits(config)
     out = []
     seen = set()
     for rows in (incoming, existing):
@@ -34,32 +34,32 @@ def _merge_ci_success_rows(existing, incoming) -> list:
                 continue
             seen.add(identity)
             out.append({"sha": identity[0], "check": identity[1]})
-            if len(out) >= MAX_CI_CHECKS_PER_BRANCH:
+            if len(out) >= max_checks:
                 return out
     return out
 
 
-def _merge_ci_success_maps(existing, incoming) -> dict:
+def _merge_ci_success_maps(existing, incoming, config=None) -> dict:
     """Merge bounded success evidence by branch, favoring newer rows."""
-    merged = _clean_ci_successes(existing)
-    for branch, rows in _clean_ci_successes(incoming).items():
-        combined = _merge_ci_success_rows(merged.get(branch), rows)
+    merged = _clean_ci_successes(existing, config)
+    for branch, rows in _clean_ci_successes(incoming, config).items():
+        combined = _merge_ci_success_rows(merged.get(branch), rows, config)
         if combined:
             merged[branch] = combined
         else:
             merged.pop(branch, None)
     for branch in [name for name, rows in merged.items() if not rows]:
         merged.pop(branch, None)
-    while len(merged) > MAX_CI_FAILURE_BRANCHES:
-        merged.pop(sorted(merged)[0], None)
+    _prune_ci_branch_map(merged, effective_ci_wake_branches(config), config)
     return merged
 
 
-def _prune_ci_branch_map(mapping: dict, protected_branches) -> bool:
-    """Trim to the fixed branch cap without dropping configured wake branches."""
+def _prune_ci_branch_map(mapping: dict, protected_branches, config=None) -> bool:
+    """Trim to the effective branch cap without dropping configured wake branches."""
+    max_branches, _ = ci_cache_limits(config)
     protected = set(protected_branches)
     pruned = False
-    while len(mapping) > MAX_CI_FAILURE_BRANCHES:
+    while len(mapping) > max_branches:
         removable = sorted(branch for branch in mapping if branch not in protected)
         if not removable:
             break
@@ -98,6 +98,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
     state["last_poll"] = now
     max_branches = vcs_poll_max_branches(config)
     wake_branches = set(effective_ci_wake_branches(config))
+    cache_branches, max_checks = ci_cache_limits(config)
     def _default_reader(settings, op, params):
         return _vcs.read_via(capped_vcs_settings(settings, vcs_poll_status_timeout(config)),
                              op, params)
@@ -129,7 +130,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         success_tick: dict = {}
         failure_branches_pruned = (
             isinstance(state.get("failures"), dict)
-            and len(state["failures"]) > MAX_CI_FAILURE_BRANCHES)
+            and len(state["failures"]) > cache_branches)
         tick: dict = {}
         for branch in targets:
             data = do_read(config.vcs, "status", {"branch": branch})
@@ -152,12 +153,12 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                 if tick_run is not None:
                     tick_row["run"] = tick_run
                 rows.append(tick_row)
-            if len(rows) > MAX_CI_CHECKS_PER_BRANCH:
+            if len(rows) > max_checks:
                 check_rows_dropped = True
-            tick[branch] = rows[:MAX_CI_CHECKS_PER_BRANCH]
-            success_tick[branch] = passed_rows[:MAX_CI_CHECKS_PER_BRANCH]
+            tick[branch] = rows[:max_checks]
+            success_tick[branch] = passed_rows[:max_checks]
         previous_failures = state.get("failures")
-        failures_map = _clean_ci_failures(previous_failures)
+        failures_map = _clean_ci_failures(previous_failures, config)
         for branch, rows in tick.items():
             failures_map[branch] = rows
         if branches is None:
@@ -168,7 +169,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             if live is not None:
                 if len(live) <= max_branches:
                     live.add("main")
-                stale_branches = [b for b in failures_map if b not in live]
+                stale_branches = [b for b in failures_map if b not in live and b not in wake_branches]
                 for stale in stale_branches:
                     failures_map.pop(stale, None)
         for empty in [b for b, rows in failures_map.items() if not rows]:
@@ -179,23 +180,23 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             check_rows_dropped = check_rows_dropped or any(
                 branch not in tick
                 and isinstance(previous_failures.get(branch), list)
-                and len(previous_failures[branch]) > MAX_CI_CHECKS_PER_BRANCH
+                and len(previous_failures[branch]) > max_checks
                 for branch in failures_map)
         failure_branches_pruned = (
-            _prune_ci_branch_map(failures_map, wake_branches)
+            _prune_ci_branch_map(failures_map, wake_branches, config)
             or failure_branches_pruned)
         state["failures"] = failures_map
-        successes_map = _merge_ci_success_maps(state.get("successes"), {})
+        successes_map = _merge_ci_success_maps(state.get("successes"), {}, config)
         for branch, rows in success_tick.items():
-            combined = _merge_ci_success_rows(successes_map.get(branch), rows)
+            combined = _merge_ci_success_rows(successes_map.get(branch), rows, config)
             if combined:
                 successes_map[branch] = combined
             else:
                 successes_map.pop(branch, None)
         if branches is None and live is not None:
-            for stale in [name for name in successes_map if name not in live]:
+            for stale in [name for name in successes_map if name not in live and name not in wake_branches]:
                 successes_map.pop(stale, None)
-        _prune_ci_branch_map(successes_map, wake_branches)
+        _prune_ci_branch_map(successes_map, wake_branches, config)
         state["successes"] = successes_map
         state["last_error"] = ""
         state["last_ok"] = now

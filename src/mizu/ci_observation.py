@@ -6,7 +6,8 @@ policy live in ``ci_wake``.
 """
 from __future__ import annotations
 
-from .config import MAX_CI_WAKE_EXTRA_BRANCHES
+from .config import (DEFAULT_CI_CACHE_MAX_BRANCHES, DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH,
+                     MAX_CI_CACHE_ROWS, MAX_CI_WAKE_EXTRA_BRANCHES)
 from .fs import read_json
 
 #: Shared per-project poll state filename (timestamps, cursors, bounded CI
@@ -15,22 +16,38 @@ from .fs import read_json
 #: filename; ``ci_polling`` only updates the bounded CI fields in memory.
 POLL_STATE_FILE = "vcs-poll.json"
 
-#: Fixed bound for the shared current-CI-failure fact (branches x checks).
-#: Prompt projections conservatively report possible truncation whenever this
-#: cap is reached; a prior cache may already have been sliced.
+#: Prompt-only flattened failure projection cap; independent of cache retention.
+#: A reached cap conservatively reports possible truncation.
 MAX_CI_FAILURES = 32
-#: Fixed bound for stored per-branch check rows (keeps one tick short and the
-#: shared file small). Prompt projections flag a reached cap as possibly
-#: truncated because cached history cannot distinguish exact-fit from slicing.
-MAX_CI_CHECKS_PER_BRANCH = 16
-#: Fixed bound for stored branches with failures/success evidence
-#: (rotation prunes absent refs). Prompt projections conservatively flag
-#: failure caps as possibly truncated.
-MAX_CI_FAILURE_BRANCHES = 128
+#: No-config retention defaults; runtime settings may redistribute the same row envelope.
+MAX_CI_CHECKS_PER_BRANCH = DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH
+MAX_CI_FAILURE_BRANCHES = DEFAULT_CI_CACHE_MAX_BRANCHES
 #: Maximum selected wake branches: ci_branch plus 64 configured extras.
 MAX_CI_WAKE_BRANCHES = MAX_CI_WAKE_EXTRA_BRANCHES + 1
-#: A selected branch contributes at most the stored per-branch check cap.
-MAX_CI_WAKE_ROWS = MAX_CI_WAKE_BRANCHES * MAX_CI_CHECKS_PER_BRANCH
+#: Wake projection must cover every retained selected row, not the prompt's 32 rows.
+MAX_CI_WAKE_ROWS = MAX_CI_CACHE_ROWS
+
+
+def ci_cache_limits(config=None) -> tuple[int, int]:
+    """Effective branches/checks retention; malformed runtime settings use defaults.
+
+    Selected wake branches always fit. The per-map row envelope is fixed, and
+    checks cannot exceed the local VCS status-parser cap (not a provider limit).
+    """
+    settings = getattr(config, "vcs", config)
+    if not isinstance(settings, dict):
+        settings = {}
+    branches = settings.get("ci_cache_max_branches", MAX_CI_FAILURE_BRANCHES)
+    checks = settings.get("ci_cache_max_checks_per_branch", MAX_CI_CHECKS_PER_BRANCH)
+    from .vcs import MAX_CHECKS
+    if (type(branches) is not int or not 1 <= branches <= MAX_CI_CACHE_ROWS
+            or type(checks) is not int or not 1 <= checks <= MAX_CHECKS):
+        return MAX_CI_FAILURE_BRANCHES, MAX_CI_CHECKS_PER_BRANCH
+    branches = max(branches, len(effective_ci_wake_branches(config)), 1)
+    if branches * checks > MAX_CI_CACHE_ROWS:
+        return MAX_CI_FAILURE_BRANCHES, MAX_CI_CHECKS_PER_BRANCH
+    return branches, checks
+
 
 def _valid_ci_run(value) -> str | None:
     """Return a valid adapter run identity or ``None`` (never raises).
@@ -51,7 +68,7 @@ def _valid_ci_run(value) -> str | None:
         return None
 
 
-def _clean_ci_failures(value) -> dict:
+def _clean_ci_failures(value, config=None) -> dict:
     """Normalize a stored ``{branch: [{sha, check, run?}]}`` mapping (never raises)."""
     if not isinstance(value, dict):
         return {}
@@ -61,7 +78,12 @@ def _clean_ci_failures(value) -> dict:
         from .vcs import _SHA as _sha_re
     except Exception:
         return {}
-    for branch, rows in list(value.items())[:MAX_CI_FAILURE_BRANCHES]:
+    max_branches, max_checks = ci_cache_limits(config)
+    protected = effective_ci_wake_branches(config)
+    # Reserve selected branches before unrelated cache entries consume capacity.
+    names = list(dict.fromkeys([b for b in protected if b in value] + list(value)))
+    for branch in names[:max_branches]:
+        rows = value[branch]
         try:
             _check_branch(branch)
         except Exception:
@@ -69,7 +91,7 @@ def _clean_ci_failures(value) -> dict:
         if not isinstance(rows, list):
             continue
         kept = []
-        for entry in rows[:MAX_CI_CHECKS_PER_BRANCH]:
+        for entry in rows[:max_checks]:
             if not isinstance(entry, dict):
                 continue
             sha = entry.get("sha")
@@ -91,18 +113,18 @@ def _clean_ci_failures(value) -> dict:
     return out
 
 
-def _clean_ci_successes(value) -> dict:
+def _clean_ci_successes(value, config=None) -> dict:
     """Normalize bounded persisted success evidence (same schema as failures)."""
-    return _clean_ci_failures(value)
+    return _clean_ci_failures(value, config)
 
 
 def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
-                           branches: tuple[str, ...] | None = None) -> tuple[list, bool | None]:
-    """Return bounded cached CI rows and whether a fixed bound may have sliced them.
+                           branches: tuple[str, ...] | None = None, config=None) -> tuple[list, bool | None]:
+    """Return bounded cached CI rows and whether a retention/projection bound may have sliced them.
 
     Schema: ``(rows, may_be_truncated)`` for the shared
     ``vcs-poll.json`` cache. An optional selected-branch filter is applied
-    to raw cache keys before the 128-branch, 16-checks-per-branch, and
+    to raw cache keys before configured branch/check retention and
     flattened-row bounds; prompt projections omit it to preserve visibility
     of unrelated refs, while CI wake selection uses configured branches.
     Retained same-SHA/check success evidence annotates a failure with one
@@ -136,19 +158,21 @@ def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
             # the branch or flattened-row bounds for wake selection.
             stored = ({name: stored[name] for name in wanted if name in stored}
                       if isinstance(stored, dict) else {})
+        if config is None:
+            config = getattr(project, "config", None)
+        max_branches, max_checks = ci_cache_limits(config)
         may_be_truncated = False
         if isinstance(stored, dict):
-            # `_clean_ci_failures` takes the first 128 input branches, and at
-            # most 16 rows from each. At a reached cap the original full size
-            # cannot be recovered from an old or already-cleaned cache.
-            may_be_truncated = len(stored) >= MAX_CI_FAILURE_BRANCHES
+            # At a reached retention cap the original full size cannot be
+            # recovered from an old or already-cleaned cache.
+            may_be_truncated = len(stored) >= max_branches
             if not may_be_truncated:
                 may_be_truncated = any(
-                    isinstance(rows, list) and len(rows) >= MAX_CI_CHECKS_PER_BRANCH
+                    isinstance(rows, list) and len(rows) >= max_checks
                     for rows in stored.values())
-        cleaned = _clean_ci_failures(stored)
+        cleaned = _clean_ci_failures(stored, config)
         raw_successes = raw.get("successes")
-        successes = _clean_ci_successes(raw_successes)
+        successes = _clean_ci_successes(raw_successes, config)
         passed_on = {}
         for success_branch in sorted(successes):
             # _clean_ci_successes has already checked the citation syntax;
@@ -265,7 +289,7 @@ def wake_ci_failures(project, config=None) -> list:
     The deduplicated ``ci_branch`` plus up to 64 explicit extra branches are
     filtered from raw cache keys before row caps. Other branches remain in
     the unfiltered prompt projection and never wake a role. The projection
-    carries every retained row on the selected set (at most 65 x 16).
+    carries every retained row on the selected set (at most 2048).
     """
     try:
         if config is None:
@@ -274,6 +298,6 @@ def wake_ci_failures(project, config=None) -> list:
         if not branches:
             return []
         return ci_failures_projection(
-            project, limit=MAX_CI_WAKE_ROWS, branches=branches)[0]
+            project, limit=MAX_CI_WAKE_ROWS, branches=branches, config=config)[0]
     except Exception:
         return []

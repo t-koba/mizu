@@ -407,6 +407,8 @@ artifact_full_read_chars = 524288 # Whole-file artifact character cap (positive 
 diagnostic_bytes = 2048      # Model-visible stderr tail on a nonzero exit; 0 disables, maximum 8192.
 ci_branch = ""               # Authoritative CI/reporting branch exposed as ci_branch to vcs_read roles (e.g. "mizu"); empty disables exposure.
 ci_wake_extra_branches = [] # Add up to 64 valid branches to CI wake selection; combined with ci_branch (empty default preserves prior behavior).
+ci_cache_max_branches = 128 # Retention per failure/success map (1-2048); effective capacity also fits every selected wake branch.
+ci_cache_max_checks_per_branch = 16 # Retention per branch (1-1024); effective branches * checks must be <= 2048.
 ci_rewake_seconds = 1800     # Unchanged-red re-wake interval in seconds (60-86400); an unchanged red still re-wakes eventually.
 retire_grant = false         # Explicit operator grant for vcs_retire; false disables retirement.
 close_grant = false          # Explicit operator grant for routine vcs_dispose close; false disables close.

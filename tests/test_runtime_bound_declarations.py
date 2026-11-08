@@ -25,10 +25,12 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
-The `acceptance.py` retained-evidence ceiling and the `ci_observation.py`
-shared-cache caps and derived wake-branch/row aliases and `ci_waits.py`
-diagnostic page caps are fixed safety bounds; `ci_waits.py`'s serialized
-check-set size is a mechanism contract;
+The `acceptance.py` retained-evidence ceiling, CI observation total-row/prompt
+caps and wake-branch ceiling, and `ci_waits.py` diagnostic page caps are fixed
+safety bounds. CI branch/check retention defaults are configured policy owned
+by `[vcs] ci_cache_max_branches` and `ci_cache_max_checks_per_branch`, within
+the unchanged total-row envelope; `ci_waits.py`'s serialized check-set size is
+a mechanism contract;
 `ci_wake.py`'s re-wake default is configured policy owned by
 `[vcs] ci_rewake_seconds`, and its record version is format, outside the
 name-scoped detector.
@@ -274,19 +276,19 @@ DECLARATIONS = {
     'ci_observation.py': {
         'MAX_CI_FAILURES': (
             '32', 'safety',
-            'CI observation / bounded flattened current-failure rows for the shared cache and prompt'),
+            'CI observation / bounded flattened current-failure rows for the prompt'),
         'MAX_CI_CHECKS_PER_BRANCH': (
-            '16', 'safety',
-            'CI observation / bounded stored check rows per branch and per tick'),
+            'DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH', 'configured policy',
+            'CI observation / fallback for vcs.ci_cache_max_checks_per_branch'),
         'MAX_CI_FAILURE_BRANCHES': (
-            '128', 'safety',
-            'CI observation / bounded stored branches with failure or success evidence'),
+            'DEFAULT_CI_CACHE_MAX_BRANCHES', 'configured policy',
+            'CI observation / fallback for vcs.ci_cache_max_branches'),
         'MAX_CI_WAKE_BRANCHES': (
             'MAX_CI_WAKE_EXTRA_BRANCHES + 1', 'safety',
             'CI observation / one required ci_branch plus the fixed extra-branch ceiling'),
         'MAX_CI_WAKE_ROWS': (
-            'MAX_CI_WAKE_BRANCHES * MAX_CI_CHECKS_PER_BRANCH', 'safety',
-            'CI observation / selected wake-branch count times the stored per-branch check ceiling'),
+            'MAX_CI_CACHE_ROWS', 'safety',
+            'CI observation / wake projection covers the entire fixed per-map safety envelope'),
     },
     'web_worker.py': {
         'MAX_WEB_WORKER_INPUT_BYTES': (
@@ -1319,6 +1321,12 @@ CONFIG_MODULE_BOUNDS = {
         'format', 'dispatch evidence / minimum serialized empty schema-1 envelope'),
     'MAX_RESOURCES': (
         '64', 'safety', 'config / bounded per-profile local resource list'),
+    'DEFAULT_CI_CACHE_MAX_BRANCHES': (
+        '128', 'configured policy', 'config / unchanged vcs.ci_cache_max_branches default'),
+    'DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH': (
+        '16', 'configured policy', 'config / unchanged vcs.ci_cache_max_checks_per_branch default'),
+    'MAX_CI_CACHE_ROWS': (
+        '2048', 'safety', 'config / fixed total rows per CI observation mapping, not a provider bound'),
     'MAX_CI_WAKE_EXTRA_BRANCHES': (
         '64', 'mechanism', 'config / fixed CI wake branch-set bound'),
     'MAX_WAIT_SECONDS': (
@@ -2592,7 +2600,9 @@ SYMBOLIC_BOUNDS = {
     },
     'ci_observation.py': {
         'MAX_CI_WAKE_BRANCHES': frozenset({'MAX_CI_WAKE_EXTRA_BRANCHES'}),
-        'MAX_CI_WAKE_ROWS': frozenset({'MAX_CI_WAKE_BRANCHES', 'MAX_CI_CHECKS_PER_BRANCH'}),
+        'MAX_CI_CHECKS_PER_BRANCH': frozenset({'DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH'}),
+        'MAX_CI_FAILURE_BRANCHES': frozenset({'DEFAULT_CI_CACHE_MAX_BRANCHES'}),
+        'MAX_CI_WAKE_ROWS': frozenset({'MAX_CI_CACHE_ROWS'}),
     },
     'web_worker.py': {
         'MAX_WEB_WORKER_INPUT_BYTES': frozenset({'MAX_INCLUDE_BYTES'}),
@@ -3422,6 +3432,16 @@ def no_defaults(limit, /, count, *, size):
              'POLL_CALL_TIMEOUT_CAP': defaults['poll_status_timeout_seconds'],
              'POLL_FETCH_TIMEOUT_CAP': defaults['poll_fetch_timeout_seconds']})
         self.assertEqual(wake['DEFAULT_CI_REWAKE_SECONDS'], defaults['ci_rewake_seconds'])
+        observation = inventory(ast.parse((ROOT / 'ci_observation.py').read_text(encoding='utf-8')),
+                                symbolic_bounds=SYMBOLIC_BOUNDS['ci_observation.py'])
+        for constant, setting in (
+                ('MAX_CI_FAILURE_BRANCHES', 'ci_cache_max_branches'),
+                ('MAX_CI_CHECKS_PER_BRANCH', 'ci_cache_max_checks_per_branch')):
+            self.assertEqual(observation[constant], defaults[setting])
+            self.assertEqual(DECLARATIONS['ci_observation.py'][constant][1], 'configured policy')
+        self.assertEqual(observation['MAX_CI_WAKE_ROWS'], 'MAX_CI_CACHE_ROWS')
+        self.assertEqual(CONFIG_MODULE_BOUNDS['MAX_CI_CACHE_ROWS'][:2], ('2048', 'safety'))
+
 
     def test_lock_timeout_is_configured_policy(self):
         from mizu.config import Limits, MAX_WAIT_SECONDS, _LIMIT_RANGES

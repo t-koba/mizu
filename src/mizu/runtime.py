@@ -4886,7 +4886,7 @@ def _wall(value):
     return number
 
 
-def refresh_poll_state(state: dict, shared: dict) -> dict:
+def refresh_poll_state(state: dict, shared: dict, config=None) -> dict:
     """Refresh in-memory poll state from shared persisted state.
 
     Schema: ``state`` is daemon in-memory poll state (fetch, CI, proposal
@@ -4923,9 +4923,9 @@ def refresh_poll_state(state: dict, shared: dict) -> dict:
             if valid_cursor is not None:
                 state["proposal_cursor"] = valid_cursor
     if isinstance(shared.get("failures"), dict):
-        ci_state["failures"] = _clean_ci_failures(shared["failures"])
+        ci_state["failures"] = _clean_ci_failures(shared["failures"], config)
     ci_state["successes"] = _merge_ci_success_maps(
-        ci_state.get("successes"), shared.get("successes"))
+        ci_state.get("successes"), shared.get("successes"), config)
     return ci_state
 
 
@@ -4946,7 +4946,7 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                 shared = read_json(project.root / POLL_STATE_FILE, {})
             except (OSError, ValueError, TypeError):
                 shared = {}
-            ci_state = refresh_poll_state(state, shared)
+            ci_state = refresh_poll_state(state, shared, config)
             events = []
             fetched = poll_upstream(config, project, state, now=now, interval=interval)
             if fetched is not None:
@@ -4970,8 +4970,8 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "proposal_complete_facts": state.get("proposal_complete_facts"),
                             "last_ci_wait_poll": state.get("last_ci_wait_poll"),
                             "ci_wait_cursor": state.get("ci_wait_cursor"),
-                            "failures": _clean_ci_failures(ci_state.get("failures")),
-                            "successes": _clean_ci_successes(ci_state.get("successes"))})
+                            "failures": _clean_ci_failures(ci_state.get("failures"), config),
+                            "successes": _clean_ci_successes(ci_state.get("successes"), config)})
             except (OSError, ValueError, TypeError) as exc:
                 # Do not report a proposal page as successful when its cursor
                 # and tick timestamp could not be durably resumed. Other VCS

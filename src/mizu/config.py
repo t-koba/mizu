@@ -122,6 +122,10 @@ MAX_DECISION_RECONCILIATION_BYTES = 64 * 1024 * 1024
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
+# CI observation retention defaults; the total per-map envelope stays fixed.
+DEFAULT_CI_CACHE_MAX_BRANCHES = 128
+DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH = 16
+MAX_CI_CACHE_ROWS = 2048
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
 MAX_NO_PROGRESS_BACKOFF_SECONDS = MAX_WAIT_SECONDS
@@ -1958,6 +1962,7 @@ def load(file: Path) -> Config:
                "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
                "poll_enabled", "poll_proposals_enabled", "ci_wait_descendants",
                "poll_interval_seconds", "poll_max_branches",
+               "ci_cache_max_branches", "ci_cache_max_checks_per_branch",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
                "close_grant", "merge_grant", "request_grant"}, "vcs")
@@ -1967,6 +1972,8 @@ def load(file: Path) -> Config:
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
            "poll_enabled": False, "poll_proposals_enabled": False, "ci_wait_descendants": True,
            "poll_interval_seconds": 300, "poll_max_branches": 4,
+           "ci_cache_max_branches": DEFAULT_CI_CACHE_MAX_BRANCHES,
+           "ci_cache_max_checks_per_branch": DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH,
            "poll_fetch_timeout_seconds": 30,
            "poll_status_timeout_seconds": 15, "retire_grant": False,
            "owned_prefixes": [], "protected_refs": [],
@@ -1997,6 +2004,16 @@ def load(file: Path) -> Config:
         except Exception as exc:
             raise ConfigError(
                 "vcs.ci_wake_extra_branches must contain valid branch names") from exc
+    from .vcs import MAX_CHECKS
+    number(vcs["ci_cache_max_branches"], "vcs.ci_cache_max_branches", 1, MAX_CI_CACHE_ROWS)
+    number(vcs["ci_cache_max_checks_per_branch"], "vcs.ci_cache_max_checks_per_branch",
+           1, MAX_CHECKS)
+    selected = set(vcs["ci_wake_extra_branches"])
+    if vcs["ci_branch"]:
+        selected.add(vcs["ci_branch"])
+    capacity = max(vcs["ci_cache_max_branches"], len(selected), 1)
+    if capacity * vcs["ci_cache_max_checks_per_branch"] > MAX_CI_CACHE_ROWS:
+        raise ConfigError("vcs CI cache effective branches times checks per branch must not exceed 2048")
     vcs["retire_grant"] = boolean(vcs["retire_grant"], "vcs.retire_grant")
     vcs["close_grant"] = boolean(vcs["close_grant"], "vcs.close_grant")
     vcs["merge_grant"] = boolean(vcs["merge_grant"], "vcs.merge_grant")
