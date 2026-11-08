@@ -960,7 +960,7 @@ class SyntheticEngineTests(Fixture):
             self.assertNotIsInstance(caught.exception, ModelFailure)
 
     def test_claude_api_error_status_is_preserved_as_selector_evidence(self):
-        for status in (429, 503, 401):
+        for status in (100, 429, 503, 401, 599):
             with self.subTest(status=status), self.assertRaises(ModelFailure) as caught:
                 terminal_result({'terminal_reason': 'api_error', 'subtype': 'success',
                                  'is_error': True, 'errors': 'synthetic boom',
@@ -1099,6 +1099,12 @@ class CumulativeUsageTests(unittest.TestCase):
         value=model_delta({'main':{'inputTokens':30},'child':{'inputTokens':5}}, {'main':{'inputTokens':20}})
         self.assertEqual(sum(item['inputTokens'] for item in value),15)
         with self.assertRaises(ProtocolError): model_delta({'main':{'inputTokens':1}}, {'main':{'inputTokens':2}})
+
+    def test_claude_model_totals_enforce_signed_64_bit_counter_range(self):
+        maximum=2**63-1
+        self.assertEqual(model_delta({'main':{'inputTokens':maximum}}, {})[0]['inputTokens'], maximum)
+        with self.assertRaises(ProtocolError):
+            model_delta({'main':{'inputTokens':maximum+1}}, {})
 class McpProxyTests(unittest.TestCase):
     def bridge_config(self, handle):
         bridge = Bridge(handle, tool_definitions(("finish",)), timeout=60)

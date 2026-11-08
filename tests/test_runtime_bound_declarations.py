@@ -1863,6 +1863,13 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_observation.py', '_valid_ci_run', 1, 0): (
         '128', 'safety',
         'CI observation / bound the opaque cached run identity before persistence and projection'),
+    ('claude.py', 'model_delta', 3, 0): (
+        '2 ** 63 - 1', 'format',
+        'Claude cumulative token usage / cap each counter at the signed 64-bit usage-field maximum'),
+    ('claude.py', 'validated_api_error_status', 0, 0): (
+        '100', 'format', 'Claude SDK error evidence / HTTP status codes begin at 100'),
+    ('claude.py', 'validated_api_error_status', 2, 0): (
+        '599', 'format', 'Claude SDK error evidence / HTTP status codes end at 599'),
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
@@ -2931,7 +2938,7 @@ def sibling():
         found = {}
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
-                'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
+                'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
                 'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
