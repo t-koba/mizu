@@ -376,6 +376,21 @@ class RecoveryProbeTests(SelectionFixture):
             self.assertEqual(result['status'], 'success')
         self.assertNotIn(str(source).encode(), canonical(self.store.read()))
 
+    def test_target_binding_uses_configured_executable_size_limit(self):
+        self.setup_probe()
+        executable = self.root / 'probe-executable'
+        executable.write_bytes(b'12345')
+        with patch('mizu.probes.shutil.which', return_value=str(executable)):
+            small = dataclasses.replace(
+                self.config,
+                limits=dataclasses.replace(self.config.limits, probe_executable_bytes=4))
+            with self.assertRaisesRegex(ConfigError, 'Probe executable exceeds identity bound'):
+                target_binding(small, 'primary')
+            exact = dataclasses.replace(
+                self.config,
+                limits=dataclasses.replace(self.config.limits, probe_executable_bytes=5))
+            self.assertIsInstance(target_binding(exact, 'primary'), str)
+
     def test_pi_source_content_refresh_does_not_change_binding(self):
         for engine in ('pi', 'pi-durable'):
             with self.subTest(engine=engine):

@@ -92,8 +92,11 @@ its probe output reads remain fixed safety. The `work_order.py`, `selection.py`,
 the work-order page/rationale/record caps, selection list/state/reservation/
 retry caps, continuation chain and pointer/run reads, ADR-042 host-relative
 startup floor/multiplier/ceiling and probe/record caps, the ADR-006/ADR-013
-paid smoke wall cap, and the recovery-probe execution ceilings. Selection
-retention is the exception: `MAX_TERMINAL_CONTRIBUTIONS` and
+paid smoke wall cap, and the recovery-probe execution ceilings are fixed
+mechanism or safety bounds. Recovery-probe executable hashing has a separate
+host I/O policy under `[limits].probe_executable_bytes` (default 256 MiB), with
+a fixed 64 KiB streaming buffer. Selection retention is the exception:
+`MAX_TERMINAL_CONTRIBUTIONS` and
 `MAX_PROBE_EVENTS` are `configured policy` defaults for the optional
 data-dir `selection/policy.json`; absence keeps 256/8 and malformed values
 refuse selection. The
@@ -544,6 +547,9 @@ DECLARATIONS = {
             'live smoke / fixed paid-probe wall cap clamped below configured limits (ADR-006/ADR-013)'),
     },
     'probes.py': {
+        'PROBE_EXECUTABLE_HASH_CHUNK_BYTES': (
+            '65536', 'mechanism',
+            'recovery probes / fixed streaming hash buffer; bounds transient memory independently of executable size'),
         'MAX_SECONDS': (
             '90', 'safety',
             'recovery probes / fixed execution ceiling; configured budget and smaller limits still win'),
@@ -1211,6 +1217,9 @@ CONFIG_MODULE_BOUNDS = {
     'MAX_PROJECT_GOAL_BYTES': (
         '1073741824', 'safety',
         'config / absolute project-goal input ceiling; snapshot audit uses it for older configurations'),
+    'DEFAULT_PROBE_EXECUTABLE_BYTES': (
+        '256 * 1024 * 1024', 'configured policy',
+        'recovery probes / default for [limits].probe_executable_bytes; prior host I/O refusal bound'),
     'MAX_USAGE_POLICY_COUNT': (
         'min(TOML_INTEGER_MAX, sys.maxsize)', 'safety',
         'config / report counts fit the TOML integer and host collection-index ranges'),
@@ -2947,6 +2956,30 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(Limits().pipe_poll_interval_ms, platform.PIPE_POLL_INTERVAL_MS)
         self.assertEqual(_LIMIT_RANGES['pipe_poll_interval_ms'], (1, 500))
         self.assertEqual(DECLARATIONS['platform.py']['PIPE_POLL_INTERVAL_MS'][1], 'configured policy')
+
+    def test_probe_executable_identity_uses_configured_bound(self):
+        from mizu.config import (DEFAULT_PROBE_EXECUTABLE_BYTES, Limits,
+                                 TOML_INTEGER_MAX, _LIMIT_RANGES)
+        self.assertEqual(DEFAULT_PROBE_EXECUTABLE_BYTES, 256 * 1024 * 1024)
+        self.assertEqual(Limits().probe_executable_bytes, DEFAULT_PROBE_EXECUTABLE_BYTES)
+        self.assertEqual(_LIMIT_RANGES['probe_executable_bytes'], (1, TOML_INTEGER_MAX))
+        self.assertEqual(CONFIG_MODULE_BOUNDS['DEFAULT_PROBE_EXECUTABLE_BYTES'][1],
+                         'configured policy')
+        tree = ast.parse((ROOT / 'probes.py').read_text(encoding='utf-8'))
+        binding = next(node for node in tree.body
+                       if isinstance(node, ast.FunctionDef) and node.name == 'target_binding')
+        checks = [node for node in ast.walk(binding) if isinstance(node, ast.If)]
+        self.assertIn(
+            'not path.is_file() or path.stat().st_size > config.limits.probe_executable_bytes',
+            [ast.unparse(node.test) for node in checks])
+        chunk = inventory(tree)['PROBE_EXECUTABLE_HASH_CHUNK_BYTES']
+        self.assertEqual(chunk, '65536')
+        reads = [node for node in ast.walk(binding)
+                 if isinstance(node, ast.Call) and ast.unparse(node.func) == 'stream.read']
+        self.assertEqual([ast.unparse(node.args[0]) for node in reads],
+                         ['PROBE_EXECUTABLE_HASH_CHUNK_BYTES'])
+        self.assertEqual(DECLARATIONS['probes.py']['PROBE_EXECUTABLE_HASH_CHUNK_BYTES'][1],
+                         'mechanism')
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

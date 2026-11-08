@@ -6,7 +6,8 @@ import re
 import unittest
 
 from support import Fixture
-from mizu.config import (DEFAULT_INSIGHT_HISTORY_ENTRIES, MAX_CHECK_RETAINED,
+from mizu.config import (DEFAULT_INSIGHT_HISTORY_ENTRIES, DEFAULT_PROBE_EXECUTABLE_BYTES,
+                         MAX_CHECK_RETAINED,
                          MAX_DECISION_PROJECTION_RECORDS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
                          MAX_HISTORY_TEMPORARIES, MAX_INSIGHT_HISTORY_ENTRIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
@@ -36,6 +37,27 @@ class InsightHistoryLimitConfigTests(Fixture):
                     self.assertEqual(Project(config, "sample").insights.history_entries, int(value))
                 else:
                     with self.assertRaisesRegex(ConfigError, "limits.insight_history_entries"):
+                        load(self.file)
+
+
+class ProbeExecutableLimitConfigTests(Fixture):
+    def test_default_override_and_fail_closed_range(self):
+        self.assertEqual(DEFAULT_PROBE_EXECUTABLE_BYTES, 256 * 1024 * 1024)
+        self.assertEqual(Limits().probe_executable_bytes, DEFAULT_PROBE_EXECUTABLE_BYTES)
+        self.assertEqual(_LIMIT_RANGES["probe_executable_bytes"], (1, TOML_INTEGER_MAX))
+        base = re.sub(r'(?m)^probe_executable_bytes = .*\n', '', self.file.read_text())
+        self.file.write_text(base)
+        self.assertEqual(load(self.file).limits.probe_executable_bytes,
+                         DEFAULT_PROBE_EXECUTABLE_BYTES)
+        for value in ("1", "268435456", str(TOML_INTEGER_MAX), "0", "-1",
+                      "true", "1.5", "\"268435456\"", "[]", "{}"):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace(
+                    "\n[limits]\n", f"\n[limits]\nprobe_executable_bytes = {value}\n"))
+                if value in ("1", "268435456", str(TOML_INTEGER_MAX)):
+                    self.assertEqual(load(self.file).limits.probe_executable_bytes, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, "limits.probe_executable_bytes"):
                         load(self.file)
 
 

@@ -27,6 +27,8 @@ from .selection import (INTENT_RESERVE_BYTES, State, active, bounded, consume_in
 MAX_SECONDS = 90
 MAX_REQUESTS = 2
 MAX_TOOLS = 1
+# Fixed streaming buffer; executable-size policy is configured separately.
+PROBE_EXECUTABLE_HASH_CHUNK_BYTES = 65536
 POLICY = ('This is an availability challenge, not a project task. Call mizu_finish '
           'once with outcome="done" and summary exactly equal to the challenge. '
           'Do not use other tools or provide any other content.\n')
@@ -65,11 +67,11 @@ def target_binding(config, profile):
     if not executable:
         raise ConfigError('Probe command unavailable')
     path = Path(executable)
-    if not path.is_file() or path.stat().st_size > 256 * 1024 * 1024:
+    if not path.is_file() or path.stat().st_size > config.limits.probe_executable_bytes:
         raise ConfigError('Probe executable exceeds identity bound')
     sha = hashlib.sha256()
     with path.open('rb') as stream:
-        for chunk in iter(lambda: stream.read(65536), b''):
+        for chunk in iter(lambda: stream.read(PROBE_EXECUTABLE_HASH_CHUNK_BYTES), b''):
             sha.update(chunk)
     return digest(canonical({'profile': profile, 'settings': settings, 'command': command,
                              'executable': sha.hexdigest(), 'adapter': adapter_digest(settings['engine']),

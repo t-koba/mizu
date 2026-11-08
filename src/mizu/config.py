@@ -31,6 +31,9 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 #: Whole-artifact character budget; paged mode uses its own byte budget.
 DEFAULT_ARTIFACT_FULL_READ_CHARS = 524288
+#: Recovery-probe identity hashing uses this maximum executable size by default.
+#: The operator may adjust the host I/O budget; values use the TOML integer range.
+DEFAULT_PROBE_EXECUTABLE_BYTES = 256 * 1024 * 1024
 #: Absolute maximum accepted for an operator-selected project goal. Snapshot
 #: histories may outlive the current, smaller project_goal_bytes setting.
 MAX_PROJECT_GOAL_BYTES = 1073741824
@@ -412,6 +415,9 @@ class Limits:
     lock_retry_interval_ms: int = LOCK_RETRY_INTERVAL_MS
     #: POSIX pipe idle-wait policy; readiness remains immediate (1–500 ms).
     pipe_poll_interval_ms: int = PIPE_POLL_INTERVAL_MS
+    #: Maximum local executable size hashed to bind a recovery-probe target identity.
+    #: Host I/O policy; the 256 MiB default preserves the previous refusal bound.
+    probe_executable_bytes: int = DEFAULT_PROBE_EXECUTABLE_BYTES
     lock_diagnostics: bool = False
     # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
     open_work_items: int = 100
@@ -601,6 +607,7 @@ class Limits:
 _LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
                  "lock_retry_interval_ms": (1, MAX_WAIT_SECONDS * 1000),
                  "pipe_poll_interval_ms": (1, 500),
+                 "probe_executable_bytes": (1, TOML_INTEGER_MAX),
                  "open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
