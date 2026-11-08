@@ -48,7 +48,11 @@ contracts; its delivered-token set covers prior progress plus one opening page,
 and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth
-and spawn-reap bounds are fixed mechanism or safety. Lock waits are configured
+and spawn-reap bounds are fixed mechanism or safety. The bridge timeout fallback
+is shared between `bridge.py` and `mcp_proxy.py` for incomplete configs; normal
+bridge configs carry a deadline derived from model-request policy. The MCP
+proxy receive chunk bounds transient allocation while `MAX_FRAME` caps the full
+response. Lock waits are configured
 host/load policy owned by `[limits].lock_timeout_seconds` (default 30 s). The widened
 character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
@@ -213,6 +217,14 @@ DECLARATIONS = {
         'BRIDGE_BACKLOG_LIMIT': (
             '16', 'safety',
             'bridge / bounded pending accept backlog for each per-run local listener'),
+        'DEFAULT_BRIDGE_TIMEOUT_MS': (
+            '60000', 'mechanism',
+            'bridge / fallback for incomplete local configs; runtime configs carry the configured model-request deadline'),
+    },
+    'mcp_proxy.py': {
+        'MCP_PROXY_RECV_CHUNK_BYTES': (
+            '65536', 'safety',
+            'MCP proxy / transient socket-read allocation bound; MAX_FRAME independently caps the full reply'),
     },
     'evidence_records.py': {
         'MAX_STARTED_EVIDENCE_BYTES': (
@@ -2546,6 +2558,31 @@ def no_defaults(limit, /, count, *, size):
                     inventory(tree, EXTRA_CANDIDATES.get(filename, ()),
                               SYMBOLIC_BOUNDS.get(filename)),
                     {name: entry[0] for name, entry in declarations.items()})
+
+
+    def test_bridge_proxy_fallback_and_chunk_bounds_use_shared_declarations(self):
+        for filename, function_name in (('bridge.py', 'connect'), ('mcp_proxy.py', 'forward')):
+            with self.subTest(file=filename):
+                tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+                functions = [node for node in ast.walk(tree)
+                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                             and node.name == function_name]
+                self.assertEqual(len(functions), 1)
+                defaults = [node for node in ast.walk(functions[0])
+                            if isinstance(node, ast.Call)
+                            and callee_name(node.func) == 'config.get'
+                            and node.args and isinstance(node.args[0], ast.Constant)
+                            and node.args[0].value == 'timeout_ms']
+                self.assertEqual(len(defaults), 1)
+                self.assertEqual(ast.unparse(defaults[0].args[1]), 'DEFAULT_BRIDGE_TIMEOUT_MS')
+
+        tree = ast.parse((ROOT / 'mcp_proxy.py').read_text(encoding='utf-8'))
+        forward = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.FunctionDef) and node.name == 'forward')
+        reads = [node for node in ast.walk(forward)
+                 if isinstance(node, ast.Call) and callee_name(node.func) == 'client.recv']
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(ast.unparse(reads[0].args[0]), 'MCP_PROXY_RECV_CHUNK_BYTES')
 
     def test_every_module_with_bounds_is_inventoried(self):
         # config.py has its own field-scoped inventory; scripts/check.py is the

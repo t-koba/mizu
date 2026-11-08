@@ -20,11 +20,16 @@ import socket
 import time
 from pathlib import Path
 
-from .bridge import LOOPBACK_HOSTS, connect as _bridge_connect
+from .bridge import (
+    DEFAULT_BRIDGE_TIMEOUT_MS, LOOPBACK_HOSTS, connect as _bridge_connect,
+)
 from .errors import Denied
 from .fs import MAX_FRAME, canonical, loads_finite, read_json
 from .protocol import MCP_VERSIONS
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
+
+# Bound transient socket-read allocation; MAX_FRAME separately caps the full reply.
+MCP_PROXY_RECV_CHUNK_BYTES = 65536
 
 
 def load_bridge() -> dict:
@@ -53,7 +58,7 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
     if not isinstance(arguments, dict):
         raise Denied("Tool arguments must be an object")
     try:
-        timeout_ms = int(config.get("timeout_ms", 60000))
+        timeout_ms = int(config.get("timeout_ms", DEFAULT_BRIDGE_TIMEOUT_MS))
     except (TypeError, ValueError) as exc:
         raise Denied("Invalid bridge configuration") from exc
     if timeout_ms <= 0:
@@ -78,7 +83,7 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
             # cleanup closes the connection if no join was admitted.
             client.settimeout(None if joining else remaining)
             try:
-                chunk = client.recv(65536)
+                chunk = client.recv(MCP_PROXY_RECV_CHUNK_BYTES)
             except (socket.timeout, TimeoutError) as exc:
                 raise Denied("Bridge deadline exceeded") from exc
             if not chunk:

@@ -23,7 +23,8 @@ operators must verify the dedicated account ACLs on the target OS.
 
 Cancellation/retry: serve_forever polls every 0.1s; __exit__ shuts down,
 closes and joins the worker thread (2s). Clients set a socket timeout from
-timeout_ms and perform no retries; a failed call surfaces to the run record.
+timeout_ms, falling back to DEFAULT_BRIDGE_TIMEOUT_MS only for incomplete configs.
+They perform no retries; a failed call surfaces to the run record.
 The host marks granted synchronous joins in joined_operations. Clients bound
 connect/send normally, then defer the reply timer to child-local host deadlines;
 parent transport cleanup drains admitted joins before closing their connection.
@@ -55,6 +56,8 @@ from .fs import MAX_FRAME, canonical, loads_finite, write_json
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 #: Bound the pending accept backlog of each per-run local bridge listener.
 BRIDGE_BACKLOG_LIMIT = 16
+#: Fallback for bridge configs that omit the writer-populated per-request deadline.
+DEFAULT_BRIDGE_TIMEOUT_MS = 60_000
 
 
 def default_transport() -> str:
@@ -82,7 +85,7 @@ def connect(config: dict) -> socket.socket:
     AF_UNIX where the platform provides it. Anything else raises Denied.
     """
     try:
-        timeout_ms = int(config.get("timeout_ms", 60000))
+        timeout_ms = int(config.get("timeout_ms", DEFAULT_BRIDGE_TIMEOUT_MS))
     except (TypeError, ValueError) as exc:
         raise Denied("Invalid bridge configuration") from exc
     if timeout_ms <= 0:
