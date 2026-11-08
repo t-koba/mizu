@@ -1,4 +1,4 @@
-"""Best-effort local dispatch measurements, never admission or session policy."""
+"""Best-effort local dispatch measurements and grant observations, never policy."""
 from __future__ import annotations
 
 import time
@@ -69,6 +69,8 @@ def selected_session(context, profile, settings, path):
                     or projection["generation"] != generation):
                 reason = "prompt_session_mismatch"
             else:
+                from .unit_prompts import broker_grant
+                record["broker_grant"] = broker_grant(context)
                 record["session"] = {"key": path.parent.name, "generation": generation,
                                      "prompt_mode": ("continuation" if context.turn_continuation else projection["mode"]),
                                      "rotation": (None if context.turn_continuation else projection["rotation"]), "unknown_reason": None}

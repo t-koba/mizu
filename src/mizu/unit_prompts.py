@@ -21,8 +21,8 @@ import time
 from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs
-from .errors import Denied
-from .fs import canonical, read_json
+from .errors import ConfigError, Denied
+from .fs import DIGEST, canonical, digest, read_json
 from .protocol import WRITER_CONTINUATION_CONTRACT, tool_definitions
 from .report import previous as _previous_report
 
@@ -272,6 +272,96 @@ def _prompt_tool_surface(context: Context) -> dict:
     }
 
 
+def broker_grant(context: Context) -> dict:
+    """Names-only effective broker grant for one physical dispatch, not authority."""
+    return {"tools": _prompt_tool_surface(context)["tools"],
+            "bound": context.bound_hit, "wrap_up": context.wrap_up_attempted}
+
+
+def _grant_session(saved, directory):
+    from .engine_config import session_generation
+    if not isinstance(saved, dict) or not isinstance(saved.get("id"), str) or not saved["id"]:
+        return None
+    return digest(canonical({"id": saved["id"], "created_at": saved.get("created_at"),
+                             "generation": session_generation(directory)}))
+
+
+def session_grant_evidence(context: Context, directory) -> dict | None:
+    """Tail-only evidence, bound to an observed persistent driver selection.
+
+    No provider identifier is projected. Unknown selection, selector fallback,
+    failed dispatch, or unreadable session data supplies no transition evidence.
+    This record is replaced with the existing prompt cursor after settlement.
+    """
+    try:
+        from .engine_config import session_generation
+        attempt = context._dispatch_evidence["attempts"][-1]
+        session = attempt["session"]
+        if (attempt["status"] != "returned" or session["unknown_reason"] is not None
+                or session["key"] != directory.name
+                or session["generation"] != session_generation(directory)):
+            return None
+        identity = _grant_session(read_json(directory / "session.json", None), directory)
+        if identity is not None:
+            return {"session": identity, **attempt["broker_grant"]}
+    except (AttributeError, ConfigError, KeyError, IndexError, OSError, TypeError, ValueError):
+        pass
+    return None
+
+
+def session_grant_transition(context: Context, last, saved, directory) -> dict:
+    """Explain only an evidenced broker-grant change on this same session.
+
+    Legacy/malformed/unknown records remain usable as inbox cursors but cannot
+    justify a grant claim. A prior unit's per-run bound explains a wrap-up-only
+    reduction; otherwise the exact changed tool lists are stated without
+    guessing why they changed.
+    """
+    from .protocol import DEFINITIONS
+    try:
+        if (not isinstance(last, dict) or not isinstance(last.get("snapshot"), str)
+                or not DIGEST.fullmatch(last["snapshot"])):
+            return {}
+        prior = last["broker_grant"]
+        tools = prior["tools"]
+        current = _prompt_tool_surface(context)["tools"]
+        identity = _grant_session(saved, directory)
+        bound = prior["bound"]
+        wrapped = prior["wrap_up"]
+        if (identity is None or set(prior) != {"session", "tools", "bound", "wrap_up"}
+                or prior["session"] != identity or type(wrapped) is not bool
+                or bound is not None and bound not in ("drain", "deadline", "requests", "tools")
+                or wrapped and bound is None
+                or not isinstance(tools, list) or len(tools) > len(DEFINITIONS)
+                or any(not isinstance(tool, str) or not tool.startswith("mizu_")
+                       or tool.removeprefix("mizu_") not in DEFINITIONS for tool in tools)
+                or len(set(tools)) != len(tools)
+                or context.bound_hit is not None or context.wrap_up_attempted
+                or (bound == "drain" and context.project.control().get("draining"))):
+            return {}
+        old_tools, current_tools = set(tools), set(current)
+        if old_tools == current_tools:
+            return {}
+        added = [tool for tool in current if tool not in old_tools]
+        removed = [tool for tool in tools if tool not in current_tools]
+        if bound is not None and wrapped:
+            message = (f"The prior unit reached its per-run {bound} bound and then had a "
+                       "wrap-up-only broker grant; that restriction applied only to the prior "
+                       "unit and ended with it. This resumed unit's unit_tool_surface lists its "
+                       "current grants; host enforcement remains authoritative.")
+        else:
+            message = ("The recorded broker tool grants differ from the prior unit. "
+                       "The previous tool names are included for comparison; the record does "
+                       "not establish a per-run bound as the cause, so do not infer one. "
+                       "This unit's unit_tool_surface lists its current grants; host "
+                       "enforcement remains authoritative.")
+        return {"grant_transition": {"previous_bound": bound, "previous_tools": tools,
+                                     "added_tools": added, "removed_tools": removed,
+                                     "message": message}}
+    except (AttributeError, ConfigError, KeyError, OSError, TypeError, ValueError):
+        return {}
+
+
 def _prompt_run_identity(context: Context) -> dict:
     """Bounded run identity for the opening prompt (never fails).
 
@@ -378,14 +468,15 @@ def prompt_for(context: Context) -> str:
                       ensure_ascii=False)
 
 
-def prompt_delta_for(context: Context, pending: list) -> str:
+def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict | None = None) -> str:
     """Append-only delta for a resumed persistent session.
 
     Schema: the constant ``unit`` opening, then the names-only
     ``unit_tool_surface``, the ``goal_digest`` pin, the
     pinned ``published_snapshot`` and a small ``snapshot_delta``
-    (previous/current ids), plus the normalized dispatch ``admission`` label,
-    then only the pending
+    (previous/current ids), plus the normalized dispatch ``admission`` label
+    and an optional ``grant_transition`` when bounded same-session evidence
+    proves the broker tool surface changed, then only the pending
     proposals not yet offered, an ``open_insights`` statement of the still
     undecided backlog (ids plus total, so an already-offered insight never
     reads as done), the always-present bounded ``open_work_items`` page,
@@ -427,6 +518,7 @@ def prompt_delta_for(context: Context, pending: list) -> str:
     return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
+                       **(grant_transition or {}),
                        "goal_digest": context.goal_digest,
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),

@@ -18,6 +18,21 @@ FINISH = {"outcome": "wait", "summary": "Exact saved work", "state": "Exact save
 
 
 class FinishSealTests(Fixture):
+    def test_blocked_finish_under_any_harness_bound_is_host_sealed_bounded(self):
+        for bound in ("requests", "tools", "deadline", "drain"):
+            with self.subTest(bound=bound):
+                ctx = self.context("worker")
+                ctx.bound_hit = bound
+                ctx.wrap_up_attempted = True
+                ctx.handle("finish", {
+                    "outcome": "blocked",
+                    "summary": "A temporary run bound restricted this unit",
+                    "state": "Now: bounded work.\nNext: Resume with the normal grant.",
+                })
+                self.assertEqual(ctx.finished["outcome"], "bounded")
+                self.assertEqual(ctx.finished["bound"], bound)
+                self.assertEqual(read_json(ctx.run_dir / "finish-intent.json"), ctx.finished)
+
     def test_seal_refuses_work_before_admission_counters_or_dispatch(self):
         ctx = self.context()
         ctx.model_evidence = {"requests": 0, "admission_status": "unknown"}

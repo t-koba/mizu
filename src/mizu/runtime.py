@@ -1984,9 +1984,9 @@ class Context:
             self.capture_resolved = True
         wait = min(args.get("wait_seconds", self.config.limits.default_wait_seconds),
                    self.config.limits.maximum_wait_seconds)
-        if self.bound_hit is not None and self.bound_hit != "drain":
-            # A seal after a spend bound is a bounded end, never a fresh
-            # verdict: the unit saved what it could and runs again.
+        if self.bound_hit is not None:
+            # A seal after any harness per-run bound is a bounded end, never
+            # a fresh verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
         if self.role.workspace == "write" and args["outcome"] == "wait":
             wait_liveness, _, held_wait_kind = _writer_wait_sources(
@@ -2140,6 +2140,7 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         opening = _plan._capture_opening(context)
     except Exception:
         return prompt_for(context), "full", key, None, session_dir
+    last = None
     try:
         # Freeze the displayed inventory before consulting the resume cursor.
         # An arrival after this capture stays out of both the delta and the
@@ -2157,7 +2158,9 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         # re-offer the bounded captured rows rather than silently omit them.
         pending = opening["pending_insights"]
     try:
-        return prompt_delta_for(context, pending), "delta", key, None, session_dir
+        from .unit_prompts import session_grant_transition
+        transition = session_grant_transition(context, last, saved, session_dir)
+        return prompt_delta_for(context, pending, grant_transition=transition), "delta", key, None, session_dir
     except Exception:
         return prompt_for(context), "full", key, None, session_dir
 
@@ -3536,8 +3539,10 @@ class Engine:
                 if session_dir is not None and model_result.get("settled") is not False:
                     with contextlib.suppress(OSError, ValueError, TypeError):
                         from .engine_config import write_prompt_state
+                        from .unit_prompts import session_grant_evidence
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
-                                           inbox_generation=context.inbox_seen)
+                                           inbox_generation=context.inbox_seen,
+                                           broker_grant=session_grant_evidence(context, session_dir))
                 result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
                 if check_wait is not None:
                     result["next_evaluation_at"] = time.time() + self.config.limits.idle_seconds

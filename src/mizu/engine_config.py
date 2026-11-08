@@ -642,11 +642,18 @@ def read_prompt_state(directory):
     return record
 
 
-def write_prompt_state(directory, *, snapshot, inbox_generation):
-    """Record what a persistent session has already received (delta)."""
+def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=None):
+    """Record the last published prompt cursor and optional observed grant.
+
+    ``broker_grant`` is replaced with this cursor only when a settled driver
+    selection proved the session and bounded broker tool surface; legacy
+    cursors without it remain valid. It is explanatory evidence, never grant
+    authority. Failure: the atomic JSON write propagates to the caller.
+    """
     from .fs import now, write_json
     write_json(directory / "prompt_state.json",
-               {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now()})
+               {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now(),
+                **({"broker_grant": broker_grant} if broker_grant is not None else {})})
 
 
 def save_session(path, identifier, usage):

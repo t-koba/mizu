@@ -1395,6 +1395,22 @@ statement of the still-undecided backlog with ids, total, and explicit
 truncation so already-offered insights never read as done), never the full
 history again; a new, compacted-away, or rotated session receives
 the full prompt, which states the same backlog alongside the full entries.
+The session's existing `prompt_state.json` cursor may also carry a tail-only
+`broker_grant` (`session` fingerprint, protocol-bounded tool names, exact `bound`,
+`wrap_up` boolean). It is replaced after settled publication, not appended;
+legacy cursors still work. The fingerprint binds the observed driver's persistent
+session ID, creation time and generation without exposing the ID in prompts.
+Unobserved/mismatched driver selection supplies no grant evidence. On the same
+resumed session only, a validated prior settled-session cursor is compared
+with the current broker tool surface. A changed surface
+produces a compact `grant_transition` beside `unit_tool_surface`, with exact
+added/removed tool names. When the prior physical dispatch proves a per-run
+bound and wrap-up-only grant, the prompt says that restriction ended with that
+unit; otherwise it states that the recorded tool grants differ without
+inventing a cause. Missing/stale/corrupt evidence, unchanged tools,
+fresh/rotated sessions or a still-active bound produce no claim. This is
+explanatory context only, never authority, and does not advance the
+inbox/snapshot cursor.
 Both modes carry only `goal_digest` for the charter. Every engine dispatch,
 including resume, places the ordered role policy and exact pinned charter in
 stable system instructions, independently of compactable unit history.

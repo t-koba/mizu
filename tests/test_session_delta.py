@@ -171,6 +171,86 @@ class SessionDeltaTests(Fixture):
                     self.assertEqual(projection(self, first["run"])["session_key"],
                                      projection(self, second["run"])["session_key"])
 
+    def test_resumed_grant_transition_uses_the_last_restricted_dispatch(self):
+        from mizu.errors import DeadlineWrapUp
+        from mizu.runtime import session_prompt
+        from mizu.fs import write_json
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(roles["worker"], capabilities=("files", "read", "finish"))
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(self.config, "sample")
+        for bound in ("drain", "requests"):
+            with self.subTest(bound=bound):
+                path = save_worker_session(self, {"tokens": 0})
+                calls = []
+                def bounded(ctx, prompt, profile):
+                    # Fake driver selection evidence, not a provider integration.
+                    settings = effective(ctx.config, ctx.role, ctx.role.profile)
+                    selected, _ = session_record(ctx, ctx.role.profile, settings)
+                    self.assertEqual(selected, path)
+                    calls.append(prompt)
+                    if len(calls) == 1:
+                        ctx.bound_hit = bound
+                        raise DeadlineWrapUp("per-run " + bound)
+                    self.assertEqual(ctx.role.capabilities, ("finish",))
+                    ctx.handle("finish", {"outcome": "wait", "summary": "bounded", "state": "ready"})
+                result = Engine(self.config, driver=ScriptDriver(bounded)).run(self.project, "worker")
+                self.assertEqual(result["status"], "completed")
+                cursor = read_json(path.parent / "prompt_state.json")
+                self.assertEqual(cursor["broker_grant"]["bound"], bound)
+                self.assertEqual(cursor["broker_grant"]["tools"], ["mizu_finish"])
+                self.assertIs(cursor["broker_grant"]["wrap_up"], True)
+                self.assertNotIn("test-session", json.dumps(cursor))
+
+                ctx = self.context("worker")
+                prompt, mode, *_ = session_prompt(ctx, ctx.role, ctx.run_dir)
+                decoded = json.loads(prompt)
+                self.assertEqual(mode, "delta")
+                transition = decoded["grant_transition"]
+                self.assertEqual(transition["previous_bound"], bound)
+                self.assertEqual(transition["previous_tools"], ["mizu_finish"])
+                self.assertIn("ended with it", transition["message"])
+                self.assertIn("only to the prior unit", transition["message"])
+                self.assertIn("current grants", transition["message"])
+                self.assertEqual(decoded["unit_tool_surface"]["tools"],
+                                 ["mizu_files", "mizu_read", "mizu_finish"])
+                ctx.handle("files", {})  # The notice does not create the restored grant.
+                self.assertEqual(read_json(path.parent / "prompt_state.json"), cursor)
+
+                def resumed(ctx, prompt, profile):
+                    settings = effective(ctx.config, ctx.role, ctx.role.profile)
+                    session_record(ctx, ctx.role.profile, settings)
+                    self.assertEqual(json.loads(prompt)["grant_transition"], transition)
+                    ctx.handle("files", {})
+                resumed_result = Engine(self.config, driver=ScriptDriver(resumed)).run(self.project, "worker")
+                self.assertEqual(resumed_result["status"], "completed")
+                current_cursor = read_json(path.parent / "prompt_state.json")
+                self.assertIsNone(current_cursor["broker_grant"]["bound"])
+                self.assertIs(current_cursor["broker_grant"]["wrap_up"], False)
+                next_ctx = self.context("worker")
+                self.assertNotIn("grant_transition", json.loads(
+                    session_prompt(next_ctx, next_ctx.role, next_ctx.run_dir)[0]))
+                write_json(path.parent / "prompt_state.json", cursor)
+
+                # Same directory/key is not proof of the same conversation.
+                save_session(path, "replacement-session", {"tokens": 0})
+                replaced = self.context("worker")
+                self.assertNotIn("grant_transition", json.loads(
+                    session_prompt(replaced, replaced.role, replaced.run_dir)[0]))
+                path.unlink()
+                fresh = self.context("worker")
+                prompt, mode, *_ = session_prompt(fresh, fresh.role, fresh.run_dir)
+                self.assertEqual(mode, "full")
+                self.assertNotIn("grant_transition", json.loads(prompt))
+                # Keep old cursor bytes: they must not authorize a fresh session.
+                self.assertEqual(read_json(path.parent / "prompt_state.json"), cursor)
+                write_json(path.parent / "prompt_state.json", {})
+
+    def test_unobserved_driver_selection_does_not_record_a_grant(self):
+        path = save_worker_session(self, {"tokens": 0})
+        Engine(self.config, driver=Capture()).run(self.project, "worker")
+        self.assertNotIn("broker_grant", read_json(path.parent / "prompt_state.json"))
+
     def test_age_bound_rotates_to_a_fresh_full_prompt(self):
         config = dataclasses.replace(
             self.config, limits=dataclasses.replace(self.config.limits, session_max_age_seconds=1))
