@@ -15,6 +15,13 @@ from mizu.storage import (_AUDIT_JSON_BYTES,
                           _session_accounting, audit, reclaim)
 
 
+def _posix_path_limit(root):
+    """Resolve a typical POSIX PATH_MAX under explicit semantics on every host."""
+    with mock.patch('mizu.snapshot_manifest._platform.IS_WINDOWS', False), \
+            mock.patch('mizu.snapshot_manifest._posix_path_max', return_value=4096):
+        return decoded_path_limit(root)
+
+
 class SessionEntry:
     """Minimal scandir entry; callbacks check consumption order without buffering."""
     def __init__(self, path, *, directory=False, on_stat=None):
@@ -698,9 +705,8 @@ class StorageReclaimTests(Fixture):
         finally:
             tracemalloc.stop()
         self.assertLess(peak, 4 * _AUDIT_JSON_BYTES)
-        # Decoded paths longer than the POSIX pathconf bound are rejected
-        # on POSIX hosts (typically 4096 bytes); Windows hosts allow the
-        # extended-length limit (see next test).
+        # Simulate POSIX PATH_MAX explicitly so the rejection is deterministic
+        # on Windows hosts as well as POSIX hosts.
         long_name = 'a' * 5000
         long_member = (canonical(long_name)[:-1] + b':{"sha256":"' + b'a' * 64 +
                        b'","bytes":1,"executable":false}')
@@ -709,7 +715,7 @@ class StorageReclaimTests(Fixture):
                           _AUDIT_JSON_BYTES, record['id'],
                           self.project.snapshots.max_files,
                           self.project.snapshots.max_file,
-                              decoded_path_limit(self.project.root))
+                              _posix_path_limit(self.project.root))
         # Disk reads for a huge corrupt member stay bounded to the per-member
         # bound plus I/O buffering, not the whole multi-hundred-KiB file.
         from mizu.storage import _SNAPSHOT_AUDIT_BYTES
@@ -782,13 +788,12 @@ class StorageReclaimTests(Fixture):
                     record['code_digest'])
             finally:
                 self.project.snapshots._path_validation_cache.clear()
-        # On POSIX hosts the same 5000-character path exceeds PATH_MAX from
-        # pathconf, so the retention parser rejects it there.
+        # Explicit POSIX PATH_MAX semantics reject the same path on every host.
         with self.assertRaisesRegex(LimitExceeded, 'file member exceeds'):
             read_manifest(io.BytesIO(canonical(record)), _AUDIT_JSON_BYTES,
                           record['id'], self.project.snapshots.max_files,
                           self.project.snapshots.max_file,
-                          decoded_path_limit(self.project.root))
+                          _posix_path_limit(self.project.root))
         path = self.project.root / 'snapshots' / (record['id'] + '.json')
         write_json(path, record)
         try:
