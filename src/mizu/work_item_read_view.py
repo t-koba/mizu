@@ -20,6 +20,12 @@ from .fs import canonical
 from .work_items import _HISTORY_UNSET
 
 
+READ_VIEW_SNAPSHOT_CACHE_BYTES = 32 * 1024 * 1024
+READ_VIEW_FILE_CACHE_BYTES = 8 * 1024 * 1024
+READ_VIEW_ITEM_CACHE_BYTES = 8 * 1024 * 1024
+READ_VIEW_ITEM_CACHE_ENTRIES = 1024
+
+
 class _Records:
     def __init__(self, read, budget, *, copy_values=True):
         self.read, self.budget, self.copy_values = read, budget, copy_values
@@ -57,7 +63,7 @@ def readonly_view(store):
     read_snapshot = snapshots.get
     # The chain validator only compares these private manifests; none are
     # returned to the caller or changed while constructing page rows.
-    records = _Records(read_snapshot, 32 * 1024 * 1024, copy_values=False)
+    records = _Records(read_snapshot, READ_VIEW_SNAPSHOT_CACHE_BYTES, copy_values=False)
 
     def get(snapshot_id=None):
         # The mutable current pointer and invalid arguments always take the
@@ -68,7 +74,7 @@ def readonly_view(store):
 
     snapshots.get = get
     view.snapshots = snapshots
-    view._read = _Records(view._read, 8 * 1024 * 1024)
+    view._read = _Records(view._read, READ_VIEW_FILE_CACHE_BYTES)
     read_item = view._get
     items = {}
     item_bytes = 0
@@ -95,9 +101,10 @@ def readonly_view(store):
                               verify_snapshots=verify_snapshots,
                               verify_current_delivery=verify_current_delivery)
             size = len(canonical(value)) + len(key[1])
-            if size > 8 * 1024 * 1024:
+            if size > READ_VIEW_ITEM_CACHE_BYTES:
                 return value
-            if len(items) >= 1024 or item_bytes + size > 8 * 1024 * 1024:
+            if (len(items) >= READ_VIEW_ITEM_CACHE_ENTRIES
+                    or item_bytes + size > READ_VIEW_ITEM_CACHE_BYTES):
                 items.clear()
                 item_bytes = 0
             items[key] = value

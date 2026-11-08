@@ -938,6 +938,20 @@ DECLARATIONS = {
             '4096', 'safety',
             'wait events / bounded receipt read'),
     },
+    'work_item_read_view.py': {
+        'READ_VIEW_SNAPSHOT_CACHE_BYTES': (
+            '32 * 1024 * 1024', 'safety',
+            'work items / request-local validated snapshot cache byte ceiling'),
+        'READ_VIEW_FILE_CACHE_BYTES': (
+            '8 * 1024 * 1024', 'safety',
+            'work items / request-local file cache byte ceiling'),
+        'READ_VIEW_ITEM_CACHE_BYTES': (
+            '8 * 1024 * 1024', 'safety',
+            'work items / request-local parsed-item cache byte ceiling; oversized values bypass caching'),
+        'READ_VIEW_ITEM_CACHE_ENTRIES': (
+            '1024', 'safety',
+            'work items / request-local parsed-item cache entry ceiling'),
+    },
     'work_item_seed.py': {
         'MAX_DECISION_TASKS': (
             '16', 'format',
@@ -2558,6 +2572,20 @@ def sibling():
             for (scope, argument, occurrence), expression in range_argument_inventory(tree).items():
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
+
+    def test_work_item_read_view_cache_bounds_are_declared_and_used(self):
+        tree = ast.parse((ROOT / 'work_item_read_view.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'readonly_view')
+        calls = [node for node in ast.walk(function)
+                 if isinstance(node, ast.Call) and callee_name(node.func) == '_Records']
+        self.assertEqual([ast.unparse(call.args[1]) for call in calls], [
+            'READ_VIEW_SNAPSHOT_CACHE_BYTES', 'READ_VIEW_FILE_CACHE_BYTES'])
+        comparisons = {ast.unparse(node) for node in ast.walk(function)
+                       if isinstance(node, ast.Compare)}
+        self.assertIn('size > READ_VIEW_ITEM_CACHE_BYTES', comparisons)
+        self.assertIn('len(items) >= READ_VIEW_ITEM_CACHE_ENTRIES', comparisons)
+        self.assertIn('item_bytes + size > READ_VIEW_ITEM_CACHE_BYTES', comparisons)
 
     def test_editor_search_bounds_are_declared_and_used(self):
         tree = ast.parse((ROOT / 'editor.py').read_text(encoding='utf-8'))
