@@ -587,6 +587,9 @@ DECLARATIONS = {
         'MAX_TOOLS': (
             '1', 'safety',
             'recovery probes / fixed execution ceiling; configured tool limit still wins'),
+        'MAX_PROBE_EVENT_STREAM_BYTES': (
+            '65536', 'safety',
+            'recovery probes / fixed 64-KiB event-stream cap for one terminal availability challenge'),
     },
     'selection.py': {
         'MAX_BYTES': (
@@ -2046,6 +2049,15 @@ COMPARISON_BOUND_ARGUMENTS = {
         '100', 'mechanism', 'proposal wait / fixed maximum per-source delivery page'),
     ('proposal_waits.py', 'readiness_init', 2, 0): (
         '100', 'mechanism', 'proposal wait readiness / fixed maximum candidate page'),
+    ('probes.py', 'sponsor_binding', 1, 0): (
+        '65536', 'safety',
+        'recovery probes / bound project settings file before parsing and hashing sponsor identity'),
+    ('probes.py', '_summary', 2, 0): (
+        '2 ** 53', 'format',
+        'recovery probes / inclusive exact binary64 integer-magnitude edge for JSON usage values'),
+    ('probes.py', '_service', 1, 0): (
+        '1024', 'safety',
+        'recovery probes / bound admission evidence before reading the saved request count'),
     ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
         '4096', 'safety',
         'Pi reselection / bound session-file identity text before retaining it in family state'),
@@ -2875,7 +2887,7 @@ def sibling():
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
                 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
-                'pi_reselection.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
+                'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
@@ -3404,6 +3416,17 @@ def no_defaults(limit, /, count, *, size):
                          ['PROBE_EXECUTABLE_HASH_CHUNK_BYTES'])
         self.assertEqual(DECLARATIONS['probes.py']['PROBE_EXECUTABLE_HASH_CHUNK_BYTES'][1],
                          'mechanism')
+
+    def test_recovery_probe_event_stream_uses_its_declared_ceiling(self):
+        tree = ast.parse((ROOT / 'probes.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == '_probe_limits')
+        values = [keyword.value for node in ast.walk(function)
+                  if isinstance(node, ast.Call) and ast.unparse(node.func) == 'dataclasses.replace'
+                  for keyword in node.keywords if keyword.arg == 'event_stream_bytes']
+        self.assertEqual([ast.unparse(value) for value in values], [
+            'min(MAX_PROBE_EVENT_STREAM_BYTES, config.limits.event_stream_bytes)'])
+        self.assertEqual(DECLARATIONS['probes.py']['MAX_PROBE_EVENT_STREAM_BYTES'][1], 'safety')
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

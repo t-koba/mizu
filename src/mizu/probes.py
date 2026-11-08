@@ -27,6 +27,9 @@ from .selection import (INTENT_RESERVE_BYTES, State, active, bounded, consume_in
 MAX_SECONDS = 90
 MAX_REQUESTS = 2
 MAX_TOOLS = 1
+# The challenge uses only the finish protocol, so cap its stream below the
+# general model-run allowance.
+MAX_PROBE_EVENT_STREAM_BYTES = 65536
 # Fixed streaming buffer; executable-size policy is configured separately.
 PROBE_EXECUTABLE_HASH_CHUNK_BYTES = 65536
 POLICY = ('This is an availability challenge, not a project task. Call mizu_finish '
@@ -180,7 +183,8 @@ def _probe_limits(config, role_name):
     return dataclasses.replace(config.limits, run_seconds=min(MAX_SECONDS, config.limits.run_seconds),
                                requests_per_run=min(MAX_REQUESTS, role_requests_per_run(config, role)),
                                tools_per_run=min(MAX_TOOLS, role_tools_per_run(config, role)),
-                               event_stream_bytes=min(65536, config.limits.event_stream_bytes))
+                               event_stream_bytes=min(MAX_PROBE_EVENT_STREAM_BYTES,
+                                                      config.limits.event_stream_bytes))
 
 
 def _budget_available(config, project):
