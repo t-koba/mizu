@@ -124,9 +124,11 @@ its own field-scoped table), so a new module with such a bound fails until it
 is declared. The candidate vocabulary also includes nonstandard bound-bearing
 suffixes (`_DEFAULT`, `_MIN`, `_MAXIMUM`, `_SEC`, `_SAMPLE`, `_BELOW`, and
 `_OVERHEAD`) so operational defaults and diagnostic caps are not missed merely
-because their names do not begin with `MAX_` or `DEFAULT_`. Schema/version
-markers without resource-bound behavior remain outside this detector. Every
-module with a numeric literal in the selected resource-call keyword
+because their names do not begin with `MAX_` or `DEFAULT_`. The selected
+work-item scan also records cursor arity, sidecar delivery-revision floor and
+cache-witness tuple shape as format/mechanism invariants, not resource ceilings.
+Other schema/version markers without resource-bound behavior remain outside this
+detector. Every module with a numeric literal in the selected resource-call keyword
 expressions is covered in `CALLS`, so newly added local arithmetic, cache/queue
 capacities and caller-default forwarding at those sites fail until declared.
 The module and call inventories remain name- and scope-restricted and therefore
@@ -2058,6 +2060,30 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('probes.py', '_service', 1, 0): (
         '1024', 'safety',
         'recovery probes / bound admission evidence before reading the saved request count'),
+    ('work_items.py', '_open_cursor_key', 1, 0): (
+        '4', 'format',
+        'work items / cursor token has version, status, timestamp and item-identity fields'),
+    ('work_items.py', 'WorkItems.__init__', 2, 0): (
+        '31536000', 'configured policy',
+        'work items / documented one-year ceiling for the operator-selected, visibility-only stale threshold'),
+    ('work_items.py', 'WorkItems._create_id', 2, 0): (
+        '128', 'safety',
+        'work items / cap caller-supplied idempotency key before canonical hashing'),
+    ('work_items.py', 'WorkItems._sidecar_load', 0, 0): (
+        '3', 'mechanism',
+        'work items / delivery-binding revision cannot predate the schema that introduced it'),
+    ('work_items.py', 'WorkItems._legacy_seed', 2, 0): (
+        '200', 'format', 'work items / legacy title matches the public title field limit'),
+    ('work_items.py', 'WorkItems._legacy_resolution', 1, 0): (
+        '4000', 'format', 'work items / stored reconciliation reason matches the public reason field limit'),
+    ('work_items.py', 'WorkItems.reconcile', 1, 0): (
+        '32', 'format', 'work items / decision event identity is exactly 32 hexadecimal characters'),
+    ('work_items.py', 'WorkItems.reconcile', 1, 1): (
+        '4000', 'format', 'work items / reconciliation request reason matches the public reason field limit'),
+    ('work_items.py', 'WorkItems._submitter_item_status', 1, 0): (
+        '4096', 'safety', 'work items / cap canonical submitter-status projection bytes'),
+    ('work_items.py', 'WorkItems._page_open_impl', 1, 0): (
+        '4', 'mechanism', 'work items / cached projection tuple shape includes its proof witness'),
     ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
         '4096', 'safety',
         'Pi reselection / bound session-file identity text before retaining it in family state'),
@@ -2888,7 +2914,7 @@ def sibling():
                 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
-                'persistent_exec.py'):
+                'work_items.py', 'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
                        else 2 if filename == 'admission.py' else 3)
