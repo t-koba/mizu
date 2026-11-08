@@ -164,8 +164,8 @@ contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
 `usage.py`, `config.py`, `runtime.py`, `project.py`, `services.py`,
-`persistent_exec.py` and `vcs.py`; numeric-only arithmetic operands are evaluated
-without source execution. The `services.py` entries pin Windows Task Scheduler's one-minute
+`persistent_exec.py`, `cli.py` and `vcs.py`; numeric-only arithmetic operands are
+evaluated without source execution. The `services.py` entries pin Windows Task Scheduler's one-minute
 minimum and 31-day maximum repetition interval. The `admission.py` slice uses
 magnitude 2 to include its exact two-lock resource ceiling. This is not a global
 numeric comparison linter.
@@ -1736,6 +1736,10 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
+    ('cli.py', '_parse_wait', 1, 0): (
+        '4', 'format',
+        'CLI dependency wait / exactly four colon-delimited recipient, insight, revision '
+        'and action fields'),
     ('codex.py', 'CodexDriver.execute.request', 1, 0): (
         '128', 'safety',
         'Codex app-server initialize / cap unmatched notification records retained before the response'),
@@ -2516,9 +2520,9 @@ def sibling():
             self.assertTrue(rationale.strip())
         found = {}
         for filename in (
-                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py', 'codex.py',
-                'ci_observation.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
+                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
+                'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
+                'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))

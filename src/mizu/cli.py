@@ -324,6 +324,7 @@ def _parse_wait(spec):
         return {"kind": "insight_decided", "insight": arg}
     if kind == "dependency" and arg:
         parts = arg.split(":")
+        # The dependency CLI form carries recipient, insight, revision and action.
         if len(parts) == 4:
             recipient, target, rev, action = parts
             try:

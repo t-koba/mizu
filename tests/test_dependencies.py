@@ -82,7 +82,8 @@ class DependencyRegistrationTests(Fixture):
                           "requires": {"insight": "abc", "rev": 2, "action": "reject"}})
         for spec in ("dependency", "dependency:worker", "dependency:worker:abc",
                      "dependency:worker:abc:0:accept", "dependency:worker:abc:1:defer",
-                     "dependency:worker:abc:x:accept"):
+                     "dependency:worker:abc:x:accept",
+                     "dependency:worker:abc:2:accept:extra"):
             with self.assertRaises(ConfigError, msg=spec):
                 _parse_wait(spec)
         validate({"id": "x", "action": "defer", "reason": "r", "revisit": "v", "rev": 1,
