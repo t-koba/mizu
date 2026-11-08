@@ -732,6 +732,9 @@ DECLARATIONS = {
             'editor bundle / bounded changed-text read'),
     },
     'engine_config.py': {
+        'PROMPT_STATE_BYTES': (
+            '65536', 'safety',
+            'engine config / bounded session cursor envelope for row hashes and broker grant'),
         'MAX_SESSION_TOKENS': (
             '2 ** 63 - 1', 'format',
             'engine config / signed 64-bit session-token range'),

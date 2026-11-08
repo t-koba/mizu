@@ -2158,9 +2158,11 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         # re-offer the bounded captured rows rather than silently omit them.
         pending = opening["pending_insights"]
     try:
-        from .unit_prompts import session_grant_transition
+        from .unit_prompts import session_grant_transition, session_row_details
+        prior_rows = session_row_details(context, last, saved, session_dir)
         transition = session_grant_transition(context, last, saved, session_dir)
-        return prompt_delta_for(context, pending, grant_transition=transition), "delta", key, None, session_dir
+        prompt = prompt_delta_for(context, pending, grant_transition=transition, prior_rows=prior_rows)
+        return prompt, "delta", key, None, session_dir
     except Exception:
         return prompt_for(context), "full", key, None, session_dir
 
@@ -3539,10 +3541,12 @@ class Engine:
                 if session_dir is not None and model_result.get("settled") is not False:
                     with contextlib.suppress(OSError, ValueError, TypeError):
                         from .engine_config import write_prompt_state
-                        from .unit_prompts import session_grant_evidence
+                        from .unit_prompts import session_grant_evidence, session_row_evidence
+                        grant = session_grant_evidence(context, session_dir)
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
                                            inbox_generation=context.inbox_seen,
-                                           broker_grant=session_grant_evidence(context, session_dir))
+                                           broker_grant=grant,
+                                           row_details=session_row_evidence(context, session_dir, grant))
                 result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
                 if check_wait is not None:
                     result["next_evaluation_at"] = time.time() + self.config.limits.idle_seconds

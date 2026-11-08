@@ -577,6 +577,8 @@ class Limits:
     insight_cursor_ttl_seconds: int = 86400
     #: Maximum open work-item rows offered in each full or delta prompt.
     work_items_prompt: int = 20
+    #: Bulky unchanged row details in resumed persistent-session deltas.
+    session_delta_details: str = "elide"
     #: Active doing slots per role; blocked waits do not occupy a slot.
     work_items_doing: int = 1
     #: Visibility only: uninterrupted doing age that warrants review.
@@ -1445,6 +1447,10 @@ def load(file: Path) -> Config:
     keys(lim, {f.name for f in dataclasses.fields(Limits)}, "limits")
     allowed_progress_signals = ALLOWED_PROGRESS_SIGNALS
     for k, v in lim.items():
+        if k == "session_delta_details":
+            if not isinstance(v, str) or v not in ("full", "elide"):
+                raise ConfigError("limits.session_delta_details must be full or elide")
+            continue
         if k == "progress_signals":
             values = strings(v, "limits.progress_signals")
             if len(values) != len(set(values)) or any(value not in allowed_progress_signals for value in values):

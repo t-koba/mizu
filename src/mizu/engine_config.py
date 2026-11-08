@@ -2,7 +2,7 @@
 from dataclasses import asdict
 from pathlib import Path
 
-from .errors import ConfigError
+from .errors import ConfigError, Denied, LimitExceeded
 from .config import role_policy_text
 from .fs import canonical, digest, mkdir, read_json, write_json
 
@@ -630,30 +630,37 @@ def rotate_session(path, run_dir, reason):
     return record
 
 
+# Managed cursor format envelope: at most 100 work rows and two 32-check
+# pages of ID/digest pairs, plus the protocol-bounded broker grant and metadata.
+PROMPT_STATE_BYTES = 65536
+
+
 def read_prompt_state(directory):
     """Last dispatched snapshot/inbox generation for a session directory."""
     from .fs import read_json
     try:
-        record = read_json(directory / "prompt_state.json", None)
-    except (OSError, ValueError):
+        record = read_json(directory / "prompt_state.json", None, max_bytes=PROMPT_STATE_BYTES)
+    except (OSError, ValueError, Denied, LimitExceeded):
         return None
     if not isinstance(record, dict):
         return None
     return record
 
 
-def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=None):
-    """Record the last published prompt cursor and optional observed grant.
+def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=None, row_details=None):
+    """Atomically replace the published cursor, grant and bounded row hashes.
 
     ``broker_grant`` is replaced with this cursor only when a settled driver
     selection proved the session and bounded broker tool surface; legacy
-    cursors without it remain valid. It is explanatory evidence, never grant
+    cursors without it remain valid. ``row_details`` is captured before dispatch
+    and supplied only for an observed settled session. Neither record grants
     authority. Failure: the atomic JSON write propagates to the caller.
     """
     from .fs import now, write_json
     write_json(directory / "prompt_state.json",
                {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now(),
-                **({"broker_grant": broker_grant} if broker_grant is not None else {})})
+                **({"broker_grant": broker_grant} if broker_grant is not None else {}),
+                **({"row_details": row_details} if row_details is not None else {})})
 
 
 def save_session(path, identifier, usage):

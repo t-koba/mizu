@@ -236,6 +236,7 @@ work_items_doing = 1             # Per-role active doing slots (1-100); blocked 
 work_items_stale_seconds = 86400 # Doing-age review visibility only (1-31536000); never expires a hold.
 work_items_blocked_max_age_seconds = 604800 # Non-deadline blocked waits expire for review after seven days (positive TOML integer).
 work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow and incomplete legacy coverage are explicit).
+session_delta_details = "elide"  # full|elide: unchanged bulky work/check details in resumed sessions; rows and liveness stay explicit.
 decision_events_limit = 10  # Decision events per dispatch per role (1-100; default 10). Bound stays 100; value is policy.
 work_item_events_limit = 10 # Terminal work-item events per dispatch per role (1-100; default 10). Independent of the decision batch above.
 session_max_tokens = 0          # Restart a resumed persistent session once cumulative tokens reach N (0 disables).

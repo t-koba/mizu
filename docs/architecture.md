@@ -870,7 +870,7 @@ closed. This projection does not yet gate internal transitions.
 `page_open(cursor=None, limit=25)` is the bounded page reader used by the
 explicitly granted `work_items_read` operation and by the project-wide
 `open_work_items` prompt projection. Every full and delta prompt includes the
-same projection regardless of role grants, capped by `limits.work_items_prompt`
+same bounded rows regardless of role grants, capped by `limits.work_items_prompt`
 (default 20, range 1–100); the runtime calls the fail-closed reader directly,
 so store errors are not converted into empty inventory. The explicitly granted
 read-only tool defaults to 25 rows and accepts an optional opaque cursor (at
@@ -1393,8 +1393,33 @@ A resumed persistent session receives only an append-only delta (goal pin,
 current snapshot pin, proposals not yet offered, plus an `open_insights`
 statement of the still-undecided backlog with ids, total, and explicit
 truncation so already-offered insights never read as done), never the full
-history again; a new, compacted-away, or rotated session receives
-the full prompt, which states the same backlog alongside the full entries.
+history again; a new or rotated session receives the full prompt, which
+states the same backlog alongside the full entries. The durable adapter exposes
+no internal compaction event; the harness does not infer one.
+
+`limits.session_delta_details` selects `full` or the default `elide` for resumed
+deltas only. Every bounded work/check row remains explicit, including identity,
+title/status/revision/wait/liveness, continuation and discovery metadata, page
+totals, truncation and coverage. Only unchanged `description_preview`,
+`scope_preview`, `reason_preview`, check `command_preview` and `error` text are
+omitted. Such rows carry `details_unchanged: true` and `details_reference` with
+exact tool arguments: `work_items_read` by ID, own `check_job result` (which may
+acknowledge a terminal result/import matching acceptance), or shared `check_job
+join` (which subscribes and revalidates compatibility before returning details).
+New or content-changed rows send full details. Full prompts, ready-work,
+work-order generations, source page reads and check discovery are unchanged.
+
+The existing atomic `prompt_state.json` cursor replaces bounded per-row SHA-256
+fingerprints under `row_details`, never retaining a growing seen-set. These hash
+the complete current bounded row except `age_seconds`, `doing_age_seconds` and
+`blocked_age_seconds`; stale/liveness transitions are not ignored. Cursor groups
+are limited to the configured work-item page and the existing two 32-check
+pages. A 64 KiB managed cursor envelope accommodates their ID/digest pairs and
+the protocol-bounded grant. Missing, malformed, oversized, key/session-ID/
+creation-time/generation-mismatched cursors resend all details. Fingerprints are
+written only after a settled dispatch whose observed selection proves the
+persistent session/generation, alongside (without replacing) grant evidence.
+No new cursor store, compaction detection or adapter guarantee is introduced.
 The session's existing `prompt_state.json` cursor may also carry a tail-only
 `broker_grant` (`session` fingerprint, protocol-bounded tool names, exact `bound`,
 `wrap_up` boolean). It is replaced after settled publication, not appended;

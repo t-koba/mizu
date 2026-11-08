@@ -1,5 +1,6 @@
 """Limits validation and settings-table coverage, not a code-only bounds inventory."""
 import dataclasses
+import json
 import threading
 from pathlib import Path
 import re
@@ -40,6 +41,22 @@ class InsightHistoryLimitConfigTests(Fixture):
                         load(self.file)
 
 
+class SessionDeltaDetailConfigTests(Fixture):
+    def test_default_override_and_invalid_values(self):
+        base = re.sub(r'(?m)^session_delta_details = .*\n', '', self.file.read_text())
+        self.file.write_text(base)
+        self.assertEqual(load(self.file).limits.session_delta_details, "elide")
+        for value in ('"full"', '"elide"', '"unknown"', '"FULL"', 'true', '1', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace(
+                    "\n[limits]\n", f"\n[limits]\nsession_delta_details = {value}\n"))
+                if value in ('"full"', '"elide"'):
+                    self.assertEqual(load(self.file).limits.session_delta_details, json.loads(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, "limits.session_delta_details"):
+                        load(self.file)
+
+
 class ProbeExecutableLimitConfigTests(Fixture):
     def test_default_override_and_fail_closed_range(self):
         self.assertEqual(DEFAULT_PROBE_EXECUTABLE_BYTES, 256 * 1024 * 1024)
@@ -66,7 +83,8 @@ class LimitsCoverageTests(unittest.TestCase):
         # These fields use the boolean, progress-signal or finite-cost validators
         # in load(), rather than the integer range table.
         special = {"lock_diagnostics", "drain_yield", "missing_finish_counts_as_failure",
-                   "writer_wait_with_ready_work", "progress_signals", "session_max_cost_usd"}
+                   "writer_wait_with_ready_work", "progress_signals", "session_max_cost_usd",
+                   "session_delta_details"}
         fields = {field.name for field in dataclasses.fields(Limits)}
         self.assertFalse(set(_LIMIT_RANGES) & special)
         self.assertEqual(fields, set(_LIMIT_RANGES) | special)

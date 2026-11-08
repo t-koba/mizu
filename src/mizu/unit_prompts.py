@@ -362,6 +362,105 @@ def session_grant_transition(context: Context, last, saved, directory) -> dict:
         return {}
 
 
+def session_row_details(context: Context, last, saved, directory) -> dict | None:
+    """Validate the entire bounded cursor before omitting any row details.
+
+    Only observed session identity/generation is used, never an inferred
+    adapter compaction signal. Invalid/legacy cursors resend full details.
+    """
+    try:
+        required = {"snapshot", "inbox_generation", "created_at"}
+        allowed = required | {"broker_grant", "row_details"}
+        if (not isinstance(last, dict) or not required <= set(last) or not set(last) <= allowed
+                or not isinstance(last["snapshot"], str) or not DIGEST.fullmatch(last["snapshot"])
+                or not isinstance(last["inbox_generation"], str)
+                or not DIGEST.fullmatch(last["inbox_generation"])):
+            return None
+        created = last["created_at"]
+        if (not isinstance(created, str) or len(created) > 64
+                or dt.datetime.fromisoformat(created).tzinfo is None):
+            return None
+        details = last["row_details"]
+        rows = details["rows"]
+        grant = last["broker_grant"]
+        from .protocol import DEFINITIONS
+        tools = grant["tools"]
+        if (not isinstance(grant, dict) or set(grant) != {"session", "tools", "bound", "wrap_up"}
+                or not isinstance(tools, list) or len(tools) > len(DEFINITIONS)
+                or any(not isinstance(tool, str) or not tool.startswith("mizu_")
+                       or tool.removeprefix("mizu_") not in DEFINITIONS for tool in tools)
+                or len(set(tools)) != len(tools)
+                or type(grant["wrap_up"]) is not bool
+                or grant["bound"] is not None and grant["bound"] not in ("drain", "deadline", "requests", "tools")
+                or set(details) != {"session", "key", "rows"}
+                or details["key"] != directory.name
+                or details["session"] != grant["session"]
+                or details["session"] != _grant_session(saved, directory)
+                or details["session"] is None
+                or set(rows) != {"open_work_items", "check_jobs", "shared_checks"}):
+            return None
+        for group, bound in (("open_work_items", context.config.limits.work_items_prompt),
+                             ("check_jobs", 32), ("shared_checks", 32)):
+            page = rows[group]
+            if (not isinstance(page, dict) or len(page) > bound
+                    or any(not isinstance(key, str) or not 0 < len(key) <= 64
+                           or not isinstance(value, str) or not DIGEST.fullmatch(value)
+                           for key, value in page.items())):
+                return None
+        return rows
+    except (AttributeError, ConfigError, KeyError, OSError, TypeError, ValueError):
+        return None
+
+
+def session_row_evidence(context: Context, directory, grant) -> dict | None:
+    """Replace cursor rows only after the driver proved same-session settlement."""
+    rows = getattr(context, "prompt_row_fingerprints", None)
+    if grant is None or rows is None:
+        return None
+    return {"session": grant["session"], "key": directory.name, "rows": rows}
+
+
+def _row_detail_projection(context: Context, work: dict, checks: dict, prior=None) -> tuple:
+    """Copy only display rows; never mutate captured work/order or discovery state.
+
+    Fingerprint the complete bounded row, excluding only volatile age counters.
+    Identity, status, revision, wait, liveness, truncation and discovery metadata
+    always remain explicit. Current fingerprints replace (never accumulate in)
+    the existing session cursor after a settled dispatch.
+    """
+    fingerprints = {}
+    projected = {}
+    can_read_work_items = "work_items_read" in set(context.role.capabilities)
+    for group, rows in (("open_work_items", work["items"]),
+                        ("check_jobs", checks["check_jobs"]),
+                        ("shared_checks", checks["shared_checks"])):
+        fingerprints[group] = {}
+        projected[group] = []
+        for row in rows:
+            identifier = row["id"]
+            stable = {k: v for k, v in row.items()
+                      if k not in {"age_seconds", "doing_age_seconds", "blocked_age_seconds"}}
+            fingerprint = digest(canonical(stable))
+            fingerprints[group][identifier] = fingerprint
+            detail_keys = ({"description_preview", "scope_preview", "reason_preview"}
+                           if group == "open_work_items" else {"command_preview", "error"})
+            if (context.config.limits.session_delta_details == "elide"
+                    and prior is not None and prior[group].get(identifier) == fingerprint
+                    and (group != "open_work_items" or can_read_work_items)
+                    and detail_keys.intersection(row)):
+                row = {k: v for k, v in row.items() if k not in detail_keys}
+                request = ({"tool": "mizu_work_items_read", "arguments": {"id": identifier}}
+                           if group == "open_work_items" else
+                           {"tool": "mizu_check_job", "arguments": {
+                               "action": "join" if group == "shared_checks" else "result",
+                               "id": identifier}})
+                row = {**row, "details_unchanged": True, "details_reference": request}
+            projected[group].append(row)
+    context.prompt_row_fingerprints = fingerprints
+    return ({**work, "items": projected["open_work_items"]},
+            {**checks, **{k: projected[k] for k in ("check_jobs", "shared_checks")}})
+
+
 def _prompt_run_identity(context: Context) -> dict:
     """Bounded run identity for the opening prompt (never fails).
 
@@ -421,7 +520,8 @@ def prompt_for(context: Context) -> str:
     from . import work_order as _plan
     opening = _plan._capture_opening(context)
     pending = opening["pending_insights"]
-    open_work_items = opening["open_work_items"]
+    open_work_items, checks = _row_detail_projection(
+        context, opening["open_work_items"], check_jobs.prompt_projection(context))
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in caps:
@@ -452,7 +552,7 @@ def prompt_for(context: Context) -> str:
                        "wait_events": opening["wait_events"],
                        **_ci_wait_contract(context),
                        "obligations": opening["obligations"],
-                       **check_jobs.prompt_projection(context),
+                       **checks,
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
@@ -468,7 +568,8 @@ def prompt_for(context: Context) -> str:
                       ensure_ascii=False)
 
 
-def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict | None = None) -> str:
+def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict | None = None,
+                     prior_rows: dict | None = None) -> str:
     """Append-only delta for a resumed persistent session.
 
     Schema: the constant ``unit`` opening, then the names-only
@@ -491,8 +592,11 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     Bounds: pending and the open insight backlog both follow
     ``[limits] pending_insights`` (newest kept; ``truncated`` says so
     explicitly); the work-item page follows ``[limits] work_items_prompt`` and
-    includes its overflow count, cursor, truncation, and legacy coverage status;
-    the delta carries no workspace file contents and no history
+    includes its overflow count, cursor, truncation, and legacy coverage status.
+    ``session_delta_details=elide`` omits only unchanged bulky row details when
+    a validated same-session cursor supplies ``prior_rows``; every row keeps its
+    state/liveness and exact detail reference. Otherwise details are full.
+    The delta carries no workspace file contents and no history
     array, so resumed-unit bytes stay flat as history grows apart from the
     fixed previous-report preview (at most ``report.PREVIOUS_REPORT_BYTES``).
     Trust: local recorded state, which may be untrusted model input.
@@ -514,7 +618,8 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     ci_failures = opening["ci_failures"]
     ci_failures_may_be_truncated = opening["ci_truncated"]
     open_backlog = opening["open_backlog"]
-    open_work_items = opening["open_work_items"]
+    open_work_items, checks = _row_detail_projection(
+        context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
     return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
@@ -541,7 +646,7 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
-                       **check_jobs.prompt_projection(context),
+                       **checks,
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
                                      if "vcs_read" in caps else None),
