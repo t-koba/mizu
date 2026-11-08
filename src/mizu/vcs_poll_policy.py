@@ -38,6 +38,8 @@ def upstream_fetch_due(last_fetch: float | None, now: float, interval: float) ->
 MAX_CI_BRANCHES = 4
 POLL_CALL_TIMEOUT_CAP = 15
 POLL_FETCH_TIMEOUT_CAP = 30
+#: Shared daemon polling cadence default used by config load and defensive policy reads.
+DEFAULT_VCS_POLL_INTERVAL_SECONDS = 300
 
 
 def _vcs_poll_number(settings: dict, key: str, default: int) -> int:
@@ -102,10 +104,11 @@ def vcs_poll_enabled(config) -> bool:
 def vcs_poll_interval(config) -> float:
     """Daemon VCS poll cadence (seconds) from `vcs.poll_interval_seconds`."""
     try:
-        value = float(config.vcs.get("poll_interval_seconds", 300))
+        value = float(config.vcs.get(
+            "poll_interval_seconds", DEFAULT_VCS_POLL_INTERVAL_SECONDS))
     except (TypeError, ValueError):
-        return 300.0
-    return value if value > 0 else 300.0
+        return float(DEFAULT_VCS_POLL_INTERVAL_SECONDS)
+    return value if value > 0 else float(DEFAULT_VCS_POLL_INTERVAL_SECONDS)
 
 
 def capped_vcs_settings(settings: dict, cap: int) -> dict:

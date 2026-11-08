@@ -707,6 +707,9 @@ DECLARATIONS = {
         'MAX_CI_BRANCHES': ('4', 'configured policy', 'VCS polling / fail-closed fallback for poll_max_branches'),
         'POLL_CALL_TIMEOUT_CAP': ('15', 'configured policy', 'VCS polling / fail-closed fallback for poll_status_timeout_seconds'),
         'POLL_FETCH_TIMEOUT_CAP': ('30', 'configured policy', 'VCS polling / fail-closed fallback for poll_fetch_timeout_seconds'),
+        'DEFAULT_VCS_POLL_INTERVAL_SECONDS': (
+            '300', 'configured policy',
+            'VCS polling / shared config default and defensive fallback interval'),
     },
     'smoke_retention.py': {
         'MAX_RECORD': ('128 * 1024', 'safety', 'smoke retention / bounded metadata-record read'),
@@ -1067,6 +1070,8 @@ CONFIGURED_SETTINGS = {
     'vcs': {
         'artifact_full_read_chars': ('DEFAULT_ARTIFACT_FULL_READ_CHARS', 'configured policy',
                                      'VCS artifacts / whole-file character budget'),
+        'poll_interval_seconds': ('DEFAULT_VCS_POLL_INTERVAL_SECONDS', 'configured policy',
+                                  'VCS polling / cadence default shared with the defensive policy helper'),
         'poll_max_branches': ('4', 'configured policy', 'VCS polling / branches considered per daemon tick'),
         'poll_fetch_timeout_seconds': ('30', 'configured policy', 'VCS polling / upstream fetch timeout default'),
         'poll_status_timeout_seconds': ('15', 'configured policy', 'VCS polling / per-branch status timeout default'),
@@ -3432,6 +3437,8 @@ def no_defaults(limit, /, count, *, size):
              'POLL_CALL_TIMEOUT_CAP': defaults['poll_status_timeout_seconds'],
              'POLL_FETCH_TIMEOUT_CAP': defaults['poll_fetch_timeout_seconds']})
         self.assertEqual(wake['DEFAULT_CI_REWAKE_SECONDS'], defaults['ci_rewake_seconds'])
+        self.assertEqual(policy['DEFAULT_VCS_POLL_INTERVAL_SECONDS'], '300')
+        self.assertEqual(defaults['poll_interval_seconds'], 'DEFAULT_VCS_POLL_INTERVAL_SECONDS')
         observation = inventory(ast.parse((ROOT / 'ci_observation.py').read_text(encoding='utf-8')),
                                 symbolic_bounds=SYMBOLIC_BOUNDS['ci_observation.py'])
         for constant, setting in (

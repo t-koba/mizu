@@ -17,6 +17,7 @@ from .errors import ConfigError, Denied
 from .fs import ID, READ_PAGE_CHARS, canonical, relative_parts, lock_policy
 from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT, PIPE_POLL_INTERVAL_MS, pipe_poll_policy
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
+from .vcs_poll_policy import DEFAULT_VCS_POLL_INTERVAL_SECONDS
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
@@ -1971,7 +1972,7 @@ def load(file: Path) -> Config:
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
            "poll_enabled": False, "poll_proposals_enabled": False, "ci_wait_descendants": True,
-           "poll_interval_seconds": 300, "poll_max_branches": 4,
+           "poll_interval_seconds": DEFAULT_VCS_POLL_INTERVAL_SECONDS, "poll_max_branches": 4,
            "ci_cache_max_branches": DEFAULT_CI_CACHE_MAX_BRANCHES,
            "ci_cache_max_checks_per_branch": DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH,
            "poll_fetch_timeout_seconds": 30,
