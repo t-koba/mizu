@@ -222,7 +222,7 @@ class DrainYieldTests(Fixture):
             dispatch.assert_not_called()
         ctx.wrap_up_attempted = True
         ctx.handle("finish", FINISH)
-        self.assertEqual(ctx.finished["outcome"], "continue")
+        self.assertEqual(ctx.finished["outcome"], "bounded")
 
     def test_only_persistent_non_ephemeral_enabled_runs_yield(self):
         for session, ephemeral, enabled, yields in (
@@ -333,7 +333,7 @@ class DrainYieldTests(Fixture):
         engine = Engine(self.config, driver=driver)
         first = engine.run(self.project, "worker")
         self.assertEqual(first["status"], "completed")
-        self.assertEqual(first["finish"]["outcome"], "continue")
+        self.assertEqual(first["finish"]["outcome"], "bounded")
         self.assertEqual(first["wrap_up"], {"bound": "drain"})
         self.assertEqual(dispatches[0][1:3], dispatches[1][1:3])
         self.assertEqual(dispatches[1][3], dispatches[0][3] + "-t2")
@@ -376,7 +376,7 @@ class DrainYieldTests(Fixture):
             ctx.handle("finish", FINISH)
         driver = UnsealedDriver(work)
         result = Engine(self.config, driver=driver).run(self.project, "worker")
-        self.assertEqual(result["finish"]["outcome"], "continue")
+        self.assertEqual(result["finish"]["outcome"], "bounded")
         self.assertEqual(paths[0], paths[1])
 
     def test_unsealed_wrap_up_is_durable_non_failure_without_publication(self):
