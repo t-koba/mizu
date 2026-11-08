@@ -306,8 +306,12 @@ def _capture_opening(context) -> dict:
             previous_tokens = (
                 previous_progress["wait_resolution_tokens"]
                 if isinstance(previous_progress, dict)
-                and previous_progress["schema"] == 4
+                and previous_progress["schema"] >= 4
                 and previous_progress["role"] == context.role.name else [])
+            if (isinstance(previous_progress, dict)
+                    and previous_progress["schema"] >= 5
+                    and previous_progress["role"] == context.role.name):
+                ready_args["_wait_resolution_high_water"] = previous_progress["wait_resolution_high_water"]
             # The open-work page has already shown these proof rows. Prefer
             # other unseen proofs in the bounded ready-work page so overflow
             # advances within this same prompt instead of repeating a no-op.
@@ -324,10 +328,15 @@ def _capture_opening(context) -> dict:
         from .unit_prompts import _ready_work_projection
         ready_work = _ready_work_projection(raw_ready, context=context)
         if records_resolution_delivery:
-            context.wait_resolution_tokens = wait_resolution_tokens(
-                open_work_items, raw_ready, role_name=context.role.name,
-                retained=raw_ready.get("_wait_resolution_delivered_current"),
-                maximum_tokens=MAX_WAIT_RESOLUTION_TOKENS)
+            shown_tokens = wait_resolution_tokens(
+                open_work_items, raw_ready, role_name=context.role.name)
+            # Keep bounded exact receipts, including out-of-order open-page
+            # proofs. The prefix covers overflow; discarding an exact receipt
+            # may replay a shown proof after a set change, never skip an unseen one.
+            context.wait_resolution_tokens = sorted(
+                set(raw_ready["_wait_resolution_delivered_current"]) | set(shown_tokens)
+            )[:MAX_WAIT_RESOLUTION_TOKENS]
+            context.wait_resolution_high_water = raw_ready["_wait_resolution_high_water"]
         limit_pending = config.limits.pending_insights
         if "insights" in caps or "decide" in caps:
             proj = project.insights.projection(limit=limit_pending)

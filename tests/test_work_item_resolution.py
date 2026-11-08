@@ -378,6 +378,157 @@ class WaitResolutionTests(Fixture):
         self.assertEqual(idle['skipped'], 'no-event')
         self.assertFalse(idle_driver.calls)
 
+    def test_resolution_high_water_advances_beyond_200_and_quiesces(self):
+        from mizu.runtime import Engine, _progress_record, _ready_work_observation
+        from mizu.snapshot import MAX_WAIT_RESOLUTION_TOKENS, PROGRESS_SIGNALS
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_items_prompt=1))
+        self.config.roles['worker'] = dataclasses.replace(
+            self.config.roles['worker'], on_change=False, daemon=False,
+            interval_seconds=0, calendar=(), decision_events=(), work_item_events=())
+        self.project = Project(self.config, 'sample')
+        self.store = self.project.work_items
+        self.baseline = self.project.snapshots.get()
+        template = self.block('overflow-template')
+        self.snapshot('template wait is due')
+        self.reconcile(limit=1)
+        template = self.store.get(template['id'])
+        # Synthetic current projections reuse one ledger-validated proof. Keep
+        # the 203-pass regression cheap: exercise real scans, opening pages,
+        # resolution admission and snapshot progress, not 203 history replays/pass.
+        items = {f'wi_{index:032x}': {**template, 'id': f'wi_{index:032x}'}
+                 for index in range(203)}
+
+        original_events = self.store._iter_item_events_with_revisions
+        original_seed = self.store._seed_for_event
+        original_peek = self.store._peek_full_item
+        original_hold = self.store._current_hold
+
+        def events(**kw):
+            if 'with_identity' not in kw:
+                yield from original_events(**kw)
+                return
+            for item_id in reversed(items):  # Selection cannot depend on scan order.
+                row = (item_id[3:], {'id': item_id}, frozenset())
+                yield row + (None,) if kw.get("with_identity") else row
+
+        with patch.object(self.store, '_iter_item_events_with_revisions', new=events), \
+             patch.object(self.store, '_seed_for_event', new=lambda event_id, event, **kw: (
+                 ('seed', event) if 'id' in event else original_seed(event_id, event, **kw))), \
+             patch.object(self.store, '_peek_full_item', new=lambda item_id, **kw: (
+                 items[item_id] if item_id in items else original_peek(item_id, **kw))), \
+             patch.object(self.store, '_current_hold', new=lambda item_id, **kw: (
+                 (items[item_id], None) if item_id in items else original_hold(item_id, **kw))):
+            expected = {f"{item_id}:{template['wait_resolution']['wait_rev']}" for item_id in items}
+            shown = set()
+            previous_boundary = None
+            snapshot = self.project.snapshots.get()
+            role = self.config.roles['worker']
+            for _ in range(len(items)):
+                if not _ready_work_observation(self.project, snapshot, role)[2]:
+                    break
+                context = SimpleNamespace(config=self.config, project=self.project,
+                    role=role, snapshot=snapshot, goal_digest=digest(self.project.goal.encode()))
+                prompt = work_order._capture_opening(context)
+                current = set()
+                for page in ('open_work_items', 'ready_work'):
+                    self.assertLessEqual(len(prompt[page]['items']), 1)
+                    current.update(f"{row['id']}:{row['wait_resolution']['wait_rev']}"
+                                   for row in prompt[page]['items'])
+                self.assertTrue(current - shown)
+                shown.update(current)
+                progress = _progress_record(snapshot, 'worker', (),
+                    {name: False for name in PROGRESS_SIGNALS}, 'wait', ready_work=True,
+                    ready_work_signature=prompt['ready_signature'],
+                    wait_resolution_tokens=context.wait_resolution_tokens,
+                    wait_resolution_high_water=context.wait_resolution_high_water)
+                snapshot = {**snapshot, 'progress': progress}
+                self.assertEqual(progress['schema'], 5)
+                self.assertLessEqual(len(progress['wait_resolution_tokens']), MAX_WAIT_RESOLUTION_TOKENS)
+                boundary = progress['wait_resolution_high_water']['token']
+                self.assertTrue({token for token in expected if token <= boundary} <= shown)
+                if previous_boundary is not None:
+                    self.assertGreater(boundary, previous_boundary)
+                previous_boundary = boundary
+            self.assertEqual(shown, expected)
+            # Restart and unrelated ready work cannot replay the overflow whose
+            # exact receipt no longer fits in the 200-token list.
+            before = snapshot['progress']
+            durable = self.project.snapshots.create(
+                self.project.snapshots.capture_files(self.project.workspace),
+                goal='Goal', state='State', run=None, outcome='wait', summary='Delivered overflow',
+                progress=before)
+            self.project.snapshots.publish(durable)
+            ordinary_id = 'wi_' + 'f' * 32
+            items[ordinary_id] = {key: value for key, value in
+                                  {**template, 'id': ordinary_id, 'holder': None}.items()
+                                  if key != 'wait_resolution'}
+            for _ in range(2):
+                driver = ScriptDriver()
+                self.assertEqual(Engine(self.config, driver=driver).run(
+                    self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+                self.assertFalse(driver.calls)
+            after_page = self.store.page_ready(role_name='worker', limit=1,
+                _delivered_wait_resolution_tokens=before['wait_resolution_tokens'],
+                _wait_resolution_high_water=before['wait_resolution_high_water'])
+            self.assertEqual(after_page['_wait_resolution_high_water'], before['wait_resolution_high_water'])
+
+    def test_resolution_high_water_resets_for_changed_proofs_and_prunes(self):
+        first = self.block('boundary-first')
+        second = self.block('boundary-second')
+        self.snapshot('both due')
+        self.reconcile(limit=2)
+        from mizu.work_items import wait_resolution_token
+        proofs = sorted((self.store.get(item['id']) for item in (first, second)),
+                        key=wait_resolution_token)
+        earliest, latest = map(wait_resolution_token, proofs)
+        # One out-of-order shown proof cannot cover an unseen earlier proof.
+        page = self.store.page_ready(role_name='worker', limit=1,
+                                    _delivered_wait_resolution_tokens=[latest])
+        self.assertEqual(wait_resolution_token(page['items'][0]), earliest)
+        boundary = page['_wait_resolution_high_water']
+        self.assertEqual(boundary['token'], earliest)
+        # A structurally valid but absent boundary cannot authorize skipping.
+        absent = self.store.page_ready(role_name='worker', limit=1,
+            _delivered_wait_resolution_tokens=[latest],
+            _wait_resolution_high_water={**boundary, 'token': 'wi_' + 'f' * 32 + ':1'})
+        self.assertEqual(wait_resolution_token(absent['items'][0]), earliest)
+        complete = self.store.page_ready(role_name='worker', limit=1,
+            _delivered_wait_resolution_tokens=[earliest, latest],
+            _wait_resolution_high_water=boundary)
+        self.assertFalse(complete['_wait_resolution_undelivered'])
+        boundary = complete['_wait_resolution_high_water']
+        self.assertEqual(boundary['token'], latest)
+        # Same ID, new wait revision: even a token below the previous boundary
+        # must be offered. Keep the boundary item eligible to test set binding,
+        # not just the boundary-membership safeguard.
+        item = proofs[0]
+        self.store.transition(item['id'], expected_rev=item['rev'], status='blocked',
+                              actor='worker', wait={'kind': 'code_change'})
+        self.snapshot('new wait due')
+        self.reconcile(limit=1)
+        replacement = wait_resolution_token(self.store.get(item['id']))
+        self.assertNotEqual(replacement, earliest)
+        page = self.store.page_ready(role_name='worker', limit=1,
+            _delivered_wait_resolution_tokens=[earliest, latest],
+            _wait_resolution_high_water=boundary)
+        self.assertTrue(page['_wait_resolution_undelivered'])
+        self.assertEqual(wait_resolution_token(page['items'][0]), replacement)
+        self.assertNotEqual(page['_wait_resolution_high_water']['signature'], boundary['signature'])
+        self.assertEqual(page['_wait_resolution_delivered_current'], [latest])
+        # Losing holder eligibility prunes both the stale exact token and the
+        # prefix binding. An empty proof set has no boundary.
+        for proof in proofs:
+            current = self.store.get(proof['id'])
+            self.store.transition(current['id'], expected_rev=current['rev'],
+                                  status='dropped', actor='worker', reason='Prune resolved cause')
+        empty = self.store.page_ready(role_name='worker', limit=1,
+            _delivered_wait_resolution_tokens=[replacement, latest],
+            _wait_resolution_high_water=page['_wait_resolution_high_water'])
+        self.assertFalse(empty['_wait_resolution_undelivered'])
+        self.assertEqual(empty['_wait_resolution_delivered_current'], [])
+        self.assertIsNone(empty['_wait_resolution_high_water']['token'])
+
     def test_wait_resolution_progress_prunes_proofs_after_item_leaves_open_state(self):
         from mizu.runtime import Engine
         limits = dataclasses.replace(self.config.limits, work_items_prompt=1)

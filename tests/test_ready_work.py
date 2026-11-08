@@ -570,7 +570,7 @@ class ReadySetChangeTests(Fixture):
         engine = self.engine()
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
         snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 4)
+        self.assertEqual(snapshot['progress']['schema'], 5)
         self.assertEqual(snapshot['progress']['ready_work_signature'], self.signature())
         self.assertTrue(self.project.status()['idle_with_open_work']['ready_work'])
         for _ in range(3):
@@ -686,7 +686,7 @@ class ReadySetChangeTests(Fixture):
         engine = self.engine()
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 4)
+        self.assertEqual(snapshot['progress']['schema'], 5)
         self.assertFalse(_ready_work_changed(self.project, snapshot, role))
         # Invalid evidence closes, never reinterpreted as permissive legacy.
         for bad in ({}, {**snapshot['progress'], 'ready_work_signature': 'bad'}):

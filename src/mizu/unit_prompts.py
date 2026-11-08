@@ -210,6 +210,8 @@ def _ready_work_projection(page, *, context=None):
                         ("id", "title", "status", "stale", "redecision", "updated_at",
                          "doing_since", "doing_age_seconds", "doing_stale")},
                        "age_seconds": _ready_work_age(row["updated_at"], current_time),
+                       **({key: row[key] for key in ("rev", "holder", "wait_resolution")}
+                          if "wait_resolution" in row else {}),
                        **({"wait": row["wait"], "wait_liveness": row["wait_liveness"],
                            "wait_satisfied": row["wait_liveness"]["state"] == "due"}
                           if row["status"] == "blocked" else {})}

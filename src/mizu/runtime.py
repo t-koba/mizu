@@ -239,7 +239,7 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
     """Return ready-set change, presence and a resolution-qualified change.
 
     Current store/read or malformed progress errors close all three facts. The
-    full signature reports ready-set change; schema-4 writer progress separately
+    full signature reports ready-set change; schema-4/5 writer progress separately
     qualifies resolution wakes by exact item/revision tokens actually shown in
     the opening pages. Legacy progress retains its conservative changed-set
     fallback because it has no delivery tokens. The progress role and fingerprint
@@ -254,12 +254,14 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
         store = project.work_items if work_items is None else work_items
         delivered_tokens = None
         if (role is not None and isinstance(previous, dict)
-                and previous.get("schema") == 4):
+                and previous.get("schema") >= 4):
             delivered_tokens = (previous["wait_resolution_tokens"]
                                 if previous["role"] == role.name else [])
         ready_args = {"limit": 1, **({"role_name": role.name} if role is not None else {})}
         if delivered_tokens is not None:
             ready_args["_delivered_wait_resolution_tokens"] = delivered_tokens
+            if previous["schema"] >= 5 and previous["role"] == role.name:
+                ready_args["_wait_resolution_high_water"] = previous["wait_resolution_high_water"]
         page = store.page_ready(**ready_args)
         signature = page.get("signature")
         total = page.get("total")
@@ -3459,7 +3461,9 @@ class Engine:
                                                ready_work=ready_work_at_finish,
                                                ready_work_signature=getattr(context, "ready_work_signature", None),
                                                wait_resolution_tokens=getattr(
-                                                   context, "wait_resolution_tokens", _READY_WORK_UNSET))
+                                                   context, "wait_resolution_tokens", _READY_WORK_UNSET),
+                                               wait_resolution_high_water=getattr(
+                                                   context, "wait_resolution_high_water", _READY_WORK_UNSET))
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
@@ -3552,7 +3556,9 @@ class Engine:
                                 ready_work=None,
                                 ready_work_signature=getattr(context, "ready_work_signature", None),
                                 wait_resolution_tokens=getattr(
-                                    context, "wait_resolution_tokens", _READY_WORK_UNSET)))
+                                    context, "wait_resolution_tokens", _READY_WORK_UNSET),
+                                wait_resolution_high_water=getattr(
+                                    context, "wait_resolution_high_water", _READY_WORK_UNSET)))
                     if role.workspace == "write":
                         write_json(project.root / "observed" / f"{role_name}.json", observed)
                 selected_tokens = set(finished.get("ack_events", []))
@@ -4550,7 +4556,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None,
                     ready_work: bool | None | object = _READY_WORK_UNSET,
                     ready_work_signature: str | None | object = _READY_WORK_UNSET,
-                    wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET) -> dict:
+                    wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET,
+                    wait_resolution_high_water: dict | object = _READY_WORK_UNSET) -> dict:
     """Build compact unit evidence and its bounded consecutive no-progress count.
 
     ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
@@ -4560,7 +4567,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     An explicit ready_work_signature produces schema 3, binding admission to
     the ready set shown in the unit input rather than the finish-time probe.
     Schema 4 also records the bounded exact wait-resolution causes offered to
-    the writer, so an old proof cannot re-admit on an unrelated ready-set change.
+    the writer. Schema 5 adds a proof-set-bound shown prefix for overflow; neither
+    receipt admits an old proof on an unrelated ready-set change.
     """
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
@@ -4582,6 +4590,9 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         # sufficient to preserve the parked disposition without unbounded growth.
         count = min(101, previous_count + 1)
     obligations_digest = obligations_digest or _progress_obligations_digest(())
+    if (wait_resolution_high_water is not _READY_WORK_UNSET
+            and wait_resolution_tokens is _READY_WORK_UNSET):
+        raise Denied("Wait-resolution high water requires exact delivery tokens")
     if (wait_resolution_tokens is not _READY_WORK_UNSET
             and ready_work_signature is _READY_WORK_UNSET):
         raise Denied("Wait-resolution delivery requires a ready-work observation")
@@ -4608,6 +4619,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         record.update(schema=3, ready_work_signature=ready_work_signature)
     if wait_resolution_tokens is not _READY_WORK_UNSET:
         record.update(schema=4, wait_resolution_tokens=wait_resolution_tokens)
+    if wait_resolution_high_water is not _READY_WORK_UNSET:
+        record.update(schema=5, wait_resolution_high_water=wait_resolution_high_water)
     return validate_progress(record)
 
 

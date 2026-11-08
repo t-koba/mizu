@@ -2480,7 +2480,8 @@ class WorkItems:
                                         order_fingerprint=True)
 
     def page_ready(self, *, limit=25, role_name=None,
-                   _delivered_wait_resolution_tokens=None) -> dict:
+                   _delivered_wait_resolution_tokens=None,
+                   _wait_resolution_high_water=None) -> dict:
         """Return open/doing work and blocked work needing replanning.
 
         Same bounds, ordering, recovery, lock and fail-closed contract as
@@ -2494,8 +2495,12 @@ class WorkItems:
         ``_wait_resolution_undelivered`` reports a current eligible proof new to
         that input, ``_wait_resolution_delivered_current`` returns only supplied
         tokens still present in the full eligible scan, and unseen proof rows sort
-        first so bounded prompt pages advance through overflow. Ordinary read
-        pages omit these private fields and keep their normal ordering.
+        first in exact token order. A private high-water receipt covers a shown
+        prefix only while its role-eligible resolution-token-set signature matches;
+        a mismatch or missing boundary retries selection without that prefix under
+        the same lock. The returned high water is prospective: persist it only
+        when these pages have actually been delivered. Ordinary read pages omit
+        these private fields and keep their normal ordering.
         It is independent of scan order, other row metadata and limit, with
         constant extra memory. It is change detection evidence, not authorization or a collision-free set proof. No state
         transitions are performed. With role_name, only unheld open items
@@ -2515,10 +2520,26 @@ class WorkItems:
         if role_name is not None:
             identifier(role_name)
         with lock(self.root / "locks" / "insights.lock"):
-            return self._page_open_impl(
-                cursor=None, limit=limit, readonly=False, ready_only=True,
-                role_name=role_name,
-                delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
+            if _wait_resolution_high_water is not None:
+                from .snapshot import validate_wait_resolution_high_water
+                validate_wait_resolution_high_water(_wait_resolution_high_water)
+                if _delivered_wait_resolution_tokens is None or role_name is None:
+                    raise Denied("Wait-resolution high water requires scoped delivery tokens")
+            args = dict(cursor=None, limit=limit, readonly=False, ready_only=True,
+                        role_name=role_name,
+                        delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
+            result = self._page_open_impl(
+                **args, wait_resolution_high_water=_wait_resolution_high_water)
+            if (_wait_resolution_high_water is not None
+                    and (result["_wait_resolution_high_water"]["signature"]
+                         != _wait_resolution_high_water["signature"]
+                         or not result["_wait_resolution_boundary_current"])):
+                # The whole proof set (not unrelated ready work) changed. A
+                # fresh locked scan must select from the beginning; a boundary
+                # from a different set could otherwise skip a newly inserted proof.
+                result = self._page_open_impl(**args)
+            result.pop("_wait_resolution_boundary_current", None)
+            return result
 
     def _seed_for_event(self, event_id: str, event: dict, *, readonly: bool):
         """Resolve the seed for one committed event with an explicit mode.
@@ -2661,7 +2682,7 @@ class WorkItems:
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False,
                         wait_resolution_role: str | None = None, _active_transform=None,
-                        delivered_wait_resolution_tokens=None):
+                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -2708,6 +2729,12 @@ class WorkItems:
         wait_resolution_pending = False
         wait_resolution_undelivered = False
         delivered_resolution_current = set()
+        boundary = (wait_resolution_high_water["token"]
+                    if wait_resolution_high_water is not None else None)
+        boundary_current = boundary is None
+        resolution_sum = 0
+        resolution_count = 0
+        resolution_max = None
         order_sum = 0
         for row in events:
             if cacheable:
@@ -2848,14 +2875,19 @@ class WorkItems:
                 if "wait_resolution" in item:
                     leaf += b"\0wait-resolution-v1\0" + canonical(item["wait_resolution"])
                     holder = item.get("holder")
-                    if holder is not None and (role_name is None or holder == role_name):
+                    if (item["status"] == "open" and holder is not None
+                            and (role_name is None or holder == role_name)):
                         wait_resolution_pending = True
-                        token = wait_resolution_token(item)
                         if delivered_resolution_tokens is not None:
-                            if (item["status"] == "open"
-                                    and token in delivered_resolution_tokens):
+                            token = wait_resolution_token(item)
+                            resolution_sum = (resolution_sum + int(digest(
+                                b"wait-resolution-token-v1\0" + token.encode()), 16)) % (1 << 256)
+                            resolution_count += 1
+                            resolution_max = max(resolution_max or token, token)
+                            boundary_current = boundary_current or token == boundary
+                            if token in delivered_resolution_tokens:
                                 delivered_resolution_current.add(token)
-                            elif token not in delivered_resolution_tokens:
+                            elif boundary is None or token > boundary:
                                 wait_resolution_undelivered = True
                 ready_sum = (ready_sum + int(digest(leaf), 16)) % (1 << 256)
             total += 1
@@ -2867,10 +2899,14 @@ class WorkItems:
                 row.update(state)
             if ready_only and delivered_resolution_tokens is not None:
                 unseen_resolution = (
-                    item.get("holder") == role_name
+                    item["status"] == "open" and item.get("holder") == role_name
                     and "wait_resolution" in item
-                    and wait_resolution_token(item) not in delivered_resolution_tokens)
-                sort_key = (0 if unseen_resolution else 1, *sort_key)
+                    and wait_resolution_token(item) not in delivered_resolution_tokens
+                    and (boundary is None or wait_resolution_token(item) > boundary))
+                # Proof-token order is the prefix receipt's order, independent
+                # of mutable row timestamps and the ordinary ready-set order.
+                sort_key = ((0, wait_resolution_token(item)) if unseen_resolution
+                            else (1, *sort_key))
             if cursor_key is not None and sort_key <= cursor_key:
                 continue
             eligible += 1
@@ -2901,6 +2937,20 @@ class WorkItems:
         if ready_only and delivered_resolution_tokens is not None:
             result["_wait_resolution_undelivered"] = wait_resolution_undelivered
             result["_wait_resolution_delivered_current"] = sorted(delivered_resolution_current)
+            shown_unseen = [wait_resolution_token(row) for row in rows
+                            if row.get("holder") == role_name and "wait_resolution" in row
+                            and wait_resolution_token(row) not in delivered_resolution_tokens
+                            and (boundary is None or wait_resolution_token(row) > boundary)]
+            # Only the selected earliest unseen rows extend the contiguous
+            # delivered prefix. Out-of-order open-page proofs remain exact tokens.
+            next_boundary = (max(shown_unseen) if shown_unseen else boundary)
+            if not wait_resolution_undelivered:
+                next_boundary = resolution_max
+            result["_wait_resolution_high_water"] = {
+                "signature": digest(canonical(["wait-resolution-set-v1", role_name,
+                                                resolution_count, f"{resolution_sum:064x}"])),
+                "token": next_boundary}
+            result["_wait_resolution_boundary_current"] = boundary_current
         if ready_only:
             complete = unseeded_decisions == 0 and unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked

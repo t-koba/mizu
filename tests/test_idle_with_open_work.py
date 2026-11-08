@@ -181,6 +181,38 @@ class IdleWithOpenWorkTests(Fixture):
 
     # --- recorded at finish: Engine capture ---
 
+    def test_resolution_prefix_schema_is_bounded_and_legacy_schemas_remain_readable(self):
+        token = 'wi_' + 'a' * 32 + ':256'
+        boundary = {'signature': 'b' * 64, 'token': token}
+        args = {}
+        fields = ({}, {'ready_work': True}, {'ready_work_signature': 'c' * 64},
+                  {'wait_resolution_tokens': [token]},
+                  {'wait_resolution_high_water': boundary})
+        for schema, extra in enumerate(fields, start=1):
+            args.update(extra)
+            progress = _progress_record({}, 'worker', (),
+                {name: False for name in PROGRESS_SIGNALS}, 'wait', **args)
+            self.assertEqual(progress['schema'], schema)
+            validate_progress(progress)
+            progress_projection(progress)
+        projected = progress_projection(progress)
+        self.assertEqual(projected['wait_resolution_high_water'], boundary)
+        self.assertIsNot(projected['wait_resolution_high_water'], boundary)
+        validate_progress({**progress, 'wait_resolution_high_water': {**boundary, 'token': None}})
+        for bad in (None, [], {}, {**boundary, 'extra': 1},
+                    {**boundary, 'signature': 'B' * 64}, {**boundary, 'signature': 1},
+                    {**boundary, 'token': 'wi_' + 'a' * 32 + ':257'},
+                    {**boundary, 'token': 'wi_' + 'a' * 32 + ':0'},
+                    {**boundary, 'token': token * 201}, {**boundary, 'token': True}):
+            with self.subTest(boundary=bad), self.assertRaises(Denied):
+                validate_progress({**progress, 'wait_resolution_high_water': bad})
+        with self.assertRaises(Denied):
+            validate_progress({key: value for key, value in progress.items()
+                               if key != 'wait_resolution_high_water'})
+        with self.assertRaises(Denied):
+            _progress_record({}, 'worker', (), {name: False for name in PROGRESS_SIGNALS},
+                             'wait', wait_resolution_high_water=boundary)
+
     def test_writer_run_binds_true_and_single_row_probe(self):
         self.item("ready-at-finish")
         seen = {}
@@ -194,7 +226,7 @@ class IdleWithOpenWorkTests(Fixture):
         with patch.object(self.project.work_items, "page_ready", side_effect=probe):
             snap = self.run_writer("wait")
         self.assertEqual(seen.get("limit"), 1)
-        self.assertEqual(snap["progress"]["schema"], 4)
+        self.assertEqual(snap["progress"]["schema"], 5)
         self.assertIs(snap["progress"]["ready_work"], True)
         idle = self.status_idle()
         self.assertTrue(idle["active"])
@@ -220,7 +252,7 @@ class IdleWithOpenWorkTests(Fixture):
 
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
             snap = self.run_writer("wait")
-        self.assertEqual(snap["progress"]["schema"], 4)
+        self.assertEqual(snap["progress"]["schema"], 5)
         self.assertIs(snap["progress"]["ready_work"], None)
         idle = self.status_idle()
         self.assertFalse(idle["active"])

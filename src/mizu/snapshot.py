@@ -46,6 +46,19 @@ _PROGRESS_TIMESTAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
 
 
+def validate_wait_resolution_high_water(value: dict) -> dict:
+    """Validate the bounded resolution-only prefix receipt (not a ready cursor)."""
+    if (not isinstance(value, dict) or set(value) != {"signature", "token"}
+            or not isinstance(value["signature"], str)
+            or not DIGEST.fullmatch(value["signature"])
+            or value["token"] is not None and (
+                not isinstance(value["token"], str)
+                or not _WAIT_RESOLUTION_TOKEN.fullmatch(value["token"])
+                or int(value["token"].rsplit(":", 1)[1]) > 256)):
+        raise Denied("Invalid snapshot wait-resolution high water")
+    return value
+
+
 def validate_progress(value: dict) -> dict:
     """Validate the compact, immutable progress record; legacy absence is valid.
 
@@ -56,22 +69,26 @@ def validate_progress(value: dict) -> dict:
     role-eligible ready-set ``ready_work_signature`` at the prompt boundary
     (64 lowercase hex, or None if no input was delivered). Legacy schemas stay
     readable; their missing signature never hides nonempty current ready work.
+    Schema 4 adds at most 200 exact shown resolution tokens. Schema 5 adds a
+    resolution-set fingerprint and nullable exact token boundary, covering a
+    contiguous shown prefix without growing that list.
     """
     fields_v1 = {"schema", "signals", "selected", "role", "has_progress",
               "no_progress_count", "obligations_digest", "recorded_at"}
     fields_v2 = fields_v1 | {"ready_work"}
     fields_v3 = fields_v2 | {"ready_work_signature"}
     fields_v4 = fields_v3 | {"wait_resolution_tokens"}
+    fields_v5 = fields_v4 | {"wait_resolution_high_water"}
     if not isinstance(value, dict):
         raise Denied("Invalid snapshot progress record")
     schema = value.get("schema")
-    if type(schema) is not int or schema not in (1, 2, 3, 4):
+    if type(schema) is not int or schema not in (1, 2, 3, 4, 5):
         raise Denied("Invalid snapshot progress schema")
     if schema == 1:
         if set(value) != fields_v1:
             raise Denied("Invalid snapshot progress record")
     else:
-        expected = {2: fields_v2, 3: fields_v3, 4: fields_v4}[schema]
+        expected = {2: fields_v2, 3: fields_v3, 4: fields_v4, 5: fields_v5}[schema]
         if set(value) != expected:
             raise Denied("Invalid snapshot progress record")
         ready = value.get("ready_work")
@@ -81,7 +98,7 @@ def validate_progress(value: dict) -> dict:
         signature = value["ready_work_signature"]
         if signature is not None and (not isinstance(signature, str) or not DIGEST.fullmatch(signature)):
             raise Denied("Invalid snapshot ready-work signature")
-    if schema == 4:
+    if schema >= 4:
         tokens = value["wait_resolution_tokens"]
         if (not isinstance(tokens, list) or len(tokens) > MAX_WAIT_RESOLUTION_TOKENS
                 or any(not isinstance(token, str)
@@ -89,6 +106,8 @@ def validate_progress(value: dict) -> dict:
                        or int(token.rsplit(":", 1)[1]) > 256 for token in tokens)
                 or len(tokens) != len(set(tokens))):
             raise Denied("Invalid snapshot wait-resolution delivery")
+    if schema >= 5:
+        validate_wait_resolution_high_water(value["wait_resolution_high_water"])
     signals = value["signals"]
     if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
             or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
@@ -147,8 +166,10 @@ def progress_projection(value: dict | None) -> dict | None:
         projected["ready_work"] = value["ready_work"]
     if value["schema"] >= 3:
         projected["ready_work_signature"] = value["ready_work_signature"]
-    if value["schema"] == 4:
+    if value["schema"] >= 4:
         projected["wait_resolution_tokens"] = list(value["wait_resolution_tokens"])
+    if value["schema"] >= 5:
+        projected["wait_resolution_high_water"] = dict(value["wait_resolution_high_water"])
     return projected
 
 

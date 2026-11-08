@@ -106,26 +106,42 @@ for membership or exact terminal evidence. This probabilistic fingerprint is cha
 authorization or collision-free set proof, and retains constant extra memory.
 Full and resumed/delta inputs capture that scan's signature when the ready
 projection is built. Writer snapshots store it in validated progress schema 3,
-or schema 4 when exact resolution-delivery tokens are also present; observer
+or schema 4/5 with resolution-delivery receipts; observer
 completion cursors store it in schema 3 as `ready_work_signature` (64 lowercase
 hex, or null for no delivered input). Finish-time `ready_work`
 remains the separate True/False/null idle diagnostic, not an admission cursor.
 Work added or becoming ready during execution therefore remains new input.
 
 A writable role with both `work_order` and `work_items_transition` also records
-progress schema 4's bounded `wait_resolution_tokens`: exact item/revision keys
-for holder-owned resolution proofs actually shown in its opening pages. On an
-explicit event, only a currently eligible resolution absent from that delivered
-set can admit a one-shot resolution wake. The ready-work page prioritizes
-unseen proofs not already shown by the open-work page, so bounded page overflow
-advances instead of repeating the same first proof. If more causes remain than
-both pages can show, they stay eligible for later event passes. Thus an old proof
-cannot turn an unrelated ready-set change into another explicit-only run. Legacy
-progress without these tokens keeps the conservative
-existing wake behavior until a schema-4 prompt is delivered. The token list is
-bounded by the configured opening-page size (at most 200 tokens total) and is
-carried in the existing immutable snapshot progress record; it adds no separate
-store, cursor, acknowledgement, or generic ready-work event.
+progress schema 5's resolution-delivery receipts. `wait_resolution_tokens` holds
+at most 200 exact `item_id:wait_rev` keys actually shown in its opening pages,
+carried forward while still eligible. `wait_resolution_high_water` is an exact
+`{signature, token}` object: a 64-lowercase-hex fingerprint of only the current
+role-eligible holder-owned open resolution-token set, and a nullable exact token
+boundary. It covers the contiguous shown prefix in lexicographic token order.
+The fingerprint uses domain-separated SHA-256 leaves summed modulo 2**256 and
+hashed with role and cardinality, like the ready signature; it is change-detection
+evidence, not authorization or a collision-free set proof.
+
+The ready page prioritizes the earliest proofs absent from both receipts and
+not already shown by the open page. Only actually shown rows extend the prefix;
+out-of-order shown rows remain bounded exact receipts. More than 200 current
+proofs therefore advance across bounded pages without growing progress. A proof
+set change or absent boundary invalidates the prefix and retries selection from
+the beginning under the same ledger lock. Stale exact receipts are pruned.
+This conservative reset can replay previously shown overflow after a proof-set
+change, but cannot skip an unseen proof. Unrelated ready work does not change
+the resolution fingerprint and cannot repeat an explicit-only resolution wake.
+The extra scan is needed only on invalidation; retained scan memory stays bounded
+by the prompt pages and exact receipts, not the full proof set.
+
+Schemas 1–4 remain readable: schema 4 uses its exact receipts until the next
+successful delivery upgrades it; older progress keeps its conservative existing
+wake behavior. Malformed receipts fail closed. All receipts live in the existing
+immutable snapshot progress record, committed only after successful delivery;
+busy admission, failed delivery and restart leave unseen causes discoverable.
+There is no separate store, generic ready-set cursor, acknowledgement or
+ready-work event.
 
 An unchanged set after `wait` parks until independent input, wait expiry or
 another genuine wake; unchanged ready work does not bypass the existing
@@ -399,12 +415,11 @@ the configured cadence. Cache-affinity ordering is separate.
 An already reopened, holder-owned item with a validated `wait_resolution`
 also supplies an exact event cause for its writer (with both reconciliation
 grants), including a non-autonomous writer. Pre-admission dispatch compares
-current eligible proof identities (`item_id:wait_rev`) with the exact bounded
-tokens shown in that role's opening pages and recorded in schema-4 snapshot
-progress. A new or previously unseen resolution admits once; an unrelated ready
-set change cannot revive a proof already delivered. Older progress lacks these
-tokens and retains the conservative signature-change behavior until a schema-4
-input is successfully delivered. No generic ready-work event admission is
+current eligible proof identities (`item_id:wait_rev`) with that role's exact
+receipts and, in schema 5, resolution-only shown-prefix receipt described above.
+A previously unseen resolution admits; an unrelated ready-set change cannot
+revive a delivered proof. Progress before schema 4 retains conservative
+signature-change behavior until a new input is successfully delivered. No generic ready-work event admission is
 enabled for explicit-only roles without a new resolution proof; subscriptions
 and defaults are unchanged.
 
@@ -412,8 +427,8 @@ Pre-admission dispatch and its locked recheck derive this cause from durable
 ledger proof, not an in-process transition callback. A busy admission, failure
 before delivery, or restart leaves it discoverable. Successful completion binds
 the input tokens in the existing immutable progress record; a later change to
-the ready set alone does not repeat the event. No separate event store, cursor,
-or acknowledgement is introduced.
+the ready set alone does not repeat the event. No separate event store or
+acknowledgement is introduced.
 
 ### Blocked-work liveness status
 
