@@ -3,6 +3,7 @@ import json
 import os
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from support import Fixture
@@ -84,6 +85,12 @@ class ProjectionLifecycleTests(Fixture):
     def test_prune_needs_exclusions_but_not_pause(self):
         self.assertFalse(self.project.control()["paused"])
         self.assertFalse(prune(self.project, apply=False)["applied"])
+
+    def test_audit_fallback_reports_configured_web_cache_ttl(self):
+        self.project.config.web["cache_seconds"] = 900
+        with patch("mizu.storage._web_cache_candidates", side_effect=OSError("scan failed")):
+            report = audit(self.project)
+        self.assertEqual(report["web_cache"]["cache_seconds"], 900)
 
     def test_audit_reports_capacity_for_remaining_stores(self):
         self.project.set_control(paused=True)

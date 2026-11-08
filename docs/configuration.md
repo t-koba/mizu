@@ -499,7 +499,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
-| `free_disk_mb` | Minimum free disk space required to start a work unit |
+| `free_disk_mb` | Minimum free-disk reserve for work-unit admission, checks, recovery probes, and backup destinations (default 1,024 MiB; 0 disables; integer 0–1,073,741,824 MiB; one MiB is 1,048,576 bytes) |
 
 Lock timeout policy is execution-local, not a process-global setting changed by loading
 configuration or creating a project. CLI execution, Engine runs, tool-handler threads
@@ -1190,7 +1190,7 @@ The container interior is always Linux. The runtime must support standard flags 
 | `entrypoint` | `"/bin/sh"` | Container entrypoint; the image must provide it |
 | `entrypoint_args` | `[]` | Ordered runner arguments appended after the image and before the harness-managed `-c` script arguments; at most 32 nonempty argv items, each at most 4096 characters and without NUL or LF. Never shell-split or exported. Empty keeps the existing command. Example: `entrypoint = "/bin/bash"` with `entrypoint_args = ["-o", "pipefail"]` keeps `pipefail` out of child shells (unlike exported `SHELLOPTS`) |
 | `memory_mb`, `cpus`, `pids` | `2048`, `2`, `256` | Container resource limits |
-| `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`) |
+| `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`); `file_mb` is converted as MiB to bytes |
 | `cleanup_timeout_seconds` | `15` | Per-OCI-call deadline for leftover listing/removal, project-container listing, and post-command removal; positive TOML integer seconds |
 | `bulk_cleanup_timeout_seconds` | `30` | Per-OCI-call deadline for project-wide container removal; positive TOML integer seconds |
 | `checkpoint_inspect_timeout_seconds` | `15` | Per-OCI-call deadline for the fail-closed checkpoint-image preflight inspect; positive TOML integer seconds |

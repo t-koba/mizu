@@ -29,6 +29,10 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: `submit_insight` fixes source to the role name, so these are refused
 #: at config load to keep the operator channel unforgeable.
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
+#: Binary MiB unit for configured limits converted to byte counts.
+MEBIBYTE_BYTES = 1024 * 1024
+#: Default web-response cache TTL; explicit ``[web].cache_seconds`` wins.
+DEFAULT_WEB_CACHE_SECONDS = 1800
 #: Whole-artifact character budget; paged mode uses its own byte budget.
 DEFAULT_ARTIFACT_FULL_READ_CHARS = 524288
 #: Recovery-probe identity hashing uses this maximum executable size by default.
@@ -1884,7 +1888,7 @@ def load(file: Path) -> Config:
     keys(web, {"hosts", "feeds", "cache_seconds", "timeout_seconds", "max_bytes", "diagnostic_bytes",
                "search_feed_item_limit", "search_command", "destination_command", "intranet",
                "probe_hosts", "probe_methods"}, "web")
-    web = {"hosts": [], "feeds": [], "cache_seconds": 1800, "timeout_seconds": 20,
+    web = {"hosts": [], "feeds": [], "cache_seconds": DEFAULT_WEB_CACHE_SECONDS, "timeout_seconds": 20,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "search_feed_item_limit": 200,
            "search_command": [], "destination_command": [], "intranet": False,

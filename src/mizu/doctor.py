@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .budget import Budget
-from .config import Config, keys, resolve_timezone, strings
+from .config import Config, MEBIBYTE_BYTES, keys, resolve_timezone, strings
 from .drivers import command_for
 from .errors import ConfigError, Denied, LimitExceeded, MizuError
 from .fs import digest, identifier, mkdir, read_json, safe_read
@@ -411,7 +411,7 @@ quota, period = map(int, evidence['cpu.max'].split())
 assert abs(quota / period - CPU_LIMIT) < 0.001
 print(json.dumps({'resource_limits': evidence}, sort_keys=True))
 RESOURCE
-""".replace('MEMORY_LIMIT', str(config.sandbox.memory_mb * 1048576)).replace('PID_LIMIT', str(config.sandbox.pids)).replace('CPU_LIMIT', str(config.sandbox.cpus))
+""".replace('MEMORY_LIMIT', str(config.sandbox.memory_mb * MEBIBYTE_BYTES)).replace('PID_LIMIT', str(config.sandbox.pids)).replace('CPU_LIMIT', str(config.sandbox.cpus))
                 script = """set -eu
 [ -r /workspace/probe.txt ]
 ! (echo unsafe > /workspace/probe.txt) 2>/dev/null
@@ -457,7 +457,7 @@ def git_presence() -> tuple:
 
 def free_disk(config: Config) -> dict:
     free = shutil.disk_usage(config.data).free if config.data.exists() else shutil.disk_usage(config.data.parent).free
-    reserve = config.limits.free_disk_mb * 1048576
+    reserve = config.limits.free_disk_mb * MEBIBYTE_BYTES
     if free < reserve:
         raise ConfigError(f"Free disk {free} bytes is below the {reserve} byte reserve")
     return {"free_bytes": free, "reserve_bytes": reserve}

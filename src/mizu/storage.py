@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .delegation_jobs import DelegationJobs
 from .admission import check_slot_exclusions, role_exclusions
-from .config import MAX_PROJECT_GOAL_BYTES
+from .config import DEFAULT_WEB_CACHE_SECONDS, MAX_PROJECT_GOAL_BYTES, MEBIBYTE_BYTES
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
@@ -125,7 +125,7 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
     if destination.exists() or destination == project.root or project.root in destination.parents:
         raise Denied("Backup must be a new file outside the project tree")
     mkdir(destination.parent)
-    if shutil.disk_usage(destination.parent).free < project.config.limits.free_disk_mb * 1048576:
+    if shutil.disk_usage(destination.parent).free < project.config.limits.free_disk_mb * MEBIBYTE_BYTES:
         raise Denied("Free disk space is below the configured reserve")
     # Deliberately exclude project .git/hooks, active sockets/locks, caches and the
     # mutable worktree. A separate sealed snapshot captures uncommitted work.
@@ -321,7 +321,8 @@ def _compress_event_log(raw: Path) -> Path:
 def _web_cache_seconds(project: Project) -> int:
     """Operator-selected web-cache reuse TTL ([web] cache_seconds)."""
     web = getattr(project.config, "web", None)
-    seconds = web.get("cache_seconds", 1800) if isinstance(web, dict) else 1800
+    seconds = (web.get("cache_seconds", DEFAULT_WEB_CACHE_SECONDS)
+               if isinstance(web, dict) else DEFAULT_WEB_CACHE_SECONDS)
     try:
         seconds = int(seconds)
     except (TypeError, ValueError) as exc:
@@ -1247,7 +1248,7 @@ def audit(project: Project) -> dict:
     except (OSError, ValueError):
         web_cache = {"entries": 0, "bytes": 0, "expired": 0, "expired_bytes": 0,
                      "expired_sample": [], "expired_truncated": False, "skipped": 0,
-                     "cache_seconds": 1800}
+                     "cache_seconds": _web_cache_seconds(project)}
     return {
         "acceptance_receipts": collected["acceptance_receipts"],
         "sessions": sessions,
@@ -1420,7 +1421,7 @@ def _automatic_snapshot_gc(project: Project, instant: int) -> dict:
         return {"status": "unavailable"}
     if not days:
         return {"status": "disabled"}
-    cutoff = instant - days * 86400
+    cutoff = instant - days * _DAY_SECONDS
     try:
         with quiescent(project, require_pause=False, snapshot_gc=True):
             collected = _audit_collect(project, history_cutoff=cutoff)

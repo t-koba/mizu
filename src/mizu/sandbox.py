@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import platform as _platform
 from .admission import check_slot_exclusions, role_exclusion, role_exclusions
-from .config import Config
+from .config import Config, MEBIBYTE_BYTES
 from .errors import Busy, ConfigError, Denied
 from .fs import DIGEST, SCRIPT_MAX, digest, held, lock, mkdir, now, write_json
 from .process import Result, environment, run, stop_note
@@ -327,7 +327,7 @@ class Sandbox:
                     "--security-opt=no-new-privileges",
                     "--memory", f"{cfg.memory_mb}m", "--memory-swap", f"{cfg.memory_mb}m",
                     "--cpus", str(cfg.cpus), "--pids-limit", str(cfg.pids),
-                    "--ulimit", f"fsize={cfg.file_mb * 1024 * 1024}:{cfg.file_mb * 1024 * 1024}",
+                    "--ulimit", f"fsize={cfg.file_mb * MEBIBYTE_BYTES}:{cfg.file_mb * MEBIBYTE_BYTES}",
                     "--ulimit", "core=0:0", "--log-driver=none", "--init",
                     "--tmpfs", f"/tmp:rw,nosuid,nodev,size={cfg.temporary_mb}m,mode=1777",
                     "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp",

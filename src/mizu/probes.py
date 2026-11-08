@@ -13,7 +13,7 @@ from pathlib import Path
 from .delegation_jobs import DelegationJobs
 from .admission import role_exclusion
 from .budget import Budget
-from .config import Role, load, role_requests_per_run, role_tools_per_run
+from .config import MEBIBYTE_BYTES, Role, load, role_requests_per_run, role_tools_per_run
 from .drivers import driver_for
 from .engine_config import adapter_digest, effective, local_settings_digest
 from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitExceeded
@@ -385,7 +385,7 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
                         reason = 'configuration_changed'
                 if reason is None:
                     _budget_available(current, project)
-                    if shutil.disk_usage(project.root).free < current.limits.free_disk_mb * 1048576:
+                    if shutil.disk_usage(project.root).free < current.limits.free_disk_mb * MEBIBYTE_BYTES:
                         raise InfraExceeded('Recovery disk reserve unavailable')
                     mkdir(work.parent)
                     # The named disposable directory keeps Budget admission ids

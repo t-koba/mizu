@@ -18,6 +18,7 @@ import time
 import math
 from pathlib import Path
 from .admission import check_slot_exclusion
+from .config import MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
@@ -672,7 +673,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
     if not custom and 'verify' not in context.role.capabilities:
         raise Denied('Acceptance check jobs require verify capability')
     purpose = purpose_label(purpose)
-    if shutil.disk_usage(project.root).free < context.config.limits.free_disk_mb * 1048576:
+    if shutil.disk_usage(project.root).free < context.config.limits.free_disk_mb * MEBIBYTE_BYTES:
         raise Busy('Free disk space is below the check input reserve')
     context.close_exec()
     capture = project.snapshots.capture_files(context.workspace)
@@ -1194,7 +1195,7 @@ def _run_one(project, stop, sandbox_factory, invalid):
     control = project.control()
     if not control.get('armed') or control.get('paused') or control.get('draining') or stop.is_set():
         return {'status': 'deferred'}
-    if shutil.disk_usage(project.root).free < project.config.limits.free_disk_mb * 1048576:
+    if shutil.disk_usage(project.root).free < project.config.limits.free_disk_mb * MEBIBYTE_BYTES:
         return {'status': 'disk-reserve'}
     blocked = False
     candidates = []

@@ -41,7 +41,7 @@ from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _normalize_ci_wake_branches, read_ci_wake, write_ci_wake)
 from .budget import Budget
 from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
-                     Config, Role, load,
+                     MEBIBYTE_BYTES, Config, Role, load,
                      role_cooldown_seconds, role_daemon_spacing_seconds, role_no_progress_backoff_seconds,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
@@ -2511,7 +2511,7 @@ class Engine:
             raise InfraExceeded(f"{self.config.timezone} daily model-request budget unavailable for project '{project.name}'")
         if usage["shared_limit"] > 0 and usage["shared_used"] >= usage["shared_limit"]:
             raise InfraExceeded(f"{self.config.timezone} daily model-request shared budget unavailable")
-        if shutil.disk_usage(project.root).free < self.config.limits.free_disk_mb * 1048576:
+        if shutil.disk_usage(project.root).free < self.config.limits.free_disk_mb * MEBIBYTE_BYTES:
             raise InfraExceeded("Free disk space is below the configured reserve")
 
     def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,

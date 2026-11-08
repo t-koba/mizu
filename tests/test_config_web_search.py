@@ -1,11 +1,19 @@
-"""Configured RSS/Atom per-feed search shaping policy."""
+"""Configured web defaults and RSS/Atom per-feed search shaping."""
 from support import Fixture
-from mizu.config import load
+from mizu.config import DEFAULT_WEB_CACHE_SECONDS, load
 from mizu.errors import ConfigError
 from mizu.web import SEARCH_RESULT_LIMIT
 
 
 class WebSearchConfigTests(Fixture):
+    def test_cache_ttl_default_survives_omission(self):
+        self.assertEqual(self.config.web["cache_seconds"], DEFAULT_WEB_CACHE_SECONDS)
+        original = self.file.read_text()
+        without_setting = original.replace("cache_seconds = 1800\n", "", 1)
+        self.assertNotEqual(without_setting, original)
+        self.file.write_text(without_setting)
+        self.assertEqual(load(self.file).web["cache_seconds"], DEFAULT_WEB_CACHE_SECONDS)
+
     def test_default_and_range(self):
         self.assertEqual(self.config.web["search_feed_item_limit"], 200)
         original = self.file.read_text()

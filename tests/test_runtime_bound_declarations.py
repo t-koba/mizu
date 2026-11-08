@@ -1015,6 +1015,8 @@ GATE_DECLARATIONS = {
 # raw-settings default table checked below. This is not a full config inventory.
 CONFIGURED_SETTINGS = {
     'web': {
+        'cache_seconds': ('DEFAULT_WEB_CACHE_SECONDS', 'configured policy',
+                          'web / response-cache reuse and reclamation TTL default'),
         'search_feed_item_limit': ('200', 'configured policy', 'web / per-feed RSS/Atom candidate shaping'),
     },
     'vcs': {
@@ -1228,6 +1230,12 @@ CONFIG_MODULE_BOUNDS = {
     'MAX_PROJECT_GOAL_BYTES': (
         '1073741824', 'safety',
         'config / absolute project-goal input ceiling; snapshot audit uses it for older configurations'),
+    'MEBIBYTE_BYTES': (
+        '1024 * 1024', 'mechanism',
+        'config / exact binary unit conversion for byte budgets named in MiB'),
+    'DEFAULT_WEB_CACHE_SECONDS': (
+        '1800', 'configured policy',
+        'web / default for [web].cache_seconds; explicit project settings override'),
     'DEFAULT_PROBE_EXECUTABLE_BYTES': (
         '256 * 1024 * 1024', 'configured policy',
         'recovery probes / default for [limits].probe_executable_bytes; prior host I/O refusal bound'),
@@ -2847,6 +2855,36 @@ def no_defaults(limit, /, count, *, size):
                 self.assertEqual(found[name], expression)
                 self.assertIn(category, categories)
                 self.assertTrue(rationale.strip())
+
+    def test_snapshot_retention_uses_the_declared_day_conversion(self):
+        tree = ast.parse((ROOT / "storage.py").read_text(encoding="utf-8"))
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "_automatic_snapshot_gc")
+        cutoff = next(node.value for node in ast.walk(function)
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "cutoff"
+                              for target in node.targets))
+        self.assertEqual(ast.unparse(cutoff), "instant - days * _DAY_SECONDS")
+
+    def test_mib_byte_conversions_use_the_shared_unit(self):
+        fields = {"free_disk_mb", "memory_mb", "file_mb"}
+        counts = {field: 0 for field in fields}
+        for filename in ("storage.py", "probes.py", "doctor.py", "check_jobs.py",
+                         "runtime.py", "sandbox.py"):
+            tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+                    continue
+                mentioned = {part.attr for part in ast.walk(node)
+                             if isinstance(part, ast.Attribute) and part.attr in fields}
+                if not mentioned:
+                    continue
+                self.assertEqual(len(mentioned), 1)
+                self.assertIn("MEBIBYTE_BYTES", {
+                    part.id for part in ast.walk(node) if isinstance(part, ast.Name)})
+                counts[next(iter(mentioned))] += 1
+        self.assertEqual(counts, {"free_disk_mb": 6, "memory_mb": 1, "file_mb": 2})
 
     def test_systemd_service_settings_are_configured_policy(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
