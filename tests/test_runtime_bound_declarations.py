@@ -99,9 +99,10 @@ partial; absence from the tables is not evidence that a value is not a decision.
 Expressions are inventoried without evaluating source. The call detector covers
 local arithmetic only when it appears in a selected bound-bearing keyword; these
 tests still do not lint arbitrary numeric literals, alias-only values, nested
-assignments, symbolic loop bounds, positional arguments or call keywords outside
-the listed set. Expand coverage as the behavior-based inventory reaches other
-owners. The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
+assignments, symbolic non-`range` loop bounds, positional arguments or call
+keywords outside the listed set. The exact range tables do not infer other loop
+forms. Expand coverage as the behavior-based inventory reaches other owners.
+The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
 PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults, VCS
 polling fallback defaults, the retained-check Limits field and ceiling, and
 explicitly listed raw web and VCS settings; the decision-history recovery ceiling
@@ -137,10 +138,11 @@ claim that it is configured. This slice classifies current defaults only and
 does not change behavior, config or adapter contracts.
 
 The direct-range slice inventories every numeric positional argument to
-built-in `range(...)` calls by file, scope, argument and occurrence. It makes
-literal loop, retry and protocol-index bounds reviewable without treating all
-numeric literals as policy. It remains partial: symbolic arguments, arbitrary
-loop conditions, slices and numeric literals in other contexts are outside it.
+built-in `range(...)` calls by file, scope, argument and occurrence. A separate
+exact table classifies all currently symbolic `range` arguments across
+`src/mizu`, including their configuration owners and data-derived bounds.
+Arbitrary loop conditions, slices, aliases and numeric literals in other
+contexts remain outside these inventories.
 """
 import ast
 from pathlib import Path
@@ -1527,6 +1529,68 @@ RANGE_ARGUMENTS = {
         '2', 'format', 'work items / replay revision files begin after immutable seed revision 1'),
 }
 
+# (relative file, qualified scope, positional argument, occurrence):
+#     (exact ast.unparse(argument), classification, owner / rationale)
+SYMBOLIC_RANGE_ARGUMENTS = {
+    ('admission.py', 'check_slot_exclusions', 0, 0): (
+        'max(0, slots)', 'configured policy',
+        'admission / one exclusion per configured parallel_checks slot'),
+    ('admission.py', '_Queue._enqueue', 0, 0): (
+        'self.capacity', 'configured policy',
+        'admission / pending-owner search bounded by limits.admission_queue_capacity'),
+    ('admission.py', '_Queue._slots', 0, 0): (
+        'self.slots', 'configured policy',
+        'admission / active-slot search bounded by limits.parallel_runs'),
+    ('check_jobs.py', '_run_one', 0, 0): (
+        'project.config.limits.parallel_checks', 'configured policy',
+        'check jobs / compute-slot search bounded by limits.parallel_checks'),
+    ('check_jobs.py', 'run_pending', 0, 0): (
+        'project.config.limits.check_pending', 'configured policy',
+        'check jobs / drain batch bounded by limits.check_pending'),
+    ('check_jobs.py', 'recover', 0, 0): (
+        'project.config.limits.parallel_checks', 'configured policy',
+        'check jobs / fault-slot search bounded by limits.parallel_checks'),
+    ('ci_acceptance.py', 'policy', 0, 0): (
+        'len(commands)', 'mechanism',
+        'CI acceptance / exact coverage check iterates each bounded command index'),
+    ('ci_polling.py', 'poll_ci', 0, 0): (
+        'max_branches', 'configured policy',
+        'CI polling / rotating branch batch bounded by vcs.poll_max_branches'),
+    ('decision_delivery.py', 'pending', 0, 0): (
+        'len(delivered) - 1', 'mechanism',
+        'decision delivery / reverse scan of the bounded page trims optional attention rows'),
+    ('scheduler_evidence.py', 'summarize', 1, 0): (
+        'len(sequence)', 'mechanism',
+        'scheduler evidence / overlap scan walks the already-bounded sorted sequence'),
+    ('scheduler_evidence.py', 'summarize', 1, 1): (
+        'len(sequence) - 1', 'mechanism',
+        'scheduler evidence / adjacent-pair scan walks the already-bounded sorted sequence'),
+    ('snapshot.py', 'Snapshots.merge', 0, 0): (
+        'self.history_index', 'configured policy',
+        'snapshot merge / ancestry walk bounded by limits.history_index parent edges'),
+    ('snapshot.py', 'Snapshots.merge', 1, 0): (
+        'len(parts)', 'mechanism',
+        'snapshot merge / prefix-conflict check walks each validated path component'),
+    ('snapshot.py', 'Snapshots.validate_paths', 1, 0): (
+        "len(name.split('/'))", 'mechanism',
+        'snapshot paths / ancestor-conflict check walks each validated path component'),
+    ('storage.py', '_snapshot_ancestry', 0, 0): (
+        'history_index', 'configured policy',
+        'storage retention / merge ancestry protection uses limits.history_index edges'),
+    ('work_item_seed.py', 'task_seeds', 0, 0): (
+        'len(tasks)', 'mechanism',
+        'work-item task manifest / visit every validated member within the 16-task contract'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 0): (
+        'len(numeric) + 2', 'format',
+        'work items / verify revision filenames form a contiguous seed-relative chain'),
+    ('work_items.py', 'WorkItems._iter_chain', 1, 0): (
+        'len(revisions) + 2', 'format',
+        'work items / validate contiguous revision numbers after immutable seed revision 1'),
+    ('work_items.py', 'WorkItems._iter_chain', 1, 1): (
+        'len(revisions) + 2', 'format',
+        'work items / replay every validated revision within MAX_REVISIONS'),
+}
+
 
 def numeric(node, symbolic=()):
     if isinstance(node, ast.Constant):
@@ -1567,7 +1631,8 @@ def numeric(node, symbolic=()):
     return isinstance(node, ast.Name) and node.id in symbolic
 
 
-def range_argument_inventory(tree):
+def range_argument_inventory(tree, *, symbolic=False):
+    """Inventory numeric or non-numeric range arguments; symbolic selects the latter."""
     found, occurrences = {}, {}
 
     class RangeArguments(ast.NodeVisitor):
@@ -1590,7 +1655,11 @@ def range_argument_inventory(tree):
             if isinstance(node.func, ast.Name) and node.func.id == 'range':
                 scope = '.'.join(self.scope) or '<module>'
                 for index, argument in enumerate(node.args):
-                    if not numeric(argument):
+                    is_numeric = numeric(argument)
+                    if symbolic:
+                        if is_numeric:
+                            continue
+                    elif not is_numeric:
                         continue
                     base = (scope, index)
                     occurrence = occurrences.get(base, 0)
@@ -1763,6 +1832,39 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             for (scope, argument, occurrence), expression in range_argument_inventory(tree).items():
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
+
+    def test_symbolic_range_argument_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for expression, category, rationale in SYMBOLIC_RANGE_ARGUMENTS.values():
+            self.assertIn(category, categories)
+            self.assertTrue(rationale.strip())
+        found = {}
+        for path in sorted(ROOT.rglob('*.py')):
+            filename = path.relative_to(ROOT).as_posix()
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for (scope, argument, occurrence), expression in range_argument_inventory(
+                    tree, symbolic=True).items():
+                found[(filename, scope, argument, occurrence)] = expression
+        self.assertEqual(found, {site: entry[0] for site, entry in SYMBOLIC_RANGE_ARGUMENTS.items()})
+
+    def test_symbolic_range_detector_scope_and_drift(self):
+        source = (
+            "def outer(count, rows):\n"
+            "    range(0, count, 2)\n"
+            "    def nested():\n"
+            "        return range(len(rows))\n"
+            "class Reader:\n"
+            "    def read(self):\n"
+            "        return range(self.capacity)\n"
+        )
+        self.assertEqual(range_argument_inventory(ast.parse(source), symbolic=True), {
+            ('outer', 1, 0): 'count',
+            ('outer.nested', 0, 0): 'len(rows)',
+            ('Reader.read', 0, 0): 'self.capacity',
+        })
+        changed = source.replace('range(len(rows))', 'range(len(rows) - 1)')
+        self.assertNotEqual(range_argument_inventory(ast.parse(changed), symbolic=True),
+                            range_argument_inventory(ast.parse(source), symbolic=True))
 
     def test_range_detector_scope_argument_alignment_and_numeric_vocabulary(self):
         source = '''
