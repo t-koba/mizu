@@ -142,7 +142,9 @@ built-in `range(...)` calls by file, scope, argument and occurrence. A separate
 exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
-contexts remain outside these inventories.
+contexts remain outside these inventories. One direct-comparison slice records
+operands of magnitude at least 3 in `check_jobs.py`; it is not a global numeric
+comparison linter.
 """
 import ast
 from pathlib import Path
@@ -1591,6 +1593,33 @@ SYMBOLIC_RANGE_ARGUMENTS = {
         'work items / replay every validated revision within MAX_REVISIONS'),
 }
 
+# Direct comparison operands with magnitude >= 3 in the audited check-jobs
+# module. (file, qualified scope, operand index, occurrence):
+#     (exact ast.unparse(operand), classification, owner / rationale)
+COMPARISON_BOUND_ARGUMENTS = {
+    ('check_jobs.py', '_mount_fingerprint', 2, 0): (
+        '1099511627776', 'safety',
+        'check jobs / persisted dependency bounds mirror the 1 TiB config validation ceiling'),
+    ('check_jobs.py', 'cache_input.unbound', 1, 0): (
+        '256', 'safety',
+        'check jobs / only expose untrusted relative cache paths within a bounded diagnostic field'),
+    ('check_jobs.py', 'submit', 2, 0): (
+        '32', 'format',
+        'check jobs / custom command arrays follow the public 32-command protocol bound'),
+    ('check_jobs.py', 'submit', 1, 0): (
+        '32', 'format',
+        'check jobs / stored acceptance command lists follow the same 32-command protocol bound'),
+    ('check_jobs.py', 'prompt_projection', 1, 0): (
+        '65536', 'safety',
+        'check jobs / bounded prompt projection metadata ceiling before adding rows'),
+    ('check_jobs.py', 'prompt_projection', 1, 1): (
+        '65536', 'safety',
+        'check jobs / bounded serialized check-job prompt projection ceiling while adding rows'),
+    ('check_jobs.py', 'logs', 2, 0): (
+        '8192', 'format',
+        'check jobs / public command-evidence page-size ceiling'),
+}
+
 
 def numeric(node, symbolic=()):
     if isinstance(node, ast.Constant):
@@ -1629,6 +1658,51 @@ def numeric(node, symbolic=()):
     if isinstance(node, ast.Attribute):
         return ast.unparse(node) in symbolic
     return isinstance(node, ast.Name) and node.id in symbolic
+
+
+def comparison_argument_inventory(tree):
+    """Inventory direct numeric comparison operands with magnitude at least 3."""
+    found, occurrences = {}, {}
+
+    def literal_value(node):
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return node.value
+        if (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd))
+                and isinstance(node.operand, ast.Constant)
+                and type(node.operand.value) in (int, float)):
+            return (-1 if isinstance(node.op, ast.USub) else 1) * node.operand.value
+        return None
+
+    class Comparisons(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = []
+
+        def visit_ClassDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Compare(self, node):
+            scope = '.'.join(self.scope) or '<module>'
+            for index, operand in enumerate([node.left, *node.comparators]):
+                value = literal_value(operand)
+                if value is None or abs(value) < 3:
+                    continue
+                base = (scope, index)
+                occurrence = occurrences.get(base, 0)
+                occurrences[base] = occurrence + 1
+                found[(*base, occurrence)] = ast.unparse(operand)
+            self.generic_visit(node)
+
+    Comparisons().visit(tree)
+    return found
 
 
 def range_argument_inventory(tree, *, symbolic=False):
@@ -1832,6 +1906,41 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             for (scope, argument, occurrence), expression in range_argument_inventory(tree).items():
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
+
+    def test_check_jobs_comparison_bound_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for expression, category, rationale in COMPARISON_BOUND_ARGUMENTS.values():
+            self.assertIn(category, categories)
+            self.assertTrue(rationale.strip())
+        tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
+        found = comparison_argument_inventory(tree)
+        expected = {
+            (scope, operand, occurrence): value
+            for (filename, scope, operand, occurrence), (value, _, _)
+            in COMPARISON_BOUND_ARGUMENTS.items()
+            if filename == 'check_jobs.py'
+        }
+        self.assertEqual(found, expected)
+
+    def test_comparison_detector_operand_scope_and_drift(self):
+        source = (
+            "def outer(value):\n"
+            "    if 1 <= value <= 32:\n"
+            "        return value\n"
+            "    def nested():\n"
+            "        return value > 64\n"
+            "class Reader:\n"
+            "    def read(self):\n"
+            "        return 128 >= 0\n"
+        )
+        self.assertEqual(comparison_argument_inventory(ast.parse(source)), {
+            ('outer', 2, 0): '32',
+            ('outer.nested', 1, 0): '64',
+            ('Reader.read', 0, 0): '128',
+        })
+        changed = source.replace('value > 64', 'value > 96')
+        self.assertNotEqual(comparison_argument_inventory(ast.parse(changed)),
+                            comparison_argument_inventory(ast.parse(source)))
 
     def test_symbolic_range_argument_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
