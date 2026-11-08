@@ -294,6 +294,19 @@ os._exit(0)
         with self.assertRaises(Denied):
             reclaim(self.project, apply=True)
 
+    def test_identity_revision_fits_sqlite_integer_range(self):
+        insight_id = "a" * 32
+        path = self.project.root / "insight-ids" / f"{insight_id}.json"
+        value = {"id": insight_id, "sha256": "0" * 64,
+                 "created_at": "2026-01-01T00:00:00+00:00",
+                 "rev": insight_archive.MAX_SQLITE_INTEGER}
+        write_json(path, value)
+        self.assertEqual(insight_archive.identity(self.project.root, insight_id), value)
+        value["rev"] = insight_archive.MAX_SQLITE_INTEGER + 1
+        write_json(path, value)
+        with self.assertRaisesRegex(Denied, "Unsafe or corrupt retained insight identity"):
+            insight_archive.identity(self.project.root, insight_id)
+
     def test_identity_repair_from_archived_record_does_not_reopen(self):
         item = self.proposal(origin="caller")
         self.gc()

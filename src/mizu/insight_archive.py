@@ -19,6 +19,8 @@ from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, identifier, safe_read, sync_dir
 
 NAME = "insight-archive.sqlite3"
+# SQLite INTEGER ordering keys are signed 64-bit values.
+MAX_SQLITE_INTEGER = 9223372036854775807
 
 
 @contextlib.contextmanager
@@ -175,7 +177,8 @@ def identity(root: Path, insight_id: str) -> dict | None:
         stamp = dt.datetime.fromisoformat(created) if isinstance(created, str) else None
         if stamp is None or stamp.tzinfo is None:
             raise ValueError
-        if "rev" in value and (type(value["rev"]) is not int or not 1 <= value["rev"] <= 9223372036854775807):
+        if "rev" in value and (type(value["rev"]) is not int
+                                or not 1 <= value["rev"] <= MAX_SQLITE_INTEGER):
             raise ValueError
         return value
     except (OSError, LimitExceeded, ValueError, TypeError) as exc:

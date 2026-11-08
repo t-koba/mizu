@@ -914,7 +914,8 @@ replacement insight without implying rejected substance.
                     or type(state["position"]) is not int or state["position"] < 0
                     or (state["scope"] == "live" and state["high_water"] is not None)
                     or (state["scope"] == "archive" and (type(state["high_water"]) is not int
-                        or not 0 <= state["position"] <= state["high_water"] <= 9223372036854775807))):
+                        or not (0 <= state["position"] <= state["high_water"]
+                                <= insight_archive.MAX_SQLITE_INTEGER)))):
                 raise ValueError
         except (ValueError, TypeError, binascii.Error, UnicodeError) as exc:
             raise Denied("Malformed insight page cursor") from exc

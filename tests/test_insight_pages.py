@@ -246,6 +246,21 @@ class InsightPageTests(Fixture):
             self.project.insights.list_page(scope='all')
         self.assertEqual(len(self.project.insights.list_page(limit=1)['items']), 1)
 
+    def test_archive_cursor_high_water_uses_sqlite_integer_ceiling(self):
+        project = digest(str(self.project.root.resolve()).encode())
+        payload = {"v": 1, "scope": "archive", "project": project,
+                   "generation": "0" * 64, "expires": 2000000001,
+                   "position": 0, "high_water": insight_archive.MAX_SQLITE_INTEGER}
+        body = canonical(payload)
+        token = base64.urlsafe_b64encode(body).decode() + "." + digest(body)
+        self.assertEqual(
+            Insights._page_cursor(token, "archive", project, 2000000000), payload)
+        payload["high_water"] += 1
+        body = canonical(payload)
+        token = base64.urlsafe_b64encode(body).decode() + "." + digest(body)
+        with self.assertRaisesRegex(Denied, "Malformed insight page cursor"):
+            Insights._page_cursor(token, "archive", project, 2000000000)
+
     def test_malformed_cursor_rejected(self):
         self.bulk_live(2)
         valid = self.project.insights.list_page(limit=1)['next_cursor']

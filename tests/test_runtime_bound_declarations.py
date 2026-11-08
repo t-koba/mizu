@@ -438,6 +438,12 @@ DECLARATIONS = {
         'MAX_RECORDED_BATCH_COMMANDS': (
             '32', 'safety', 'project / bounded commands per named batch'),
     },
+    'insight_archive.py': {
+        'MAX_SQLITE_INTEGER': (
+            '9223372036854775807', 'format',
+            'insight archive / signed 64-bit SQLite INTEGER ceiling for revisions '
+            'and cursor high-water'),
+    },
     'insights.py': {
         'MAX_DECISION_EVENT_BYTES': (
             '1024 * 1024', 'safety', 'insights / fixed decision-event record read and write ceiling'),
