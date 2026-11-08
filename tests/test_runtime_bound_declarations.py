@@ -77,8 +77,9 @@ defer an operator setting until the pilot integration can actually consume it,
 rather than expose an inert option.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
-safety bounds. Restore's fixed member-read chunk bounds transient memory while
-its separate `max_bytes` setting limits total restored bytes. The `engine_config.py`
+safety bounds. Restore's fixed member-read chunk and archive-member count bound
+transient resources while its separate `max_bytes` setting limits total restored
+bytes. The `engine_config.py`
 reviewed-resource byte and tree-entry ceilings are
 fixed safety bounds; the 4096-entry traversal budget also bounds file count.
 The `drivers.py` event-stream default is the configured
@@ -393,6 +394,10 @@ DECLARATIONS = {
             '1048576', 'safety',
             'storage restore / fixed streamed-member read chunk bounds transient memory; '
             'max_bytes separately limits total restored bytes'),
+        'RESTORE_MEMBER_COUNT_MAX': (
+            '100000', 'safety',
+            'storage restore / fixed ceiling bounds filesystem work for untrusted archives; '
+            'max_bytes separately limits total member bytes'),
         'MAX_SNAPSHOT_GOAL_JSON_EXPANSION': (
             '6', 'format',
             'storage audit / canonical JSON can escape one UTF-8 control byte as six ASCII bytes'),

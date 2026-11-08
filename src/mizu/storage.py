@@ -35,6 +35,8 @@ from .snapshot import open_store
 
 #: Fixed archive-member read chunk; restore(max_bytes) separately limits total bytes.
 RESTORE_CHUNK_BYTES = 1048576
+#: Maximum member count for untrusted restore archives; byte totals have their own cap.
+RESTORE_MEMBER_COUNT_MAX = 100000
 
 #: Project members covered by backup/restore (plus backup.json on restore).
 #: operator-record-index is derived and deliberately rebuilt, not backed up.
@@ -1543,7 +1545,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                     seen.add(member.name)
                     count += 1
                     total += member.size
-                    if count > 100000 or member.size < 0 or total > max_bytes:
+                    if count > RESTORE_MEMBER_COUNT_MAX or member.size < 0 or total > max_bytes:
                         raise Denied("Backup exceeds restore limits")
                     target = stage / relative
                     if member.isdir():

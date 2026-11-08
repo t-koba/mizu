@@ -567,6 +567,18 @@ class RestoreTests(Fixture):
         with self.assertRaises(Denied):
             restore(self.config, 'restored', self.malicious('backup.json'), max_bytes=2)
 
+    def test_restore_member_count_is_bounded_independently_of_total_bytes(self):
+        archive = self.root / 'many-members.tar.gz'
+        with tarfile.open(archive, 'w:gz') as saved:
+            for name in ('project.toml', 'backup.json'):
+                info = tarfile.TarInfo(name)
+                info.size = 0
+                saved.addfile(info, io.BytesIO())
+        with patch.object(storage, 'RESTORE_MEMBER_COUNT_MAX', 1):
+            with self.assertRaises(Denied):
+                restore(self.config, 'restored', archive, max_bytes=1024)
+        self.assertFalse((self.config.data / 'projects/restored').exists())
+
     def test_refuses_unexpected_top_level(self):
         with self.assertRaises(Denied):
             restore(self.config, 'restored', self.malicious('workspace/exploit'))
