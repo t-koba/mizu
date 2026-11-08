@@ -142,9 +142,9 @@ built-in `range(...)` calls by file, scope, argument and occurrence. A separate
 exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
-contexts remain outside these inventories. One direct-comparison slice records
-operands of magnitude at least 3 in `check_jobs.py`; it is not a global numeric
-comparison linter.
+contexts remain outside these inventories. A direct-comparison slice records
+operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py` and
+`ci_acceptance.py`; it is not a global numeric comparison linter.
 """
 import ast
 from pathlib import Path
@@ -1597,6 +1597,24 @@ SYMBOLIC_RANGE_ARGUMENTS = {
 # module. (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
+    ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
+        '256', 'safety',
+        'acceptance / only expose untrusted relative cache paths within a bounded diagnostic field'),
+    ('acceptance.py', 'read_job', 1, 0): (
+        '32', 'format',
+        'acceptance / retained job command lists follow the public 32-command protocol bound'),
+    ('acceptance.py', 'read_job', 2, 0): (
+        '1099511627776', 'safety',
+        'acceptance / persisted dependency bounds mirror the 1 TiB config validation ceiling'),
+    ('acceptance.py', 'read_job', 1, 1): (
+        '32', 'format',
+        'acceptance / retained scratch-path manifests follow the 32-entry protocol bound'),
+    ('acceptance.py', 'read_job', 1, 2): (
+        '255', 'format',
+        'acceptance / scratch path component length follows the public 255-character schema bound'),
+    ('acceptance.py', '_scope', 2, 0): (
+        '32', 'format',
+        'acceptance / local command scope follows the public 32-command protocol bound'),
     ('check_jobs.py', '_mount_fingerprint', 2, 0): (
         '1099511627776', 'safety',
         'check jobs / persisted dependency bounds mirror the 1 TiB config validation ceiling'),
@@ -1618,6 +1636,39 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('check_jobs.py', 'logs', 2, 0): (
         '8192', 'format',
         'check jobs / public command-evidence page-size ceiling'),
+    ('ci_acceptance.py', '_text', 2, 0): (
+        '1024', 'format',
+        'CI acceptance / public text fields allow at most 1024 UTF-8 bytes'),
+    ('ci_acceptance.py', '_text', 1, 0): (
+        '32', 'format',
+        'CI acceptance / reject ASCII C0 control characters in policy text'),
+    ('ci_acceptance.py', '_text', 1, 1): (
+        '127', 'format',
+        'CI acceptance / reject ASCII DEL in policy text'),
+    ('ci_acceptance.py', 'policy', 2, 0): (
+        '32', 'format',
+        'CI acceptance / project verify command list follows the public 32-command protocol bound'),
+    ('ci_acceptance.py', 'policy', 2, 1): (
+        '32', 'format',
+        'CI acceptance / declared equivalence checks follow the 32-entry policy schema'),
+    ('ci_acceptance.py', 'policy', 2, 2): (
+        '32', 'format',
+        'CI acceptance / per-check command indices follow the 32-entry policy schema'),
+    ('ci_acceptance.py', 'policy', 2, 3): (
+        '32', 'format',
+        'CI acceptance / per-check coverage obligations follow the 32-entry policy schema'),
+    ('ci_acceptance.py', 'policy', 2, 4): (
+        '32', 'format',
+        'CI acceptance / per-check environment facts follow the 32-entry policy schema'),
+    ('ci_acceptance.py', 'policy', 1, 0): (
+        '32768', 'safety',
+        'CI acceptance / complete operator policy is capped at the documented 32 KiB'),
+    ('ci_acceptance.py', 'validate', 1, 0): (
+        '2147483647', 'format',
+        'CI acceptance / receipt attempt range is the documented 1-2147483647 integer contract'),
+    ('ci_acceptance.py', 'retain', 2, 0): (
+        '2147483647', 'format',
+        'CI acceptance / ingestion selector uses the same documented attempt range'),
 }
 
 
@@ -1907,20 +1958,18 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
 
-    def test_check_jobs_comparison_bound_inventory(self):
+    def test_selected_comparison_bound_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
         for expression, category, rationale in COMPARISON_BOUND_ARGUMENTS.values():
             self.assertIn(category, categories)
             self.assertTrue(rationale.strip())
-        tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
-        found = comparison_argument_inventory(tree)
-        expected = {
-            (scope, operand, occurrence): value
-            for (filename, scope, operand, occurrence), (value, _, _)
-            in COMPARISON_BOUND_ARGUMENTS.items()
-            if filename == 'check_jobs.py'
-        }
-        self.assertEqual(found, expected)
+        found = {}
+        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py'):
+            tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+            for site, expression in comparison_argument_inventory(tree).items():
+                found[(filename, *site)] = expression
+        self.assertEqual(found, {
+            site: entry[0] for site, entry in COMPARISON_BOUND_ARGUMENTS.items()})
 
     def test_comparison_detector_operand_scope_and_drift(self):
         source = (
