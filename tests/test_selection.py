@@ -1156,6 +1156,30 @@ class ClassificationTests(SelectionFixture):
                 if read_json(path).get('kind') == 'classification']
         self.assertEqual(len(runs), 1)
 
+    def test_classification_cache_read_limit_is_inclusive(self):
+        role, _ = self.classifier()
+
+        def callback(ctx, *_):
+            if ctx.role.workspace == 'none':
+                ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
+
+        driver = ScriptDriver(callback)
+        engine = Engine(self.config, driver=driver)
+        self.assertEqual(
+            engine.run(self.project, role.name)['selection']['classification']['status'], 'completed')
+        from mizu.classification import MAX_CLASSIFICATION_CACHE_BYTES
+        path = self.project.root / 'selection' / f'{role.name}-classification.json'
+        data = path.read_bytes()
+        self.assertLess(len(data), MAX_CLASSIFICATION_CACHE_BYTES)
+        path.write_bytes(data + b' ' * (MAX_CLASSIFICATION_CACHE_BYTES - len(data)))
+        self.assertEqual(engine.run(self.project, role.name)['selection']['classification']['status'],
+                         'cached')
+        self.assertEqual(len(self.classifying_calls(driver)), 1)
+
+        path.write_bytes(path.read_bytes() + b' ')
+        with self.assertRaises(ConfigError):
+            engine.run(self.project, role.name)
+
     def test_idle_state_churn_reuses_cache_while_new_work_reclassifies(self):
         role, _ = self.classifier()
         inferred = []

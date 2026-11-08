@@ -29,6 +29,12 @@ class ClassificationUsageTests(unittest.TestCase):
         self.assertEqual(_model_summary(model), {'engine': 'pi', 'usage_known': True,
                                                  'input_tokens': 8, 'output_tokens': 4})
 
+    def test_model_summary_identity_and_integer_limits_are_inclusive(self):
+        self.assertEqual(_model_summary({'profile': 'p' * 256}), {'profile': 'p' * 256})
+        self.assertIsNone(_model_summary({'profile': 'p' * 257}))
+        self.assertEqual(_model_summary({'requests': 2**53}), {'requests': 2**53})
+        self.assertIsNone(_model_summary({'requests': 2**53 + 1}))
+
     def test_oversized_engine_is_unknown_before_usage_normalization(self):
         model = {'engine': 'pi' + 'x' * 256, 'profile': 'classifier', 'usage_known': True,
                  'usage': [{'input': 1, 'output': 2}]}

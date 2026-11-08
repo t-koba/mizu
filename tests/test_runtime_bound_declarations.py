@@ -189,6 +189,20 @@ DECLARATIONS = {
             'acceptance / fixed retained-evidence read and canonical-value ceiling; '
             'limits.file_bytes may narrow reads'),
     },
+    'classification.py': {
+        'MAX_CLASSIFICATION_MODEL_LABEL_CHARS': (
+            '256', 'safety',
+            'classification / bound untrusted driver identity labels in cached model summaries'),
+        'MAX_CLASSIFICATION_MODEL_INTEGER': (
+            '2 ** 53', 'format',
+            'classification / inclusive binary64 integer-representation edge for model-count JSON values'),
+        'MAX_CLASSIFICATION_MODEL_SUMMARY_BYTES': (
+            '4096', 'safety',
+            'classification / bound the copied model-usage summary before retaining it'),
+        'MAX_CLASSIFICATION_CACHE_BYTES': (
+            '65536', 'safety',
+            'classification / per-role cache read and canonical-value ceiling'),
+    },
     'bridge.py': {
         'BRIDGE_BACKLOG_LIMIT': (
             '16', 'safety',

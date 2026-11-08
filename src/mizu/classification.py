@@ -14,6 +14,16 @@ from .selection import (DEFAULT_CLASSIFIER_INPUTS, _clip, bounded, validate_labe
 from .usage import attempt_usage, normalize
 
 
+#: Bound driver-reported model identity labels before retaining them in a cache.
+MAX_CLASSIFICATION_MODEL_LABEL_CHARS = 256
+#: Inclusive edge of the contiguous exactly representable integer range in binary64.
+MAX_CLASSIFICATION_MODEL_INTEGER = 2**53
+#: Bound the copied model-usage summary independently of source data size.
+MAX_CLASSIFICATION_MODEL_SUMMARY_BYTES = 4096
+#: Per-role classification cache read and canonical-value ceiling.
+MAX_CLASSIFICATION_CACHE_BYTES = 65536
+
+
 class ClassificationOutputError(ValueError):
     """A model completed, but did not return the declared attribute object."""
 
@@ -30,11 +40,11 @@ def _model_summary(model):
     summary = {}
     for key in ('profile', 'engine', 'provider', 'model', 'request_unit'):
         value = model.get(key)
-        if isinstance(value, str) and value and len(value) <= 256:
+        if isinstance(value, str) and value and len(value) <= MAX_CLASSIFICATION_MODEL_LABEL_CHARS:
             summary[key] = value
     for key in ('requests',):
         value = model.get(key)
-        if type(value) is int and 0 <= value <= 2**53:
+        if type(value) is int and 0 <= value <= MAX_CLASSIFICATION_MODEL_INTEGER:
             summary[key] = value
     usage = model.get('usage')
     engine = summary.get('engine', 'unknown')
@@ -43,11 +53,12 @@ def _model_summary(model):
                     for fragment in usage)):
         totals = attempt_usage(usage, engine)
         counts = (totals['input_tokens'], totals['output_tokens'])
-        if (all(type(count) is int and 0 <= count <= 2**53 for count in counts)
+        if (all(type(count) is int and 0 <= count <= MAX_CLASSIFICATION_MODEL_INTEGER
+                for count in counts)
                 and all(not normalize(fragment, engine)['unknown_shape'] for fragment in usage)):
             summary.update(usage_known=True, input_tokens=counts[0], output_tokens=counts[1])
     try:
-        bounded(summary, 4096)
+        bounded(summary, MAX_CLASSIFICATION_MODEL_SUMMARY_BYTES)
     except Exception:
         return None
     return summary or None
@@ -84,10 +95,10 @@ def classify(engine, project, role, snapshot, facts, *, preview=False):
     cached = None
     if path.exists():
         try:
-            if path.is_symlink() or path.stat().st_size > 65536:
+            if path.is_symlink() or path.stat().st_size > MAX_CLASSIFICATION_CACHE_BYTES:
                 raise ValueError('invalid cache file')
             cached = read_json(path)
-            bounded(cached, 65536)
+            bounded(cached, MAX_CLASSIFICATION_CACHE_BYTES)
             if not isinstance(cached, dict) or cached.get('status') not in ('completed', 'failed'):
                 raise ValueError('invalid cache')
             if not isinstance(cached.get('key'), str) or not isinstance(cached.get('run'), str):
