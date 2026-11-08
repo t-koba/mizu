@@ -29,9 +29,12 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
-The `acceptance.py` retained-evidence ceiling, CI observation total-row/prompt
-caps and wake-branch ceiling, and `ci_waits.py` diagnostic page caps are fixed
-safety bounds. `check_jobs.py` names its check-summary/evidence row caps,
+The `acceptance.py` retained-evidence ceiling and public invalid-producer
+diagnostic sample cap, CI observation total-row/prompt caps and wake-branch
+ceiling, and `ci_waits.py` diagnostic page caps are fixed safety bounds. The
+acceptance sample is capped at 32 rows while total/omitted report coverage and
+the complete internal exclusion set remain intact. `check_jobs.py` names its
+check-summary/evidence row caps,
 identity suffix, text-preview widths and shared capture-error excerpt; its
 caller-visible page and command-array limits remain checked against their
 existing schema declarations. CI branch/check retention defaults are configured policy owned
@@ -247,6 +250,10 @@ DECLARATIONS = {
             '1048576', 'safety',
             'acceptance / fixed retained-evidence read and canonical-value ceiling; '
             'limits.file_bytes may narrow reads'),
+        'MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES': (
+            '32', 'safety',
+            'acceptance / fixed public diagnostic sample envelope for untrusted entries; '
+            'full internal exclusions and total/omitted coverage are preserved'),
     },
     'classification.py': {
         'MAX_CLASSIFICATION_MODEL_LABEL_CHARS': (

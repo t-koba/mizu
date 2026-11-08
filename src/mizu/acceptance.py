@@ -16,6 +16,7 @@ from .errors import Denied, LimitExceeded
 from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
 
 MAX_BYTES = 1048576
+MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES = 32
 _BASE = 'evidence/acceptance'
 
 
@@ -42,7 +43,7 @@ def producer_diagnostics(invalid):
     if not invalid:
         return {}
     entries = []
-    for key in sorted(invalid, key=str)[:32]:
+    for key in sorted(invalid, key=str)[:MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES]:
         identity = {'entry_digest': key[1]} if isinstance(key, tuple) else {'job_id': key}
         entries.append({**identity, 'code': invalid[key]})
     return {'invalid_producers': {'entries': entries, 'total': len(invalid),
