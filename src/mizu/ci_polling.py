@@ -169,7 +169,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             if live is not None:
                 if len(live) <= max_branches:
                     live.add("main")
-                stale_branches = [b for b in failures_map if b not in live and b not in wake_branches]
+                stale_branches = [b for b in failures_map if b not in live]
                 for stale in stale_branches:
                     failures_map.pop(stale, None)
         for empty in [b for b, rows in failures_map.items() if not rows]:
@@ -194,7 +194,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             else:
                 successes_map.pop(branch, None)
         if branches is None and live is not None:
-            for stale in [name for name in successes_map if name not in live and name not in wake_branches]:
+            for stale in [name for name in successes_map if name not in live]:
                 successes_map.pop(stale, None)
         _prune_ci_branch_map(successes_map, wake_branches, config)
         state["successes"] = successes_map

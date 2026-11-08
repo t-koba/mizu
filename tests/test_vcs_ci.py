@@ -1142,11 +1142,14 @@ class CiCacheRetentionTests(Fixture):
                 branches=["selected-a"], reader=reader)
         self.assertEqual(state["failures"], expected)
         self.assertEqual(state["successes"], expected)
-        # Selected branches absent from live refs survive live-ref pruning too.
+        # Live-ref pruning still ends the lifetime of deleted branch facts,
+        # including a configured wake branch; wake selection only protects
+        # branches from capacity eviction.
         vcs.inject_refs(self.project.root, {"new": SHA_B})
         poll_ci(config, self.project, state, now=30.0, interval=15.0, reader=reader)
-        self.assertEqual(state["failures"], expected)
-        self.assertEqual(state["successes"], expected)
+        retained = {"new": self._rows(2)}
+        self.assertEqual(state["failures"], retained)
+        self.assertEqual(state["successes"], retained)
 
     def test_wake_covers_total_envelope_not_the_old_65_times_16_limit(self):
         from mizu.ci_observation import wake_ci_failures, ci_failures_projection
