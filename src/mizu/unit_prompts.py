@@ -444,7 +444,10 @@ def _row_detail_projection(context: Context, work: dict, checks: dict, prior=Non
             fingerprints[group][identifier] = fingerprint
             detail_keys = ({"description_preview", "scope_preview", "reason_preview"}
                            if group == "open_work_items" else {"command_preview", "error"})
-            if (context.config.limits.session_delta_details == "elide"
+            # Shared candidates are projected before full input validation.
+            # `join` revalidates and subscribes, so it is not a guaranteed read.
+            if (group != "shared_checks"
+                    and context.config.limits.session_delta_details == "elide"
                     and prior is not None and prior[group].get(identifier) == fingerprint
                     and (group != "open_work_items" or can_read_work_items)
                     and detail_keys.intersection(row)):
@@ -452,8 +455,7 @@ def _row_detail_projection(context: Context, work: dict, checks: dict, prior=Non
                 request = ({"tool": "mizu_work_items_read", "arguments": {"id": identifier}}
                            if group == "open_work_items" else
                            {"tool": "mizu_check_job", "arguments": {
-                               "action": "join" if group == "shared_checks" else "result",
-                               "id": identifier}})
+                               "action": "result", "id": identifier}})
                 row = {**row, "details_unchanged": True, "details_reference": request}
             projected[group].append(row)
     context.prompt_row_fingerprints = fingerprints

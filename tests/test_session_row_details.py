@@ -8,6 +8,7 @@ from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.engine_config import (PROMPT_STATE_BYTES, effective, read_prompt_state,
                                 save_session, session_record)
+from mizu.errors import Denied
 from mizu.fs import read_json, write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
@@ -36,8 +37,7 @@ class RowProjectionTests(Fixture):
         work['items'][0].update(age_seconds=6, doing_age_seconds=11, blocked_age_seconds=21)
         small_work, small_checks = _row_detail_projection(ctx, work, checks, prior)
         for source, small in ((work['items'], small_work['items']),
-                              (checks['check_jobs'], small_checks['check_jobs']),
-                              (checks['shared_checks'], small_checks['shared_checks'])):
+                              (checks['check_jobs'], small_checks['check_jobs'])):
             self.assertEqual(len(source), len(small))
             row = small[0]
             self.assertIs(row['details_unchanged'], True)
@@ -47,6 +47,9 @@ class RowProjectionTests(Fixture):
             self.assertEqual({k: v for k, v in row.items() if not k.startswith('details_')},
                              {k: v for k, v in source[0].items()
                               if k not in {'description_preview', 'command_preview'}})
+        self.assertEqual(small_checks['shared_checks'], checks['shared_checks'])
+        self.assertIn('command_preview', small_checks['shared_checks'][0])
+        self.assertNotIn('details_unchanged', small_checks['shared_checks'][0])
         self.assertEqual({k: v for k, v in small_work.items() if k != 'items'},
                          {k: v for k, v in work.items() if k != 'items'})
         for field in ('check_continuation', 'check_discovery'):
@@ -63,7 +66,7 @@ class RowProjectionTests(Fixture):
         changed_checks['shared_checks'].append({**job, 'id': 'd' * 32})
         _, projected = _row_detail_projection(ctx, work, changed_checks, prior)
         self.assertEqual(projected['check_jobs'], changed_checks['check_jobs'])
-        self.assertEqual(projected['shared_checks'][1], changed_checks['shared_checks'][1])
+        self.assertEqual(projected['shared_checks'], changed_checks['shared_checks'])
         ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
             ctx.config.limits, session_delta_details='full'))
         self.assertEqual(_row_detail_projection(ctx, work, checks, prior), (work, checks))
@@ -92,7 +95,9 @@ class SessionRowDetailsTests(Fixture):
         roles['worker'] = dataclasses.replace(
             roles['worker'], capabilities=tuple(dict.fromkeys(
                 (*roles['worker'].capabilities, 'check_job', 'work_items_read'))))
-        self.config = dataclasses.replace(self.config, roles=roles)
+        self.config = dataclasses.replace(
+            self.config, roles=roles,
+            sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project = Project(self.config, 'sample')
         self.item = self.project.work_items.create(
             idempotency_key='row', title='Review scope', actor='worker',
@@ -155,6 +160,26 @@ class SessionRowDetailsTests(Fixture):
             self.config.limits, session_delta_details='full'))
         self.project.config = self.config
         self.assert_full_details(self.peek()[1])
+
+    def test_shared_candidate_details_survive_join_revalidation_denial(self):
+        ctx = self.context('worker')
+        checks = check_jobs.prompt_projection(ctx)
+        candidate = next(row for row in checks['shared_checks'] if row['id'] == self.job['id'])
+        self.assertTrue(candidate['requires_input_check'])
+
+        work = {'items': []}
+        _row_detail_projection(ctx, work, checks)
+        prior = ctx.prompt_row_fingerprints
+        _, delta_checks = _row_detail_projection(ctx, work, checks, prior)
+        delta = next(row for row in delta_checks['shared_checks'] if row['id'] == self.job['id'])
+        self.assertIn('command_preview', delta)
+        self.assertNotIn('details_unchanged', delta)
+
+        # A shared candidate can be shown before environment validation changes;
+        # join then denies and must not be the only path to its command details.
+        with patch('mizu.check_jobs.environment', return_value=None):
+            with self.assertRaisesRegex(Denied, 'No matching reusable check'):
+                check_jobs.join(ctx, self.job['id'])
 
     def test_invalid_cursor_and_session_resets_resend_full_details(self):
         self.run_observed()

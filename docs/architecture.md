@@ -1401,12 +1401,15 @@ no internal compaction event; the harness does not infer one.
 deltas only. Every bounded work/check row remains explicit, including identity,
 title/status/revision/wait/liveness, continuation and discovery metadata, page
 totals, truncation and coverage. Only unchanged `description_preview`,
-`scope_preview`, `reason_preview`, check `command_preview` and `error` text are
-omitted. Such rows carry `details_unchanged: true` and `details_reference` with
-exact tool arguments: `work_items_read` by ID, own `check_job result` (which may
-acknowledge a terminal result/import matching acceptance), or shared `check_job
-join` (which subscribes and revalidates compatibility before returning details).
-New or content-changed rows send full details. Full prompts, ready-work,
+`scope_preview`, `reason_preview`, and role-owned `check_jobs`
+`command_preview`/`error` text are omitted. Such rows
+carry `details_unchanged: true` and `details_reference` with exact tool
+arguments: `work_items_read` by ID or own `check_job result` (which may
+acknowledge a terminal result/import matching acceptance). Shared-check
+candidates retain their full command/error details: prompt discovery is a
+pre-validation view, while `check_job join` revalidates and creates a
+subscription, so it is not a guaranteed details read. New or content-changed
+rows send full details. Full prompts, ready-work,
 work-order generations, source page reads and check discovery are unchanged.
 
 The existing atomic `prompt_state.json` cursor replaces bounded per-row SHA-256
