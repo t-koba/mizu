@@ -7,6 +7,10 @@ The gate inventory covers `scripts/check.py`'s host-cost, output
 and artifact bounds; its enforced host-cost choices are configured policy
 defaults, while its scope reserves and output/artifact bounds are fixed safety
 ceilings.
+The editor search byte, match and excerpt defaults are configured policy in
+`[editor]`, captured per export. The per-file `PREVIEW_BYTES` read bound, shared
+maximum excerpt, strict settings-file read cap and MAX_FRAME-derived canonical
+response cap remain fixed safety/framing bounds, checked against their uses.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
 ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
@@ -194,7 +198,6 @@ CANDIDATE = re.compile(
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
-    'editor.py': frozenset({'EDITOR_SEARCH_MAX_MATCHES'}),
     'platform.py': frozenset({'LOCK_RETRY_INTERVAL_MS', 'PIPE_POLL_INTERVAL_MS'}),
     'snapshot_manifest.py': frozenset({'_WINDOWS_EXTENDED_PATH_UNITS',
                                        '_MAX_FILES_WHITESPACE_RUN'}),
@@ -725,15 +728,14 @@ DECLARATIONS = {
             'distribution / public-source algorithm label bound'),
     },
     'editor.py': {
-        'EDITOR_SEARCH_MAX_BYTES': (
-            '8 * 1024 * 1024', 'safety',
-            'editor search / per-request cumulative byte budget bounds work on exported snapshots'),
-        'EDITOR_SEARCH_MAX_MATCHES': (
-            '50', 'mechanism',
-            'editor search / fixed maximum result rows in the public search tool'),
-        'EDITOR_SEARCH_MATCH_CHARS': (
-            '1000', 'safety',
-            'editor search / bounded line excerpt per returned match'),
+        'EDITOR_SEARCH_SETTINGS_BYTES': (
+            '4096', 'safety', 'editor bundle / fixed three-integer search-settings read envelope'),
+        'EDITOR_SEARCH_RESPONSE_BYTES': (
+            'MAX_FRAME // 4', 'safety',
+            'editor search / canonical response reserve for structured and escaped text copies plus MCP framing'),
+        'EDITOR_SEARCH_SKIPPED_BYTES': (
+            'EDITOR_SEARCH_RESPONSE_BYTES // 4', 'safety',
+            'editor search / skipped-path diagnostics reserve so they cannot crowd out matches'),
         'BUNDLE_MANIFEST_BYTES': (
             '16 * 1024 * 1024', 'safety',
             'editor bundle / bounded manifest read'),
@@ -1066,6 +1068,11 @@ CONFIGURED_SETTINGS = {
     },
 }
 CONFIGURED = {
+    'Editor': {
+        'search_max_bytes': ('8 * 1024 * 1024', 'configured policy', 'editor / per-request scan byte budget'),
+        'search_max_matches': ('50', 'configured policy', 'editor / per-request match count'),
+        'search_match_chars': ('1000', 'configured policy', 'editor / matching-line excerpt length'),
+    },
     'Usage': {
         'runs_scanned': ('5000', 'configured policy', 'usage / history scan work budget'),
         'finish_rate_runs_scanned': ('512', 'configured policy', 'usage / finish-only status history window'),
@@ -1254,6 +1261,8 @@ DECISION_RECONCILIATION = {
 # already declared by the special dictionaries, so a new unexplained literal
 # fails it.
 CONFIG_MODULE_BOUNDS = {
+    'MAX_EDITOR_SEARCH_MATCH_CHARS': (
+        'READ_PAGE_CHARS', 'safety', 'editor / fixed maximum excerpt uses the shared read-page envelope'),
     'MAX_INSIGHT_HISTORY_ENTRIES': (
         '1000', 'safety', 'insights / fixed ceiling for explicit history output rows'),
     'DEFAULT_INSIGHT_HISTORY_ENTRIES': (
@@ -2328,8 +2337,13 @@ def range_argument_inventory(tree, *, symbolic=False):
 
 
 SYMBOLIC_BOUNDS = {
+    'editor.py': {
+        'EDITOR_SEARCH_RESPONSE_BYTES': frozenset({'MAX_FRAME'}),
+        'EDITOR_SEARCH_SKIPPED_BYTES': frozenset({'EDITOR_SEARCH_RESPONSE_BYTES'}),
+    },
     'fs.py': {'_LOCAL_BLOCKING_TIMEOUT': frozenset({'_platform.LOCK_TIMEOUT'})},
     'config.py': {
+        'MAX_EDITOR_SEARCH_MATCH_CHARS': frozenset({'READ_PAGE_CHARS'}),
         'MAX_NO_PROGRESS_BACKOFF_SECONDS': frozenset({'MAX_WAIT_SECONDS'}),
         'MAX_USAGE_POLICY_COUNT': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),
         'MAX_USAGE_RUNS_SCANNED': frozenset({'MAX_USAGE_POLICY_COUNT'}),
@@ -2600,12 +2614,22 @@ def sibling():
                               for value in ast.walk(node.test)))
         comparisons = {ast.unparse(node) for node in ast.walk(search)
                        if isinstance(node, ast.Compare)}
-        self.assertIn("scanned + entry['bytes'] > EDITOR_SEARCH_MAX_BYTES", comparisons)
-        self.assertIn('len(hits) == EDITOR_SEARCH_MAX_MATCHES', comparisons)
+        self.assertIn("scanned + entry['bytes'] > self.editor.search_max_bytes", comparisons)
+        self.assertIn('len(hits) == self.editor.search_max_matches', comparisons)
         slices = {ast.unparse(node) for node in ast.walk(search)
                   if isinstance(node, ast.Subscript)
                   and ast.unparse(node.value) == 'value'}
-        self.assertIn('value[:EDITOR_SEARCH_MATCH_CHARS]', slices)
+        self.assertIn('value[:self.editor.search_match_chars]', slices)
+        self.assertIn("entry['bytes'] > PREVIEW_BYTES", comparisons)
+        self.assertIn('result_bytes + size > EDITOR_SEARCH_RESPONSE_BYTES', comparisons)
+        self.assertIn('skipped_bytes + size > skipped_budget', comparisons)
+        self.assertIn('append_bounded(skipped, path, skipped_budget=EDITOR_SEARCH_SKIPPED_BYTES)',
+                      {ast.unparse(node) for node in ast.walk(search) if isinstance(node, ast.Call)})
+        calls = {ast.unparse(node) for node in ast.walk(search) if isinstance(node, ast.Call)}
+        self.assertIn('append_bounded(skipped, path, skipped_budget=EDITOR_SEARCH_SKIPPED_BYTES)', calls)
+        self.assertIn('append_bounded(hits, hit)', calls)
+        self.assertIn("safe_read(self.bundle, 'editor-search.json', EDITOR_SEARCH_SETTINGS_BYTES)",
+                      {ast.unparse(node) for node in ast.walk(capsule) if isinstance(node, ast.Call)})
 
     def test_bridge_listeners_share_declared_backlog_bound(self):
         tree = ast.parse((ROOT / 'bridge.py').read_text(encoding='utf-8'))

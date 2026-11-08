@@ -14,7 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError, Denied
-from .fs import ID, canonical, relative_parts, lock_policy
+from .fs import ID, READ_PAGE_CHARS, canonical, relative_parts, lock_policy
 from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT, PIPE_POLL_INTERVAL_MS, pipe_poll_policy
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
@@ -49,6 +49,8 @@ MAX_STORAGE_RUN_ENTRIES = 100_000
 
 #: TOML signed-64-bit integer representation ceiling, not a resource budget.
 TOML_INTEGER_MAX = (1 << 63) - 1
+#: Fixed excerpt ceiling keeps editor search rows within the shared read-page envelope.
+MAX_EDITOR_SEARCH_MATCH_CHARS = READ_PAGE_CHARS
 #: subprocess selector waits use signed 32-bit milliseconds; retain the largest
 #: whole-second value that fits, regardless of the host parsing this config.
 MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS = 2_147_483
@@ -351,7 +353,7 @@ def _merge_into(base: dict, fragment: dict, origin: Path, origins: dict[str, Pat
 #: Root keys accepted at the document level.
 ROOT_KEYS = frozenset({
     "data_dir", "engines", "timezone", "limits", "sandbox", "profiles", "roles",
-    "services",
+    "services", "editor",
     "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude",
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
@@ -1313,6 +1315,24 @@ def service_settings(raw: dict) -> ServiceSettings:
 
 
 @dataclasses.dataclass(frozen=True)
+class Editor:
+    search_max_bytes: int = 8 * 1024 * 1024
+    search_max_matches: int = 50
+    search_match_chars: int = 1000
+
+
+def editor_settings(raw: dict) -> Editor:
+    fields = dataclasses.fields(Editor)
+    keys(raw, {field.name for field in fields}, "editor")
+    return Editor(**{
+        field.name: number(raw.get(field.name, field.default), f"editor.{field.name}", 1,
+                           MAX_EDITOR_SEARCH_MATCH_CHARS
+                           if field.name == "search_match_chars" else TOML_INTEGER_MAX)
+        for field in fields
+    })
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     file: Path
     data: Path
@@ -1349,6 +1369,7 @@ class Config:
     publication_evidence: PublicationEvidence = dataclasses.field(default_factory=PublicationEvidence)
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
     services: ServiceSettings = dataclasses.field(default_factory=ServiceSettings)
+    editor: Editor = dataclasses.field(default_factory=Editor)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -2001,4 +2022,5 @@ def load(file: Path) -> Config:
                   project_import=project_import_policy(data.get("project_import", {})),
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})),
-                  services=service_settings(data.get("services", {})))
+                  services=service_settings(data.get("services", {})),
+                  editor=editor_settings(data.get("editor", {})))

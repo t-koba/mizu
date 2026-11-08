@@ -324,6 +324,7 @@ unit stopped, while `Now`/`Next` are short working notes, not a parallel backlog
 | `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit roles required) |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system. The product's reserved private evidence tree (`private-validation/`) is always left out of a capture, whatever this list holds. The product's own host state (the per-engine adapter start-up record `adapter-startup.json` and its lock) is left out for the same reason: it holds one host's measurements, not the product's source |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
+| `editor` | Operator-owned search policy captured in each immutable Editor export (see [Editor search](#editor-search)) |
 
 The private evidence tree `private-validation/` holds receipts the product regenerates on demand and never commits (see [VALIDATION.md](VALIDATION.md)). A capture leaves that tree out, so a regenerated receipt never enters a published snapshot and never moves a tree's `code_digest`. The rule belongs to the product, so `exclude` cannot reintroduce it; a snapshot that already holds such a path stays readable.
 
@@ -1072,6 +1073,25 @@ policy, audit and recognized quarantine recovery are examined.
 See [operations](operations.md#shared-smoke-evidence-retention) for commands,
 quarantine recovery, partial-failure results and bounded maintenance audit.
 
+## Editor search
+
+Top-level `[editor]` controls exported capsule search policy, not live workspace
+access. Omitted fields keep these defaults:
+
+| Field | Default | Accepted integer range |
+|---|---|---|
+| `search_max_bytes` | 8,388,608 (8 MiB) | 1 through `TOML_INTEGER_MAX` (9,223,372,036,854,775,807) |
+| `search_max_matches` | 50 | 1 through `TOML_INTEGER_MAX` |
+| `search_match_chars` | 1,000 | 1 through `MAX_EDITOR_SEARCH_MATCH_CHARS = READ_PAGE_CHARS` (8,192) |
+
+Booleans, nonintegers, unknown keys and non-table values are refused. These are
+configured policy defaults: choose scan work, result count and excerpt length
+for the exported project. `mizu editor export` captures the effective values in
+strict `editor-search.json` inside its atomic immutable export. Only legacy
+bundles missing the file use current defaults; unsafe or malformed present files
+are refused. Config changes affect new exports only. See [Editor](editor.md) for
+the settings-file schema, truncation and MCP transport behavior.
+
 ## Fixed mechanism bounds
 
 Safety-critical bounds are fixed in code rather than exposed as configuration knobs.
@@ -1086,6 +1106,10 @@ detected bound without declaring it:
 | | `MAX_STARTED_EVIDENCE_BYTES` (`evidence_records.py`) | 64 KiB | Hard ceiling for run metadata used only to authorize retained-evidence reads and to trim the configured queue-observation sample; `file_bytes` may lower it |
 | | `MAX_FRAME` (`fs.py`) | 1 MiB | Maximum JSON-RPC message size across bridge and MCP servers |
 | | `MAX_JSON_DEPTH` (`fs.py`) | 64 | Maximum JSON nesting depth `loads_finite` accepts; a deeper document is refused before it is parsed, so the refusal does not follow a runtime's recursion limit |
+| **Editor search** | `MAX_EDITOR_SEARCH_MATCH_CHARS` (`config.py`) | `READ_PAGE_CHARS` (8,192) | Fixed excerpt ceiling, separate from the configured 1,000-character default |
+| | `EDITOR_SEARCH_SETTINGS_BYTES` (`editor.py`) | 4 KiB | Bounded strict three-integer settings-file read |
+| | `EDITOR_SEARCH_RESPONSE_BYTES` (`editor.py`) | `MAX_FRAME // 4` (256 KiB) | Canonical result cap reserves MCP structured/text duplication and envelope; exhaustion truncates rather than overflowing |
+| | `EDITOR_SEARCH_SKIPPED_BYTES` (`editor.py`) | `EDITOR_SEARCH_RESPONSE_BYTES // 4` (64 KiB) | Diagnostic path sample cannot consume the match-result reserve |
 | **VCS artifacts** | `MAX_ARTIFACT_FIELD_NAMES` / `MAX_ARTIFACT_FIELD_NAME_CHARS` (`vcs.py`) | 8 / 32 | Bounds the field identifiers a shape refusal may name; values and arbitrary keys are never echoed |
 | **Tool inputs** | `exec` / `experiment` script | 64 KiB | Sandbox command size (`SCRIPT_MAX`) |
 | **Adapter diagnostics** | `ADAPTER_DIAGNOSTIC_BYTES_MAX` (`process.py`) | 8 KiB | Hard ceiling for any configured model-visible stderr excerpt; per-adapter `diagnostic_bytes` may lower it or disable it |

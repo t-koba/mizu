@@ -5,6 +5,7 @@ separate account with only the exported bundle and outbox mounted.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -12,8 +13,10 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from .errors import Denied
-from .fs import PREVIEW_BYTES, atomic_write, canonical, digest, mkdir, relative_parts, safe_read, write_json, page, lock
+from .config import Editor, editor_settings
+from .errors import ConfigError, Denied
+from .fs import (MAX_FRAME, PREVIEW_BYTES, loads_finite, atomic_write, canonical,
+                 digest, mkdir, relative_parts, safe_read, write_json, page, lock)
 from .project import Project
 from .protocol import DEFINITIONS, MCP_VERSIONS, PAGE_FIELDS, obj, text, validate
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
@@ -21,9 +24,12 @@ assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, f
 #: Exported-bundle framing: whole-manifest reads vs recent-summary reads.
 BUNDLE_MANIFEST_BYTES = 16 * 1024 * 1024
 BUNDLE_CHANGES_BYTES = 262144
-EDITOR_SEARCH_MAX_BYTES = 8 * 1024 * 1024
-EDITOR_SEARCH_MAX_MATCHES = 50
-EDITOR_SEARCH_MATCH_CHARS = 1000
+#: Fixed read cap for the three-integer exported settings object, not search policy.
+EDITOR_SEARCH_SETTINGS_BYTES = 4096
+#: Canonical search payload reserve for MCP's structured + escaped text copies
+#: and JSON-RPC envelope. Independent of operator scan and result-row policy.
+EDITOR_SEARCH_RESPONSE_BYTES = MAX_FRAME // 4
+EDITOR_SEARCH_SKIPPED_BYTES = EDITOR_SEARCH_RESPONSE_BYTES // 4
 
 TOOLS = {
     "get_changes": ("Read the exported bounded diff and recent snapshot summaries.", obj({})),
@@ -31,7 +37,7 @@ TOOLS = {
     "list_files": ("List the files in this immutable snapshot; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
     "read_file": ("Read one relative path from the exported snapshot.", obj({"path": text(4096)}, ("path",))),
     "search_files": (
-        f"Search literal text in the exported snapshot; bounded to {EDITOR_SEARCH_MAX_MATCHES} matches.",
+        "Search literal text in the exported snapshot.",
         obj({"query": text(1000)}, ("query",))),
     # Input schema shared with the runtime submit_insight; outbox files are
     # additionally framed by PREVIEW_BYTES at ingest.
@@ -68,13 +74,15 @@ def export_public_source(snapshot: dict) -> dict:
             "captured_files": len(snapshot["files"]), "public_files": public_files}
 
 
-def export(project: Project, destination: Path) -> dict:
+def export(project: Project, destination: Path, settings: Editor = Editor()) -> dict:
     destination = destination.resolve()
     if destination.exists():
         raise Denied("Export destination already exists")
     mkdir(destination.parent)
     stage = Path(tempfile.mkdtemp(prefix=".export-", dir=destination.parent))
     try:
+        policy = editor_settings(dataclasses.asdict(settings))
+        write_json(stage / "editor-search.json", dataclasses.asdict(policy))
         snapshot = project.snapshots.get()
         project.snapshots.materialize(snapshot, stage / "code")
         write_json(stage / "snapshot.json", snapshot)
@@ -134,7 +142,35 @@ class Capsule:
                            for key, value in expected.items())):
                 raise Denied("Bundle public-source integrity failure")
             self.public_source = candidate
+        try:
+            (self.bundle / "editor-search.json").lstat()
+        except FileNotFoundError:
+            self.editor = Editor()
+        else:
+            raw = safe_read(self.bundle, "editor-search.json", EDITOR_SEARCH_SETTINGS_BYTES)
+            try:
+                def unique(pairs):
+                    result = dict(pairs)
+                    if len(result) != len(pairs):
+                        raise ValueError("Duplicate editor-search key")
+                    return result
+                settings = loads_finite(raw, object_pairs_hook=unique)
+                if not isinstance(settings, dict) or set(settings) != set(dataclasses.asdict(Editor())):
+                    raise ValueError("Expected all editor-search settings")
+                self.editor = editor_settings(settings)
+            except (ValueError, ConfigError) as exc:
+                raise Denied("Invalid bundle editor-search settings") from exc
         mkdir(self.outbox)
+
+    def tools(self) -> list[dict]:
+        policy = self.editor
+        description = (
+            f"Search literal text in the exported snapshot; scan at most {policy.search_max_bytes} bytes, "
+            f"return at most {policy.search_max_matches} matches, clip lines to {policy.search_match_chars} characters. "
+            f"Files above {PREVIEW_BYTES} bytes are skipped; canonical results including skipped names "
+            f"are capped at {EDITOR_SEARCH_RESPONSE_BYTES} bytes (truncated on exhaustion).")
+        return [{"name": n, "description": description if n == "search_files" else d,
+                 "inputSchema": schema} for n, (d, schema) in TOOLS.items()]
 
     def read(self, name: str) -> str:
         relative_parts(name)
@@ -169,19 +205,42 @@ class Capsule:
             if not arguments["query"].strip():
                 raise Denied("A nonempty literal query is required")
             hits, scanned, skipped = [], 0, []
+            result = {"matches": hits, "truncated": False, "skipped": skipped}
+            # Account once for the envelope and once per candidate, including
+            # list commas but excluding canonical's trailing LF. Reserve the
+            # longer false spelling so switching to true always fits.
+            result_bytes = len(canonical(result))
+            skipped_bytes = 0
+
+            def append_bounded(rows, item, *, skipped_budget=None):
+                nonlocal result_bytes, skipped_bytes
+                size = len(canonical(item)) - 1 + bool(rows)
+                if (result_bytes + size > EDITOR_SEARCH_RESPONSE_BYTES
+                        or (skipped_budget is not None
+                            and skipped_bytes + size > skipped_budget)):
+                    return False
+                rows.append(item)
+                result_bytes += size
+                if skipped_budget is not None:
+                    skipped_bytes += size
+                return True
             for path, entry in sorted(self.snapshot["files"].items()):
                 if (entry["bytes"] > PREVIEW_BYTES
-                        or scanned + entry["bytes"] > EDITOR_SEARCH_MAX_BYTES):
-                    skipped.append(path)
+                        or scanned + entry["bytes"] > self.editor.search_max_bytes):
+                    result["truncated"] = True
+                    if not append_bounded(skipped, path,
+                                          skipped_budget=EDITOR_SEARCH_SKIPPED_BYTES):
+                        result["truncated"] = True
                     continue
                 scanned += entry["bytes"]
                 for line, value in enumerate(self.read(path).splitlines(), 1):
                     if arguments["query"] in value:
-                        hits.append({"path": path, "line": line,
-                                     "text": value[:EDITOR_SEARCH_MATCH_CHARS]})
-                        if len(hits) == EDITOR_SEARCH_MAX_MATCHES:
-                            return {"matches": hits, "truncated": True, "skipped": skipped}
-            return {"matches": hits, "truncated": bool(skipped), "skipped": skipped}
+                        hit = {"path": path, "line": line,
+                               "text": value[:self.editor.search_match_chars]}
+                        if not append_bounded(hits, hit) or len(hits) == self.editor.search_max_matches:
+                            result["truncated"] = True
+                            return result
+            return result
         if not arguments["title"].strip() or not arguments["body"].strip():
             raise Denied("Insight title and body must be nonempty")
         insight_id = uuid.uuid4().hex
@@ -202,8 +261,7 @@ def serve(bundle: Path, outbox: Path, *, input_stream=None, output_stream=None) 
     capsule = Capsule(bundle, outbox)
 
     def list_tools() -> list[dict]:
-        return [{"name": n, "description": d, "inputSchema": schema}
-                for n, (d, schema) in TOOLS.items()]
+        return capsule.tools()
 
     def call_tool(name, arguments: dict) -> dict:
         return capsule.call(name, arguments)

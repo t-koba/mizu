@@ -423,7 +423,7 @@ def _cmd_insight(config, project, args):
 def _cmd_editor_export(config, project, args):
     from .editor import export
     with lock(project.root / "locks/publication.lock", blocking=False):
-        return export(project, args.destination)
+        return export(project, args.destination, config.editor)
 
 
 def _cmd_service(config, project, args):

@@ -290,6 +290,14 @@ mode = "rootless"                 # rootless on every OS, or single on Linux hos
 # cgroup_manager = "cgroupfs"
 # cgroup_parent = "user.slice/user-1000.slice/user@1000.service/mizucg"
 
+# Export-time capsule search policy; config changes require a new export.
+# Positive integers; byte/match counts accept TOML's signed-64-bit maximum.
+# Excerpts have a fixed READ_PAGE_CHARS ceiling (8192); per-file reads remain 128 KiB.
+# [editor]
+# search_max_bytes = 8388608
+# search_max_matches = 50
+# search_match_chars = 1000
+
 # Systemd-only deployment and validation policy; positive integer seconds.
 # Restart/stop defaults preserve existing generated units; regenerate and
 # reinstall units after changing them. The verification timeout bounds the
