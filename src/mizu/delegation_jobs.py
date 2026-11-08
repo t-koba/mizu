@@ -37,10 +37,12 @@ results to 32 KiB UTF-8, and the ledger to 1 MiB plus 14 bytes per job for the
 explicit intent field plus one maximum active
 binding/intent inventory. At most one job is active, so the allowance does not
 accumulate across history. Only the latest terminal result is retained; old
-jobs retain small identity/status/result-digest tombstones indefinitely. The 1024-job history cap is shared project-state
-capacity policy pending this pilot's configuration section: capacity exhaustion
-refuses new starts, never forgets a key. The byte ceilings and schema are
-private format/safety limits, not scheduling policy.
+jobs retain small identity/status/result-digest tombstones indefinitely. The 1024-job history cap is shared project-state capacity policy: exhaustion
+refuses new starts rather than forgetting a key. This private store has no
+in-repository consumer or configuration path yet, so defer an operator setting
+until the async-delegation pilot is integrated instead of exposing an inert
+option. The byte ceilings and schema are private format/safety limits, not
+scheduling policy.
 
 Every mutation uses a dedicated file lock and one fsynced atomic replacement.
 Start commits identity AND reservation before returning; an interrupted write
