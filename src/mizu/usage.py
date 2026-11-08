@@ -291,6 +291,7 @@ def summarize(project) -> dict:
                     continue
                 if not target.is_file():
                     continue
+                # A fixed per-record safety ceiling; there is no whole-report cap.
                 if target.stat().st_size > 1048576:
                     skipped += 1
                     continue

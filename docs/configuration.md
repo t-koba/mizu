@@ -811,8 +811,9 @@ counts flow through collection-index APIs. `runs_scanned` and
 the extra candidate used to detect truncation also fits. These are
 representation/API bounds, not recommended operating values. Increasing a
 window can increase scan work. The usage summary has no whole-report byte cap;
-the status rate scan separately keeps fixed safety ceilings of 64 KiB per
-record and 8 MiB total read content.
+each individual `result.json`, `consultation.json` or `error.json` read is
+capped at 1 MiB. The status-rate scan separately keeps fixed safety ceilings
+of 64 KiB per record and 8 MiB total read content.
 
 ```toml
 [usage]

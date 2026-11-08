@@ -143,8 +143,9 @@ exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
-operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py` and
-`ci_acceptance.py`; it is not a global numeric comparison linter.
+operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
+`ci_acceptance.py` and `usage.py`; it is not a global numeric comparison
+linter.
 """
 import ast
 from pathlib import Path
@@ -1593,8 +1594,8 @@ SYMBOLIC_RANGE_ARGUMENTS = {
         'work items / replay every validated revision within MAX_REVISIONS'),
 }
 
-# Direct comparison operands with magnitude >= 3 in the audited check-jobs
-# module. (file, qualified scope, operand index, occurrence):
+# Direct comparison operands with magnitude >= 3 in the selected modules.
+# (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
     ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
@@ -1669,6 +1670,36 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_acceptance.py', 'retain', 2, 0): (
         '2147483647', 'format',
         'CI acceptance / ingestion selector uses the same documented attempt range'),
+    ('usage.py', '_affinity_row', 2, 0): (
+        '256', 'safety',
+        'usage / bound the stored role label in the whitelisted affinity projection'),
+    ('usage.py', '_affinity_row', 2, 1): (
+        '256', 'safety',
+        'usage / bound the stored engine label in the whitelisted affinity projection'),
+    ('usage.py', '_affinity_row', 2, 2): (
+        '64', 'safety',
+        'usage / bound recorded start-time text before including it in the affinity projection'),
+    ('usage.py', '_affinity_row', 2, 3): (
+        '64', 'safety',
+        'usage / bound recorded end-time text before including it in the affinity projection'),
+    ('usage.py', '_affinity_row', 2, 4): (
+        '256', 'safety',
+        'usage / bound the stored prompt-mode label in the whitelisted affinity projection'),
+    ('usage.py', '_affinity_row', 2, 5): (
+        '256', 'safety',
+        'usage / bound the stored profile label in the whitelisted affinity projection'),
+    ('usage.py', '_affinity_row', 2, 6): (
+        '256', 'safety',
+        'usage / bound the provider label copied from run evidence'),
+    ('usage.py', '_affinity_row', 2, 7): (
+        '256', 'safety',
+        'usage / bound the model label copied from run evidence'),
+    ('usage.py', 'record_time', 1, 0): (
+        '64', 'safety',
+        'usage / cap untrusted timestamp text before ISO-8601 parsing'),
+    ('usage.py', 'summarize', 1, 0): (
+        '1048576', 'safety',
+        'usage / fixed per-record read ceiling for retained run evidence; no whole-report byte cap'),
 }
 
 
@@ -1964,7 +1995,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertIn(category, categories)
             self.assertTrue(rationale.strip())
         found = {}
-        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py'):
+        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             for site, expression in comparison_argument_inventory(tree).items():
                 found[(filename, *site)] = expression
