@@ -703,6 +703,15 @@ DECLARATIONS = {
         'PURPOSE_MAX': (
             '64', 'format',
             'check jobs / stored purpose label character bound'),
+        'CHECK_INPUT_HASH_CHUNK_BYTES': (
+            'MEBIBYTE_BYTES', 'safety',
+            'check jobs / transient buffer bound while hashing one frozen input'),
+        'COMMAND_EVIDENCE_OUTPUT_MULTIPLIER': (
+            '8', 'safety',
+            'check jobs / canonical JSON output-expansion allowance for bounded command evidence'),
+        'COMMAND_EVIDENCE_ENVELOPE_BYTES': (
+            'MEBIBYTE_BYTES', 'safety',
+            'check jobs / bounded script and record-envelope allowance for command evidence'),
     },
     'delegation_gates.py': {
         'POLICY_MAX_BYTES': (
@@ -2307,6 +2316,10 @@ SYMBOLIC_BOUNDS = {
     'storage_runs.py': {
         'MAX_ENTRIES': frozenset({'MAX_STORAGE_RUN_ENTRIES'}),
     },
+    'check_jobs.py': {
+        'CHECK_INPUT_HASH_CHUNK_BYTES': frozenset({'MEBIBYTE_BYTES'}),
+        'COMMAND_EVIDENCE_ENVELOPE_BYTES': frozenset({'MEBIBYTE_BYTES'}),
+    },
     'storage.py': {
         '_SNAPSHOT_AUDIT_BYTES': frozenset({
             '_AUDIT_JSON_BYTES', 'MAX_PROJECT_GOAL_BYTES', 'MAX_SNAPSHOT_GOAL_JSON_EXPANSION'}),
@@ -2744,6 +2757,26 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(ast.unparse(reads[0].args[0]),
                          'min(RESTORE_CHUNK_BYTES, remaining)')
         self.assertEqual(DECLARATIONS['storage.py']['RESTORE_CHUNK_BYTES'][0], '1048576')
+
+    def test_check_job_stream_and_evidence_bounds_use_declared_limits(self):
+        tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
+        fingerprint = next(node for node in ast.walk(tree)
+                           if isinstance(node, ast.FunctionDef)
+                           and node.name == 'cache_input')
+        reads = [node for node in ast.walk(fingerprint)
+                 if isinstance(node, ast.Call) and ast.unparse(node.func) == 'stream.read']
+        self.assertEqual([ast.unparse(node.args[0]) for node in reads],
+                         ['min(remaining, CHECK_INPUT_HASH_CHUNK_BYTES)', '1'])
+        logs = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == 'logs')
+        evidence_bound = next(node for node in ast.walk(logs)
+                              if isinstance(node, ast.Compare)
+                              and ast.unparse(node.left) == 'path.stat().st_size')
+        self.assertEqual(ast.unparse(evidence_bound.comparators[0]),
+                         'context.config.limits.output_bytes * COMMAND_EVIDENCE_OUTPUT_MULTIPLIER + COMMAND_EVIDENCE_ENVELOPE_BYTES')
+        for name in ('CHECK_INPUT_HASH_CHUNK_BYTES', 'COMMAND_EVIDENCE_OUTPUT_MULTIPLIER',
+                     'COMMAND_EVIDENCE_ENVELOPE_BYTES'):
+            self.assertEqual(DECLARATIONS['check_jobs.py'][name][1], 'safety')
 
     def test_bridge_proxy_fallback_and_chunk_bounds_use_shared_declarations(self):
         for filename, function_name in (('bridge.py', 'connect'), ('mcp_proxy.py', 'forward')):

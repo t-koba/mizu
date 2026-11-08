@@ -67,6 +67,11 @@ def job_role(job_id):
 
 #: A purpose is a short opaque label: it names a demand, never a path.
 PURPOSE_MAX = 64
+#: Bound transient memory while hashing one frozen check input.
+CHECK_INPUT_HASH_CHUNK_BYTES = MEBIBYTE_BYTES
+#: Canonical JSON escapes control characters; allow expansion plus a record envelope.
+COMMAND_EVIDENCE_OUTPUT_MULTIPLIER = 8
+COMMAND_EVIDENCE_ENVELOPE_BYTES = MEBIBYTE_BYTES
 
 
 def purpose_label(purpose):
@@ -365,7 +370,7 @@ def cache_input(project, *, diagnostic=None, state=None):
                             return unbound(relative=relative)
                         hasher, remaining = hashlib.sha256(), info.st_size
                         while remaining:
-                            data = stream.read(min(remaining, 1048576))
+                            data = stream.read(min(remaining, CHECK_INPUT_HASH_CHUNK_BYTES))
                             if not data:
                                 return unbound(relative=relative)
                             remaining -= len(data)
@@ -1037,7 +1042,9 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
     if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 8192:
         raise Denied('Invalid evidence page')
     path = root(context.project) / job.get('shared_job', job_id) / 'commands' / (evidence_id + '.json')
-    if not path.is_file() or path.is_symlink() or path.stat().st_size > context.config.limits.output_bytes * 8 + 1048576:
+    if (not path.is_file() or path.is_symlink()
+            or path.stat().st_size > (context.config.limits.output_bytes * COMMAND_EVIDENCE_OUTPUT_MULTIPLIER
+                                      + COMMAND_EVIDENCE_ENVELOPE_BYTES)):
         raise Denied('Command evidence unavailable')
     data = path.read_bytes()
     identity = digest(data)
