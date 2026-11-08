@@ -62,7 +62,8 @@ from pathlib import Path
 
 from .config import (DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTION_RECORDS,
                      DEFAULT_DECISION_RECEIPT_DIAGNOSTICS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
-                     DEFAULT_DECISION_RECONCILIATION_BYTES, MAX_DECISION_RECONCILIATION_BYTES)
+                     DEFAULT_DECISION_RECONCILIATION_BYTES, MAX_DECISION_RECONCILIATION_BYTES,
+                     MAX_INSIGHT_HISTORY_ENTRIES)
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events, lock_diagnostics
 from .work_item_waits import WAIT_KINDS, normalize_wait
@@ -428,7 +429,6 @@ def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str | None:
 MAX_EVIDENCE_ENTRIES = 16
 MAX_EVIDENCE_CHARS = 8192
 
-
 class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
@@ -436,7 +436,8 @@ class Insights:
                  producer_inputs_per_source: int = 20,
                  decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS,
                  decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS,
-                 decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES):
+                 decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES,
+                 history_entries: int = 1000):
         self.root, self.maximum = root, maximum
         self.retention_days = retention_days
         self.open_work_items = open_work_items
@@ -457,6 +458,10 @@ class Insights:
             raise Denied(
                 f"Decision reconciliation bytes must be an integer in [1, {MAX_DECISION_RECONCILIATION_BYTES}]")
         self.decision_reconciliation_bytes = decision_reconciliation_bytes
+        if (type(history_entries) is not int
+                or not 1 <= history_entries <= MAX_INSIGHT_HISTORY_ENTRIES):
+            raise Denied("history_entries must be an integer in [1, MAX_INSIGHT_HISTORY_ENTRIES]")
+        self.history_entries = history_entries
         self.work_item_intent_default = work_item_intent_default
         self.work_item_intent_by_source = dict(work_item_intent_by_source or {})
         #: Snapshot store for wait baselines; wired by Project, else None.
@@ -709,7 +714,10 @@ replacement insight without implying rejected substance.
         """Explicit audit retrieval for prior revisions; never in routine context.
 
         Schema: list of archived prior records ascending by rev, each with
-        superseded markers. Bounds: at most 1000 entries, byte-bounded.
+        superseded markers. Bounds: at most ``self.history_entries`` returned
+        records (default 1000, operator-adjustable down to 1). This is not a
+        scan bound: sorting the matching glob enumerates and materializes all
+        matching paths before record selection.
         Trust: local recorded state. Failure: Denied on unknown ID shape;
         empty list when no revisions exist (current via read()).
         """
@@ -725,7 +733,7 @@ replacement insight without implying rejected substance.
                 out.append(record)
             except (OSError, ValueError, TypeError, AttributeError, Denied):
                 continue
-            if len(out) >= 1000:
+            if len(out) >= self.history_entries:
                 break
         out.sort(key=lambda r: _rev_of(r))
         return out

@@ -6,14 +6,37 @@ import re
 import unittest
 
 from support import Fixture
-from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
-                         MAX_DECISION_RECEIPT_DIAGNOSTICS, MAX_HISTORY_TEMPORARIES,
+from mizu.config import (DEFAULT_INSIGHT_HISTORY_ENTRIES, MAX_CHECK_RETAINED,
+                         MAX_DECISION_PROJECTION_RECORDS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
+                         MAX_HISTORY_TEMPORARIES, MAX_INSIGHT_HISTORY_ENTRIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
                          MAX_PROJECT_GOAL_BYTES, TOML_INTEGER_MAX, MAX_STORAGE_RUN_ENTRIES,
-                         Limits, ROOT_KEYS,
-                         _LIMIT_RANGES, load)
+                         Limits, ROOT_KEYS, _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
+from mizu.project import Project
 from mizu import fs, platform
+
+
+class InsightHistoryLimitConfigTests(Fixture):
+    def test_default_override_range_and_project_wiring(self):
+        self.assertEqual(MAX_INSIGHT_HISTORY_ENTRIES, 1000)
+        self.assertEqual(DEFAULT_INSIGHT_HISTORY_ENTRIES, 1000)
+        self.assertEqual(Limits().insight_history_entries, 1000)
+        self.assertEqual(_LIMIT_RANGES["insight_history_entries"], (1, 1000))
+        base = re.sub(r'(?m)^insight_history_entries = .*\n', '', self.file.read_text())
+        self.file.write_text(base)
+        self.assertEqual(load(self.file).limits.insight_history_entries, 1000)
+        for value in ("1", "500", "1000", "0", "1001", "-1", "true", "1.5", "\"1\"", "[]", "{}"):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace(
+                    "\n[limits]\n", f"\n[limits]\ninsight_history_entries = {value}\n"))
+                if value in ("1", "500", "1000"):
+                    config = load(self.file)
+                    self.assertEqual(config.limits.insight_history_entries, int(value))
+                    self.assertEqual(Project(config, "sample").insights.history_entries, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, "limits.insight_history_entries"):
+                        load(self.file)
 
 
 class LimitsCoverageTests(unittest.TestCase):

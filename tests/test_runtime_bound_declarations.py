@@ -11,9 +11,11 @@ The `vcs.py` provider response-shape bounds are fixed mechanism and safety
 ceilings for untrusted content; their audit found no host-cost policy bound.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. The `insights.py` module
-constants are fixed record and evidence safety bounds; its constructor policy
-defaults include policy supplied by `Project`, including the configured
-malformed-receipt diagnostic sample; literal bound-parameter defaults are
+constants are fixed record and evidence safety bounds; its explicit-history
+result count is configured policy with a fixed ceiling, and discovery remains
+unbounded by that count. Constructor policy defaults include policy supplied by
+`Project`, including history output and the malformed-receipt diagnostic sample;
+literal bound-parameter defaults are
 classified separately below. The `runtime.py` literals are fixed run-local memory, one-row probe and public page
 bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
@@ -1197,6 +1199,11 @@ DECISION_RECONCILIATION = {
 # already declared by the special dictionaries, so a new unexplained literal
 # fails it.
 CONFIG_MODULE_BOUNDS = {
+    'MAX_INSIGHT_HISTORY_ENTRIES': (
+        '1000', 'safety', 'insights / fixed ceiling for explicit history output rows'),
+    'DEFAULT_INSIGHT_HISTORY_ENTRIES': (
+        '1000', 'configured policy',
+        'insights / default for [limits].insight_history_entries'),
     'DEFAULT_ARTIFACT_FULL_READ_CHARS': (
         '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
     'MAX_STORAGE_RUN_ENTRIES': (
@@ -1507,6 +1514,9 @@ PARAMETER_DEFAULTS = {
         '31', 'configured policy', 'insights / Project supplies [limits] retention_days'),
     ('insights.py', 'Insights.__init__', 'cursor_ttl_seconds'): (
         '86400', 'configured policy', 'insights / Project supplies [limits] insight_cursor_ttl_seconds'),
+    ('insights.py', 'Insights.__init__', 'history_entries'): (
+        '1000', 'configured policy',
+        'insights / Project supplies [limits].insight_history_entries'),
     ('insights.py', 'Insights.projection', 'limit'): (
         '30', 'policy', 'insights / caller-selected live projection size'),
     ('insights.py', 'Insights.list', 'limit'): (

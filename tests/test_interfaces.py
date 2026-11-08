@@ -637,6 +637,22 @@ class InsightRevisionTests(Fixture):
         self.assertEqual(listed["rev"], 2)
         self.assertNotEqual(self.project.insights.generation(), gen1)
 
+    def test_history_caps_returned_records(self):
+        from mizu.config import MAX_INSIGHT_HISTORY_ENTRIES
+        insight_id = "a" * 32
+        revision_dir = self.project.root / "insight-revisions"
+        paths = [revision_dir / f"{insight_id}.r{rev}.json"
+                 for rev in range(1, MAX_INSIGHT_HISTORY_ENTRIES + 2)]
+        records = {path: {"id": insight_id, "rev": rev}
+                   for rev, path in enumerate(paths, start=1)}
+        with patch("mizu.insights.Path.glob", return_value=iter(paths)), \
+             patch("mizu.insights.Path.is_symlink", return_value=False), \
+             patch("mizu.insights.read_json", side_effect=records.__getitem__):
+            history = self.project.insights.history(insight_id)
+        self.assertEqual(len(history), MAX_INSIGHT_HISTORY_ENTRIES)
+        self.assertEqual([record["rev"] for record in history],
+                         sorted(record["rev"] for record in history))
+
     def test_noop_revise_does_not_wake(self):
         item = self.project.insights.submit(source="operator", title="T", body="v1", base_snapshot=None)
         gen1 = self.project.insights.generation()

@@ -509,7 +509,11 @@ rationale never authorizes changed content while the current revision stays
 pending for reassessment. Prior
 revisions are returned only by the explicit history path, never injected into
 routine context, and are durable audit like decisions (backed up, never
-pruned). Direct ID reuse with different content outside revise is rejected.
+pruned). Explicit history returns at most the configured prior-revision
+count (default and absolute ceiling 1,000); that result cap does not bound
+discovery, because the current reader sorts all matching paths in the shared
+revision directory before applying it. Direct ID reuse with different
+content outside revise is rejected.
 Decisions bind to the reviewed `rev`, so a prior approval never authorizes
 changed content; deferral still requires a revisit condition and stays
 pending. A substantive accept/modify/reject prevents conflicting further

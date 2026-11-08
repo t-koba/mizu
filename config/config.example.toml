@@ -227,6 +227,7 @@ smoke_retention_report_bytes = 83886080000 # Cumulative report payload read budg
 event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.jsonl, diagnostics.txt) older than N days to .gz (0 disables).
 event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); Lifecycle records follow run_retention_days, not this log clock.
 event_stream_bytes = 4194304  # Per-run engine event-stream retention in bytes (1 MiB-256 MiB); past-budget bytes are dropped with an explicit *-events-truncated.json marker while the run continues.
+insight_history_entries = 1000 # Prior revisions returned by explicit history (1-1000); this is an output cap, not a scan budget.
 insight_cursor_ttl_seconds = 86400 # Absolute insight page cursor lifetime (60-604800 seconds); continuation never extends it.
 pending_insights = 30            # Newest pending proposals offered per prompt. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 scheduled_input_scan_items = 1000 # Maximum inbox entries opened per opted-in timer; overflow falls through to normal scheduling (positive TOML integer).

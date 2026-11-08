@@ -57,6 +57,10 @@ MAX_CHECK_RETAINED = 1024
 #: 3.5 MiB of Python allocations on the measured host.
 MAX_HISTORY_TEMPORARIES = 4096
 DEFAULT_HISTORY_TEMPORARIES = 64
+#: Fixed ceiling for explicit prior-insight history rows; the operator may lower it.
+MAX_INSIGHT_HISTORY_ENTRIES = 1000
+#: Preserve the historical explicit-history output default.
+DEFAULT_INSIGHT_HISTORY_ENTRIES = 1000
 #: Absolute in-process ceiling for configured current-decision projection rows.
 #: The page retains full source-bounded envelopes. A synthetic 512-row scan with
 #: 64 KiB bodies held 32.6 MiB; the source record can reach 1 MiB, so the ceiling
@@ -557,6 +561,8 @@ class Limits:
     pending_insights: int = 30
     #: Maximum inbox directory entries inspected to prove a scheduled deferral set empty.
     scheduled_input_scan_items: int = 1000
+    #: Operator-selected prior revisions returned by explicit insight history (1-1000).
+    insight_history_entries: int = DEFAULT_INSIGHT_HISTORY_ENTRIES
     #: Absolute lifetime of an explicit insight enumeration cursor (seconds).
     insight_cursor_ttl_seconds: int = 86400
     #: Maximum open work-item rows offered in each full or delta prompt.
@@ -607,6 +613,7 @@ _LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
                  "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
+                 "insight_history_entries": (1, MAX_INSIGHT_HISTORY_ENTRIES),
                  "insight_cursor_ttl_seconds": (60, 604800),
                  "run_retention_scan_runs": (1, MAX_STORAGE_RUN_ENTRIES),
                  "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
