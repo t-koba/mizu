@@ -59,6 +59,10 @@ class WaitResolutionTests(Fixture):
     def reconcile(self, *, role='worker', limit=20):
         resolution.reconcile(self.project, role, limit=limit)
 
+    def test_reconcile_requires_a_positive_page_limit(self):
+        with self.assertRaises(Denied):
+            self.reconcile(limit=0)
+
     def test_default_and_manual_policy_and_refresh_validation(self):
         check_project_settings({'roles': ['worker']})
         item = self.block()
@@ -950,7 +954,9 @@ class WaitResolutionTests(Fixture):
         opened = self.store.get(item['id'])
         path = self.project.root / 'work-items' / item['id'] / f"{opened['rev']}.json"
         for key, bad in [('wait_rev', True), ('wait_digest', 'e' * 64), ('kind', 'terminal'),
-                         ('resolved_at', 'not-a-timestamp'), ('evidence', {})]:
+                         ('resolved_at', 'not-a-timestamp'),
+                         ('resolved_at', '2026-01-01T00:00:00+00:0'),
+                         ('resolved_at', '2026-01-01T00:00:00+00:000'), ('evidence', {})]:
             broken = copy.deepcopy(opened)
             broken['wait_resolution'][key] = bad
             write_json(path, broken)

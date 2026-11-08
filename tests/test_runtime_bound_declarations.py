@@ -204,13 +204,16 @@ operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
 `insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`, `config.py`,
 `runtime.py`, `project.py`, `services.py`, `persistent_exec.py`, `cli.py`,
-`vcs.py`, `model_catalog.py`, `pi_durable.py` and `platform.py`; numeric-only
-arithmetic operands, including bounded integer powers, are evaluated without
-source execution. The `services.py` entries pin
-Windows Task Scheduler's one-minute minimum and 31-day maximum repetition
+`vcs.py`, `model_catalog.py`, `pi_durable.py`, `platform.py`,
+`work_item_seed.py`, `work_item_retirement.py`, `work_item_waits.py` and
+`work_item_resolution.py`; numeric-only arithmetic operands, including bounded
+integer powers, are evaluated without source execution. The `services.py` entries
+pin Windows Task Scheduler's one-minute minimum and 31-day maximum repetition
 interval. The `admission.py` slice uses magnitude 2 for its two-lock ceiling;
-the `pi_durable.py` slice uses magnitude 1 to include its attempt-identity
-formats. This is not a global numeric comparison linter.
+the `pi_durable.py` slice uses magnitude 1 for attempt identity, and the four
+work-item slices use magnitude 1 for positive revisions, schema versions,
+nonempty fields, and positive page sizes.
+This is not a global numeric comparison linter.
 """
 import ast
 import math
@@ -1994,6 +1997,44 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('platform.py', 'cancel_pipe_io', 1, 0): (
         '1168', 'mechanism',
         'Windows synchronous-I/O cancellation / preserve the existing benign no-pending-work error'),
+    ('work_item_seed.py', 'validate_origin', 1, 0): (
+        '1', 'format', 'work-item origin / referenced insight revision is positive'),
+    ('work_item_seed.py', 'validate_text', 0, 0): (
+        '1', 'format', 'work-item description / nonblank public text has at least one character'),
+    ('work_item_seed.py', 'validate_text', 2, 0): (
+        '4000', 'format', 'work-item description / follows the 1-4000-character creation schema'),
+    ('work_item_seed.py', 'validate_scope', 0, 0): (
+        '1', 'format', 'accepted work scope / nonblank public text has at least one character'),
+    ('work_item_seed.py', 'validate_scope', 2, 0): (
+        '4000', 'format', 'accepted work scope / follows the 1-4000-character decision schema'),
+    ('work_item_seed.py', 'validate_seed', 0, 0): (
+        '1', 'format', 'work-item seed title / public title is nonempty'),
+    ('work_item_seed.py', 'validate_seed', 2, 0): (
+        '200', 'format', 'work-item seed title / follows the 1-200-character title schema'),
+    ('work_item_seed.py', 'validate_seed', 1, 0): (
+        '1', 'format', 'work-item seed / initial persisted revision is exactly one'),
+    ('work_item_seed.py', 'validate_tasks', 0, 0): (
+        '1', 'format', 'decision task manifest / a declared task list is nonempty'),
+    ('work_item_seed.py', 'validate_tasks', 0, 1): (
+        '1', 'format', 'decision task title / public title is nonempty'),
+    ('work_item_seed.py', 'validate_tasks', 2, 0): (
+        '200', 'format', 'decision task title / follows the 1-200-character task schema'),
+    ('work_item_retirement.py', 'request', 1, 0): (
+        '4000', 'format', 'exhausted-item retirement reason / follows the bounded transition-reason field'),
+    ('work_item_retirement.py', 'read', 1, 0): (
+        '1', 'format', 'work-item retirement sidecar / require exact schema version one'),
+    ('work_item_waits.py', '_normalize_wait', 1, 0): (
+        '1', 'format', 'dependency wait / referenced insight revision is positive'),
+    ('work_item_waits.py', '_liveness', 1, 0): (
+        '1', 'format', 'wait target / current insight revision is positive'),
+    ('work_item_waits.py', '_liveness', 0, 0): (
+        '1', 'format', 'wait target / insight title is nonempty'),
+    ('work_item_waits.py', '_liveness', 2, 0): (
+        '200', 'format', 'wait target / insight title follows its 1-200-character schema'),
+    ('work_item_resolution.py', 'validate', 1, 0): (
+        '25', 'format', 'wait-resolution timestamp / exact UTC seconds-precision ISO-8601 text length'),
+    ('work_item_resolution.py', 'reconcile', 0, 0): (
+        '1', 'mechanism', 'wait-resolution scan / a bounded page must request at least one row'),
     ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
         '4', 'format',
         'delegation ledger / require the exact persisted schema version before interpreting state'),
@@ -3086,13 +3127,18 @@ def sibling():
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'model_catalog.py',
-                'pi_durable.py', 'platform.py',
+                'pi_durable.py', 'platform.py', 'work_item_seed.py',
+                'work_item_retirement.py', 'work_item_waits.py',
+                'work_item_resolution.py',
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-            minimum = (1 if filename in {'bridge.py', 'pi_durable.py'}
+            minimum = (1 if filename in {
+                'bridge.py', 'pi_durable.py', 'work_item_seed.py',
+                'work_item_retirement.py', 'work_item_waits.py',
+                'work_item_resolution.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

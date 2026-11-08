@@ -75,6 +75,20 @@ class DecisionTaskTests(Fixture):
         self.assertEqual(self.store.page_closed_readonly()["items"][0]["id"], ids[0])
         self.assertEqual(self.decide(work_items=self.tasks, scope="Deliver both parts"), event)
 
+    def test_one_task_with_one_character_title_is_accepted(self):
+        task = {"title": "x", "description": "d"}
+        event = self.decide(work_items=[task])
+        self.assertEqual(event["work_item_specs"], [task])
+        self.assertEqual(event["work_items"][0]["title"], "x")
+        self.assertEqual(self.store.get(event["work_items"][0]["id"])["title"], "x")
+
+    def test_maximum_task_title_is_accepted(self):
+        task = {"title": "t" * 200, "description": "d"}
+        event = self.decide(work_items=[task])
+        self.assertEqual(event["work_item_specs"], [task])
+        self.assertEqual(event["work_items"][0]["title"], task["title"])
+        self.assertEqual(self.store.get(event["work_items"][0]["id"])["title"], task["title"])
+
     def test_exact_and_conflicting_replays(self):
         event = self.decide(work_items=self.tasks, action="modify")
         self.assertEqual(self.decide(work_items=copy.deepcopy(self.tasks), action="modify", run="retry"), event)

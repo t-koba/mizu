@@ -75,6 +75,7 @@ class DirectWorkItemTests(Fixture):
         for origin in ({}, {"rev": 1}, {"insight_id": "missing", "rev": 1},
                        {"work_item_id": "wi_" + "f" * 32, "rev": 1},
                        {"insight_id": "../bad", "rev": 1},
+                       {"insight_id": "missing", "rev": 0},
                        {"insight_id": "missing", "rev": True},
                        {"insight_id": "missing", "work_item_id": "wi_" + "a" * 32, "rev": 1}):
             with self.subTest(origin=origin), self.assertRaises(Denied):
@@ -86,6 +87,12 @@ class DirectWorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.create(origin={"work_item_id": item_id, "rev": 1})
         self.assertEqual(self.store.page_open()["total"], 0)
+
+    def test_title_length_edges_fit_the_seed_format(self):
+        for key, title in (("short-title", "x"), ("maximum-title", "t" * 200)):
+            with self.subTest(length=len(title)):
+                item = self.create(key, title)["record"]["work_item"]
+                self.assertEqual(item["title"], title)
 
     def test_mixed_inventory_keeps_coverage_and_shared_history_semantics(self):
         proposal = self.insight()

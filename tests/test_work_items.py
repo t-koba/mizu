@@ -591,6 +591,25 @@ class WorkItemTests(Fixture):
         self.assertEqual(view["history"][1]["wait"],
                          {"kind": "insight_decided", "target": self.proposal["id"]})
 
+    def test_wait_liveness_accepts_insight_title_length_edges(self):
+        item_ids = []
+        for index, title in enumerate(("x", "t" * 200)):
+            proposal = self.project.insights.submit(
+                source="worker", title=title, body="Evidence", base_snapshot=None)
+            seed = self.store.create(
+                idempotency_key=f"title-wait-{index}", title=f"Wait {index}", actor="worker"
+            )["record"]["work_item"]
+            self.store.transition(seed["id"], expected_rev=1, status="doing", actor="worker")
+            self.store.transition(
+                seed["id"], expected_rev=2, status="blocked", actor="worker",
+                wait={"kind": "insight_decided", "insight": proposal["id"]})
+            item_ids.append(seed["id"])
+        page = self.store.blocked_liveness_readonly()
+        self.assertEqual(page["total"], 2)
+        rows = {row["id"]: row for row in page["items"]}
+        for item_id in item_ids:
+            self.assertEqual(rows[item_id]["state"], "pending")
+
     def test_explain_reads_dropped_terminal_item_and_preserves_reason(self):
         dropped = self.change("dropped", reason="No longer needed")
         view = self.store.explain(self.item_id)
@@ -881,6 +900,10 @@ class WorkItemTests(Fixture):
     def test_dependency_wait_uses_existing_validator(self):
         wait = {"kind": "dependency", "recipient": "reviewer",
                 "requires": {"insight": self.proposal["id"], "rev": 1, "action": "accept"}}
+        for revision in (0, True):
+            invalid = {**wait, "requires": {**wait["requires"], "rev": revision}}
+            with self.subTest(revision=revision), self.assertRaises(Denied):
+                self.change("blocked", wait=invalid)
         blocked = self.change("blocked", wait=wait)
         self.assertEqual(blocked["wait"], wait)
         self.assertEqual(self.store.get(self.item_id), blocked)

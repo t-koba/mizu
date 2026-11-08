@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu import work_item_events
+from mizu import work_item_retirement
 from mizu import work_items as work_items_module
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, write_json
@@ -62,6 +63,15 @@ class RetirementTests(Fixture):
         self.assertEqual(self.store.get(self.item_id), self.last)
         self.assertFalse(self.path.exists())
         return self.last
+
+    def test_retirement_reason_character_edges(self):
+        request = work_item_retirement.request
+        for reason in ("x", "r" * 4000):
+            record = request(self.item_id, MAX_REVISIONS, "dropped", "worker", reason)
+            self.assertEqual(record["reason"], reason)
+        for reason in ("", " " * 4000, "r" * 4001):
+            with self.subTest(length=len(reason)), self.assertRaises(Denied):
+                request(self.item_id, MAX_REVISIONS, "dropped", "worker", reason)
 
     def tree(self):
         return {p.name: p.read_bytes() for p in self.directory.iterdir()}

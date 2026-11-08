@@ -60,6 +60,16 @@ class WorkItemScopeTests(Fixture):
         self.assertIsNotNone(status)
         self.assertEqual(status["status"], "open")
 
+    def test_scope_length_edges_are_accepted_and_preserved(self):
+        for index, scope in enumerate(("x", "x" * 4000)):
+            proposal = self.proposal(title=f"Scope edge {index}")
+            decision = self.project.insights.decide(
+                proposal["id"], "accept", "reviewed", "", f"run-{index}",
+                expected_rev=1, scope=scope)
+            self.assertEqual(decision["scope"], scope)
+            self.assertEqual(decision["work_item"]["scope"], scope)
+            self.assertEqual(self.store.get(decision["work_item"]["id"])["scope"], scope)
+
     def test_decision_without_a_scope_keeps_the_legacy_shape(self):
         decision = self.decide()
         self.assertNotIn("scope", decision)
