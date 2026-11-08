@@ -498,15 +498,16 @@ class RestoreTests(Fixture):
 
         with patch.object(retention, "validate_restored_refs", side_effect=pause_validation), \
              patch.object(retention, "shared_lock", observe_retention_lock), \
-             ThreadPoolExecutor(max_workers=2) as pool:
+             ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(restore, self.config, "restored-first", archive)
             try:
                 self.assertTrue(entered.wait(5), "Restore did not reach locked reference validation")
                 self.assertFalse((data / "projects/restored-first").exists())
-                retention_future = pool.submit(retention.run, data, apply=True)
-                self.assertTrue(attempted.wait(5), "Retention did not attempt the shared lock")
+                # Keep restore concurrent, but run the competing admission on
+                # this thread so worker startup latency cannot mask lock behavior.
                 with self.assertRaises(Busy):
-                    retention_future.result(timeout=5)
+                    retention.run(data, apply=True)
+                self.assertTrue(attempted.is_set(), "Retention did not attempt the shared lock")
                 self.assertTrue(pair.is_dir())
             finally:
                 release.set()
