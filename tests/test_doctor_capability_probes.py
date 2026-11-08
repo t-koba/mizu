@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -177,6 +178,24 @@ class ContainerRuntimeProbeTests(Fixture):
             doctor=dataclasses.replace(self.config.doctor, runtime_version_seconds=7))
         self.assertEqual(doctor.container_runtime(config)['version'], "podman version 5.0")
         self.assertEqual(seen, [7])
+
+    def test_single_mode_requires_exact_namespace_helper_token_shape(self):
+        config = dataclasses.replace(
+            self.config,
+            sandbox=dataclasses.replace(self.config.sandbox, mode='single'))
+
+        def probe(helper_output):
+            with patch.object(doctor._platform, 'is_root', return_value=False), \
+                    patch.object(doctor.shutil, 'which', return_value='/usr/bin/podman'), \
+                    patch.object(doctor, 'ensure_single', return_value={'prepared': True}), \
+                    patch.object(doctor, 'run', side_effect=[
+                        Result(0, 'podman version 5.0\n', '', 'exited', 0.1),
+                        Result(0, helper_output, '', 'exited', 0.1)]):
+                return doctor.container_runtime(config)
+
+        self.assertEqual(probe('0 1000 1\n0\n')['namespace_map'], '0 1000 1')
+        with self.assertRaises(doctor.Denied):
+            probe('0 1000 1 0 extra\n')
 
     def test_a_child_that_outlived_its_bound_names_the_bound(self):
         with self.assertRaises(ConfigError) as caught:
