@@ -46,13 +46,15 @@ from .fs import (DIGEST, MAX_JSON_DEPTH, READ_PAGE_CHARS, atomic_write, canonica
 RECORD_BYTES = 1024 * 1024 + 4096
 RECEIPT_BYTES = 2048
 MANIFEST_ROWS = 512
+RECORD_NAME_MAX_CHARS = 256
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]*(?:[./:][a-z0-9][a-z0-9_-]*)+\Z")
 _ENVELOPE = {"schema", "id", "kind", "created_at", "writer", "subject", "payload"}
 _BINDING = {"role", "record_id", "record_digest", "ack_token"}
 
 
 def _name(value: str, *, kind: bool = False) -> str:
-    if not isinstance(value, str) or len(value) > 256 or not _NAME.fullmatch(value if not kind else "kind/" + value):
+    if (not isinstance(value, str) or len(value) > RECORD_NAME_MAX_CHARS
+            or not _NAME.fullmatch(value if not kind else "kind/" + value)):
         raise Denied("Expected a bounded record name")
     return value
 

@@ -137,6 +137,23 @@ class OperatorRecordTests(Fixture):
             with self.subTest(row=str(row)[:80]), self.assertRaises(Denied):
                 shared.put(row, writer=records.WRITER)
 
+    def test_body_and_closure_identifier_bounds(self):
+        body = 'x' * records.MAX_OPERATOR_RECORD_BODY_CHARS
+        accepted = records.write(self.project, event_id='max-body', kind='operator.notice',
+                                 body=body, addressee='reviewer')
+        self.assertEqual(accepted['record']['payload']['body'], body)
+        with self.assertRaises(Denied):
+            records.write(self.project, event_id='over-body', kind='operator.notice',
+                          body=body + 'x', addressee='reviewer')
+
+        target = {'id': 'x' * records.RECORD_NAME_MAX_CHARS, 'digest': '0' * 64}
+        records._validate('operator.notice', None, {
+            'action': 'withdraw', 'body': '', 'addressee': 'reviewer', 'target': target})
+        target['id'] += 'x'
+        with self.assertRaises(Denied):
+            records._validate('operator.notice', None, {
+                'action': 'withdraw', 'body': '', 'addressee': 'reviewer', 'target': target})
+
     def test_immutable_replay_and_interrupted_response(self):
         original = SharedRecords.put
         def lost_response(shared, *args, **kwargs):

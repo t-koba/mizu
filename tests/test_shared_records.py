@@ -11,7 +11,7 @@ from unittest.mock import patch
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical, digest
 from mizu.shared_records import (KindPolicy, MANIFEST_ROWS, RECORD_BYTES,
-                                 RECEIPT_BYTES, SharedRecords)
+                                 RECEIPT_BYTES, RECORD_NAME_MAX_CHARS, SharedRecords)
 from mizu.storage import MEMBERS
 from mizu.project import Project
 import mizu.storage as storage
@@ -317,6 +317,19 @@ class SharedRecordsTests(unittest.TestCase):
     def test_backup_restore_membership(self):
         self.assertIn("shared-records", MEMBERS)
         self.assertIn("shared-record-receipts", MEMBERS)
+
+    def test_record_name_character_limit(self):
+        namespace = 'n' * (RECORD_NAME_MAX_CHARS - 2)
+        record = dict(envelope('max-name'), id=f'{namespace}/x')
+        record['subject'] = {'event': 'max-name'}
+        self.store.put(record, writer='host.test')
+        self.assertEqual(self.store.get(record['id'])[0], record)
+
+        namespace += 'n'
+        oversized = dict(envelope('oversized-name'), id=f'{namespace}/x')
+        oversized['subject'] = {'event': 'oversized-name'}
+        with self.assertRaises(Denied):
+            self.store.put(oversized, writer='host.test')
 
     def test_sharded_canonical_and_namespace_isolation(self):
         one, _ = self.put("one")

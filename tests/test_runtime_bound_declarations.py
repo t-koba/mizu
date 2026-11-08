@@ -886,6 +886,11 @@ DECLARATIONS = {
             '128', 'safety',
             'model catalog / bounded observation rows'),
     },
+    'operator_records.py': {
+        'MAX_OPERATOR_RECORD_BODY_CHARS': (
+            '32768', 'safety',
+            'operator records / fixed cap for user-authored immutable body content'),
+    },
     'pi_durable.py': {
         'RESULT_BYTES': (
             '1024 * 1024', 'safety',
@@ -955,6 +960,9 @@ DECLARATIONS = {
         'RECORD_BYTES': (
             '1024 * 1024 + 4096', 'safety',
             'shared records / bounded canonical envelope'),
+        'RECORD_NAME_MAX_CHARS': (
+            '256', 'format',
+            'shared records / maximum name length in the canonical record-name grammar'),
         'RECEIPT_BYTES': (
             '2048', 'safety',
             'shared records / bounded receipt read'),
@@ -3030,7 +3038,8 @@ def sibling():
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
-                'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py'):
+                'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
+                'operator_records.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
                        else 2 if filename == 'admission.py' else 3)

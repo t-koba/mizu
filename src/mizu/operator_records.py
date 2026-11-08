@@ -11,11 +11,12 @@ import heapq
 
 from .errors import ConfigError, Denied
 from .fs import DIGEST, identifier, lock, now
-from .shared_records import KindPolicy, SharedRecords
+from .shared_records import RECORD_NAME_MAX_CHARS, KindPolicy, SharedRecords
 from .operator_record_index import catalog, remember
 
 WRITER = 'operator.cli'
 ROUTES = {'answer': 'question_source', 'operator.notice': 'addressee'}
+MAX_OPERATOR_RECORD_BODY_CHARS = 32768
 
 
 def configuration(raw=None):
@@ -53,7 +54,7 @@ def _validate(kind, subject, payload):
         raise Denied('Invalid operator record payload')
     identifier(payload['addressee'])
     body, action, target = payload['body'], payload['action'], payload['target']
-    if not isinstance(body, str) or len(body) > 32768:
+    if not isinstance(body, str) or len(body) > MAX_OPERATOR_RECORD_BODY_CHARS:
         raise Denied('Operator record body exceeds bound')
     if action not in ('publish', 'withdraw', 'supersede') or (kind == 'answer' and action != 'publish'):
         raise Denied('Invalid operator record action')
@@ -67,7 +68,7 @@ def _validate(kind, subject, payload):
             raise Denied('Publish cannot close another record')
     elif (type(target) is not dict or set(target) != {'id', 'digest'}
           or not isinstance(target['digest'], str) or not DIGEST.fullmatch(target['digest'])
-          or not isinstance(target['id'], str) or len(target['id']) > 256):
+          or not isinstance(target['id'], str) or len(target['id']) > RECORD_NAME_MAX_CHARS):
         raise Denied('Closure requires an exact record and digest')
 
 
