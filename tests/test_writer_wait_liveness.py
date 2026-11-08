@@ -7,7 +7,7 @@ from support import Fixture, ScriptDriver
 from test_ci_waits import CiWaitFixture, SHA
 from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.fs import now, read_json
+from mizu.fs import now, read_json, write_json
 from mizu.runtime import Engine, _writer_progress_fallback, _writer_wait_liveness, should_run
 
 
@@ -15,7 +15,172 @@ class WriterWaitTests(Fixture):
     def role(self):
         return self.config.roles['worker']
 
+    def block(self, key, wait):
+        store = self.project.work_items
+        item = store.create(actor='worker', idempotency_key=key, title=key)['record']['work_item']
+        return store.transition(item['id'], expected_rev=1, actor='worker',
+                                status='blocked', wait=wait)
+
+    def question(self, source='worker'):
+        return self.project.insights.submit(
+            source=source, title='Fixture question', body='Q: What should happen?',
+            base_snapshot=None, kind='question', addressee='operator')
+
+    def backoff_time(self, snapshot):
+        return (dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
+                + self.config.limits.writer_no_progress_backoff_seconds)
+
+    def test_solo_code_wait_backoff_without_ready_work_is_not_an_event(self):
+        self.config.roles['worker'] = dataclasses.replace(self.role(), on_change=True)
+        item = self.block('self code', {'kind': 'code_change'})
+        engine = Engine(self.config, driver=ScriptDriver())
+        result = engine.run(self.project, 'worker')
+        self.assertIs(result['finish']['wait_liveness'], False)
+        snapshot = self.project.snapshots.get()
+        due = self.backoff_time(snapshot)
+        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+        self.assertFalse(should_run(self.project, snapshot, role_name='worker', current_time=due - 1))
+        self.assertTrue(should_run(self.project, snapshot, role_name='worker', current_time=due))
+        with patch('mizu.runtime.time.time', return_value=due):
+            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+            self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+        current = self.project.work_items.get(item['id'])
+        self.assertEqual((current['status'], current['rev']), ('blocked', item['rev']))
+        # Configuration, not the current run/holder count, determines sole-writer authority.
+        self.config.roles['reviewer'] = dataclasses.replace(
+            self.config.roles['reviewer'], workspace='write')
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.role(), False, due, project=self.project))
+
+    def test_own_answered_current_question_remains_holder_ready(self):
+        question = self.question()
+        item = self.block('answer', {'kind': 'insight_decided', 'insight': question['id']})
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+        self.assertIsNone(self.project.status()['blocked_work']['items'][0]['self_resolvable'])
+        Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        self.project.insights.decide(question['id'], 'reject', 'Substantive answer', '', 'fixture',
+                                     expected_rev=1)
+        self.assertTrue(_writer_progress_fallback(
+            snapshot, self.config, self.role(), False, self.backoff_time(snapshot), project=self.project))
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
+        ready = self.project.work_items.page_ready(role_name='worker')
+        self.assertIn(item['id'], [row['id'] for row in ready['items']])
+        self.assertEqual(self.project.work_items.page_ready(role_name='reviewer')['total'], 0)
+        self.assertEqual(self.project.work_items.get(item['id'])['status'], 'blocked')
+        # An answer to an older revision is not an answer to the current question.
+        self.project.insights.revise(question['id'], source='worker', title='Follow-up',
+                                     body='Q: A new question?', base_snapshot=None, expected_rev=1)
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+
+    def test_malformed_question_metadata_never_proves_a_self_wait(self):
+        question = self.question()
+        item = self.block('malformed answer', {'kind': 'insight_decided', 'insight': question['id']})
+        self.project.insights.decide(question['id'], 'reject', 'Substantive answer', '', 'fixture',
+                                     expected_rev=1)
+        path = self.project.root / 'inbox' / f"{question['id']}.json"
+        target = read_json(path)
+        target['addressee'] = 'not a valid role'
+        write_json(path, target)
+        blocked = self.project.status()['blocked_work']
+        row = next(row for row in blocked['items'] if row['id'] == item['id'])
+        self.assertEqual(row['state'], 'unknown')
+        self.assertIsNone(row['self_resolvable'])
+        self.assertFalse(blocked['coverage_complete'])
+
+    def test_answered_foreign_question_or_own_proposal_is_not_a_self_wait(self):
+        for source, kind in (('reviewer', 'question'), ('worker', 'proposal')):
+            target = self.project.insights.submit(
+                source=source, title='External target', body='Fixture target',
+                base_snapshot=None, kind=kind, addressee='operator')
+            item = self.block(kind, {'kind': 'insight_decided', 'insight': target['id']})
+            Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker')
+            snapshot = self.project.snapshots.get()
+            self.project.insights.decide(target['id'], 'reject', 'Settled', '', 'fixture', expected_rev=1)
+            self.assertFalse(_writer_progress_fallback(
+                snapshot, self.config, self.role(), False, self.backoff_time(snapshot), project=self.project))
+            row = next(row for row in self.project.status()['blocked_work']['items'] if row['id'] == item['id'])
+            self.assertIsNone(row['self_resolvable'])
+
+    def test_external_waits_suppress_self_wait_backoff(self):
+        self.block('self code', {'kind': 'code_change'})
+        Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        due = self.backoff_time(snapshot)
+        other = self.question('reviewer')
+        for key, wait in (
+                ('deadline', {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'}),
+                ('dependency', {'kind': 'dependency', 'recipient': 'reviewer',
+                                'requires': {'insight': other['id'], 'rev': 1, 'action': 'accept'}}),
+                ('other question', {'kind': 'insight_decided', 'insight': other['id']})):
+            with self.subTest(key=key):
+                item = self.block(key, wait)
+                self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+                self.assertFalse(_writer_progress_fallback(
+                    snapshot, self.config, self.role(), False, due, project=self.project))
+                self.project.work_items.transition(item['id'], expected_rev=item['rev'],
+                                                   actor='worker', status='dropped', reason='Fixture settled')
+        # A free-standing unresolved own operator question is also external liveness.
+        self.question()
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.role(), False, due, project=self.project))
+
+    def test_self_wait_inventory_must_be_complete_and_safe(self):
+        self.block('self code', {'kind': 'code_change'})
+        Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker')
+        snapshot = self.project.snapshots.get()
+        due = self.backoff_time(snapshot)
+        page = self.project.work_items.page_open_readonly()
+        for field, value in (('coverage_complete', False), ('truncated', True)):
+            with self.subTest(field=field), patch.object(
+                    self.project.work_items, 'page_open_readonly', return_value={**page, field: value}):
+                self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
+                self.assertFalse(_writer_progress_fallback(
+                    snapshot, self.config, self.role(), False, due, project=self.project))
+        (self.project.root / 'inbox').mkdir(exist_ok=True)
+        (self.project.root / 'inbox' / 'broken.json').write_text('{')
+        self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.role(), False, due, project=self.project))
+
+    def test_status_reports_bounded_self_causes_without_transition_or_extra_scan(self):
+        code = self.block('self code', {'kind': 'code_change'})
+        question = self.question()
+        answer = self.block('answer', {'kind': 'insight_decided', 'insight': question['id']})
+        self.project.insights.decide(question['id'], 'reject', 'Substantive answer', '', 'fixture',
+                                     expected_rev=1)
+        store = self.project.work_items
+        with patch.object(store, '_page_open_impl', wraps=store._page_open_impl) as scan:
+            blocked = self.project.status()['blocked_work']
+            self.assertEqual(scan.call_count, 1)
+        self.assertTrue(blocked['coverage_complete'])
+        self.assertFalse(blocked['truncated'])
+        causes = {row['id']: row['self_resolvable'] for row in blocked['items']}
+        self.assertEqual(causes, {code['id']: 'sole_writer_code_change',
+                                  answer['id']: 'answered_own_question'})
+        # The same bounded scan exposes row truncation independently of inventory coverage.
+        bounded = store.open_state_readonly(limit=1, writer_roles={'worker'})['blocked_work']
+        self.assertEqual(len(bounded['items']), 1)
+        self.assertTrue(bounded['truncated'])
+        self.assertTrue(bounded['coverage_complete'])
+        self.config.roles['reviewer'] = dataclasses.replace(
+            self.config.roles['reviewer'], workspace='write')
+        rows = {row['id']: row for row in self.project.status()['blocked_work']['items']}
+        self.assertIsNone(rows[code['id']]['self_resolvable'])
+        self.assertEqual(rows[answer['id']]['self_resolvable'], 'answered_own_question')
+        for item in (code, answer):
+            self.assertEqual(store.get(item['id'])['rev'], item['rev'])
+        (self.project.root / 'work-items' / code['id'] / 'broken.json').write_text('{')
+        unavailable = self.project.status()['blocked_work']
+        self.assertFalse(unavailable['coverage_complete'])
+        self.assertIsNone(unavailable['total'])
+
     def test_owned_check_liveness_and_terminal_check_finish(self):
+        self.block('self code', {'kind': 'code_change'})
         role = dataclasses.replace(self.role(), capabilities=(*self.role().capabilities, 'check_job'))
         identity = 'a' * 64
         for owner, status, live in (
@@ -121,6 +286,10 @@ class WriterCiWaitTests(CiWaitFixture):
     def test_exact_held_ci_request_and_terminal_evidence(self):
         role = self.config.roles['worker']
         item = self.block()
+        code = self.store.create(actor='worker', idempotency_key='self-code',
+                                 title='Self code wait')['record']['work_item']
+        self.store.transition(code['id'], expected_rev=1, actor='worker', status='blocked',
+                              wait={'kind': 'code_change'})
         self.assertIsNone(_writer_wait_liveness(self.project, role))
         requests = CiRequests(self.project.root)
         for sha in ('b' * 40, SHA):

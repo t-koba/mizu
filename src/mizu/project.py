@@ -427,7 +427,8 @@ class Project:
         # old run idle. The observation was bound into the progress record
         # when this snapshot was created.
         idle_diagnostic = idle_with_open_work(snapshot)
-        open_state = self.work_items.open_state_readonly()
+        open_state = self.work_items.open_state_readonly(
+            writer_roles={name for name in self.roles if self.config.roles[name].workspace == "write"})
         backpressure = self.backpressure(open_count=open_state["open_count"])
         blocked_work = open_state["blocked_work"]
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],

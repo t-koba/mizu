@@ -202,21 +202,34 @@ and presence facts. This does not revive `done`/`blocked`, bypass producer/contr
 gates, or change the daemon cadence or progress-driven immediate handoff.
 
 A writable writer's `wait` also uses that backoff when current bounded local
-reads prove no live external source remains and eligible ready work exists.
-This path always waits for the configured timer from the snapshot's progress
-timestamp, even if the unit made progress; no immediate allowance applies.
-The host records `finish.wait_liveness` in the existing finish intent/result:
-`true` for a live owned queued/running check, an own unresolved operator-addressed
-question, or a held CI wait with an exact publication/SHA dispatch request and
-no terminal evidence; `false` for proven absence/terminal sources; `null` for
-unknown evidence. Admission rechecks current liveness. Check discovery, strict
-insight counts and the configured work-item prompt page bound the local reads;
-incomplete, ambiguous, corrupt or unreadable evidence cannot prove absence.
-A CI wait alone, including an unpublished snapshot without request evidence,
-stays unknown. No provider is called or wait store created. Existing wait
-expiry, subscribed event wakes and default/maximum wait durations are unchanged;
-a timer fallback is not an event subscription. The `idle_with_open_work` status
-remains the recorded-at-finish diagnostic, not a live scheduler verdict.
+reads prove no live external source remains and either eligible ready work or a
+held self-resolvable wait exists.
+Two held waits are self-resolvable, not external sources: `code_change` when
+the holder is the project's sole configured `workspace = "write"` role, and
+`insight_decided` on a current, substantively answered (`accept`, `modify` or
+`reject`) `kind = "question"` authored by that holder. The answered question
+remains holder-ready under the existing due-wait rules. A proven self-resolvable
+wait permits the same backoff even when no ledger item is currently ready;
+this does not reopen, unblock or transition work.
+
+This path always waits for `writer_no_progress_backoff_seconds` from the
+snapshot's progress timestamp, even if the unit made progress; no immediate
+allowance applies. The host records `finish.wait_liveness` in the existing
+finish intent/result: `true` for a live owned queued/running check, an own
+unresolved operator-addressed question, a pending external ledger wait, or a
+held CI wait with an exact publication/SHA dispatch request and no terminal
+evidence; `false` for proven absence/terminal/self-resolvable sources; `null`
+for unknown evidence. Future deadlines, pending dependencies, questions awaiting
+another role's decision, code-change waits with another authorized writer, and
+pending proposal waits remain external sources. Admission rechecks current
+liveness. Check discovery, strict insight counts and the configured work-item
+prompt page bound the local reads; incomplete, ambiguous, corrupt or unreadable
+evidence cannot prove absence. A CI wait alone, including an unpublished snapshot
+without request evidence, stays unknown. No provider is called or wait store
+created. Existing wait expiry, subscribed event wakes and default/maximum wait
+durations are unchanged; a timer fallback is not an event subscription. The
+`idle_with_open_work` status remains the recorded-at-finish diagnostic, not a
+live scheduler verdict.
 
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the
@@ -442,7 +455,13 @@ insight target or an exact dependency revision superseded or substantively
 conflicting), `terminal` (the same exact CI/publication/proposal route as holder
 readiness), `expired`, and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
-exact route. Missing legacy bodies, orphan identity/decision records, unsafe
+exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change`,
+`answered_own_question`, or `null`. This annotation uses the same bounded
+read-only scan and does not change the wait's state or readiness. The existing
+`coverage_complete` reports inventory/observation completeness; `truncated` and
+`overflow_count` separately identify omitted diagnostic rows. An incomplete
+view is not proof that no self-resolvable or external cause exists.
+Missing legacy bodies, orphan identity/decision records, unsafe
 paths, inconsistent revisions, incomplete archives and malformed evidence cannot
 prove an impossible releaser or terminal outcome.
 

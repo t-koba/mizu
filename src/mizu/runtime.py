@@ -4197,31 +4197,49 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
 
 
 def _writer_wait_liveness(project, role, *, releases=()) -> bool | None:
-    """Current bounded local evidence: True live, False absent/terminal, None unknown.
+    """True for external liveness, False when none remains, None when unknown."""
+    return _writer_wait_sources(project, role, releases=releases)[0]
 
+
+def _writer_wait_sources(project, role, *, releases=()) -> tuple[bool | None, bool]:
+    """Return (external liveness, self-resolvable witness) from bounded local reads.
+
+    Liveness is True for live, False for absent/terminal/self, None for unknown.
     No adapter calls, new registrations or inferred remote completion. Incomplete
     inventories can prove a positive witness, never absence. A pending CI wait
     alone does not prove CI was requested; require its exact publication request.
     """
     try:
         unknown = False
+        self_resolvable = False
         if "check_job" in role.capabilities:
             from .acceptance import discover
             jobs, invalid = discover(project)
             if any(job["role"] == role.name and job["id"] not in releases
                    and job["status"] in ("queued", "running") for job in jobs.values()):
-                return True
+                return True, False
             unknown = bool(invalid)
         if project.insights.unresolved_counts(
                 [role.name], kind="question", addressee="operator")[role.name]:
-            return True
+            return True, False
         store = project.work_items
         page = store.page_open_readonly(limit=project.config.limits.work_items_prompt)
         unknown |= not page["coverage_complete"] or page["truncated"]
+        from .work_item_waits import liveness
+        writers = {name for name in project.roles
+                   if project.config.roles[name].workspace == "write"}
         requests = None
         for item in page["items"]:
-            if (item["holder"] != role.name or item["status"] != "blocked"
-                    or item["wait"]["kind"] not in ("ci", "publication_ci")):
+            if item["holder"] != role.name or item["status"] != "blocked":
+                continue
+            if item["wait"]["kind"] not in ("ci", "publication_ci"):
+                observed = liveness(store, item["wait"], None, item=item, writer_roles=writers)
+                if observed["state"] == "unknown":
+                    unknown = True
+                elif observed["self_resolvable"]:
+                    self_resolvable = True
+                elif observed["state"] in ("pending", "receipt_bound"):
+                    return True, False
                 continue
             if ci_waits.evidence(store, item) is not None:
                 continue
@@ -4234,22 +4252,21 @@ def _writer_wait_liveness(project, role, *, releases=()) -> bool | None:
             if any(request["publication_id"] == wait["publication_id"]
                    and request["sha"] == wait["sha"]
                    for day in requests["days"] for request in day["items"]):
-                return True
+                return True, False
             # Missing dispatch evidence is not evidence of remote inactivity.
             unknown = True
-        return None if unknown else False
+        return (None if unknown else False), self_resolvable
     except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        return None
+        return None, False
 
 
 def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
                               *, project=None) -> bool:
-    """Shared daemon/dispatch fallback, only with proven role-eligible ready work.
+    """Back off for ready work, or a proven self-wait with no external source.
 
-    Progress-driven Next handoffs remain independent. A timer or policy change
-    cannot turn an empty/failed ready-work observation into permission to run.
+    Progress-driven Next handoffs and event subscriptions remain independent.
     """
-    if (role.workspace != "write" or not ready_work_present
+    if (role.workspace != "write"
             or record.get("outcome") not in ("continue", "bounded", "wait")):
         return False
     progress = record.get("progress")
@@ -4262,9 +4279,12 @@ def _writer_progress_fallback(record, config, role, ready_work_present, current_
             return (progress["role"] == role.name and timestamp is not None
                     and backoff > 0 and current_time >= timestamp + backoff
                     and project is not None
-                    and _writer_wait_liveness(project, role) is False)
+                    and (_writer_wait_liveness(project, role) is False if ready_work_present
+                         else _writer_wait_sources(project, role) == (False, True)))
         except (Denied, AttributeError, TypeError, ValueError):
             return False
+    if not ready_work_present:
+        return False
     try:
         validate_progress(progress)
         policy_changed = set(progress["selected"]) != set(role_progress_signals(config, role))

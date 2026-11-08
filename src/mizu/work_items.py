@@ -2684,7 +2684,7 @@ class WorkItems:
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
-                        blocked_only: bool = False, include_open_count: bool = False,
+                        blocked_only: bool = False, include_open_count: bool = False, writer_roles=None,
                         wait_resolution_role: str | None = None, _active_transform=None,
                         delivered_wait_resolution_tokens=None, wait_resolution_high_water=None):
         """Collect the bounded open page with an explicit recovery mode.
@@ -2858,7 +2858,7 @@ class WorkItems:
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
                 state = liveness(self, wait, published_snapshot,
-                                 item=item)
+                                 item=item, writer_roles=writer_roles)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
@@ -3068,19 +3068,22 @@ class WorkItems:
                     "truncated": None, "unseeded_decisions": None,
                     "coverage_complete": False, "diagnostic": "unreadable"}
 
-    def open_state_readonly(self, *, limit=25) -> dict:
+    def open_state_readonly(self, *, limit=25, writer_roles=None) -> dict:
         """Return the seeded open count and blocked liveness from one scan.
 
         The caller gets the same fail-closed diagnostic shape as
         :meth:`blocked_liveness_readonly` and an ``open_count`` derived from the
-        same validated projections. A read error reports both as unavailable;
+        same validated projections. Optional configured writer names annotate
+        self-resolvable causes without changing liveness states or ordering.
+        A read error reports both as unavailable;
         it never falls back to a zero or an unvalidated cache.
         """
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         try:
             blocked = self._page_open_impl(cursor=None, limit=limit, readonly=True,
-                                           blocked_only=True, include_open_count=True)
+                                           blocked_only=True, include_open_count=True,
+                                           writer_roles=writer_roles)
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
             return {"open_count": None,
                     "blocked_work": {"items": [], "total": None, "counts": None,

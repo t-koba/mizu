@@ -130,8 +130,8 @@ def blocked_age(store, item):
             "blocked_max_age_seconds": None if wait.get("kind") == "deadline" else store.blocked_max_age_seconds}
 
 
-def liveness(store, wait, snapshot, *, item=None):
-    observed = _liveness(store, wait, snapshot, item=item)
+def liveness(store, wait, snapshot, *, item=None, writer_roles=None):
+    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles)
     if item is None:
         return observed
     age = blocked_age(store, item)
@@ -145,7 +145,7 @@ def liveness(store, wait, snapshot, *, item=None):
     return {**observed, **age}
 
 
-def _liveness(store, wait, snapshot, *, item=None) -> dict:
+def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Insight-decided waits follow the current revision; dependency waits bind an
@@ -155,9 +155,13 @@ def _liveness(store, wait, snapshot, *, item=None) -> dict:
     proposal merge waits use only their receipt-bound routes when a current
     item is supplied (readiness); generic diagnostics leave them receipt_bound.
     """
+    holder = item.get("holder") if item is not None else None
+    self_resolvable = None
+
     def result(state, reason):
         return {"state": state, "reason": reason,
-                "wait_kind": wait.get("kind") if isinstance(wait, dict) else None}
+                "wait_kind": wait.get("kind") if isinstance(wait, dict) else None,
+                **({"self_resolvable": self_resolvable} if writer_roles is not None else {})}
 
     try:
         if wait is None:
@@ -190,6 +194,8 @@ def _liveness(store, wait, snapshot, *, item=None) -> dict:
             if not isinstance(current, str) or not DIGEST.fullmatch(current):
                 return result("unknown", "snapshot_unavailable")
             due = current != wait["digest"]
+            if holder is not None and writer_roles == {holder}:
+                self_resolvable = "sole_writer_code_change"
         else:
             from . import insight_archive
             from .fs import PREVIEW_BYTES
@@ -236,6 +242,10 @@ def _liveness(store, wait, snapshot, *, item=None) -> dict:
                 if action == "withdraw":
                     return result("impossible", "target_withdrawn")
                 due = action in ("accept", "modify", "reject")
+                if due and writer_roles is not None and holder in writer_roles:
+                    from .insights import insight_metadata
+                    if insight_metadata(item).get("kind", "proposal") == "question" and item["source"] == holder:
+                        self_resolvable = "answered_own_question"
             else:
                 if action in ("accept", "modify", "reject") and action != wait["requires"]["action"]:
                     return result("impossible", "decision_conflict")
