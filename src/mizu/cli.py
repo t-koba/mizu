@@ -532,7 +532,7 @@ def _cmd_work_items(config, project, args):
     opened read-only by the caller.
     """
     from .work_item_read_view import readonly_view
-    store = readonly_view(project.work_items)
+    store = readonly_view(project.work_items, limits=config.limits)
     from .work_item_events import closed_page, progress
     roles = {name: config.roles[name] for name in project.roles}
     event_delivery = progress(store, roles)

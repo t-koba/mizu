@@ -440,6 +440,10 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `work_items_doing` | Per-role active `doing` cap (integer 1–100; default 1). `roles.<name>.work_items_doing` overrides this default with the same bounds. Checked under the transition CAS lock when entering `doing` or transferring a `doing` hold to a different role, counting validated holder state across all items, not just a page. Blocked waits consume no slot; existing over-limit records remain readable and may leave `doing` or receive same-holder scope/delivery revisions |
 | `work_items_stale_seconds` | Uninterrupted `doing` age at which `doing_stale` becomes true (integer 1–31,536,000; default 86,400 / 24 hours). Review visibility only, not origin staleness, expiry, reassignment, authorization or scheduling |
 | `work_items_blocked_max_age_seconds` | Per-project lifetime of blocked waits without an explicit `deadline.at` (positive TOML integer, at most 9,223,372,036,854,775,807; default 604,800 seconds / seven days). Expiry makes held work actionable for reasoned reopening, never completes it or infers remote failure. First blocked time survives delivery/publication rebinding and intermediate `doing`; only an explicit `open` resets it. Explicit deadlines remain independent. See [blocked-work liveness](scheduling.md#blocked-work-liveness-status) |
+| `work_item_read_view_snapshot_cache_bytes` | Serialized-byte budget for validated snapshot records; default 33,554,432 bytes |
+| `work_item_read_view_file_cache_bytes` | Serialized-byte budget for file records; default 8,388,608 bytes |
+| `work_item_read_view_item_cache_bytes` | Serialized-byte budget for parsed-item records; default 8,388,608 bytes |
+| `work_item_read_view_item_cache_entries` | Parsed-item entry budget; default 1,024 |
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
 | `session_delta_details` | Persistent-session delta details: `elide` (default) omits only unchanged work-item previews and role-owned check-job command/error text, with explicit unchanged markers and exact detail references; shared-check candidate details remain full because `join` revalidates and subscribes rather than guaranteeing a read. `full` repeats all details. All bounded rows, state/liveness and page/discovery metadata remain explicit. New/changed rows and invalid/missing session cursors send full details; other projections are unchanged |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units. A writable role may override the cooldown with `roles.<name>.cooldown_seconds` (1–1,073,741,824; unset keeps the project value); read-only cadence stays on `idle_seconds` |
@@ -502,6 +506,13 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
 | `free_disk_mb` | Minimum free-disk reserve for work-unit admission, checks, recovery probes, and backup destinations (default 1,024 MiB; 0 disables; integer 0–1,073,741,824 MiB; one MiB is 1,048,576 bytes) |
+
+The four work-item read-view budgets above are positive exact TOML integers
+through 9,223,372,036,854,775,807; zero does not disable caching. They apply to
+CLI views and runtime dispatch, trading request-local memory for repeated
+validation and I/O, not changing correctness. Oversized records bypass caching;
+eviction repeats validated reads. No cache persists across responses or
+invocations.
 
 Lock timeout policy is execution-local, not a process-global setting changed by loading
 configuration or creating a project. CLI execution, Engine runs, tool-handler threads

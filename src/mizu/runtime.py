@@ -2604,7 +2604,7 @@ class Engine:
             _reconcile_work_item_waits(project, role, self.config) if reconcile_waits
             else (False, prior_wait_resolution_pending))
         # Reuse validated records only within this dispatch, never across rechecks.
-        work_items = readonly_view(project.work_items)
+        work_items = readonly_view(project.work_items, limits=self.config.limits)
         terminal_page = work_item_events.pending(
             work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))

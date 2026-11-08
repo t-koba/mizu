@@ -1,11 +1,12 @@
 """Read-view reuse must preserve validation, output and request isolation."""
 import dataclasses
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver, bind_delivery
 from mizu import acceptance, work_items as work_items_module
 from mizu.cli import _cmd_work_items
+from mizu.config import Limits
 from mizu.distribution import public_source_identity
 from mizu.publication import Publication
 from mizu.work_items import WorkItems
@@ -116,8 +117,8 @@ class ReadViewTests(Fixture):
         self.config.roles["worker"] = dataclasses.replace(
             worker, work_item_events=("done",), work_item_sources="any")
 
-        def uncached(value):
-            view = readonly_view(value)
+        def uncached(value, **kwargs):
+            view = readonly_view(value, **kwargs)
             view._peek_full_item = lambda *a, **kw: None
             return view
 
@@ -338,7 +339,7 @@ class ReadViewTests(Fixture):
         for event_trigger, continuation in ((True, False), (False, False), (True, True)):
             with self.subTest(event_trigger=event_trigger, continuation=continuation):
                 with patch.object(Snapshots, "validate_manifest", validate):
-                    with patch("mizu.runtime.readonly_view", side_effect=lambda value: value):
+                    with patch("mizu.runtime.readonly_view", side_effect=lambda value, **kwargs: value):
                         expected = self.dispatch(event_trigger=event_trigger, continuation=continuation)
                     uncached = len(calls)
                     calls.clear()
@@ -365,7 +366,7 @@ class ReadViewTests(Fixture):
         current = self.dispatch()
         self.assertEqual(current["_dispatch"].admission, "work_item")
         self.assertEqual([row["id"] for row in current["terminal_events"]], [item_id])
-        with patch("mizu.runtime.readonly_view", side_effect=lambda value: value):
+        with patch("mizu.runtime.readonly_view", side_effect=lambda value, **kwargs: value):
             self.assertEqual(self.dispatch(), current)
 
     def test_next_dispatch_revalidates_historical_manifest(self):
@@ -375,7 +376,7 @@ class ReadViewTests(Fixture):
         write_json(self.project.root / "snapshots" / f"{snapshot['id']}.json", snapshot)
         with self.assertRaises(Denied):
             self.dispatch()
-        with patch("mizu.runtime.readonly_view", side_effect=lambda value: value):
+        with patch("mizu.runtime.readonly_view", side_effect=lambda value, **kwargs: value):
             with self.assertRaises(Denied):
                 self.dispatch()
 
@@ -389,6 +390,82 @@ class ReadViewTests(Fixture):
         view.snapshots.excludes = ("private",)
         with self.assertRaises(Denied):
             view.snapshots.validate_paths({"private/file": {}})
+
+    def test_cli_and_dispatch_forward_configured_limits(self):
+        self.prepare()
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_item_read_view_snapshot_cache_bytes=137,
+            work_item_read_view_file_cache_bytes=139,
+            work_item_read_view_item_cache_bytes=149,
+            work_item_read_view_item_cache_entries=2))
+        with patch("mizu.work_item_read_view.readonly_view", wraps=readonly_view) as view:
+            _cmd_work_items(self.config, self.project,
+                            SimpleNamespace(cursor=None, limit=100, closed=100))
+        view.assert_called_once_with(self.project.work_items, limits=self.config.limits)
+        with patch("mizu.runtime.readonly_view", wraps=readonly_view) as view:
+            self.dispatch()
+        view.assert_called_once_with(self.project.work_items, limits=self.config.limits)
+
+    def test_small_budgets_repeat_validation_without_changing_projection(self):
+        self.prepare()
+        expected = self.render(readonly_view(self.project.work_items))
+        limits = dataclasses.replace(
+            Limits(), work_item_read_view_snapshot_cache_bytes=1,
+            work_item_read_view_file_cache_bytes=1,
+            work_item_read_view_item_cache_bytes=1,
+            work_item_read_view_item_cache_entries=1)
+        with patch.object(Snapshots, "validate_manifest", autospec=True,
+                          side_effect=Snapshots.validate_manifest) as validate:
+            self.assertEqual(self.render(readonly_view(self.project.work_items, limits=limits)),
+                             expected)
+        self.assertGreater(validate.call_count, 1)
+
+    def test_each_byte_budget_is_used_exactly_and_misses_are_not_cached(self):
+        value = {"key": "a"}
+        for kind in ("snapshot", "file", "item"):
+            size = len(canonical(value)) + (len(canonical({})) if kind == "item" else 0)
+            for budget, expected_reads in ((size - 1, 4), (size, 3), (2 * size, 2)):
+                with self.subTest(kind=kind, budget=budget):
+                    reader = Mock(return_value=value)
+                    store = SimpleNamespace(
+                        snapshots=SimpleNamespace(get=reader, _path_key=lambda key: key),
+                        _read=reader, _get=reader)
+                    limits = dataclasses.replace(
+                        Limits(), **{f"work_item_read_view_{kind}_cache_bytes": budget})
+                    view = readonly_view(store, limits=limits)
+                    read = {"snapshot": view.snapshots.get, "file": view._read,
+                            "item": lambda key: view._get(
+                                key, seed_event={}, history_revisions=None)}[kind]
+                    for key in ("a", "a", "b", "a"):
+                        self.assertEqual(read(key), value)
+                    self.assertEqual(reader.call_count, expected_reads)
+                    # Exceptions on a cache miss must be retried, not retained.
+                    reader.side_effect = Denied("invalid record")
+                    for _ in range(2):
+                        with self.assertRaisesRegex(Denied, "invalid record"):
+                            read("bad")
+                    self.assertEqual(reader.call_count, expected_reads + 2)
+
+    def test_parsed_item_entry_budget_and_default_fallback(self):
+        for entries, expected_reads in ((None, 2), (1, 3), (2, 2)):
+            with self.subTest(entries=entries):
+                reader = Mock(return_value={"key": "a"})
+                store = SimpleNamespace(
+                    snapshots=SimpleNamespace(get=reader, _path_key=lambda key: key),
+                    _read=reader, _get=reader)
+                kwargs = {} if entries is None else {"limits": dataclasses.replace(
+                    Limits(), work_item_read_view_item_cache_entries=entries)}
+                view = readonly_view(store, **kwargs)
+                self.assertEqual(view._read.budget, Limits().work_item_read_view_file_cache_bytes)
+                for key in ("a", "a", "b", "a"):
+                    item = view._get(key, seed_event={}, history_revisions=None)
+                    self.assertEqual(item, {"key": "a"})
+                    item["key"] = "changed"
+                self.assertEqual(reader.call_count, expected_reads)
+                fresh = readonly_view(store, **kwargs)
+                self.assertEqual(fresh._get("a", seed_event={}, history_revisions=None),
+                                 {"key": "a"})
+                self.assertEqual(reader.call_count, expected_reads + 1)
 
     def test_record_budget_eviction_and_copy_isolation(self):
         calls = []

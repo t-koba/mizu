@@ -532,7 +532,7 @@ class CiWaitTests(CiWaitFixture):
         def dispatch():
             return engine._dispatch_state(self.project, "worker", role, event_trigger=True)
 
-        with patch("mizu.runtime.readonly_view", side_effect=lambda store: store):
+        with patch("mizu.runtime.readonly_view", side_effect=lambda store, **kwargs: store):
             expected = dispatch()
         self.assertEqual(dispatch(), expected)
         self.assertEqual(expected["_dispatch"].admission, "wait")
@@ -543,7 +543,7 @@ class CiWaitTests(CiWaitFixture):
         current = dispatch()
         self.assertEqual(current["wait_events"], [])
         self.assertEqual(current["_dispatch"].admission, "ready_work")
-        with patch("mizu.runtime.readonly_view", side_effect=lambda store: store):
+        with patch("mizu.runtime.readonly_view", side_effect=lambda store, **kwargs: store):
             self.assertEqual(dispatch(), current)
 
     def test_runtime_replays_unselected_explicit_ci_delivery(self):

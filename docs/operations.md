@@ -572,12 +572,24 @@ live pages and routine model context remain live-only.
 
 The CLI is the canonical task-list reader, including for dashboards. Within one
 invocation it reuses validated snapshots and task records across the open,
-closed and delivery sections. Serialized retained records are bounded to 48 MiB
-(with additional Python object overhead); the parsed-item cache retains at most
-1,024 rows, and path validation retains at most 8192 names. Eviction only causes
-another validated read. The next invocation
-reads again, so changes and corruption remain visible. No persistent cache,
-writer lock, recovery operation or release-specific alternate reader is used.
+closed and delivery sections. Runtime dispatch uses the same request-local
+facade. The `[limits]` cache budgets are
+`work_item_read_view_snapshot_cache_bytes` (default 32 MiB),
+`work_item_read_view_file_cache_bytes` (8 MiB),
+`work_item_read_view_item_cache_bytes` (8 MiB), and
+`work_item_read_view_item_cache_entries` (1,024 entries). Each accepts a positive
+exact TOML integer through 9,223,372,036,854,775,807; zero does not disable caching.
+The byte budgets measure serialized retained records, with additional Python
+object overhead. Path validation still retains at most 8192 names.
+
+These settings trade memory against repeat validation and I/O, not correctness:
+oversized records are read and validated normally without retention, and eviction
+only causes another validated read. Snapshot/file caches evict oldest-used
+records; the parsed-item cache clears when its byte or entry budget would be
+exceeded. All caches are discarded after the response or dispatch. The next
+request reads again, so changes and corruption remain visible. No persistent
+cache, writer lock, recovery operation or release-specific alternate reader is
+used.
 
 
 ```sh

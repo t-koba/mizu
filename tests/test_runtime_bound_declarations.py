@@ -53,6 +53,9 @@ revision, delivered-token and sidecar bounds are fixed mechanism or safety
 contracts; its delivered-token set covers prior progress plus one opening page,
 and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
+The `work_item_read_view.py` snapshot, file and parsed-item retention budgets
+are configured policy under `[limits]`; misses repeat validated reads. Their
+exact defaults and uses are checked separately; the path-key cache stays fixed.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 spawn-reap bounds are fixed mechanism or safety. POSIX pipe idle polling is
 configured policy owned by `[limits].pipe_poll_interval_ms` (default 100 ms,
@@ -940,20 +943,7 @@ DECLARATIONS = {
             '4096', 'safety',
             'wait events / bounded receipt read'),
     },
-    'work_item_read_view.py': {
-        'READ_VIEW_SNAPSHOT_CACHE_BYTES': (
-            '32 * 1024 * 1024', 'safety',
-            'work items / request-local validated snapshot cache byte ceiling'),
-        'READ_VIEW_FILE_CACHE_BYTES': (
-            '8 * 1024 * 1024', 'safety',
-            'work items / request-local file cache byte ceiling'),
-        'READ_VIEW_ITEM_CACHE_BYTES': (
-            '8 * 1024 * 1024', 'safety',
-            'work items / request-local parsed-item cache byte ceiling; oversized values bypass caching'),
-        'READ_VIEW_ITEM_CACHE_ENTRIES': (
-            '1024', 'safety',
-            'work items / request-local parsed-item cache entry ceiling'),
-    },
+    'work_item_read_view.py': {},
     'work_item_seed.py': {
         'MAX_DECISION_TASKS': (
             '16', 'format',
@@ -1067,6 +1057,19 @@ CONFIGURED_SETTINGS = {
                               'VCS CI wake / unchanged-red re-wake interval default'),
     },
 }
+# Request-local retention only: cache misses repeat normal validation, so these
+# memory-versus-I/O choices are policy, not fixed correctness/safety ceilings.
+WORK_ITEM_READ_VIEW_CACHE = {
+    'work_item_read_view_snapshot_cache_bytes': (
+        '32 * 1024 * 1024', 'configured policy', 'Limits / request-local validated snapshot records'),
+    'work_item_read_view_file_cache_bytes': (
+        '8 * 1024 * 1024', 'configured policy', 'Limits / request-local file records'),
+    'work_item_read_view_item_cache_bytes': (
+        '8 * 1024 * 1024', 'configured policy', 'Limits / request-local parsed-item records'),
+    'work_item_read_view_item_cache_entries': (
+        '1024', 'configured policy', 'Limits / request-local parsed-item entries'),
+}
+
 CONFIGURED = {
     'Editor': {
         'search_max_bytes': ('8 * 1024 * 1024', 'configured policy', 'editor / per-request scan byte budget'),
@@ -2588,18 +2591,31 @@ def sibling():
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
 
     def test_work_item_read_view_cache_bounds_are_declared_and_used(self):
+        from mizu.config import TOML_INTEGER_MAX, _LIMIT_RANGES
+
+        config_tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in config_tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        defaults = {node.target.id: ast.unparse(node.value) for node in limits.body
+                    if isinstance(node, ast.AnnAssign)}
+        for name, (expression, category, rationale) in WORK_ITEM_READ_VIEW_CACHE.items():
+            self.assertEqual(category, 'configured policy')
+            self.assertTrue(rationale.strip())
+            self.assertEqual(defaults[name], expression)
+            self.assertEqual(_LIMIT_RANGES[name], (1, TOML_INTEGER_MAX))
         tree = ast.parse((ROOT / 'work_item_read_view.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body
                         if isinstance(node, ast.FunctionDef) and node.name == 'readonly_view')
         calls = [node for node in ast.walk(function)
                  if isinstance(node, ast.Call) and callee_name(node.func) == '_Records']
         self.assertEqual([ast.unparse(call.args[1]) for call in calls], [
-            'READ_VIEW_SNAPSHOT_CACHE_BYTES', 'READ_VIEW_FILE_CACHE_BYTES'])
+            'limits.work_item_read_view_snapshot_cache_bytes',
+            'limits.work_item_read_view_file_cache_bytes'])
         comparisons = {ast.unparse(node) for node in ast.walk(function)
                        if isinstance(node, ast.Compare)}
-        self.assertIn('size > READ_VIEW_ITEM_CACHE_BYTES', comparisons)
-        self.assertIn('len(items) >= READ_VIEW_ITEM_CACHE_ENTRIES', comparisons)
-        self.assertIn('item_bytes + size > READ_VIEW_ITEM_CACHE_BYTES', comparisons)
+        self.assertIn('size > limits.work_item_read_view_item_cache_bytes', comparisons)
+        self.assertIn('len(items) >= limits.work_item_read_view_item_cache_entries', comparisons)
+        self.assertIn('item_bytes + size > limits.work_item_read_view_item_cache_bytes', comparisons)
 
     def test_editor_search_bounds_are_declared_and_used(self):
         tree = ast.parse((ROOT / 'editor.py').read_text(encoding='utf-8'))

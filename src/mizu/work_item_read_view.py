@@ -16,14 +16,9 @@ from collections import OrderedDict
 from copy import copy, deepcopy
 from functools import lru_cache
 
+from .config import Limits
 from .fs import canonical
 from .work_items import _HISTORY_UNSET
-
-
-READ_VIEW_SNAPSHOT_CACHE_BYTES = 32 * 1024 * 1024
-READ_VIEW_FILE_CACHE_BYTES = 8 * 1024 * 1024
-READ_VIEW_ITEM_CACHE_BYTES = 8 * 1024 * 1024
-READ_VIEW_ITEM_CACHE_ENTRIES = 1024
 
 
 class _Records:
@@ -48,22 +43,25 @@ class _Records:
         return value
 
 
-def readonly_view(store):
+def readonly_view(store, *, limits=None):
     """Private read facade; discard after rendering one work-items response.
 
     The unchanged page/receipt readers own schema, limits, evidence and failure
-    semantics. Serialized cached records are bounded to 48 MiB in total; parsed
-    objects have normal Python overhead. Path checks are bounded to 8192 names.
-    Do not use this facade for writes. All records remain scoped to this CLI
-    invocation; there is no persistent validation cache or alternate reader.
+    semantics. Limits select request-local serialized-byte and parsed-item count
+    budgets (48 MiB / 1024 items by default), plus Python object overhead.
+    Path checks are bounded to 8192 names.
+    Do not use this facade for writes. Records remain scoped to one response
+    or dispatch; there is no persistent validation cache or alternate reader.
     """
+    limits = Limits() if limits is None else limits
     view = copy(store)
     snapshots = copy(store.snapshots)
     snapshots._path_key = lru_cache(maxsize=8192)(snapshots._path_key)
     read_snapshot = snapshots.get
     # The chain validator only compares these private manifests; none are
     # returned to the caller or changed while constructing page rows.
-    records = _Records(read_snapshot, READ_VIEW_SNAPSHOT_CACHE_BYTES, copy_values=False)
+    records = _Records(read_snapshot,
+                       limits.work_item_read_view_snapshot_cache_bytes, copy_values=False)
 
     def get(snapshot_id=None):
         # The mutable current pointer and invalid arguments always take the
@@ -74,7 +72,7 @@ def readonly_view(store):
 
     snapshots.get = get
     view.snapshots = snapshots
-    view._read = _Records(view._read, READ_VIEW_FILE_CACHE_BYTES)
+    view._read = _Records(view._read, limits.work_item_read_view_file_cache_bytes)
     read_item = view._get
     items = {}
     item_bytes = 0
@@ -101,10 +99,10 @@ def readonly_view(store):
                               verify_snapshots=verify_snapshots,
                               verify_current_delivery=verify_current_delivery)
             size = len(canonical(value)) + len(key[1])
-            if size > READ_VIEW_ITEM_CACHE_BYTES:
+            if size > limits.work_item_read_view_item_cache_bytes:
                 return value
-            if (len(items) >= READ_VIEW_ITEM_CACHE_ENTRIES
-                    or item_bytes + size > READ_VIEW_ITEM_CACHE_BYTES):
+            if (len(items) >= limits.work_item_read_view_item_cache_entries
+                    or item_bytes + size > limits.work_item_read_view_item_cache_bytes):
                 items.clear()
                 item_bytes = 0
             items[key] = value
