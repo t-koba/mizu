@@ -914,8 +914,13 @@ measurement log is compressed/dropped by `mizu prune` according to
 writes a start before calling the driver, updates local session
 selection when observed, and settles timing/attempt-only facts in `finally`.
 A crash can leave `started` without an end; later observations may still exist in
-`runtime-usage.json`, joined by attempt. Write/measurement failures are swallowed
-and do not retry, cancel or change model execution; evidence can consequently be
+`runtime-usage.json`, joined by attempt. Each `_model_usage` bridge frame is
+capped at 65,536 canonical bytes, and the run context retains at most 4,096
+observation rows; these are fixed run-local safety bounds, separate from
+configurable `[dispatch_evidence]` attempt retention. Over-limit runtime-usage
+reports are refused and may leave usage facts incomplete. For
+`dispatch-attempts.json`, write/measurement failures are swallowed and do not
+retry, cancel or change model execution; its evidence can consequently be
 missing or stale and is not an audit-completeness guarantee. Scheduling remains
 FIFO with unchanged slot/role/workspace locking, provider TTL and session policy.
 

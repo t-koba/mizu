@@ -142,9 +142,10 @@ built-in `range(...)` calls by file, scope, argument and occurrence. A separate
 exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
-contexts remain outside these inventories. A direct-comparison slice records operands of magnitude at least 3 in
-`check_jobs.py`, `acceptance.py`, `ci_acceptance.py`, `usage.py` and
-`config.py`; it is not a global numeric comparison linter.
+contexts remain outside these inventories. A direct-comparison slice records
+operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
+`ci_acceptance.py`, `usage.py`, `config.py` and `runtime.py`; it is not a
+global numeric comparison linter.
 """
 import ast
 from pathlib import Path
@@ -1657,6 +1658,36 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('config.py', 'load', 1, 8): (
         '256', 'format',
         'VCS configuration / protected-ref length follows the shared 256-character branch-name contract'),
+    ('runtime.py', '_ready_work_observation', 1, 0): (
+        '4', 'format',
+        'snapshot progress / schema-4 delivery-token receipt compatibility guard'),
+    ('runtime.py', '_ready_work_observation', 1, 1): (
+        '5', 'format',
+        'snapshot progress / schema-5 resolution-specific high-water receipt guard'),
+    ('runtime.py', 'Context._handle', 1, 0): (
+        '65536', 'safety',
+        'runtime usage / fixed canonical bridge-frame byte ceiling for one observation'),
+    ('runtime.py', 'Context._handle', 1, 1): (
+        '4096', 'safety',
+        'runtime usage / fixed per-run retained observation-row ceiling'),
+    ('runtime.py', 'Context._covered_waits', 1, 0): (
+        '16', 'format',
+        'VCS request / covered work-item count follows the public request protocol'),
+    ('runtime.py', 'Context._op_finish', 1, 0): (
+        '512', 'format',
+        'finish / acknowledgement-token count follows the public maxItems contract'),
+    ('runtime.py', 'Context._op_finish', 1, 1): (
+        '64', 'format',
+        'finish / acknowledgement-token length follows the public maxLength contract'),
+    ('runtime.py', '_producer_limit', 2, 0): (
+        '1073741824', 'configured policy',
+        'producer holds / open_work_items and producer_inputs_per_source use the configured range'),
+    ('runtime.py', '_declared_next', 1, 0): (
+        '32000', 'format',
+        'writer handoff / state text follows the public finish schema length'),
+    ('runtime.py', '_declared_next', 1, 1): (
+        '4096', 'format',
+        'writer handoff / actionable Next step follows the documented declaration format bound'),
     ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
         '256', 'safety',
         'acceptance / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -2054,7 +2085,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertIn(category, categories)
             self.assertTrue(rationale.strip())
         found = {}
-        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py', 'config.py'):
+        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py', 'config.py', 'runtime.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             for site, expression in comparison_argument_inventory(tree).items():
                 found[(filename, *site)] = expression
