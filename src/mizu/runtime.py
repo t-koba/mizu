@@ -90,7 +90,7 @@ from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               vcs_poll_interval, vcs_poll_max_branches,
                               vcs_poll_proposals_enabled, vcs_poll_status_timeout)
 from .ci_polling import (_merge_ci_success_maps, _merge_ci_success_rows,
-                         _prune_ci_branch_map, poll_ci)
+                         _prune_ci_branch_map, _live_ci_branches, poll_ci)
 from .vcs_proposal_poll import (MAX_PROPOSAL_CURSOR, _valid_proposal_cursor,
                                 poll_proposals)
 from .vcs_upstream_poll import poll_upstream, refresh_upstream
@@ -4886,7 +4886,7 @@ def _wall(value):
     return number
 
 
-def refresh_poll_state(state: dict, shared: dict, config=None) -> dict:
+def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=True) -> dict:
     """Refresh in-memory poll state from shared persisted state.
 
     Schema: ``state`` is daemon in-memory poll state (fetch, CI, proposal
@@ -4897,7 +4897,8 @@ def refresh_poll_state(state: dict, shared: dict, config=None) -> dict:
     empty. An absent, unreadable, or invalid failure map leaves the local map
     intact. Success evidence has its separate merge policy. Bounds: timestamps
     must be numeric. Trust: local
-    operator state, never model input. Failure: never raises.
+    operator state, never model input. ``refresh_ci=False`` defers cache
+    normalization until after upstream refresh/live-ref discovery. Failure: never raises.
     """
     ci_state = state.setdefault("ci", {})
     state["proposal_complete_facts"] = (shared.get("proposal_complete_facts")
@@ -4922,11 +4923,23 @@ def refresh_poll_state(state: dict, shared: dict, config=None) -> dict:
             valid_cursor = _valid_proposal_cursor(stored_cursor)
             if valid_cursor is not None:
                 state["proposal_cursor"] = valid_cursor
-    if isinstance(shared.get("failures"), dict):
-        ci_state["failures"] = _clean_ci_failures(shared["failures"], config)
-    ci_state["successes"] = _merge_ci_success_maps(
-        ci_state.get("successes"), shared.get("successes"), config)
+    if refresh_ci:
+        _refresh_ci_cache(ci_state, shared, config)
     return ci_state
+
+
+def _refresh_ci_cache(ci_state, shared, config=None, *, live_branches=None,
+                      defer_branch_cap=False):
+    """Refresh bounded CI facts only after any known-deleted refs are excluded."""
+    if not isinstance(shared, dict):
+        return
+    if isinstance(shared.get("failures"), dict):
+        ci_state["failures"] = _clean_ci_failures(
+            shared["failures"], config, live_branches=live_branches,
+            defer_branch_cap=defer_branch_cap)
+    ci_state["successes"] = _merge_ci_success_maps(
+        ci_state.get("successes"), shared.get("successes"), config,
+        live_branches=live_branches, defer_branch_cap=defer_branch_cap)
 
 
 def poll_project_vcs(config, project, state: dict, *, now: float, interval: float) -> list:
@@ -4946,11 +4959,26 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                 shared = read_json(project.root / POLL_STATE_FILE, {})
             except (OSError, ValueError, TypeError):
                 shared = {}
-            ci_state = refresh_poll_state(state, shared, config)
+            ci_state = refresh_poll_state(state, shared, config, refresh_ci=False)
             events = []
             fetched = poll_upstream(config, project, state, now=now, interval=interval)
             if fetched is not None:
                 events.append(fetched)
+            # Fetch can delete refs. Discover their lifetime before cache capacity
+            # selection, but keep skipped/disabled polls free of ref reads.
+            # When the CI tick is not due there is no complete inventory, so
+            # defer configured capacity selection (fixed envelope still
+            # applies) to avoid evicting live rows via a stale wake ref.
+            ci_due = bool(config.vcs.get("command")
+                          and upstream_fetch_due(ci_state.get("last_poll"), now, interval))
+            live = None
+            if ci_due:
+                try:
+                    live = _live_ci_branches(config, project)
+                except (Denied, OSError):
+                    pass  # Unknown inventory must not imply branch deletion.
+            _refresh_ci_cache(ci_state, shared, config, live_branches=live,
+                              defer_branch_cap=not ci_due)
             polled = poll_ci(config, project, ci_state, now=now, interval=interval)
             if polled is not None:
                 events.append(polled)
@@ -4970,8 +4998,12 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "proposal_complete_facts": state.get("proposal_complete_facts"),
                             "last_ci_wait_poll": state.get("last_ci_wait_poll"),
                             "ci_wait_cursor": state.get("ci_wait_cursor"),
-                            "failures": _clean_ci_failures(ci_state.get("failures"), config),
-                            "successes": _clean_ci_successes(ci_state.get("successes"), config)})
+                            "failures": _clean_ci_failures(
+                                ci_state.get("failures"), config,
+                                defer_branch_cap=not ci_due),
+                            "successes": _clean_ci_successes(
+                                ci_state.get("successes"), config,
+                                defer_branch_cap=not ci_due)})
             except (OSError, ValueError, TypeError) as exc:
                 # Do not report a proposal page as successful when its cursor
                 # and tick timestamp could not be durably resumed. Other VCS

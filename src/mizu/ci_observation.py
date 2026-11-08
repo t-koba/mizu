@@ -68,8 +68,15 @@ def _valid_ci_run(value) -> str | None:
         return None
 
 
-def _clean_ci_failures(value, config=None) -> dict:
-    """Normalize a stored ``{branch: [{sha, check, run?}]}`` mapping (never raises)."""
+def _clean_ci_failures(value, config=None, *, live_branches=None, defer_branch_cap=False) -> dict:
+    """Normalize stored CI rows, pruning known-deleted refs before capacity selection.
+
+    ``live_branches=None`` means no complete inventory is available: retain the
+    existing capacity/wake-priority policy without inferring any deletions.
+    ``defer_branch_cap=True`` preserves live rows until a complete inventory is
+    available by enforcing the fixed row envelope instead of the configured
+    branch cap; per-branch validation still applies.
+    """
     if not isinstance(value, dict):
         return {}
     out: dict = {}
@@ -79,10 +86,21 @@ def _clean_ci_failures(value, config=None) -> dict:
     except Exception:
         return {}
     max_branches, max_checks = ci_cache_limits(config)
+    if defer_branch_cap:
+        # Until a complete ref inventory is available, retain old branches up
+        # to the fixed safety envelope. Count actual validated rows below; a
+        # worst-case per-branch estimate would evict sparse live branches when
+        # the configured per-branch cap is large. Count inspected rows below.
+        max_branches = MAX_CI_CACHE_ROWS
+    remaining_entries = MAX_CI_CACHE_ROWS if defer_branch_cap else None
     protected = effective_ci_wake_branches(config)
     # Reserve selected branches before unrelated cache entries consume capacity.
     names = list(dict.fromkeys([b for b in protected if b in value] + list(value)))
+    if live_branches is not None:
+        names = [branch for branch in names if branch in live_branches]
     for branch in names[:max_branches]:
+        if remaining_entries == 0:
+            break
         rows = value[branch]
         try:
             _check_branch(branch)
@@ -92,6 +110,10 @@ def _clean_ci_failures(value, config=None) -> dict:
             continue
         kept = []
         for entry in rows[:max_checks]:
+            if remaining_entries is not None:
+                if remaining_entries == 0:
+                    break
+                remaining_entries -= 1
             if not isinstance(entry, dict):
                 continue
             sha = entry.get("sha")
@@ -113,9 +135,10 @@ def _clean_ci_failures(value, config=None) -> dict:
     return out
 
 
-def _clean_ci_successes(value, config=None) -> dict:
+def _clean_ci_successes(value, config=None, *, live_branches=None, defer_branch_cap=False) -> dict:
     """Normalize bounded persisted success evidence (same schema as failures)."""
-    return _clean_ci_failures(value, config)
+    return _clean_ci_failures(
+        value, config, live_branches=live_branches, defer_branch_cap=defer_branch_cap)
 
 
 def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,

@@ -1151,6 +1151,140 @@ class CiCacheRetentionTests(Fixture):
         self.assertEqual(state["failures"], retained)
         self.assertEqual(state["successes"], retained)
 
+    def test_deleted_wake_ref_is_pruned_before_reduced_capacity_selection(self):
+        from mizu.fs import read_json, write_json
+        from mizu.runtime import poll_project_vcs
+        config = self._config(2, 1, command=["synthetic"], ci_branch="stale",
+                              poll_max_branches=1)
+        value = {branch: self._rows(1) for branch in ("live-a", "live-b", "stale")}
+        expected = {branch: value[branch] for branch in ("live-a", "live-b")}
+        refs = {branch: SHA_A for branch in ("live-a", "live-b", "live-c")}
+        for project_poll in (False, True):
+            with self.subTest(project_poll=project_poll):
+                # Only live-c is refreshed: a lost live-b cannot be recovered by
+                # the tick. Both the authoritative shared failures and merged
+                # local/shared successes must survive reduced retention.
+                ci = {"ci_offset": 2, "failures": value, "successes": value}
+                if not project_poll:
+                    vcs.inject_refs(self.project.root, refs)
+                    event = poll_ci(config, self.project, ci, now=15.0, interval=15.0,
+                                    reader=lambda *_: {"checks": []})
+                else:
+                    vcs.inject_refs(self.project.root, {**refs, "stale": SHA_B})
+                    write_json(self.project.root / "vcs-poll.json", {
+                        "last_poll": 0.0, "failures": value, "successes": value})
+                    def fetch(*_args, **_kwargs):
+                        # Upstream refresh deletes the selected ref this tick,
+                        # so cache normalization must wait until after fetch.
+                        vcs.inject_refs(self.project.root, refs)
+                        return None
+                    with (patch("mizu.runtime.poll_upstream", side_effect=fetch),
+                          patch("mizu.runtime.ci_waits.poll", return_value=None),
+                          patch("mizu.runtime.poll_proposals", return_value=None),
+                          patch("mizu.vcs.read_via", return_value={"checks": []})):
+                        events = poll_project_vcs(config, self.project, {"ci": ci},
+                                                  now=15.0, interval=15.0)
+                    event, = events
+                    stored = read_json(self.project.root / "vcs-poll.json")
+                    for key in ("failures", "successes"):
+                        with self.subTest(persisted_cache=key):
+                            self.assertEqual(stored[key], expected)
+                self.assertTrue(event["ok"])
+                self.assertEqual(event["branches"], ["live-c"])
+                for key in ("failures", "successes"):
+                    with self.subTest(memory_cache=key):
+                        self.assertEqual(ci[key], expected)
+
+    def test_unknown_live_inventory_does_not_imply_deleted_wake_ref(self):
+        from mizu.fs import read_json, write_json
+        from mizu.runtime import poll_project_vcs
+        config = self._config(2, 1, command=["synthetic"], ci_branch="stale",
+                              poll_max_branches=1)
+        value = {branch: self._rows(1) for branch in ("live-a", "live-b", "stale")}
+        expected = {branch: value[branch] for branch in ("stale", "live-a")}
+        for error in (OSError("unavailable"), Denied("incomplete inventory")):
+            with self.subTest(error=type(error).__name__):
+                write_json(self.project.root / "vcs-poll.json", {
+                    "failures": value, "successes": value})
+                state = {}
+                with (patch("mizu.runtime.poll_upstream", return_value=None),
+                      patch("mizu.runtime.ci_waits.poll", return_value=None),
+                      patch("mizu.runtime.poll_proposals", return_value=None),
+                      patch("mizu.vcs.list_refs", side_effect=error),
+                      patch("mizu.vcs.read_via") as reader):
+                    event, = poll_project_vcs(config, self.project, state,
+                                              now=15.0, interval=15.0)
+                reader.assert_not_called()
+                self.assertFalse(event["ok"])
+                stored = read_json(self.project.root / "vcs-poll.json")
+                for key in ("failures", "successes"):
+                    self.assertEqual(state["ci"][key], expected)
+                    self.assertEqual(stored[key], expected)
+
+    def test_deferred_capacity_still_obeys_total_row_envelope(self):
+        from mizu.ci_observation import MAX_CI_CACHE_ROWS, _clean_ci_failures
+        from mizu.ci_polling import _merge_ci_success_maps
+        config = self._config(2, 1024, ci_branch="wake")
+        value = {f"branch-{i:04d}": self._rows(1)
+                 for i in range(MAX_CI_CACHE_ROWS + 1)}
+        for cache in (_clean_ci_failures(value, config, defer_branch_cap=True),
+                      _merge_ci_success_maps({}, value, config, defer_branch_cap=True)):
+            self.assertLessEqual(len(cache), MAX_CI_CACHE_ROWS)
+            self.assertEqual(sum(map(len, cache.values())), MAX_CI_CACHE_ROWS)
+
+    def test_not_due_reduced_retention_defers_capacity_until_live_inventory(self):
+        from mizu.fs import read_json, write_json
+        from mizu.runtime import poll_project_vcs
+        config = self._config(2, 1024, command=["synthetic"], ci_branch="stale",
+                              poll_max_branches=1)
+        value = {branch: self._rows(1) for branch in ("live-a", "live-b", "stale")}
+        # Not due (last_poll=10, now=15, interval=15): there is no complete
+        # live inventory, so reduced capacity must not evict live rows via
+        # the stale selected wake ref. Both caches stay over the configured
+        # cap within the fixed row envelope until a due poll can prune.
+        write_json(self.project.root / "vcs-poll.json", {
+            "last_poll": 10.0, "last_fetch": 10.0,
+            "last_proposal_poll": 10.0, "last_ci_wait_poll": 10.0,
+            "failures": value, "successes": value})
+        vcs.inject_refs(self.project.root,
+                        {branch: SHA_A for branch in ("live-a", "live-b", "stale")})
+        state = {}
+        with (patch("mizu.runtime.poll_upstream", return_value=None),
+              patch("mizu.runtime.ci_waits.poll", return_value=None),
+              patch("mizu.runtime.poll_proposals", return_value=None),
+              patch("mizu.vcs.list_refs",
+                    side_effect=AssertionError("not-due poll must not read refs")),
+              patch("mizu.vcs.read_via",
+                    side_effect=AssertionError("not-due poll must not call the adapter"))):
+            events = poll_project_vcs(config, self.project, state,
+                                      now=15.0, interval=15.0)
+        self.assertEqual(events, [])
+        stored = read_json(self.project.root / "vcs-poll.json")
+        for key in ("failures", "successes"):
+            with self.subTest(preserved_cache=key):
+                self.assertEqual(state["ci"][key], value)
+                self.assertEqual(stored[key], value)
+        # A later due tick sees the stale deletion and prunes before capacity
+        # selection, so the preserved live-b is still recoverable.
+        vcs.inject_refs(self.project.root,
+                        {branch: SHA_A for branch in ("live-a", "live-b", "live-c")})
+        state["ci"]["ci_offset"] = 2
+        with (patch("mizu.runtime.poll_upstream", return_value=None),
+              patch("mizu.runtime.ci_waits.poll", return_value=None),
+              patch("mizu.runtime.poll_proposals", return_value=None),
+              patch("mizu.vcs.read_via", return_value={"checks": []})):
+            events = poll_project_vcs(config, self.project, state,
+                                      now=25.0, interval=15.0)
+        event = next(item for item in events if item["event"] == "ci_poll")
+        self.assertTrue(event["ok"])
+        self.assertEqual(event["branches"], ["live-c"])
+        expected = {branch: value[branch] for branch in ("live-a", "live-b")}
+        stored = read_json(self.project.root / "vcs-poll.json")
+        for key in ("failures", "successes"):
+            with self.subTest(pruned_cache=key):
+                self.assertEqual(state["ci"][key], expected)
+                self.assertEqual(stored[key], expected)
+
     def test_wake_covers_total_envelope_not_the_old_65_times_16_limit(self):
         from mizu.ci_observation import wake_ci_failures, ci_failures_projection
         from mizu.fs import write_json
