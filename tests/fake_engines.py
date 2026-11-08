@@ -139,6 +139,12 @@ else:
         if method == 'initialize':
             if scenario == 'no-initialize':
                 continue
+            notification_count = {
+                'handshake-notifications-at-cap': 128,
+                'handshake-notifications-over-cap': 129,
+            }.get(scenario, 0)
+            for _ in range(notification_count):
+                emit({'method': 'synthetic/handshakeNotification', 'params': {}})
             if scenario == 'initialize-error':
                 emit({'id': identifier, 'error': {'code': -32000, 'message': 'synthetic refusal'}})
             else:

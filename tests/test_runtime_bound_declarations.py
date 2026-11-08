@@ -145,7 +145,7 @@ exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
-operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
+operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
 `usage.py`, `config.py`, `runtime.py`, `project.py`, `services.py` and
 `vcs.py`; numeric-only arithmetic operands are evaluated without source
@@ -1669,6 +1669,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
+    ('codex.py', 'CodexDriver.execute.request', 1, 0): (
+        '128', 'safety',
+        'Codex app-server initialize / cap unmatched notification records retained before the response'),
     ('config.py', '_vcs_prefix', 1, 0): (
         '256', 'format',
         'VCS configuration / branch-prefix length follows the shared 256-character branch-name contract'),
@@ -2370,7 +2373,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertTrue(rationale.strip())
         found = {}
         for filename in (
-                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
+                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py', 'codex.py',
                 'ci_observation.py', 'ci_requests.py',
                 'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
                 'project.py', 'admission.py', 'services.py', 'vcs.py'):

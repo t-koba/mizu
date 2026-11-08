@@ -161,6 +161,12 @@ class SyntheticEngineTests(Fixture):
                 self.assertEqual(ctx.engine_tool_invocations, {})
                 self.assertEqual(ctx.role.engine_tools, (grant,))
 
+    def test_codex_bounds_unmatched_notifications_during_initialize(self):
+        context, _result = self.execute('codex', 'handshake-notifications-at-cap')
+        self.assertIsNotNone(context.finished)
+        with self.assertRaisesRegex(ProtocolError, 'Too many notifications during handshake'):
+            self.execute('codex', 'handshake-notifications-over-cap')
+
     def test_unexpected_codex_tool_notifications_are_not_admission(self):
         for scenario in ('native-before-finish', 'external-before-finish', 'collab-before-finish'):
             with self.subTest(scenario=scenario):
