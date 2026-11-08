@@ -1873,6 +1873,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('continuations.py', '_aware_time', 1, 0): (
         '32', 'safety',
         'continuation state / bound persisted timestamp text before ISO-8601 parsing'),
+    ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
+        '4', 'format',
+        'delegation ledger / require the exact persisted schema version before interpreting state'),
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
@@ -2942,7 +2945,7 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
-                'continuations.py', 'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
+                'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py'):
