@@ -181,10 +181,12 @@ Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
-`usage.py`, `config.py`, `runtime.py`, `project.py`, `services.py`,
-`persistent_exec.py`, `cli.py` and `vcs.py`; numeric-only arithmetic operands are
-evaluated without source execution. The `services.py` entries pin Windows Task Scheduler's one-minute
-minimum and 31-day maximum repetition interval. The `admission.py` slice uses
+`insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`, `config.py`,
+`runtime.py`, `project.py`, `services.py`, `persistent_exec.py`, `cli.py` and
+`vcs.py`; numeric-only arithmetic operands, including bounded integer powers,
+are evaluated without source execution. The `services.py` entries pin
+Windows Task Scheduler's one-minute minimum and 31-day maximum repetition
+interval. The `admission.py` slice uses
 magnitude 2 to include its exact two-lock resource ceiling. This is not a global
 numeric comparison linter.
 """
@@ -2012,6 +2014,36 @@ COMPARISON_BOUND_ARGUMENTS = {
         '100', 'mechanism', 'proposal wait / fixed maximum per-source delivery page'),
     ('proposal_waits.py', 'readiness_init', 2, 0): (
         '100', 'mechanism', 'proposal wait readiness / fixed maximum candidate page'),
+    ('selection.py', 'scalar', 1, 0): (
+        '4096', 'safety', 'selection scalar / bound an individual string before canonical encoding'),
+    ('selection.py', 'scalar', 1, 1): (
+        '2 ** 53', 'format', 'selection scalar / numeric magnitude follows the exact IEEE-754 JSON contract'),
+    ('selection.py', 'seconds', 2, 0): (
+        '31536000', 'policy', 'selection timers / fixed one-year ceiling on operator-selected retry intervals'),
+    ('selection.py', 'timestamp', 2, 0): (
+        '253402300799', 'format', 'selection evidence / Unix timestamp ceiling for datetime year 9999'),
+    ('selection.py', 'validate_condition', 1, 0): (
+        '12', 'safety', 'selection conditions / limit recursive policy nesting'),
+    ('selection.py', 'validate_condition', 1, 1): (
+        '512', 'safety', 'selection condition / bound dotted-path text before splitting'),
+    ('selection.py', 'validate_selectors', 2, 0): (
+        '31536000', 'policy', 'selector configuration / one-year ceiling on optional reselection intervals'),
+    ('selection.py', 'validate_selectors', 1, 0): (
+        '65536', 'safety', 'classifier policy / cap the operator-selected policy file before reading'),
+    ('selection.py', 'validate_selectors', 0, 0): (
+        '256', 'safety', 'classifier inputs / require a minimally useful text budget'),
+    ('selection.py', 'validate_selectors', 2, 1): (
+        '65536', 'safety', 'classifier inputs / cap per-classifier text collection at 64 KiB'),
+    ('selection.py', 'State.read', 1, 0): (
+        '128', 'format', 'selection state / run identity follows the bounded run-id format'),
+    ('selection.py', 'State.result', 2, 0): (
+        '128', 'format', 'selection state / run identity follows the bounded run-id format'),
+    ('selection.py', 'State.result', 2, 1): (
+        '64', 'mechanism', 'selection state / attempts match the configured on_error retry maximum'),
+    ('selection.py', 'validate_event', 2, 0): (
+        '4', 'safety', 'probe evidence / cap retained model-request count for one probe event'),
+    ('selection.py', 'validate_event', 2, 1): (
+        '2 ** 53', 'format', 'probe evidence / token counts follow the exact IEEE-754 JSON contract'),
     ('ci_wake.py', '_ci_rewake_seconds', 0, 0): (
         '60', 'configured policy',
         'CI wake / [vcs] ci_rewake_seconds validated lower interval bound'),
@@ -2114,6 +2146,26 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('usage.py', '_affinity_row', 2, 7): (
         '256', 'safety',
         'usage / bound the model label copied from run evidence'),
+    ('codex.py', 'TokenUsage.validate', 2, 0): (
+        '2 ** 63 - 1', 'format', 'Codex provider / token counters follow the signed 64-bit integer range'),
+    ('usage.py', 'normalize', 2, 0): (
+        '2 ** 63 - 1', 'format', 'usage normalization / provider token counters follow the signed 64-bit integer range'),
+    ('usage.py', 'attempt_usage', 2, 0): (
+        '2 ** 63 - 1', 'format', 'usage aggregation / individual token counts follow the signed 64-bit integer range'),
+    ('usage.py', 'attempt_usage', 1, 0): (
+        '2 ** 63 - 1', 'format', 'usage aggregation / token totals cannot exceed the signed 64-bit integer range'),
+    ('usage.py', 'prompt_input_tokens', 2, 0): (
+        '2 ** 63 - 1', 'format', 'prompt usage / input token counts follow the signed 64-bit integer range'),
+    ('usage.py', 'prompt_input_tokens', 2, 1): (
+        '2 ** 63 - 1', 'format', 'prompt usage / cache-read token counts follow the signed 64-bit integer range'),
+    ('usage.py', 'prompt_input_tokens', 2, 2): (
+        '2 ** 63 - 1', 'format', 'prompt usage / cache-write token counts follow the signed 64-bit integer range'),
+    ('usage.py', '_affinity_row', 2, 8): (
+        '2 ** 63 - 1', 'format', 'affinity projection / input tokens follow the signed 64-bit integer range'),
+    ('usage.py', '_affinity_row', 2, 9): (
+        '2 ** 63 - 1', 'format', 'affinity projection / cache-read tokens follow the signed 64-bit integer range'),
+    ('usage.py', '_affinity_row', 2, 10): (
+        '2 ** 63 - 1', 'format', 'affinity projection / cache-write tokens follow the signed 64-bit integer range'),
     ('usage.py', 'record_time', 1, 0): (
         '64', 'safety',
         'usage / cap untrusted timestamp text before ISO-8601 parsing'),
@@ -2301,11 +2353,21 @@ def comparison_argument_inventory(tree, *, minimum_magnitude=3):
                     value = left / right
                 elif isinstance(node.op, ast.Mod):
                     value = left % right
+                elif isinstance(node.op, ast.Pow):
+                    # Fold only small integer powers; unknown expressions stay out.
+                    if (type(left) is not int or type(right) is not int
+                            or not 0 <= right <= 63 or abs(left) > 2**63):
+                        return None
+                    value = left ** right
+                    if abs(value) > 2**63:
+                        return None
                 else:
                     return None
             except (ArithmeticError, OverflowError):
                 return None
         else:
+            return None
+        if type(value) is int and abs(value) > 2**63:
             return None
         if isinstance(value, float) and not math.isfinite(value):
             return None
@@ -2770,8 +2832,8 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
-                'insights.py', 'proposal_waits.py', 'cli.py', 'codex.py',
-                'usage.py', 'config.py', 'runtime.py',
+                'insights.py', 'proposal_waits.py', 'selection.py',
+                'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
@@ -2814,6 +2876,17 @@ def sibling():
         arithmetic_bound = ast.parse('def queue(resources): return len(resources) > 1 + 2')
         self.assertEqual(comparison_argument_inventory(arithmetic_bound),
                          {('queue', 1, 0): '1 + 2'})
+
+    def test_comparison_detector_handles_only_bounded_integer_powers(self):
+        small = ast.parse('def scalar(value): return value <= 2 ** 53')
+        self.assertEqual(comparison_argument_inventory(small), {
+            ('scalar', 1, 0): '2 ** 53',
+        })
+        large = ast.parse('def scalar(value): return value <= 2 ** 1000000000')
+        self.assertEqual(comparison_argument_inventory(large), {})
+
+        over = ast.parse('def scalar(value): return value <= 2 ** 63 + 1')
+        self.assertEqual(comparison_argument_inventory(over), {})
 
     def test_symbolic_range_argument_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
