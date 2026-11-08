@@ -435,7 +435,9 @@ class WriterCiWaitTests(CiWaitFixture):
                               wait={'kind': 'code_change'})
         self.assertIsNone(_writer_wait_liveness(self.project, role))
         requests = CiRequests(self.project.root)
-        for sha in ('b' * 40, SHA):
+        wrong_sha = 'a' * 40
+        self.assertNotEqual(wrong_sha, SHA)
+        for sha in (wrong_sha, SHA):
             identity = request_id(self.receipt['publication_id'], sha, ['ci'])
             requests.mark_dispatch(identity, {
                 'request_id': identity, 'publication_id': self.receipt['publication_id'],
