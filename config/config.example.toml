@@ -192,6 +192,9 @@ missing_finish_counts_as_failure = true # Exhaustion increments the failure brak
 # Seconds per blocking local/kernel lock-acquisition half (0–86400).
 # 0 probes immediately; Busy/nonblocking semantics are unchanged.
 lock_timeout_seconds = 30
+# Milliseconds between kernel-lock probes (1–86400000); each sleep is clipped
+# to the remaining timeout. The first probe is immediate; no retry at/after expiry.
+lock_retry_interval_ms = 50
 # Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for
 # scheduled units); no collection or extra output when disabled.
 lock_diagnostics = false

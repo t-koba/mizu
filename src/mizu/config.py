@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError, Denied
 from .fs import ID, canonical, relative_parts, lock_policy
-from .platform import LOCK_TIMEOUT
+from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
@@ -402,6 +402,8 @@ class Limits:
     #: Seconds per blocking local/kernel lock acquire; 0 probes immediately.
     #: Host/load policy, shared by all projects in one execution (0–86400).
     lock_timeout_seconds: int = LOCK_TIMEOUT
+    #: Milliseconds between kernel probes, clipped to the acquisition deadline.
+    lock_retry_interval_ms: int = LOCK_RETRY_INTERVAL_MS
     lock_diagnostics: bool = False
     # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
     open_work_items: int = 100
@@ -586,6 +588,7 @@ class Limits:
 # daily_requests 0 disables (fail-closed); max_failures 0 disables the
 # auto-pause brake only (budgets/deadlines still bound spend and time).
 _LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
+                 "lock_retry_interval_ms": (1, MAX_WAIT_SECONDS * 1000),
                  "open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
@@ -1325,7 +1328,9 @@ class Config:
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
 
     def lock_policy(self):
-        """Scope this config's lock deadline; loading/deriving configs has no side effects.
+        """Scope this config's lock deadline and retry cadence.
+
+        Loading/deriving configs has no side effects.
 
         CLI/Engine and tool/consultation thread boundaries bind this scope.
         Embedders doing lower-level operations bind it around their execution.
@@ -1333,7 +1338,11 @@ class Config:
         seconds = self.limits.lock_timeout_seconds
         if type(seconds) is not int or not 0 <= seconds <= MAX_WAIT_SECONDS:
             raise ConfigError(f"limits.lock_timeout_seconds must be an integer in [0, {MAX_WAIT_SECONDS}]")
-        return lock_policy(seconds)
+        interval = self.limits.lock_retry_interval_ms
+        low, high = _LIMIT_RANGES["lock_retry_interval_ms"]
+        if type(interval) is not int or not low <= interval <= high:
+            raise ConfigError(f"limits.lock_retry_interval_ms must be an integer in [{low}, {high}]")
+        return lock_policy(seconds, retry_interval_ms=interval)
 
     def _raw_profile(self, profile: str) -> dict:
         try:

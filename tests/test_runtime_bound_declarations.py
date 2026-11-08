@@ -56,7 +56,8 @@ is shared between `bridge.py` and `mcp_proxy.py` for incomplete configs; normal
 bridge configs carry a deadline derived from model-request policy. The MCP
 proxy receive chunk bounds transient allocation while `MAX_FRAME` caps the full
 response. Lock waits are configured
-host/load policy owned by `[limits].lock_timeout_seconds` (default 30 s). The widened
+host/load policy owned by `[limits].lock_timeout_seconds` (default 30 s) and
+`[limits].lock_retry_interval_ms` (default 50 ms, clipped to the deadline). The widened
 character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
 header-pair count, model-catalog provider-command output ceiling, and runtime
@@ -183,6 +184,7 @@ CANDIDATE = re.compile(
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
+    'platform.py': frozenset({'LOCK_RETRY_INTERVAL_MS'}),
     'snapshot_manifest.py': frozenset({'_WINDOWS_EXTENDED_PATH_UNITS',
                                        '_MAX_FILES_WHITESPACE_RUN'}),
     'model_catalog.py': frozenset({'MAXIMUM'}),
@@ -337,6 +339,9 @@ DECLARATIONS = {
             'snapshot manifest / bound formatting-only whitespace scan between file-map tokens'),
     },
     'platform.py': {
+        'LOCK_RETRY_INTERVAL_MS': (
+            '50', 'configured policy',
+            'platform / shared default for [limits].lock_retry_interval_ms; fs forwards the execution policy'),
         'LOCK_TIMEOUT': (
             '30', 'configured policy',
             'platform / shared default for [limits].lock_timeout_seconds; fs forwards the execution policy'),
@@ -1572,11 +1577,11 @@ PARAMETER_DEFAULTS = {
 # These are wait/backoff intervals: no format or user payload is involved.
 TIMED_WAIT_ARGUMENTS = {
     ('platform.py', 'lock_fd', 'time.sleep', 0, 0): (
-        'min(0.05, remaining)', 'mechanism',
-        'platform / cap the delay between nonblocking kernel-lock probes; clip it to the configured acquisition deadline'),
+        'min(retry_interval_ms / 1000, remaining)', 'configured policy',
+        'platform / [limits].lock_retry_interval_ms sets kernel-probe cadence; clip it to the acquisition deadline'),
     ('platform.py', 'lock_fd', 'time.sleep', 0, 1): (
-        'min(0.05, remaining)', 'mechanism',
-        'platform / cap the delay between nonblocking kernel-lock probes; clip it to the configured acquisition deadline'),
+        'min(retry_interval_ms / 1000, remaining)', 'configured policy',
+        'platform / [limits].lock_retry_interval_ms sets kernel-probe cadence; clip it to the acquisition deadline'),
     ('process.py', '_input_thread.write', 'stop.wait', 0, 0): (
         '0.01', 'mechanism',
         'process input / wait after a nonblocking-write stall to avoid spinning while retaining prompt cancellation'),
@@ -2899,6 +2904,9 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(_LIMIT_RANGES['lock_timeout_seconds'], (0, MAX_WAIT_SECONDS))
         self.assertEqual(DECLARATIONS['platform.py']['LOCK_TIMEOUT'][1], 'configured policy')
         self.assertEqual(DECLARATIONS['fs.py']['_LOCAL_BLOCKING_TIMEOUT'][1], 'configured policy')
+        self.assertEqual(Limits().lock_retry_interval_ms, platform.LOCK_RETRY_INTERVAL_MS)
+        self.assertEqual(_LIMIT_RANGES['lock_retry_interval_ms'], (1, MAX_WAIT_SECONDS * 1000))
+        self.assertEqual(DECLARATIONS['platform.py']['LOCK_RETRY_INTERVAL_MS'][1], 'configured policy')
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

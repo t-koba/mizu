@@ -423,16 +423,21 @@ _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 # New threads must bind their owning Config.lock_policy() explicitly.
 _LOCAL_BLOCKING_TIMEOUT = _platform.LOCK_TIMEOUT
 _lock_timeout = contextvars.ContextVar("lock_timeout_seconds", default=None)
+_lock_retry_interval_ms = contextvars.ContextVar(
+    "lock_retry_interval_ms", default=_platform.LOCK_RETRY_INTERVAL_MS)
 
 
 @contextlib.contextmanager
-def lock_policy(seconds: float) -> Iterator[None]:
+def lock_policy(seconds: float, *,
+                retry_interval_ms: int = _platform.LOCK_RETRY_INTERVAL_MS) -> Iterator[None]:
     """Bind validated configuration for this execution, restoring it on exit."""
     token = _lock_timeout.set(seconds)
+    retry_token = _lock_retry_interval_ms.set(retry_interval_ms)
     try:
         yield
     finally:
         _lock_timeout.reset(token)
+        _lock_retry_interval_ms.reset(retry_token)
 
 
 def _local_key(path: Path) -> str:
@@ -466,9 +471,11 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     timeout = _lock_timeout.get()
     if timeout is None:
         timeout = _LOCAL_BLOCKING_TIMEOUT
+    retry_interval_ms = _lock_retry_interval_ms.get()
     observation = lock_diagnostics.begin(path.name)
     try:
-        with _lock(path, blocking=blocking, timeout=timeout, observation=observation):
+        with _lock(path, blocking=blocking, timeout=timeout,
+                   retry_interval_ms=retry_interval_ms, observation=observation):
             yield
     except BaseException as exc:
         if observation is not None and observation.row["outcome"] == "success":
@@ -480,7 +487,8 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _lock(path: Path, *, blocking: bool, timeout: float, observation) -> Iterator[None]:
+def _lock(path: Path, *, blocking: bool, timeout: float,
+          retry_interval_ms: int, observation) -> Iterator[None]:
     mkdir(path.parent)
     key = _local_key(path)
     if observation is not None:
@@ -506,7 +514,8 @@ def _lock(path: Path, *, blocking: bool, timeout: float, observation) -> Iterato
         if observation is not None:
             observation.advance("kernel-acquire")
         try:
-            _platform.lock_fd(fd, blocking=blocking, timeout=timeout)
+            _platform.lock_fd(fd, blocking=blocking, timeout=timeout,
+                              retry_interval_ms=retry_interval_ms)
         except BlockingIOError:
             if observation is not None:
                 observation.stop()

@@ -149,10 +149,14 @@ def secure_chmod(path: Path, mode: int) -> None:
 #: Default operator policy for each blocking lock-acquisition half.
 #: [limits].lock_timeout_seconds owns overrides; standalone primitives use 30 s.
 LOCK_TIMEOUT = 30
+#: Host/load policy for kernel probes; standalone calls retain the 50-ms default.
+#: [limits].lock_retry_interval_ms owns execution-local overrides.
+LOCK_RETRY_INTERVAL_MS = 50
 
 
 def lock_fd(fd: int, *, blocking: bool = True,
-            timeout: float | None = None) -> bool:
+            timeout: float | None = None,
+            retry_interval_ms: int = LOCK_RETRY_INTERVAL_MS) -> bool:
     """Exclusive advisory lock on an open fd. Returns False on contention.
 
     Uses fcntl.flock on POSIX, msvcrt.locking on Windows. Raises Busy-style
@@ -160,9 +164,12 @@ def lock_fd(fd: int, *, blocking: bool = True,
 
     Bounds: a blocking acquire waits at most ``timeout`` seconds (default 30)
     on every platform, so contention fails as Busy instead of hanging the
-    caller. Non-blocking acquires never wait. Trust: the kernel advisory
-    lock, released when the process dies. Retry/cancellation: none; the
-    caller decides whether to retry. Evidence: the lock file itself.
+    caller. Retry cadence is host/load policy (``retry_interval_ms``, default
+    50 ms); every sleep is clipped to the remaining deadline, and no retry
+    starts at or after it. The first probe is immediate, even with timeout 0.
+    Non-blocking acquires never wait. Trust: the kernel advisory lock,
+    released when the process dies. Cancellation: process death releases
+    the lock. Evidence: the lock file itself.
     Failure: contention raises BlockingIOError; a platform without an
     advisory locking primitive raises OSError rather than pretending.
     """
@@ -190,7 +197,7 @@ def lock_fd(fd: int, *, blocking: bool = True,
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise BlockingIOError("Lock contention") from None
-                    time.sleep(min(0.05, remaining))
+                    time.sleep(min(retry_interval_ms / 1000, remaining))
         _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         return True
     if _msvcrt is not None:
@@ -213,7 +220,7 @@ def lock_fd(fd: int, *, blocking: bool = True,
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise BlockingIOError("Lock contention") from None
-                    time.sleep(min(0.05, remaining))
+                    time.sleep(min(retry_interval_ms / 1000, remaining))
         try:
             _msvcrt.locking(fd, mode, 1)  # type: ignore[attr-defined]
             return True

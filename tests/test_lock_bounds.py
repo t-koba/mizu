@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import errno
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -120,6 +121,45 @@ class LockBoundTests(unittest.TestCase):
         with fs.lock(self.path):
             pass
 
+    def test_kernel_retry_cadence_and_deadline_clipping(self):
+        for primitive in ("posix", "windows"):
+            # The lock frees 1 ms after the first failed probe. A 10-ms
+            # cadence can acquire it within 20 ms; the standalone default
+            # and a cadence longer than the deadline must not probe late.
+            for interval in (10, None, 86400000):
+                with self.subTest(primitive=primitive, interval=interval):
+                    now = 0.0
+                    attempts, sleeps = [], []
+
+                    def acquire(*args):
+                        attempts.append(now)
+                        if now < 0.001:
+                            raise OSError(errno.EAGAIN, "contended")
+
+                    def sleep(seconds):
+                        nonlocal now
+                        sleeps.append(seconds)
+                        now += seconds
+
+                    fcntl = (SimpleNamespace(LOCK_EX=1, LOCK_NB=2, flock=acquire)
+                             if primitive == "posix" else None)
+                    msvcrt = (SimpleNamespace(LK_NBLCK=1, locking=acquire)
+                              if primitive == "windows" else None)
+                    options = {} if interval is None else {"retry_interval_ms": interval}
+                    with patch.object(platform, "_fcntl", fcntl), \
+                            patch.object(platform, "_msvcrt", msvcrt), \
+                            patch.object(platform.time, "monotonic", side_effect=lambda: now), \
+                            patch.object(platform.time, "sleep", side_effect=sleep):
+                        if interval == 10:
+                            self.assertTrue(platform.lock_fd(7, timeout=0.02, **options))
+                            self.assertEqual(attempts, [0, 0.01])
+                            self.assertEqual(sleeps, [0.01])
+                        else:
+                            with self.assertRaises(BlockingIOError):
+                                platform.lock_fd(7, timeout=0.02, **options)
+                            self.assertEqual(attempts, [0])
+                            self.assertEqual(sleeps, [0.02])
+
     def test_retry_does_not_acquire_after_deadline_even_if_lock_frees(self):
         for primitive in ("posix", "windows"):
             with self.subTest(primitive=primitive):
@@ -143,7 +183,7 @@ class LockBoundTests(unittest.TestCase):
                      patch.object(platform.time, "monotonic", side_effect=[0.0, 0.1, 2.0]), \
                      patch.object(platform.time, "sleep", return_value=None):
                     with self.assertRaises(BlockingIOError):
-                        platform.lock_fd(7, blocking=True, timeout=1)
+                        platform.lock_fd(7, blocking=True, timeout=1, retry_interval_ms=10)
                 self.assertEqual(len(attempts), 1)
 
     def test_kernel_zero_probes_once_and_nonblocking_ignores_timeout(self):
@@ -160,7 +200,8 @@ class LockBoundTests(unittest.TestCase):
                             patch.object(platform.time, "monotonic", return_value=0) as clock, \
                             patch.object(platform.time, "sleep") as sleep:
                         with self.assertRaises(BlockingIOError):
-                            platform.lock_fd(7, blocking=blocking, timeout=0 if blocking else 86400)
+                            platform.lock_fd(7, blocking=blocking, timeout=0 if blocking else 86400,
+                                             retry_interval_ms=10)
                         self.assertEqual(acquire.call_count, 1)
                         sleep.assert_not_called()
                         if not blocking:
@@ -176,17 +217,18 @@ class LockBoundTests(unittest.TestCase):
 
 
 class LockPolicyTests(Fixture):
-    def configured(self, seconds):
+    def configured(self, seconds, interval=50):
         return dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, lock_timeout_seconds=seconds))
+            self.config.limits, lock_timeout_seconds=seconds,
+            lock_retry_interval_ms=interval))
 
     def test_default_and_configured_policy_reach_both_halves(self):
         path = self.root / "policy.lock"
-        for seconds in (30, 0, 7, 86400):
-            with self.subTest(seconds=seconds):
+        for seconds, interval in ((30, 50), (0, 1), (7, 10), (86400, 86400000)):
+            with self.subTest(seconds=seconds, interval=interval):
                 guard = Mock()
                 guard.acquire.return_value = True
-                with self.configured(seconds).lock_policy(), \
+                with self.configured(seconds, interval).lock_policy(), \
                         patch.object(fs, "_LOCAL_LOCKS", {}), \
                         patch.object(fs.threading, "Lock", return_value=guard), \
                         patch.object(platform, "lock_fd") as kernel, \
@@ -194,7 +236,8 @@ class LockPolicyTests(Fixture):
                     with fs.lock(path):
                         pass
                     guard.acquire.assert_called_once_with(True, seconds)
-                    self.assertEqual(kernel.call_args.kwargs, {"blocking": True, "timeout": seconds})
+                    self.assertEqual(kernel.call_args.kwargs, {"blocking": True, "timeout": seconds,
+                                                              "retry_interval_ms": interval})
                     guard.release.assert_called_once_with()
         self.assertIsNone(fs._lock_timeout.get())
 
@@ -204,6 +247,23 @@ class LockPolicyTests(Fixture):
             with invalid.lock_policy():
                 self.fail("invalid policy must not bind")
         self.assertIsNone(fs._lock_timeout.get())
+
+    def test_retry_interval_validation_in_file_and_programmatic_config(self):
+        text = self.file.read_text()
+        for value in (0, -1, 86400001, True, 1.5, "10"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ConfigError, "limits.lock_retry_interval_ms"):
+                    self.configured(30, value).lock_policy()
+                # TOML values have the same strict integer/range contract.
+                self.file.write_text(text.replace(
+                    "lock_retry_interval_ms = 50", "lock_retry_interval_ms = " + json.dumps(value)))
+                with self.assertRaisesRegex(ConfigError, "limits.lock_retry_interval_ms"):
+                    load(self.file)
+                self.assertEqual(fs._lock_retry_interval_ms.get(), 50)
+        for value in (1, 10, 86400000):
+            self.file.write_text(text.replace(
+                "lock_retry_interval_ms = 50", f"lock_retry_interval_ms = {value}"))
+            self.assertEqual(load(self.file).limits.lock_retry_interval_ms, value)
 
     def test_zero_preserves_exclusion_and_nonblocking_does_not_wait(self):
         with self.configured(0).lock_policy(), fs.lock(self.root / "zero.lock"):
@@ -223,22 +283,24 @@ class LockPolicyTests(Fixture):
             kernel.assert_not_called()
 
     def test_scopes_are_nested_thread_local_and_loading_has_no_side_effects(self):
-        first, second = self.configured(7), self.configured(17)
+        first, second = self.configured(7, 10), self.configured(17, 100)
         ready = threading.Barrier(2)
         observed = []
 
         def peer():
             with second.lock_policy():
                 ready.wait(timeout=10)
-                observed.append(fs._lock_timeout.get())
+                observed.append((fs._lock_timeout.get(), fs._lock_retry_interval_ms.get()))
                 ready.wait(timeout=10)
 
         with first.lock_policy():
             self.assertEqual(load(self.file).limits.lock_timeout_seconds, 30)
             self.assertEqual(fs._lock_timeout.get(), 7)
+            self.assertEqual(fs._lock_retry_interval_ms.get(), 10)
             with self.assertRaisesRegex(ValueError, "scope"):
                 with second.lock_policy():
                     self.assertEqual(fs._lock_timeout.get(), 17)
+                    self.assertEqual(fs._lock_retry_interval_ms.get(), 100)
                     raise ValueError("scope")
             other = threading.Thread(target=peer)
             other.start()
@@ -249,9 +311,11 @@ class LockPolicyTests(Fixture):
             finally:
                 other.join(timeout=10)
             self.assertFalse(other.is_alive())
-            self.assertEqual(observed, [17])
+            self.assertEqual(observed, [(17, 100)])
             self.assertEqual(fs._lock_timeout.get(), 7)
+            self.assertEqual(fs._lock_retry_interval_ms.get(), 10)
         self.assertIsNone(fs._lock_timeout.get())
+        self.assertEqual(fs._lock_retry_interval_ms.get(), 50)
         self.assertEqual(platform.LOCK_TIMEOUT, 30)
         self.assertEqual(fs._LOCAL_BLOCKING_TIMEOUT, 30)
 
