@@ -663,6 +663,19 @@ class CiCheckTimeTests(Fixture):
 class CiRunIdentityTests(Fixture):
     """Adapter run identity keys the CI wake fact; absent stays sha-keyed."""
 
+    def test_cached_run_and_check_name_boundaries(self):
+        from mizu.ci_observation import _clean_ci_failures, _valid_ci_run
+
+        self.assertEqual(_valid_ci_run('r' * 128), 'r' * 128)
+        self.assertIsNone(_valid_ci_run('r' * 129))
+        cleaned = _clean_ci_failures({"main": [
+            {"sha": SHA_A, "check": "c" * 256, "run": "r" * 128},
+            {"sha": SHA_A, "check": "c" * 257, "run": "r" * 128},
+        ]})
+        self.assertEqual(cleaned, {
+            "main": [{"sha": SHA_A, "check": "c" * 256, "run": "r" * 128}],
+        })
+
     def test_status_accepts_valid_run(self):
         rows = vcs.parse_status_checks(
             {"checks": [{"check": "unit", "state": "failure", "sha": SHA_A,

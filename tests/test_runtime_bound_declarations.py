@@ -1620,6 +1620,12 @@ COMPARISON_BOUND_ARGUMENTS = {
         'TCP bridge / port zero is a bind-time ephemeral sentinel, not a valid dial target'),
     ('bridge.py', 'connect', 2, 0): (
         '65535', 'format', 'TCP bridge / maximum value of the 16-bit port field'),
+    ('ci_observation.py', '_valid_ci_run', 1, 0): (
+        '128', 'safety',
+        'CI observation / bound the opaque cached run identity before persistence and projection'),
+    ('ci_observation.py', '_clean_ci_failures', 1, 0): (
+        '256', 'format',
+        'CI observation / check-name length follows the shared 1-256 character VCS schema'),
     ('config.py', '_vcs_prefix', 1, 0): (
         '256', 'format',
         'VCS configuration / branch-prefix length follows the shared 256-character branch-name contract'),
@@ -2284,7 +2290,8 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertTrue(rationale.strip())
         found = {}
         for filename in (
-                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py', 'ci_requests.py',
+                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
+                'ci_observation.py', 'ci_requests.py',
                 'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
                 'project.py', 'admission.py', 'vcs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
