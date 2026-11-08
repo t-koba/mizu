@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 from support import Fixture, bind_delivery
-from mizu.errors import Busy, Denied
+from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.insights import Insights
 from mizu.project import Project
 from mizu.storage import backup, restore
@@ -31,6 +31,72 @@ class RestoreTests(Fixture):
         with self.assertRaises(Denied):
             restore(self.config, 'restored', archive)
 
+    def test_role_research_state_roundtrips_without_lock_or_temp_files(self):
+        self.project.set_control(paused=True)
+        self.project.role_state.replace(
+            'searcher', {'coverage': ['first']}, expected_generation=0, run='run-one')
+        self.project.role_state.replace(
+            'searcher', {'coverage': ['first', 'second']}, expected_generation=1,
+            run='run-two')
+        state_root = self.project.root / 'role-state'
+        (state_root / 'reviewer.json').write_bytes(b'{broken json')
+        (state_root / '.new-interrupted').write_bytes(b'not current state')
+        before = self.project.role_state.read('searcher')
+        before_bytes = (state_root / 'searcher.json').read_bytes()
+        self.assertTrue((state_root / 'searcher.lock').exists())
+
+        archive = self.root / 'role-state.tar.gz'
+        backup(self.project, archive)
+        with tarfile.open(archive, 'r:gz') as saved:
+            names = set(saved.getnames())
+        self.assertIn('role-state/searcher.json', names)
+        self.assertIn('role-state/reviewer.json', names)
+        self.assertNotIn('role-state/searcher.lock', names)
+        self.assertNotIn('role-state/.new-interrupted', names)
+
+        restore(self.config, 'restored', archive)
+        restored = Project(self.config, 'restored')
+        self.assertEqual(restored.role_state.read('searcher'), before)
+        self.assertEqual((restored.root / 'role-state/searcher.json').read_bytes(), before_bytes)
+        self.assertEqual(restored.role_state.read('searcher')['generation'], 2)
+        self.assertEqual(restored.role_state.read('not-yet-written'),
+                         {'status': 'absent', 'generation': 0, 'record': None})
+        self.assertEqual(restored.role_state.read('reviewer'),
+                         {'status': 'unavailable', 'generation': None, 'record': None})
+        self.assertEqual((restored.root / 'role-state/reviewer.json').read_bytes(), b'{broken json')
+        self.assertFalse((restored.root / 'role-state/searcher.lock').exists())
+        self.assertFalse((restored.root / 'role-state/.new-interrupted').exists())
+
+    def test_backup_refuses_unrecognized_or_overbound_role_state_entries(self):
+        from mizu.role_state import MAX_RECORD_BYTES
+        self.project.set_control(paused=True)
+        state_root = self.project.root / 'role-state'
+        state_root.mkdir(exist_ok=True)
+        cases = (
+            ('unexpected.bin', b'not a role-state record', Denied),
+            ('oversized.json', b'x' * (MAX_RECORD_BYTES + 1), LimitExceeded),
+        )
+        for name, content, error in cases:
+            with self.subTest(name=name):
+                path = state_root / name
+                path.write_bytes(content)
+                with self.assertRaises(error):
+                    backup(self.project, self.root / f'{name}.tar.gz')
+                path.unlink()
+
+    def test_restore_refuses_nonrecord_or_overbound_role_state_members(self):
+        from mizu.role_state import MAX_RECORD_BYTES
+        for name in ('role-state/searcher.lock', 'role-state/nested/searcher.json'):
+            with self.subTest(name=name), self.assertRaises(Denied):
+                restore(self.config, 'restored', self.malicious(name))
+        archive = self.root / 'oversized-role-state.tar.gz'
+        content = b'x' * (MAX_RECORD_BYTES + 1)
+        with tarfile.open(archive, 'w:gz') as tar:
+            info = tarfile.TarInfo('role-state/searcher.json')
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        with self.assertRaises(Denied):
+            restore(self.config, 'restored', archive)
 
     def test_restore_stage_is_invisible_to_active_retention(self):
         self.project.set_control(paused=True)
@@ -492,8 +558,9 @@ class RestoreTests(Fixture):
 
     def test_refuses_symlink_and_hardlink(self):
         for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
-            with self.assertRaises(Denied):
-                restore(self.config, 'restored', self.malicious('objects/escape', kind))
+            for name in ('objects/escape', 'role-state/searcher.json'):
+                with self.subTest(kind=kind, name=name), self.assertRaises(Denied):
+                    restore(self.config, 'restored', self.malicious(name, kind))
 
     def test_refuses_large_archive(self):
         with self.assertRaises(Denied):

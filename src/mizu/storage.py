@@ -40,8 +40,50 @@ MEMBERS = (
     "decision-authority.json", "decision-activation-plan.json", "decision-activation-report.json",
     "decision-history", "decision-cursors", "decision-receipts", "work-items", "work-item-receipts",
     "obligation-receipts", "shared-records", "shared-record-receipts", "waits", "runs", "sessions",
-    "evidence", "artifacts", "health", "observed", "maintenance", "spool", "selection",
+    "evidence", "artifacts", "health", "role-state", "observed", "maintenance", "spool", "selection",
 )
+
+
+def _role_state_directory_identity(directory: Path):
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & 0x400):
+        raise Denied("Unsafe role research state directory during backup")
+    return info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns
+
+
+def _role_state_backup_manifest(project_root: Path):
+    """Validate current role-state records without retaining all record bytes.
+
+    The bounded raw reads deliberately do not parse JSON: a corrupt record
+    must remain unavailable after restore, not disappear as never-written.
+    The manifest binds a second bounded read during archive writing.
+    """
+    directory = project_root / "role-state"
+    identity = _role_state_directory_identity(directory)
+    if identity is None:
+        return False, [], None
+    from .role_state import MAX_RECORD_BYTES
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries)
+    except OSError as exc:
+        raise Denied("Cannot safely enumerate role research state during backup") from exc
+    records = []
+    for name in names:
+        if name.endswith(".lock") or name.startswith(".new-"):
+            continue
+        if not name.endswith(".json"):
+            raise Denied("Unexpected role research state entry during backup")
+        identifier(name[:-5])
+        relative = f"role-state/{name}"
+        records.append((relative, digest(safe_read(project_root, relative, MAX_RECORD_BYTES))))
+    if _role_state_directory_identity(directory) != identity:
+        raise Denied("Role research state changed during backup")
+    return True, records, identity
 
 
 @contextlib.contextmanager
@@ -88,6 +130,7 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
             raise Denied('Backup refused: unresolved invalid acceptance producers: ' +
                          json.dumps(acceptance.producer_diagnostics(invalid), sort_keys=True))
         acceptance.audit(project.root)
+        role_state_present, role_state_manifest, role_state_identity = _role_state_backup_manifest(project.root)
         captured = project.snapshots.capture_files(project.workspace)
         checkpoint = project.snapshots.create(captured, goal=project.goal, state=project.snapshots.get()["state"],
                                               run=None, outcome="wait", summary="Operator backup checkpoint; not published")
@@ -117,9 +160,30 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
                         info.uname = info.gname = ""
                         return info
                     for child in include:
+                        if child == "role-state":
+                            continue
                         path = project.root / child
                         if path.exists():
                             archive.add(path, arcname=child, recursive=True, filter=safe)
+                    if role_state_present:
+                        directory_info = tarfile.TarInfo("role-state/")
+                        directory_info.type = tarfile.DIRTYPE
+                        directory_info.mode = 0o700
+                        directory_info.uid = directory_info.gid = 0
+                        directory_info.uname = directory_info.gname = ""
+                        archive.addfile(directory_info)
+                        from .role_state import MAX_RECORD_BYTES
+                        for member_name, expected_digest in role_state_manifest:
+                            contents = safe_read(project.root, member_name, MAX_RECORD_BYTES)
+                            if digest(contents) != expected_digest:
+                                raise Denied("Role research state changed during backup")
+                            info = tarfile.TarInfo(member_name)
+                            info.size, info.mode = len(contents), 0o600
+                            info.uid = info.gid = 0
+                            info.uname = info.gname = ""
+                            archive.addfile(info, io.BytesIO(contents))
+                        if _role_state_directory_identity(project.root / "role-state") != role_state_identity:
+                            raise Denied("Role research state changed during backup")
                     metadata = json.dumps({"checkpoint": checkpoint["id"],
                                            "project": project.name, "credentials_included": False}).encode()
                     info = tarfile.TarInfo("backup.json")
@@ -1444,6 +1508,20 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                             or "\\" in member.name or parts[0] not in allowed
                             or not (member.isfile() or member.isdir()) or member.name in seen):
                         raise Denied("Unsafe or duplicate backup member")
+                    if parts[0] == "role-state":
+                        if len(parts) == 1 and member.isdir():
+                            pass
+                        elif (len(parts) == 2 and member.isfile()
+                              and parts[1].endswith(".json")):
+                            from .role_state import MAX_RECORD_BYTES
+                            if member.size > MAX_RECORD_BYTES:
+                                raise Denied("Role research state backup member exceeds its supported byte bound")
+                            try:
+                                identifier(parts[1][:-5])
+                            except Denied:
+                                raise Denied("Unsafe role research state backup member") from None
+                        else:
+                            raise Denied("Unsafe role research state backup member")
                     seen.add(member.name)
                     count += 1
                     total += member.size

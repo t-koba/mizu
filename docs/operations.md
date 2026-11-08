@@ -181,6 +181,7 @@ mizu cleanup demo
   `shared-records/`, `shared-record-receipts/`, `selection/`: 作業項目とその受領・
   待機・共有記録、選択状態 ★
 - `runs/`, `sessions/`: タスク実行記録とセッションログ ★
+- `role-state/`: 各役割の現行研究状態の JSON レコード ★（role lock と `.new-*` 一時ファイルは除外。安全に読める不正 JSON は raw のまま保存し、復元後も `unavailable` として扱います）
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
 - `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
 - `work-item-state/`: 現在状態の検証済みプロジェクションを保持する派生キャッシュ
@@ -809,7 +810,7 @@ mizu status demo-restored
 
 - 復元先には新しいプロジェクト名を指定します（常に unarmed かつ paused で初期化）。
 - パストラバーサル、危険なリンク、1 GiB（既定値）超の展開は安全対策として拒否されます（大容量時は `--max-bytes` を指定）。
-- バックアップ対象は `storage.py` の `MEMBERS`（目標、設定、スナップショット、提案、成果物等）です。Git の完全な履歴、運用者共通設定（`config.toml`）、認証情報、共有日次予算は含まれません。復元内容をレビュー後、`mizu arm` で承認します。
+- バックアップ対象は `storage.py` の `MEMBERS`（目標、設定、スナップショット、提案、成果物、役割ごとの現行研究状態等）です。`role-state/<role>.json` は raw record として保存し、role lock と `.new-*` 一時ファイルは含めません。Git の完全な履歴、運用者共通設定（`config.toml`）、認証情報、共有日次予算は含まれません。復元内容をレビュー後、`mizu arm` で承認します。
 - `insight-archive.sqlite3` も対象です。バックアップは静止境界で SQLite の未完了 rollback journal を復旧してから DB 本体を保存します。`retention_days` は決定済み Insight の inbox 滞在期間であり、本文・証拠の削除期限ではありません。`insight list` は live inbox のみ、ID 読み取りはアーカイブも参照します。全件列挙には `insight page --scope live|archive` を使います（前述）。
 
 ## バージョン更新とロールバック
