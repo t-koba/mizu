@@ -189,6 +189,11 @@ DECLARATIONS = {
             'acceptance / fixed retained-evidence read and canonical-value ceiling; '
             'limits.file_bytes may narrow reads'),
     },
+    'bridge.py': {
+        'BRIDGE_BACKLOG_LIMIT': (
+            '16', 'safety',
+            'bridge / bounded pending accept backlog for each per-run local listener'),
+    },
     'evidence_records.py': {
         'MAX_STARTED_EVIDENCE_BYTES': (
             '65536', 'safety',
@@ -1610,6 +1615,11 @@ SYMBOLIC_RANGE_ARGUMENTS = {
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
+    ('bridge.py', 'connect', 0, 0): (
+        '1', 'format',
+        'TCP bridge / port zero is a bind-time ephemeral sentinel, not a valid dial target'),
+    ('bridge.py', 'connect', 2, 0): (
+        '65535', 'format', 'TCP bridge / maximum value of the 16-bit port field'),
     ('config.py', '_vcs_prefix', 1, 0): (
         '256', 'format',
         'VCS configuration / branch-prefix length follows the shared 256-character branch-name contract'),
@@ -2249,6 +2259,24 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
 
+    def test_bridge_listeners_share_declared_backlog_bound(self):
+        tree = ast.parse((ROOT / 'bridge.py').read_text(encoding='utf-8'))
+        found = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or node.name not in {
+                    '_UnixBridgeServer', '_TCPBridgeServer'}:
+                continue
+            for statement in node.body:
+                if not isinstance(statement, ast.Assign):
+                    continue
+                if any(isinstance(target, ast.Name) and target.id == 'request_queue_size'
+                       for target in statement.targets):
+                    found[node.name] = ast.unparse(statement.value)
+        self.assertEqual(found, {
+            '_UnixBridgeServer': 'BRIDGE_BACKLOG_LIMIT',
+            '_TCPBridgeServer': 'BRIDGE_BACKLOG_LIMIT',
+        })
+
     def test_selected_comparison_bound_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
         for expression, category, rationale in COMPARISON_BOUND_ARGUMENTS.values():
@@ -2256,11 +2284,12 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertTrue(rationale.strip())
         found = {}
         for filename in (
-                'acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'ci_requests.py',
+                'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py', 'ci_requests.py',
                 'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
                 'project.py', 'admission.py', 'vcs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-            minimum = 2 if filename == 'admission.py' else 3
+            minimum = (1 if filename == 'bridge.py'
+                       else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
                 found[(filename, *site)] = expression

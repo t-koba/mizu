@@ -53,6 +53,8 @@ from .fs import MAX_FRAME, canonical, loads_finite, write_json
 #: Loopback hosts a TCP bridge may bind or dial. Anything else is refused so
 #: a tampered bridge file cannot redirect tool calls off the host.
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+#: Bound the pending accept backlog of each per-run local bridge listener.
+BRIDGE_BACKLOG_LIMIT = 16
 
 
 def default_transport() -> str:
@@ -64,13 +66,13 @@ if _platform.HAS_UNIX_SOCKET_SERVER:
     class _UnixBridgeServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):  # type: ignore[attr-defined]
         daemon_threads = False
         block_on_close = True
-        request_queue_size = 16
+        request_queue_size = BRIDGE_BACKLOG_LIMIT
 
 
 class _TCPBridgeServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = False
     block_on_close = True
-    request_queue_size = 16
+    request_queue_size = BRIDGE_BACKLOG_LIMIT
 
 
 def connect(config: dict) -> socket.socket:
@@ -90,6 +92,7 @@ def connect(config: dict) -> socket.socket:
     transport = config.get("transport")
     if transport == "tcp":
         host, port = config.get("host"), config.get("port")
+        # Port zero requests an ephemeral bind and is not a valid dial target.
         if host not in LOOPBACK_HOSTS or type(port) is not int or not 1 <= port <= 65535:
             raise Denied("Bridge TCP endpoint must be loopback with a valid port")
         return socket.create_connection((host, port), timeout=timeout)
