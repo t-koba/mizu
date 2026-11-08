@@ -17,9 +17,10 @@ from pathlib import Path
 from . import platform as _platform
 from .config import role_no_progress_backoff_seconds, role_progress_signals
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
-from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, write_json, relative_parts
+from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, safe_read_stream, write_json, relative_parts
 from .distribution import is_private_name
 from .startup import HOST_STATE_FILES
+from .snapshot_manifest import read_manifest
 from .vcs import REF_PREFIX
 
 
@@ -769,6 +770,23 @@ class Snapshots:
         body = {k: v for k, v in record.items() if k != "id"}
         if record.get("id") != snapshot_id or digest(canonical(body)) != snapshot_id:
             raise Denied("Snapshot integrity failure")
+        if not isinstance(record.get("goal"), str) or digest(record["goal"].encode()) != record.get("goal_digest"):
+            raise Denied("Snapshot goal digest mismatch")
+        return self._validate_manifest_fields(snapshot_id, record)
+
+    def audit_manifest(self, snapshot_id: str, *, metadata_bytes: int, maximum: int) -> dict:
+        """Safely validate historical content without materializing its goal."""
+        if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
+            raise Denied("Invalid snapshot ID")
+        record, goal_digest = safe_read_stream(
+            self.root, f"snapshots/{snapshot_id}.json", maximum,
+            lambda stream: read_manifest(stream, metadata_bytes, snapshot_id))
+        if goal_digest != record.get("goal_digest"):
+            raise Denied("Snapshot goal digest mismatch")
+        return self._validate_manifest_fields(snapshot_id, record)
+
+    def _validate_manifest_fields(self, snapshot_id: str, record: dict) -> dict:
+        """Shared structural validation, only after content identity is proven."""
         if "parent" in record and record["parent"] is not None and (not isinstance(record["parent"], str) or not DIGEST.fullmatch(record["parent"])):
             raise Denied("Invalid parent snapshot ID")
         if not isinstance(record.get("files"), dict):
@@ -777,8 +795,6 @@ class Snapshots:
             validate_progress(record["progress"])
         if digest(canonical(record["files"])) != record.get("code_digest"):
             raise Denied("Snapshot code digest mismatch")
-        if not isinstance(record.get("goal"), str) or digest(record["goal"].encode()) != record.get("goal_digest"):
-            raise Denied("Snapshot goal digest mismatch")
         self._validate_paths_once(snapshot_id, record["files"])
         for entry in record["files"].values():
             if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str) or not DIGEST.fullmatch(entry["sha256"]) or type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= self.max_file or type(entry.get("executable")) is not bool:

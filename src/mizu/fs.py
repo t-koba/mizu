@@ -586,7 +586,20 @@ def safe_read_info(root: Path, name: str, maximum: int) -> tuple[bytes, os.stat_
     return _safe_read_portable(root, name, parts, maximum)
 
 
-def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> tuple[bytes, os.stat_result]:
+def safe_read_stream(root: Path, name: str, maximum: int, consume):
+    """Consume a pinned binary stream, checking opened-file identity afterwards.
+
+    The consumer must bound its reads/allocations and read to EOF to prove a
+    complete scan. It may seek within the same handle. No content proof is
+    cached; before/after stat checks only detect instability during this call.
+    Uses the same no-follow, regular/non-hardlinked checks as safe_read_info.
+    """
+    parts = relative_parts(name)
+    reader = _safe_read_openat if _platform.HAS_OPENAT and _platform.HAS_DIR_FD else _safe_read_portable
+    return reader(root, name, parts, maximum, consume=consume)[0]
+
+
+def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: int, consume=None) -> tuple[Any, os.stat_result]:
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
@@ -602,9 +615,9 @@ def _safe_read_openat(root: Path, name: str, parts: tuple[str, ...], maximum: in
                 raise Denied("Only regular, non-hardlinked files are readable")
             if before.st_size > maximum:
                 raise LimitExceeded("File exceeds configured byte limit")
-            data = _read_bounded(stream, maximum, before.st_size)
+            data = consume(stream) if consume is not None else _read_bounded(stream, maximum, before.st_size)
             after = os.fstat(stream.fileno())
-            if len(data) > maximum or after.st_size > maximum:
+            if (consume is None and len(data) > maximum) or after.st_size > maximum:
                 raise LimitExceeded("File grew past configured byte limit")
             if _file_identity(before) != _file_identity(after):
                 raise Denied("File changed while reading; retry at a stable boundary")
@@ -672,7 +685,7 @@ def _check_read_components(root: Path, name: str, parts: tuple[str, ...]) -> Pat
     return target
 
 
-def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: int) -> tuple[bytes, os.stat_result]:
+def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: int, consume=None) -> tuple[Any, os.stat_result]:
     try:
         target = _check_read_components(root, name, parts)
         info = target.stat()
@@ -690,9 +703,9 @@ def _safe_read_portable(root: Path, name: str, parts: tuple[str, ...], maximum: 
                 raise Denied("Only regular, non-hardlinked files are readable")
             if not _same_file(info, before):
                 raise Denied("File changed before reading")
-            data = _read_bounded(stream, maximum, before.st_size)
+            data = consume(stream) if consume is not None else _read_bounded(stream, maximum, before.st_size)
             after = os.fstat(stream.fileno())
-        if len(data) > maximum or after.st_size > maximum:
+        if (consume is None and len(data) > maximum) or after.st_size > maximum:
             raise LimitExceeded("File grew past configured byte limit")
         _check_read_components(root, name, parts)
         if _file_identity(before) != _file_identity(after) or not _same_file(after, target.stat()):

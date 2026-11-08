@@ -150,6 +150,7 @@ class SnapshotRetentionTests(Fixture):
                            storage._AUDIT_JSON_BYTES + goal_limit * 5)
 
         (self.project.root / 'PROJECT.md').write_text('shortened goal', encoding='utf-8')
+        self.project.config = self.config
         report = storage.audit(self.project)
         self.assertEqual(report['snapshots']['skipped'], 0)
         result = self.collect()

@@ -1,4 +1,5 @@
 """Reference-aware storage accounting preview plus gated reclamation. Offline only."""
+import io
 import json
 import os
 from pathlib import Path
@@ -7,8 +8,9 @@ import unittest
 from unittest import mock
 from support import Fixture, bind_delivery
 from mizu.errors import Denied
-from mizu.fs import canonical, digest, write_json
-from mizu.storage import (_AUDIT_JSON_BYTES, _SNAPSHOT_AUDIT_BYTES,
+from mizu.fs import canonical, digest, safe_read_stream, write_json
+from mizu.snapshot_manifest import read_manifest
+from mizu.storage import (_AUDIT_JSON_BYTES,
                           _session_accounting, audit, reclaim)
 
 
@@ -507,6 +509,167 @@ class StorageReclaimTests(Fixture):
             if path.name == "evidence.json":
                 path.parent.rmdir()
 
+    def test_oversized_snapshot_metadata_stops_before_reading_full_field(self):
+        path = self.project.root / "snapshots" / ("a" * 64 + ".json")
+        # Do not allocate the oversized fixture in the test either.
+        with path.open("wb") as stream:
+            stream.write(b'{"padding":"')
+            for _ in range(16):
+                stream.write(b'x' * _AUDIT_JSON_BYTES)
+            stream.write(b'"}')
+        read_bytes = []
+
+        class Counted:
+            def __init__(self, stream):
+                self.stream, self.total = stream, 0
+
+            def read(self, size):
+                data = self.stream.read(size)
+                self.total += len(data)
+                return data
+
+            def tell(self):
+                return self.stream.tell()
+
+            def seek(self, offset, whence=0):
+                return self.stream.seek(offset, whence)
+
+        def tracked(root, name, maximum, consume):
+            if name != "snapshots/" + path.name:
+                return safe_read_stream(root, name, maximum, consume)
+
+            def count(stream):
+                wrapped = Counted(stream)
+                try:
+                    return consume(wrapped)
+                finally:
+                    read_bytes.append(wrapped.total)
+            return safe_read_stream(root, name, maximum, count)
+
+        with mock.patch("mizu.snapshot.safe_read_stream", side_effect=tracked):
+            self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+            from mizu.storage import _automatic_snapshot_gc
+            result = _automatic_snapshot_gc(self.project, 2_000_000_000)
+        self.assertEqual(result["status"], "refused", result)
+        self.assertTrue(path.exists())
+        self.assertTrue(read_bytes)
+        self.assertLessEqual(max(read_bytes), _AUDIT_JSON_BYTES + 8192)
+
+    def test_streamed_manifest_content_and_textual_contract(self):
+        record = self.project.snapshots.get()
+        # Exercise UTF-8, escapes and chunk boundaries; metadata order/spacing
+        # need not be canonical, but the large goal token must be.
+        goal = ('é😀\\\"' + ''.join(map(chr, range(32)))) * 300
+        record['goal'], record['goal_digest'] = goal, digest(goal.encode())
+        record['id'] = digest(canonical({k: v for k, v in record.items() if k != 'id'}))
+        raw = json.dumps(record, ensure_ascii=False, indent=2).encode()
+        parsed, goal_digest = read_manifest(io.BytesIO(raw), _AUDIT_JSON_BYTES, record['id'])
+        self.assertNotIn('goal', parsed)
+        self.assertEqual(goal_digest, record['goal_digest'])
+        for bad in (raw.replace(b'"goal":', b'"goal":"duplicate", "goal":', 1),
+                    raw.replace('é'.encode(), b'\\u00e9', 1),
+                    raw.replace(b'"goal": "', b'"goal": "changed', 1),
+                    raw + b'trailing'):
+            with self.subTest(prefix=bad[:40]), self.assertRaises((Denied, ValueError)):
+                read_manifest(io.BytesIO(bad), _AUDIT_JSON_BYTES, record['id'])
+        # Invalid continuation bytes must not become an ever-growing tail.
+        with self.assertRaises((Denied, ValueError)):
+            read_manifest(io.BytesIO(b'{"goal":"' + b'\x80' * 32768),
+                          _AUDIT_JSON_BYTES, record['id'])
+
+    def test_streamed_manifest_accepts_whitespace_across_reader_chunks(self):
+        record = self.project.snapshots.get()
+        raw = canonical(record)
+        raw = raw[:1] + b' ' * (io.DEFAULT_BUFFER_SIZE + 3) + raw[1:]
+        parsed, goal_digest = read_manifest(io.BytesIO(raw), _AUDIT_JSON_BYTES,
+                                            record['id'])
+        self.assertNotIn('goal', parsed)
+        self.assertEqual(goal_digest, record['goal_digest'])
+
+    def test_streamed_manifest_preserves_field_validation(self):
+        base = self.project.snapshots.get()
+        bad_files = (dict(base['files'], **{'../outside': next(iter(base['files'].values()))}),
+                     {name: dict(entry, bytes=-1) for name, entry in base['files'].items()})
+        changes = ({'goal_digest': 'a' * 64}, {'code_digest': 'b' * 64},
+                   {'parent': 'invalid'}, {'progress': {}},
+                   *({'files': files, 'code_digest': digest(canonical(files))}
+                     for files in bad_files))
+        for change in changes:
+            with self.subTest(fields=list(change)):
+                record = dict(base, **change)
+                record['id'] = digest(canonical({k: v for k, v in record.items() if k != 'id'}))
+                path = self.project.root / 'snapshots' / (record['id'] + '.json')
+                write_json(path, record)
+                try:
+                    self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+                finally:
+                    path.unlink()
+
+    def test_streamed_manifest_does_not_reuse_stat_only_proof(self):
+        record = self.project.snapshots.get()
+        path = self.project.root / "snapshots" / (record['id'] + '.json')
+        self.assertEqual(audit(self.project)["snapshots"]["skipped"], 0)
+        info = path.stat()
+        raw = path.read_bytes()
+        path.write_bytes(raw.replace(canonical(record['goal'])[:-1],
+                                     canonical('x' + record['goal'][1:])[:-1], 1))
+        self.assertEqual(path.stat().st_size, info.st_size)
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+
+    def test_streamed_manifest_portable_and_opened_file_checks(self):
+        from mizu import fs
+        # Cover the callback branch of the portable reader on every host too.
+        for portable in (False, True):
+            with self.subTest(portable=portable), mock.patch.object(
+                    fs._platform, 'HAS_OPENAT', fs._platform.HAS_OPENAT and not portable):
+                self.assertEqual(audit(self.project)["snapshots"]["skipped"], 0)
+                path = self.project.root / 'stream-check'
+                path.write_bytes(b'abc')
+
+                def unstable(stream):
+                    data = stream.read(3)
+                    path.write_bytes(b'changed')
+                    return data
+
+                with self.assertRaises(Denied):
+                    safe_read_stream(self.project.root, path.name, 100, unstable)
+                alias = self.project.root / 'stream-alias'
+                os.link(path, alias)
+                try:
+                    with self.assertRaises(Denied):
+                        safe_read_stream(self.project.root, path.name, 100,
+                                         lambda stream: self.fail('hardlink consumed'))
+                finally:
+                    alias.unlink()
+                    path.unlink()
+
+    def test_goal_reread_requires_content_match(self):
+        record = self.project.snapshots.get()
+        raw = canonical(record)
+
+        class Changing(io.BytesIO):
+            scanned = False
+
+            def read(self, size):
+                chunk = super().read(size)
+                self.scanned |= not chunk
+                return chunk
+
+            def seek(self, offset, whence=0):
+                # The identity pass seeks backwards after EOF; change the
+                # goal without changing length or any simulated stat fields.
+                if self.scanned:
+                    self.scanned = False
+                    replacement = raw.replace(canonical(record['goal'])[:-1],
+                                              canonical('x' + record['goal'][1:])[:-1], 1)
+                    super().seek(0)
+                    self.write(replacement)
+                return super().seek(offset, whence)
+
+        with self.assertRaisesRegex(Denied, 'changed while reading'):
+            read_manifest(Changing(raw), _AUDIT_JSON_BYTES, record['id'])
+
     def test_active_history_reads_are_bounded_and_reused(self):
         from mizu.fs import safe_read
         snap = self.hidden_snapshot()
@@ -525,10 +688,8 @@ class StorageReclaimTests(Fixture):
                         if call.args[1] == f"histories/{generation}.json"]
         self.assertEqual(len(active_reads), 1)
         for call in reader.call_args_list:
-            if call.args[1].startswith("snapshots/"):
-                self.assertEqual(call.args[2], _SNAPSHOT_AUDIT_BYTES)
-            else:
-                self.assertEqual(call.args[2], _AUDIT_JSON_BYTES)
+            self.assertFalse(call.args[1].startswith("snapshots/"))
+            self.assertEqual(call.args[2], _AUDIT_JSON_BYTES)
 
     def test_oversized_current_pointer_is_bounded_and_blocks_apply(self):
         current = self.project.root / "current.json"

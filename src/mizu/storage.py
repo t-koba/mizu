@@ -706,7 +706,8 @@ _AUDIT_JSON_BYTES = 1048576
 MAX_SNAPSHOT_GOAL_JSON_EXPANSION = 6
 #: Snapshot histories can outlive the current goal setting. Use the stable
 #: supported maximum, not today's smaller project_goal_bytes, and allow its
-#: worst-case canonical-JSON expansion while keeping all other fields bounded.
+#: worst-case canonical-JSON expansion. This is a file-size ceiling only:
+#: audit_manifest streams goals and independently caps all other fields at 1 MiB.
 _SNAPSHOT_AUDIT_BYTES = (_AUDIT_JSON_BYTES
                          + MAX_PROJECT_GOAL_BYTES * MAX_SNAPSHOT_GOAL_JSON_EXPANSION)
 #: Sample lists stay small; full counts/bytes are always exact.
@@ -849,7 +850,6 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         snapshot_paths = []
     else:
         snapshot_paths = [child for child in snapshot_paths if child.suffix == ".json"]
-    snapshot_audit_bytes = _SNAPSHOT_AUDIT_BYTES
     for child in snapshot_paths:
         try:
             if child.is_symlink():
@@ -864,13 +864,8 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
             except OSError:
                 manifest_skipped += 1
                 continue
-            record, skipped = _audit_ref_dict(root, child, max_bytes=snapshot_audit_bytes)
-            # These files were enumerated as manifests, so even a raced
-            # disappearance makes object reachability incomplete.
-            if skipped or record is None:
-                manifest_skipped += 1
-                continue
-            project.snapshots.validate_manifest(sid, record)
+            record = project.snapshots.audit_manifest(
+                sid, metadata_bytes=_AUDIT_JSON_BYTES, maximum=_SNAPSHOT_AUDIT_BYTES)
             # GC needs only parent/time after validation; retain content digests
             # separately so large embedded goals do not accumulate across the scan.
             manifests[sid] = {"parent": record.get("parent"),
