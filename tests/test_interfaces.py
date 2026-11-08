@@ -95,6 +95,20 @@ class EditorTests(Fixture):
         self.outbox = self.project.root / "spool/editor"
         self.capsule = Capsule(self.bundle, self.outbox)
 
+    def test_search_result_and_line_excerpt_bounds(self):
+        source = self.project.workspace / "app.py"
+        source.write_text("needle" + "x" * 1200 + "\n" +
+                          "\n".join(f"needle-{index}" for index in range(1, 60)) + "\n")
+        Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        bundle = self.root / "search-bundle"
+        export(self.project, bundle)
+        capsule = Capsule(bundle, self.outbox)
+        result = capsule.call("search_files", {"query": "needle"})
+        self.assertEqual(len(result["matches"]), 50)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["matches"][0]["text"]), 1000)
+        self.assertEqual(result["matches"][49]["text"], "needle-49")
+
     def test_readonly_contract_has_no_edit_tool(self):
         with self.assertRaises(Denied):
             self.capsule.call("write_file", {"path": "app.py", "text": "bad"})

@@ -21,13 +21,18 @@ assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, f
 #: Exported-bundle framing: whole-manifest reads vs recent-summary reads.
 BUNDLE_MANIFEST_BYTES = 16 * 1024 * 1024
 BUNDLE_CHANGES_BYTES = 262144
+EDITOR_SEARCH_MAX_BYTES = 8 * 1024 * 1024
+EDITOR_SEARCH_MAX_MATCHES = 50
+EDITOR_SEARCH_MATCH_CHARS = 1000
 
 TOOLS = {
     "get_changes": ("Read the exported bounded diff and recent snapshot summaries.", obj({})),
     "get_status": ("Read the exact exported project state and its timestamp.", obj({})),
     "list_files": ("List the files in this immutable snapshot; use offset/limit for subsequent pages.", obj(PAGE_FIELDS)),
     "read_file": ("Read one relative path from the exported snapshot.", obj({"path": text(4096)}, ("path",))),
-    "search_files": ("Search literal text in the exported snapshot; bounded to 50 matches.", obj({"query": text(1000)}, ("query",))),
+    "search_files": (
+        f"Search literal text in the exported snapshot; bounded to {EDITOR_SEARCH_MAX_MATCHES} matches.",
+        obj({"query": text(1000)}, ("query",))),
     # Input schema shared with the runtime submit_insight; outbox files are
     # additionally framed by PREVIEW_BYTES at ingest.
     "submit_insight": ("Propose an idea to the Worker; no editing or control authority.",
@@ -165,14 +170,16 @@ class Capsule:
                 raise Denied("A nonempty literal query is required")
             hits, scanned, skipped = [], 0, []
             for path, entry in sorted(self.snapshot["files"].items()):
-                if entry["bytes"] > PREVIEW_BYTES or scanned + entry["bytes"] > 8 * 1024 * 1024:
+                if (entry["bytes"] > PREVIEW_BYTES
+                        or scanned + entry["bytes"] > EDITOR_SEARCH_MAX_BYTES):
                     skipped.append(path)
                     continue
                 scanned += entry["bytes"]
                 for line, value in enumerate(self.read(path).splitlines(), 1):
                     if arguments["query"] in value:
-                        hits.append({"path": path, "line": line, "text": value[:1000]})
-                        if len(hits) == 50:
+                        hits.append({"path": path, "line": line,
+                                     "text": value[:EDITOR_SEARCH_MATCH_CHARS]})
+                        if len(hits) == EDITOR_SEARCH_MAX_MATCHES:
                             return {"matches": hits, "truncated": True, "skipped": skipped}
             return {"matches": hits, "truncated": bool(skipped), "skipped": skipped}
         if not arguments["title"].strip() or not arguments["body"].strip():

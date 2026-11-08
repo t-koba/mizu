@@ -55,6 +55,11 @@ malformed entries, and a dedicated volume quota is needed for total bytes.
 | `get_changes` | Anchored published diff |
 | `submit_insight` | Append a proposal file to the dedicated outbox |
 
+Search accepts a query up to 1,000 characters, skips files larger than 128 KiB, and
+scans at most 8 MiB of exported file data per request. It returns at most 50 matches,
+clipping each matching line to 1,000 characters. Skipped files are listed and set
+`truncated`; reaching the match limit also returns `truncated: true`.
+
 There is no `write_file`, shell, patch, commit, deploy, pause, budget-change or
 harness-update tool. JSON-RPC writes only protocol records to stdout. MCP
 lifecycle negotiation supports the declared 2025-06-18 protocol and compatible

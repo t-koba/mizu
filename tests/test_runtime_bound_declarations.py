@@ -194,6 +194,7 @@ CANDIDATE = re.compile(
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
+    'editor.py': frozenset({'EDITOR_SEARCH_MAX_MATCHES'}),
     'platform.py': frozenset({'LOCK_RETRY_INTERVAL_MS', 'PIPE_POLL_INTERVAL_MS'}),
     'snapshot_manifest.py': frozenset({'_WINDOWS_EXTENDED_PATH_UNITS',
                                        '_MAX_FILES_WHITESPACE_RUN'}),
@@ -724,6 +725,15 @@ DECLARATIONS = {
             'distribution / public-source algorithm label bound'),
     },
     'editor.py': {
+        'EDITOR_SEARCH_MAX_BYTES': (
+            '8 * 1024 * 1024', 'safety',
+            'editor search / per-request cumulative byte budget bounds work on exported snapshots'),
+        'EDITOR_SEARCH_MAX_MATCHES': (
+            '50', 'mechanism',
+            'editor search / fixed maximum result rows in the public search tool'),
+        'EDITOR_SEARCH_MATCH_CHARS': (
+            '1000', 'safety',
+            'editor search / bounded line excerpt per returned match'),
         'BUNDLE_MANIFEST_BYTES': (
             '16 * 1024 * 1024', 'safety',
             'editor bundle / bounded manifest read'),
@@ -2548,6 +2558,26 @@ def sibling():
             for (scope, argument, occurrence), expression in range_argument_inventory(tree).items():
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
+
+    def test_editor_search_bounds_are_declared_and_used(self):
+        tree = ast.parse((ROOT / 'editor.py').read_text(encoding='utf-8'))
+        capsule = next(node for node in tree.body
+                       if isinstance(node, ast.ClassDef) and node.name == 'Capsule')
+        call = next(node for node in capsule.body
+                    if isinstance(node, ast.FunctionDef) and node.name == 'call')
+        search = next(node for node in ast.walk(call)
+                      if isinstance(node, ast.If)
+                      and any(isinstance(value, ast.Constant)
+                              and value.value == 'search_files'
+                              for value in ast.walk(node.test)))
+        comparisons = {ast.unparse(node) for node in ast.walk(search)
+                       if isinstance(node, ast.Compare)}
+        self.assertIn("scanned + entry['bytes'] > EDITOR_SEARCH_MAX_BYTES", comparisons)
+        self.assertIn('len(hits) == EDITOR_SEARCH_MAX_MATCHES', comparisons)
+        slices = {ast.unparse(node) for node in ast.walk(search)
+                  if isinstance(node, ast.Subscript)
+                  and ast.unparse(node.value) == 'value'}
+        self.assertIn('value[:EDITOR_SEARCH_MATCH_CHARS]', slices)
 
     def test_bridge_listeners_share_declared_backlog_bound(self):
         tree = ast.parse((ROOT / 'bridge.py').read_text(encoding='utf-8'))
