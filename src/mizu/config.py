@@ -474,6 +474,8 @@ class Limits:
     #: non-missing-finish unit resets the streak.
     missing_finish_recovery_after: int = 2
     output_bytes: int = 262144
+    #: Operator-selected maximum UTF-8 bytes in a project goal file.
+    project_goal_bytes: int = 65536
     file_bytes: int = 8388608
     snapshot_bytes: int = 268435456
     snapshot_files: int = 20000
@@ -636,6 +638,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "admission_queue_capacity": (1, 1073741824),
                  "parallel_consults": (1, 1073741824),
                  "output_bytes": (1, 1073741824),
+                 "project_goal_bytes": (1, 1073741824),
                  "file_bytes": (1, 1073741824),
                  "snapshot_bytes": (1, 1073741824),
                  "snapshot_files": (1, 1073741824)}

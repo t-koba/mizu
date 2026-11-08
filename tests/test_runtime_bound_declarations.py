@@ -134,8 +134,10 @@ Zero offsets and depth counters are mechanism state, not capacity decisions.
 Caller-selected page sizes and host timing remain policy even when a separate
 validation ceiling exists. `configured policy` names an existing config/CLI
 owner; `policy` marks a caller-controlled or still hard-coded choice, not a
-claim that it is configured. This slice classifies current defaults only and
-does not change behavior, config or adapter contracts.
+claim that it is configured. The inventories protect current declarations and
+defaults; where source evidence establishes an operator-owned choice, this audit
+may add an explicit setting while preserving the previous behavior by default.
+It does not infer host-adapter contracts.
 
 The direct-range slice inventories every numeric positional argument to
 built-in `range(...)` calls by file, scope, argument and occurrence. A separate
@@ -986,6 +988,13 @@ CHECK_RETENTION = {
 }
 
 
+PROJECT_GOAL_LIMIT = {
+    'project_goal_bytes': (
+        '65536', 'configured policy',
+        'Limits / operator-selected UTF-8 project-goal ceiling with the previous 64 KiB default'),
+}
+
+
 # The physical-run retirement budget has its own Limits owner. MAX_ENTRIES in
 # storage_runs remains the shared fixed safety ceiling, not a usage-report default.
 RUN_RETENTION_SCAN = {
@@ -1708,12 +1717,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('project.py', 'Project.backpressure._checked_limit', 2, 0): (
         '1073741824', 'configured policy',
         'backpressure / revalidate the shared configured maximum for open_work_items and producer_inputs_per_source'),
-    ('project.py', 'read_goal', 1, 0): (
-        '65536', 'safety',
-        'project goal / reject files above the fixed 64 KiB operator-input ceiling before reading'),
-    ('project.py', 'read_goal', 1, 1): (
-        '65536', 'safety',
-        'project goal / enforce the same fixed 64 KiB ceiling on decoded UTF-8 content'),
     ('ci_requests.py', 'CiRequests.daily', 2, 0): (
         '100', 'mechanism',
         'CI requests / fixed per-page ceiling bounds the validated dispatch projection'),
@@ -2587,6 +2590,17 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(inventory(tree)['MAX_CHECK_RETAINED'], CHECK_RETENTION['MAX_CHECK_RETAINED'][0])
         self.assertEqual([entry[1] for entry in CHECK_RETENTION.values()], ['configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in CHECK_RETENTION.values()))
+
+    def test_project_goal_limit_is_configured_policy(self):
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body
+                     if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'project_goal_bytes')
+        self.assertEqual(ast.unparse(field.value), PROJECT_GOAL_LIMIT['project_goal_bytes'][0])
+        self.assertEqual(PROJECT_GOAL_LIMIT['project_goal_bytes'][1], 'configured policy')
+        self.assertTrue(PROJECT_GOAL_LIMIT['project_goal_bytes'][2].strip())
 
     def test_history_temporary_policy_and_safety_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

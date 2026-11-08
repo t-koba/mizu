@@ -51,6 +51,24 @@ class RootOwnerTemplateTests(unittest.TestCase):
         self.assertEqual(sorted({field.name for field in dataclasses.fields(Limits)} - keys), [])
 
 
+class ProjectGoalBytesConfigTests(Fixture):
+    def test_default_and_strict_range(self):
+        self.assertEqual(Limits().project_goal_bytes, 65536)
+        original = re.sub(r'(?m)^project_goal_bytes = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.project_goal_bytes, 65536)
+        for value in ('1', '65536', '1073741824', '0', '-1', '1073741825',
+                      'true', 'false', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n', f'\n[limits]\nproject_goal_bytes = {value}\n'))
+                if value in ('1', '65536', '1073741824'):
+                    self.assertEqual(load(self.file).limits.project_goal_bytes, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.project_goal_bytes'):
+                        load(self.file)
+
+
 class CheckRetainedConfigTests(Fixture):
     def test_default_and_strict_range(self):
         self.assertEqual(MAX_CHECK_RETAINED, 1024)

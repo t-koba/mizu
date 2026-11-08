@@ -1562,7 +1562,10 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             roles, _, _, _ = check_project_settings(settings)
             if not roles or any(r not in config.roles for r in roles):
                 raise Denied("Backup roles are not configured on this installation")
-            read_goal(stage / "PROJECT.md", "Restored goal must be nonempty and at most 64 KiB")
+            read_goal(
+                stage / "PROJECT.md",
+                "Restored goal must be nonempty and at most {max_bytes} bytes",
+                config.limits.project_goal_bytes)
             # Validate every published history reference before exposing the project.
             for sid in store._history_ids():
                 historical = store.get(sid)

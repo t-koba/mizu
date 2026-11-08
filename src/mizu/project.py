@@ -204,7 +204,11 @@ class Project:
 
     @property
     def goal(self) -> str:
-        return read_goal(self.root / "PROJECT.md", "PROJECT.md must contain a nonempty goal within 64 KiB")
+        maximum_bytes = self.config.limits.project_goal_bytes
+        return read_goal(
+            self.root / "PROJECT.md",
+            "PROJECT.md must contain a nonempty goal within {max_bytes} bytes",
+            maximum_bytes)
 
     def control(self) -> dict:
         return read_json(self.root / "control.json", {"armed": False, "paused": True, "wake_generation": "", "draining": False})
@@ -542,17 +546,18 @@ def check_project_settings(
     return roles, verify, recorded_batches, lineage_target
 
 
-def read_goal(path: Path, complaint: str) -> str:
-    """Read an operator goal file with a pre-read size cap, then validate."""
+def read_goal(path: Path, complaint: str, max_bytes: int) -> str:
+    """Read a bounded operator goal file before validating its UTF-8 content."""
+    message = complaint.format(max_bytes=max_bytes)
     try:
-        oversized = path.stat().st_size > 65536
+        oversized = path.stat().st_size > max_bytes
     except OSError:
         oversized = False
     if oversized:
-        raise ConfigError(complaint)
+        raise ConfigError(message)
     value = path.read_text(encoding="utf-8")
-    if not value.strip() or len(value.encode()) > 65536:
-        raise ConfigError(complaint)
+    if not value.strip() or len(value.encode("utf-8")) > max_bytes:
+        raise ConfigError(message)
     return value
 
 
@@ -808,7 +813,9 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
         goal_file = goal_file.resolve()
         if not source.is_dir() or not goal_file.is_file():
             raise ConfigError("Source directory and goal file must exist")
-        goal = read_goal(goal_file, "Goal must be nonempty and at most 64 KiB")
+        goal = read_goal(
+            goal_file, "Goal must be nonempty and at most {max_bytes} bytes",
+            config.limits.project_goal_bytes)
         if not roles or any(role not in config.roles for role in roles):
             raise ConfigError("Choose existing roles")
         check_verify(verification)
