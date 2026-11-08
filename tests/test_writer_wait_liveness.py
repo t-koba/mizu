@@ -337,6 +337,14 @@ class WriterCiWaitTests(CiWaitFixture):
         due = stamp + conversion["backoff_seconds"]
         self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
         self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
+        for update in ({"wait_kind": "deadline"}, {"backoff_seconds": 299}):
+            altered = dict(snapshot)
+            altered["progress"] = dict(snapshot["progress"])
+            altered["progress"]["wait_conversion"] = {**conversion, **update}
+            with self.subTest(update=update):
+                self.assertFalse(_writer_progress_fallback(
+                    altered, self.config, self.config.roles["worker"], True,
+                    due, project=self.project))
 
     def test_future_deadline_item_wait_can_be_converted_without_ci_dispatch(self):
         item = self.store.create(actor="worker", idempotency_key="deadline-held",
@@ -378,6 +386,9 @@ class WriterCiWaitTests(CiWaitFixture):
             stamp = dt.datetime.fromisoformat(current["progress"]["recorded_at"]).timestamp()
             due = stamp + self.config.limits.writer_no_progress_backoff_seconds
             self.assertFalse(should_run(self.project, current, role_name="worker", current_time=due))
+        # Restored completeness cannot retroactively authorize a conversion
+        # that finish-time evidence did not record.
+        self.assertFalse(should_run(self.project, current, role_name="worker", current_time=due))
 
     def test_free_standing_question_and_disabled_policy_do_not_convert_live_wait(self):
         self.ready_item()

@@ -240,8 +240,10 @@ writer resumes unrelated ready work after the effective `writer_no_progress_back
 (default 300 seconds, with the existing per-role override). It does not change
 the item's status, holder or wait, shorten `maximum_wait_seconds`, or make a
 free-standing check/question sufficient. Disabled policy, no ready work, or
-incomplete evidence preserves the requested wait; no-live and self-resolvable
-fallback behavior is unchanged. The immutable snapshot status projection reports
+incomplete evidence preserves the requested wait; later complete evidence does
+not retroactively authorize that live-source fallback without a finish-time
+conversion diagnostic. No-live and self-resolvable fallback behavior is
+unchanged. The immutable snapshot status projection reports
 a successful conversion at `progress.record.wait_conversion`, including the
 cause, wait kind and delay; older snapshots without that field remain valid.
 

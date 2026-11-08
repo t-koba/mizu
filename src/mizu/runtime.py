@@ -4355,7 +4355,13 @@ def _writer_progress_fallback(record, config, role, ready_work_present, current_
                 if getattr(config.limits, "writer_wait_with_ready_work", True) is True:
                     live, _, held_wait_kind = _writer_wait_sources(
                         project, role, include_structured_wait=True)
-                    return live is False or held_wait_kind is not None
+                    if live is False:
+                        return True
+                    conversion = progress.get("wait_conversion")
+                    return (live is True and held_wait_kind is not None
+                            and isinstance(conversion, dict)
+                            and conversion.get("wait_kind") == held_wait_kind
+                            and conversion.get("backoff_seconds") == backoff)
                 return _writer_wait_liveness(project, role) is False
             live, self_resolvable, _ = _writer_wait_sources(project, role)
             return live is False and self_resolvable
