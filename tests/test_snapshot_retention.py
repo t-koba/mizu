@@ -111,7 +111,7 @@ class SnapshotRetentionTests(Fixture):
         self.assertEqual([self.path(s).exists() for s in snaps], [True, True, True, True])
         self.assertEqual(self.collect()['snapshots'], 0)
 
-    def test_large_configured_goal_manifest_is_audited_and_expired(self):
+    def test_historical_goal_manifest_is_audited_after_limit_decreases(self):
         goal_limit = 1_050_000
         self.project.config = dataclasses.replace(
             self.project.config,
@@ -122,7 +122,10 @@ class SnapshotRetentionTests(Fixture):
         large_goal_snapshot = self.snapshot(age=40)
         manifest_path = self.path(large_goal_snapshot)
         self.assertGreater(manifest_path.stat().st_size, storage._AUDIT_JSON_BYTES)
+
+        # Simulate a later configuration and goal reduction; old snapshots stay valid.
         (self.project.root / 'PROJECT.md').write_bytes(b'shortened goal')
+        self.project.config = self.config
         self.assertEqual(self.project.goal, 'shortened goal')
 
         report = storage.audit(self.project)
@@ -130,6 +133,25 @@ class SnapshotRetentionTests(Fixture):
         collected = storage._audit_collect(self.project)
         self.assertNotIn('goal', collected['manifests'][large_goal_snapshot['id']])
 
+        result = self.collect()
+        self.assertEqual(result['status'], 'collected', result)
+        self.assertFalse(manifest_path.exists())
+
+    def test_escaped_goal_manifest_is_audited_and_expired(self):
+        goal_limit = 1_050_000
+        self.project.config = dataclasses.replace(
+            self.project.config,
+            limits=dataclasses.replace(self.project.config.limits,
+                                       project_goal_bytes=goal_limit))
+        (self.project.root / 'PROJECT.md').write_text(chr(1) * goal_limit, encoding='utf-8')
+        large_goal_snapshot = self.snapshot(age=40)
+        manifest_path = self.path(large_goal_snapshot)
+        self.assertGreater(manifest_path.stat().st_size,
+                           storage._AUDIT_JSON_BYTES + goal_limit * 5)
+
+        (self.project.root / 'PROJECT.md').write_text('shortened goal', encoding='utf-8')
+        report = storage.audit(self.project)
+        self.assertEqual(report['snapshots']['skipped'], 0)
         result = self.collect()
         self.assertEqual(result['status'], 'collected', result)
         self.assertFalse(manifest_path.exists())

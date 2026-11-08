@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .delegation_jobs import DelegationJobs
 from .admission import check_slot_exclusions, role_exclusions
+from .config import MAX_PROJECT_GOAL_BYTES
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
                  identifier, lock, mkdir, now, read_json, safe_read,
@@ -699,9 +700,15 @@ def maintain_automatic_prune(project: Project) -> dict:
 
 #: Generic reference JSON files larger than this are skipped and counted,
 #: never loaded fully, so one huge run record cannot exhaust the audit.
-#: Snapshot manifests add the configured project-goal maximum to this budget
-#: because they embed the goal; their retained audit projection drops that text.
 _AUDIT_JSON_BYTES = 1048576
+#: canonical() escapes one-byte C0 controls as six ASCII bytes (\u00XX),
+#: the largest JSON expansion per UTF-8 goal byte.
+MAX_SNAPSHOT_GOAL_JSON_EXPANSION = 6
+#: Snapshot histories can outlive the current goal setting. Use the stable
+#: supported maximum, not today's smaller project_goal_bytes, and allow its
+#: worst-case canonical-JSON expansion while keeping all other fields bounded.
+_SNAPSHOT_AUDIT_BYTES = (_AUDIT_JSON_BYTES
+                         + MAX_PROJECT_GOAL_BYTES * MAX_SNAPSHOT_GOAL_JSON_EXPANSION)
 #: Sample lists stay small; full counts/bytes are always exact.
 _AUDIT_SAMPLE = 100
 
@@ -842,8 +849,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         snapshot_paths = []
     else:
         snapshot_paths = [child for child in snapshot_paths if child.suffix == ".json"]
-    snapshot_audit_bytes = (_AUDIT_JSON_BYTES
-                            + project.config.limits.project_goal_bytes)
+    snapshot_audit_bytes = _SNAPSHOT_AUDIT_BYTES
     for child in snapshot_paths:
         try:
             if child.is_symlink():

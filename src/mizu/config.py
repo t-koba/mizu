@@ -29,6 +29,9 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
 #: Whole-artifact character budget; paged mode uses its own byte budget.
 DEFAULT_ARTIFACT_FULL_READ_CHARS = 524288
+#: Absolute maximum accepted for an operator-selected project goal. Snapshot
+#: histories may outlive the current, smaller project_goal_bytes setting.
+MAX_PROJECT_GOAL_BYTES = 1073741824
 
 
 #: Aggregate entry ceiling for per-project run-reference scans.
@@ -638,7 +641,7 @@ _LIMIT_RANGES = {"open_work_items": (0, 1073741824),
                  "admission_queue_capacity": (1, 1073741824),
                  "parallel_consults": (1, 1073741824),
                  "output_bytes": (1, 1073741824),
-                 "project_goal_bytes": (1, 1073741824),
+                 "project_goal_bytes": (1, MAX_PROJECT_GOAL_BYTES),
                  "file_bytes": (1, 1073741824),
                  "snapshot_bytes": (1, 1073741824),
                  "snapshot_files": (1, 1073741824)}

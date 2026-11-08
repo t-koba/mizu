@@ -321,8 +321,15 @@ DECLARATIONS = {
             'storage automatic prune / bounded due-state read; larger state is unavailable'),
         '_AUDIT_JSON_BYTES': (
             '1048576', 'safety',
-            'storage audit / generic reference-JSON cap and snapshot metadata allowance; '
-            'snapshot manifests add the configured goal maximum because they embed the goal'),
+            'storage audit / generic reference-JSON cap; snapshot manifests have a separate bound'),
+        'MAX_SNAPSHOT_GOAL_JSON_EXPANSION': (
+            '6', 'format',
+            'storage audit / canonical JSON can escape one UTF-8 control byte as six ASCII bytes'),
+        '_SNAPSHOT_AUDIT_BYTES': (
+            '_AUDIT_JSON_BYTES + MAX_PROJECT_GOAL_BYTES * MAX_SNAPSHOT_GOAL_JSON_EXPANSION',
+            'safety',
+            'storage audit / fixed cap accepts historical goals through worst-case JSON expansion; '
+            'unrelated references keep the generic cap'),
         'AUTOMATIC_PRUNE_INTERVAL_DEFAULT': (
             '86400', 'configured policy',
             'automatic prune / unchanged cadence default when the validated [limits] override is omitted'),
@@ -1122,6 +1129,9 @@ CONFIG_MODULE_BOUNDS = {
         '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
     'MAX_STORAGE_RUN_ENTRIES': (
         '100000', 'safety', 'config / aggregate per-project run-reference scan entry ceiling'),
+    'MAX_PROJECT_GOAL_BYTES': (
+        '1073741824', 'safety',
+        'config / absolute project-goal input ceiling; snapshot audit uses it for older configurations'),
     'MAX_USAGE_POLICY_COUNT': (
         'min(TOML_INTEGER_MAX, sys.maxsize)', 'safety',
         'config / report counts fit the TOML integer and host collection-index ranges'),
@@ -2117,6 +2127,10 @@ SYMBOLIC_BOUNDS = {
     },
     'storage_runs.py': {
         'MAX_ENTRIES': frozenset({'MAX_STORAGE_RUN_ENTRIES'}),
+    },
+    'storage.py': {
+        '_SNAPSHOT_AUDIT_BYTES': frozenset({
+            '_AUDIT_JSON_BYTES', 'MAX_PROJECT_GOAL_BYTES', 'MAX_SNAPSHOT_GOAL_JSON_EXPANSION'}),
     },
     'ci_observation.py': {
         'MAX_CI_WAKE_BRANCHES': frozenset({'MAX_CI_WAKE_EXTRA_BRANCHES'}),

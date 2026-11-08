@@ -8,7 +8,8 @@ from unittest import mock
 from support import Fixture, bind_delivery
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, write_json
-from mizu.storage import _AUDIT_JSON_BYTES, _session_accounting, audit, reclaim
+from mizu.storage import (_AUDIT_JSON_BYTES, _SNAPSHOT_AUDIT_BYTES,
+                          _session_accounting, audit, reclaim)
 
 
 class SessionEntry:
@@ -525,8 +526,7 @@ class StorageReclaimTests(Fixture):
         self.assertEqual(len(active_reads), 1)
         for call in reader.call_args_list:
             if call.args[1].startswith("snapshots/"):
-                self.assertEqual(call.args[2],
-                                 _AUDIT_JSON_BYTES + self.config.limits.project_goal_bytes)
+                self.assertEqual(call.args[2], _SNAPSHOT_AUDIT_BYTES)
             else:
                 self.assertEqual(call.args[2], _AUDIT_JSON_BYTES)
 

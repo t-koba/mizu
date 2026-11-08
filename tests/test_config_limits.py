@@ -8,7 +8,8 @@ from support import Fixture
 from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
                          MAX_DECISION_RECEIPT_DIAGNOSTICS, MAX_HISTORY_TEMPORARIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
-                         TOML_INTEGER_MAX, MAX_STORAGE_RUN_ENTRIES, Limits, ROOT_KEYS,
+                         MAX_PROJECT_GOAL_BYTES, TOML_INTEGER_MAX, MAX_STORAGE_RUN_ENTRIES,
+                         Limits, ROOT_KEYS,
                          _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 
@@ -53,6 +54,7 @@ class RootOwnerTemplateTests(unittest.TestCase):
 
 class ProjectGoalBytesConfigTests(Fixture):
     def test_default_and_strict_range(self):
+        self.assertEqual(MAX_PROJECT_GOAL_BYTES, 1073741824)
         self.assertEqual(Limits().project_goal_bytes, 65536)
         original = re.sub(r'(?m)^project_goal_bytes = .*\n', '', self.file.read_text())
         self.file.write_text(original)
