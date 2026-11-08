@@ -2093,8 +2093,6 @@ COMPARISON_BOUND_ARGUMENTS = {
         'MCP server materialization / retain the explicit-server safety cap at runtime'),
     ('proposal_waits.py', 'normalize', 1, 0): (
         '3', 'format', 'proposal endpoint / repo, ref and SHA must have exactly three components'),
-    ('proposal_waits.py', '_validate', 2, 0): (
-        '256', 'mechanism', 'proposal wait / revision follows the bounded work-item history contract'),
     ('proposal_waits.py', 'delivery', 2, 0): (
         '100', 'mechanism', 'proposal wait / fixed maximum per-source delivery page'),
     ('proposal_waits.py', 'readiness_init', 2, 0): (

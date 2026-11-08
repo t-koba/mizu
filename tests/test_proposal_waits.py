@@ -65,6 +65,26 @@ class ProposalWaitTests(Fixture):
         ctx.wait_events, ctx.proposal_wait_manifest = proposal_waits.delivery(self.store, "worker")
         return ctx
 
+    def test_shared_event_revision_matches_work_item_history_ceiling(self):
+        from mizu.work_items import MAX_REVISIONS
+
+        wait = {
+            "kind": proposal_waits.KIND, "proposal_id": self.wait["proposal_id"],
+            "publication_id": "a" * 64,
+            "head": {"repo": "owner/repo", "ref": "refs/heads/published", "sha": "b" * 40},
+            "base": {"repo": "owner/repo", "ref": "main", "sha": "c" * 40},
+        }
+
+        def validate(rev):
+            subject = {"work_item": "wi_" + "1" * 32, "rev": rev, "holder": "worker"}
+            payload = {**subject, "kind": proposal_waits.KIND, "trust": "external-untrusted",
+                       "wait": wait, "state": "merged"}
+            proposal_waits._validate(subject, payload)
+
+        validate(MAX_REVISIONS)
+        with self.assertRaises(Denied):
+            validate(MAX_REVISIONS + 1)
+
     def test_registration_pins_receipt_and_both_endpoints(self):
         self.assertTrue(self.poll()["ok"])
         blocked = self.block()

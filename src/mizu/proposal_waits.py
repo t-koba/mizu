@@ -18,7 +18,7 @@ from .fs import DIGEST, canonical, digest, identifier, lock, read_json
 from .ci_observation import POLL_STATE_FILE
 from .publication import Publication
 from .smoke_refs import validate_refs
-from .work_items import _timestamp_order
+from .work_items import MAX_REVISIONS, _timestamp_order
 from .shared_records import KindPolicy, SharedRecords
 from . import vcs
 
@@ -97,7 +97,7 @@ def _record_id(item):
 
 def _validate(subject, payload):
     if (set(subject) != {"work_item", "rev", "holder"}
-            or type(subject["rev"]) is not int or not 1 <= subject["rev"] <= 256
+            or type(subject["rev"]) is not int or not 1 <= subject["rev"] <= MAX_REVISIONS
             or set(payload) != {"kind", "trust", "work_item", "rev", "holder", "wait", "state"}
             or payload["kind"] != KIND or payload["state"] != "merged"
             or payload["trust"] != "external-untrusted"
