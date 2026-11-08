@@ -12,6 +12,7 @@ import re
 import stat
 from pathlib import Path
 
+from .config import MAX_CHECK_INPUT_BOUND
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
 
@@ -124,7 +125,7 @@ def read_job(project, job_id):
             raise InvalidProducer(job_id, 'job_schema')
         _bounds = job.get('environment_bounds')
         if (not isinstance(_bounds, dict) or set(_bounds) != {'files', 'bytes'}
-                or any(type(_value) is not int or not 1 <= _value <= 1099511627776
+                or any(type(_value) is not int or not 1 <= _value <= MAX_CHECK_INPUT_BOUND
                        for _value in _bounds.values())):
             raise InvalidProducer(job_id, 'job_schema')
         if type(job.get('inputs_bound_required')) is not bool:

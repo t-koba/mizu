@@ -42,6 +42,8 @@ DEFAULT_PROBE_EXECUTABLE_BYTES = 256 * 1024 * 1024
 #: Absolute maximum accepted for an operator-selected project goal. Snapshot
 #: histories may outlive the current, smaller project_goal_bytes setting.
 MAX_PROJECT_GOAL_BYTES = 1073741824
+#: Shared absolute ceiling for configured check-input traversal bounds (1 TiB).
+MAX_CHECK_INPUT_BOUND = 1 << 40
 
 
 #: Aggregate entry ceiling for per-project run-reference scans.
@@ -1544,7 +1546,7 @@ def load(file: Path) -> Config:
     sb["entrypoint_args"] = entrypoint_args
     for key in ("check_input_files", "check_input_bytes"):
         if key in sb:
-            number(sb[key], "sandbox." + key, 1, 1099511627776)
+            number(sb[key], "sandbox." + key, 1, MAX_CHECK_INPUT_BOUND)
     sb["check_reuse"] = boolean(sb.get("check_reuse", False), "sandbox.check_reuse")
     cache_paths = strings(sb.get("check_cache_paths", []), "sandbox.check_cache_paths")
     if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", p) for p in cache_paths) or len(set(cache_paths)) != len(cache_paths):

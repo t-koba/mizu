@@ -1350,6 +1350,9 @@ CONFIG_MODULE_BOUNDS = {
     'MAX_PROJECT_GOAL_BYTES': (
         '1073741824', 'safety',
         'config / absolute project-goal input ceiling; snapshot audit uses it for older configurations'),
+    'MAX_CHECK_INPUT_BOUND': (
+        '1 << 40', 'safety',
+        'config / one shared absolute ceiling for check-input traversal bounds in settings, jobs and receipts'),
     'MEBIBYTE_BYTES': (
         '1024 * 1024', 'mechanism',
         'config / exact binary unit conversion for byte budgets named in MiB'),
@@ -2234,9 +2237,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('acceptance.py', 'read_job', 1, 0): (
         '32', 'format',
         'acceptance / retained job command lists follow the public 32-command protocol bound'),
-    ('acceptance.py', 'read_job', 2, 0): (
-        '1099511627776', 'safety',
-        'acceptance / persisted dependency bounds mirror the 1 TiB config validation ceiling'),
     ('acceptance.py', 'read_job', 1, 1): (
         '32', 'format',
         'acceptance / retained scratch-path manifests follow the 32-entry protocol bound'),
@@ -2246,9 +2246,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('acceptance.py', '_scope', 2, 0): (
         '32', 'format',
         'acceptance / local command scope follows the public 32-command protocol bound'),
-    ('check_jobs.py', '_mount_fingerprint', 2, 0): (
-        '1099511627776', 'safety',
-        'check jobs / persisted dependency bounds mirror the 1 TiB config validation ceiling'),
     ('check_jobs.py', 'cache_input.unbound', 1, 0): (
         '256', 'safety',
         'check jobs / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -3233,6 +3230,26 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(ast.unparse(reads[0].args[0]),
                          'min(RESTORE_CHUNK_BYTES, remaining)')
         self.assertEqual(DECLARATIONS['storage.py']['RESTORE_CHUNK_BYTES'][0], '1048576')
+
+    def test_check_input_ceiling_is_shared_by_config_and_readers(self):
+        sites = (('acceptance.py', 'read_job'),
+                 ('check_jobs.py', '_mount_fingerprint'))
+        for filename, scope_name in sites:
+            tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+            function = next(node for node in ast.walk(tree)
+                            if isinstance(node, ast.FunctionDef) and node.name == scope_name)
+            uses = [node for node in ast.walk(function)
+                    if isinstance(node, ast.Compare)
+                    and 'MAX_CHECK_INPUT_BOUND' in
+                    [ast.unparse(value) for value in node.comparators]]
+            self.assertEqual(len(uses), 1, (filename, scope_name))
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        uses = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and callee_name(node.func) == 'number'
+                and node.args and ast.unparse(node.args[-1]) == 'MAX_CHECK_INPUT_BOUND']
+        self.assertEqual(len(uses), 1)
+        self.assertEqual(CONFIG_MODULE_BOUNDS['MAX_CHECK_INPUT_BOUND'][:2],
+                         ('1 << 40', 'safety'))
 
     def test_check_job_stream_and_evidence_bounds_use_declared_limits(self):
         tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))

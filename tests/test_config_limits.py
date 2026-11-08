@@ -12,11 +12,29 @@ from mizu.config import (DEFAULT_INSIGHT_HISTORY_ENTRIES, DEFAULT_PROBE_EXECUTAB
                          MAX_DECISION_PROJECTION_RECORDS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
                          MAX_HISTORY_TEMPORARIES, MAX_INSIGHT_HISTORY_ENTRIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
-                         MAX_PROJECT_GOAL_BYTES, TOML_INTEGER_MAX, MAX_STORAGE_RUN_ENTRIES,
+                         MAX_PROJECT_GOAL_BYTES, MAX_CHECK_INPUT_BOUND, TOML_INTEGER_MAX,
+                         MAX_STORAGE_RUN_ENTRIES,
                          Limits, ROOT_KEYS, _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
 from mizu.project import Project
 from mizu import fs, platform
+
+
+class CheckInputBoundConfigTests(Fixture):
+    def test_shared_absolute_ceiling_and_refusal_above_it(self):
+        base = self.file.read_text()
+        for key, field in (('check_input_files', 'check_input_files'),
+                           ('check_input_bytes', 'check_input_bytes')):
+            with self.subTest(key=key):
+                pattern = re.compile(rf'(?m)^{key} = .*?$')
+                at_limit, count = pattern.subn(f'{key} = {MAX_CHECK_INPUT_BOUND}', base)
+                self.assertEqual(count, 1)
+                self.file.write_text(at_limit)
+                self.assertEqual(getattr(load(self.file).sandbox, field),
+                                 MAX_CHECK_INPUT_BOUND)
+                self.file.write_text(pattern.sub(f'{key} = {MAX_CHECK_INPUT_BOUND + 1}', base))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
 
 
 class SelectionIntervalLimitConfigTests(Fixture):

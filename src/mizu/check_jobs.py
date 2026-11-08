@@ -18,7 +18,7 @@ import time
 import math
 from pathlib import Path
 from .admission import check_slot_exclusion
-from .config import MEBIBYTE_BYTES
+from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
@@ -157,7 +157,7 @@ def _configured_input_bounds(project):
 def _mount_fingerprint(project, bounds):
     """Fingerprint local dependencies within validated, explicit traversal bounds."""
     if (not isinstance(bounds, dict) or set(bounds) != {'files', 'bytes'}
-            or any(type(value) is not int or not 1 <= value <= 1099511627776
+            or any(type(value) is not int or not 1 <= value <= MAX_CHECK_INPUT_BOUND
                    for value in bounds.values())):
         return None
     config = project.config
