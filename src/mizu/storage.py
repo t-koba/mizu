@@ -697,9 +697,10 @@ def maintain_automatic_prune(project: Project) -> dict:
         return {"status": "unavailable"}
 
 
-#: Reference-aware storage accounting bounds (fixed mechanism, not knobs):
-#: reference JSON files larger than this are skipped and counted, never
-#: loaded fully, so one huge run record cannot exhaust the audit.
+#: Generic reference JSON files larger than this are skipped and counted,
+#: never loaded fully, so one huge run record cannot exhaust the audit.
+#: Snapshot manifests add the configured project-goal maximum to this budget
+#: because they embed the goal; their retained audit projection drops that text.
 _AUDIT_JSON_BYTES = 1048576
 #: Sample lists stay small; full counts/bytes are always exact.
 _AUDIT_SAMPLE = 100
@@ -727,7 +728,8 @@ def _audit_json(path: Path):
         return None
 
 
-def _audit_ref_json(root: Path, path: Path, shape: type) -> tuple[dict | list | None, bool]:
+def _audit_ref_json(root: Path, path: Path, shape: type, *,
+                    max_bytes: int = _AUDIT_JSON_BYTES) -> tuple[dict | list | None, bool]:
     """Bounded, no-follow read; absent optional files are not skipped.
 
     JSON null is a present wrong-shape record, not an absent file. Pin path
@@ -739,7 +741,7 @@ def _audit_ref_json(root: Path, path: Path, shape: type) -> tuple[dict | list | 
         except FileNotFoundError:
             return None, False
         record = json.loads(
-            safe_read(root, path.relative_to(root).as_posix(), _AUDIT_JSON_BYTES),
+            safe_read(root, path.relative_to(root).as_posix(), max_bytes),
             parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
         if not isinstance(record, shape):
             return None, True
@@ -753,9 +755,10 @@ def _audit_ref_json(root: Path, path: Path, shape: type) -> tuple[dict | list | 
         return None, True
 
 
-def _audit_ref_dict(root: Path, path: Path) -> tuple[dict | None, bool]:
+def _audit_ref_dict(root: Path, path: Path, *,
+                    max_bytes: int = _AUDIT_JSON_BYTES) -> tuple[dict | None, bool]:
     """Read an optional reference dictionary, counting invalid records."""
-    return _audit_ref_json(root, path, dict)
+    return _audit_ref_json(root, path, dict, max_bytes=max_bytes)
 
 
 def _audit_ref_list(root: Path, path: Path) -> tuple[list | None, bool]:
@@ -839,6 +842,8 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         snapshot_paths = []
     else:
         snapshot_paths = [child for child in snapshot_paths if child.suffix == ".json"]
+    snapshot_audit_bytes = (_AUDIT_JSON_BYTES
+                            + project.config.limits.project_goal_bytes)
     for child in snapshot_paths:
         try:
             if child.is_symlink():
@@ -853,15 +858,19 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
             except OSError:
                 manifest_skipped += 1
                 continue
-            record, skipped = _audit_ref_dict(root, child)
+            record, skipped = _audit_ref_dict(root, child, max_bytes=snapshot_audit_bytes)
             # These files were enumerated as manifests, so even a raced
             # disappearance makes object reachability incomplete.
             if skipped or record is None:
                 manifest_skipped += 1
                 continue
             project.snapshots.validate_manifest(sid, record)
-            manifests[sid] = record
+            # GC needs only parent/time after validation; retain content digests
+            # separately so large embedded goals do not accumulate across the scan.
+            manifests[sid] = {"parent": record.get("parent"),
+                              "created_at": record.get("created_at")}
             manifest_objects[sid] = {entry["sha256"] for entry in record["files"].values()}
+            del record
         except (OSError, Denied, LimitExceeded, ValueError, TypeError, RecursionError):
             manifest_skipped += 1
     # Count unique record/scan paths, including a generation checked both as

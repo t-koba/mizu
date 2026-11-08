@@ -524,7 +524,11 @@ class StorageReclaimTests(Fixture):
                         if call.args[1] == f"histories/{generation}.json"]
         self.assertEqual(len(active_reads), 1)
         for call in reader.call_args_list:
-            self.assertEqual(call.args[2], _AUDIT_JSON_BYTES)
+            if call.args[1].startswith("snapshots/"):
+                self.assertEqual(call.args[2],
+                                 _AUDIT_JSON_BYTES + self.config.limits.project_goal_bytes)
+            else:
+                self.assertEqual(call.args[2], _AUDIT_JSON_BYTES)
 
     def test_oversized_current_pointer_is_bounded_and_blocks_apply(self):
         current = self.project.root / "current.json"

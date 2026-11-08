@@ -111,6 +111,29 @@ class SnapshotRetentionTests(Fixture):
         self.assertEqual([self.path(s).exists() for s in snaps], [True, True, True, True])
         self.assertEqual(self.collect()['snapshots'], 0)
 
+    def test_large_configured_goal_manifest_is_audited_and_expired(self):
+        goal_limit = 1_050_000
+        self.project.config = dataclasses.replace(
+            self.project.config,
+            limits=dataclasses.replace(self.project.config.limits,
+                                       project_goal_bytes=goal_limit))
+        (self.project.root / 'PROJECT.md').write_bytes(b'g' * goal_limit)
+
+        large_goal_snapshot = self.snapshot(age=40)
+        manifest_path = self.path(large_goal_snapshot)
+        self.assertGreater(manifest_path.stat().st_size, storage._AUDIT_JSON_BYTES)
+        (self.project.root / 'PROJECT.md').write_bytes(b'shortened goal')
+        self.assertEqual(self.project.goal, 'shortened goal')
+
+        report = storage.audit(self.project)
+        self.assertEqual(report['snapshots']['skipped'], 0)
+        collected = storage._audit_collect(self.project)
+        self.assertNotIn('goal', collected['manifests'][large_goal_snapshot['id']])
+
+        result = self.collect()
+        self.assertEqual(result['status'], 'collected', result)
+        self.assertFalse(manifest_path.exists())
+
     def test_recent_unreferenced_branches_keep_evicted_base_for_merge(self):
         base = self.snapshot(publish=True)
         # Both branches cite an old base that will leave the active history.

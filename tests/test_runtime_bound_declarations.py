@@ -316,7 +316,8 @@ DECLARATIONS = {
             'storage automatic prune / bounded due-state read; larger state is unavailable'),
         '_AUDIT_JSON_BYTES': (
             '1048576', 'safety',
-            'storage audit / bounded reference-JSON read; larger records are skipped and counted'),
+            'storage audit / generic reference-JSON cap and snapshot metadata allowance; '
+            'snapshot manifests add the configured goal maximum because they embed the goal'),
         'AUTOMATIC_PRUNE_INTERVAL_DEFAULT': (
             '86400', 'configured policy',
             'automatic prune / unchanged cadence default when the validated [limits] override is omitted'),
