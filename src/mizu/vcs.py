@@ -4,6 +4,9 @@ Schema: operator-owned ``[vcs] command`` argv receives one JSON object on
 stdin (``{"op": ...}``) and must print one JSON object on stdout.
 Bounds: request canonical bytes <= ``max_bytes``; stdout capped at
 ``max_bytes`` via ``process.run``; at most 4096 refs; ref names 1-512 chars.
+Other response field/count ceilings are Mizu-local parser bounds, not inferred
+upstream provider guarantees; public tool formats and locally bounded
+untrusted values are validated separately.
 Trust: operator-owned host program only; never model-provided argv, never run
 in the sandbox. Injected refs are external-untrusted until merged and
 verified. Retry/cancellation: single invocation under ``timeout_seconds``;

@@ -1790,6 +1790,110 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('usage.py', 'summarize', 1, 0): (
         '1048576', 'safety',
         'usage / fixed per-record read ceiling for retained run evidence; no whole-report byte cap'),
+    # VCS adapter text is external-untrusted. These are Mizu's local parser
+    # contracts; none asserts an upstream provider maximum.
+    ('vcs.py', '_reject_terminal_controls', 1, 0): (
+        '32', 'format',
+        'VCS forge text / first ASCII C0 control code boundary'),
+    ('vcs.py', '_reject_terminal_controls', 1, 1): (
+        '127', 'format',
+        'VCS forge text / ASCII DEL control code'),
+    ('vcs.py', '_reject_terminal_controls', 0, 0): (
+        '128', 'format',
+        'VCS forge text / first ASCII C1 control code boundary'),
+    ('vcs.py', '_reject_terminal_controls', 2, 0): (
+        '159', 'format',
+        'VCS forge text / last ASCII C1 control code boundary'),
+    ('vcs.py', '_check_ref_name', 1, 0): (
+        '512', 'safety',
+        'VCS refs / local per-name bound before path and response processing'),
+    ('vcs.py', 'split_ref_path', 1, 0): (
+        '4', 'format',
+        'VCS virtual refs / fixed three-component prefix plus at least one ref component'),
+    ('vcs.py', 'check_branch', 1, 0): (
+        '256', 'format',
+        'VCS branch / shared public branch-name character bound'),
+    ('vcs.py', 'require_go_approval', 1, 0): (
+        '128', 'safety',
+        'VCS approval lookup / bound an untrusted proposal identity before matching'),
+    ('vcs.py', 'parse_acquired', 1, 0): (
+        '128', 'safety',
+        'VCS acquired content / bound the returned untrusted proposal identity'),
+    ('vcs.py', 'parse_acquired', 1, 1): (
+        '64', 'format',
+        'VCS acquired content / SHA-256 digest has exactly 64 lowercase hex characters'),
+    ('vcs.py', 'check_ci_name', 1, 0): (
+        '256', 'format',
+        'VCS CI check name / shared public check-name character bound'),
+    ('vcs.py', 'read_via', 1, 0): (
+        '128', 'safety',
+        'VCS read / bound an untrusted proposal identifier before adapter use'),
+    ('vcs.py', 'read_via', 1, 1): (
+        '256', 'format',
+        'VCS read / opaque request cursor follows the public cursor schema'),
+    ('vcs.py', 'read_via', 1, 2): (
+        '256', 'format',
+        'VCS read / opaque adapter cursor follows the same local page format'),
+    ('vcs.py', '_ci_timestamp', 1, 0): (
+        '64', 'safety',
+        'VCS CI status / cap untrusted timestamp text before ISO-8601 parsing'),
+    ('vcs.py', 'parse_status_checks', 1, 0): (
+        '64', 'safety',
+        'VCS CI status / bound untrusted status text before retention'),
+    ('vcs.py', 'parse_status_checks', 1, 1): (
+        '4096', 'safety',
+        'VCS CI status / bound untrusted URL text before reporting'),
+    ('vcs.py', 'parse_status_checks', 1, 2): (
+        '128', 'safety',
+        'VCS CI status / bound untrusted run identity before binding'),
+    ('vcs.py', 'parse_status_checks', 2, 0): (
+        '1073741824', 'mechanism',
+        'VCS CI status / local positive run-attempt field ceiling before identity binding'),
+    ('vcs.py', 'parse_status_checks', 1, 3): (
+        '256', 'safety',
+        'VCS CI status / bound untrusted repository namespace text'),
+    ('vcs.py', '_check_repo', 1, 0): (
+        '256', 'safety',
+        'VCS proposal endpoints / bound repository text from the external observation'),
+    ('vcs.py', '_check_review', 1, 0): (
+        '128', 'safety',
+        'VCS proposal review / bound the untrusted reviewer identity'),
+    ('vcs.py', 'parse_proposals', 1, 0): (
+        '128', 'safety',
+        'VCS proposals / bound each untrusted proposal identity before storage'),
+    ('vcs.py', 'parse_proposals', 1, 1): (
+        '4096', 'safety',
+        'VCS proposals / bound untrusted URL text before storage'),
+    ('vcs.py', 'proposal_insight_id', 1, 0): (
+        '128', 'safety',
+        'VCS proposal identity / bound external identifier before deterministic mapping'),
+    ('vcs.py', 'proposal_facts', 1, 0): (
+        '200', 'format',
+        'VCS proposal facts / public insight-title character bound'),
+    ('vcs.py', '_check_prefix', 1, 0): (
+        '256', 'safety',
+        'VCS ref selection / bound local prefix text before matching refs'),
+    ('vcs.py', 'retire_via', 1, 0): (
+        '128', 'safety',
+        'VCS retirement / bound the external ref identity before matching'),
+    ('vcs.py', 'close_if_adopted_via', 1, 0): (
+        '128', 'safety',
+        'VCS conditional close / bound the external proposal identity before matching'),
+    ('vcs.py', 'dispose_via', 1, 0): (
+        '128', 'safety',
+        'VCS disposal / bound the external proposal identity before matching'),
+    ('vcs.py', 'validate_ci_request', 1, 0): (
+        '128', 'format',
+        'VCS CI request / workflow name follows the public request schema'),
+    ('vcs.py', 'validate_ci_runs', 1, 0): (
+        '128', 'format',
+        'VCS CI response / workflow name matches the public request format'),
+    ('vcs.py', 'validate_ci_runs', 1, 1): (
+        '128', 'safety',
+        'VCS CI response / bound untrusted run identity before exact-SHA binding'),
+    ('vcs.py', 'validate_ci_runs', 1, 2): (
+        '4096', 'safety',
+        'VCS CI response / bound untrusted URL text before recording'),
 }
 
 
@@ -2085,7 +2189,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertIn(category, categories)
             self.assertTrue(rationale.strip())
         found = {}
-        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py', 'config.py', 'runtime.py'):
+        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py', 'config.py', 'runtime.py', 'vcs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             for site, expression in comparison_argument_inventory(tree).items():
                 found[(filename, *site)] = expression
