@@ -1876,6 +1876,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
         '4', 'format',
         'delegation ledger / require the exact persisted schema version before interpreting state'),
+    ('errors.py', 'ModelFailure.__init__', 1, 0): (
+        '16384', 'safety',
+        'model failure / cap canonical adapter details before retaining error evidence'),
+    ('errors.py', 'ModelFailure.__init__', 2, 0): (
+        '253402300799', 'format',
+        'model failure / retry timestamps stop at the Unix-second ceiling for year 9999'),
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
@@ -2945,7 +2951,8 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
-                'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
+                'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
+                'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py'):

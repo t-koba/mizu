@@ -1105,6 +1105,26 @@ class CumulativeUsageTests(unittest.TestCase):
         self.assertEqual(model_delta({'main':{'inputTokens':maximum}}, {})[0]['inputTokens'], maximum)
         with self.assertRaises(ProtocolError):
             model_delta({'main':{'inputTokens':maximum+1}}, {})
+
+
+class ModelFailureBoundsTests(unittest.TestCase):
+    def test_retry_timestamp_uses_datetime_year_9999_ceiling(self):
+        maximum = 253402300799
+        self.assertEqual(ModelFailure('test', retry_at=maximum).evidence['retry_at'], maximum)
+        self.assertIsNone(ModelFailure('test', retry_at=maximum + 1).evidence['retry_at'])
+
+    def test_canonical_details_are_retained_only_within_the_byte_bound(self):
+        from mizu.fs import canonical
+        base = {'x': ''}
+        padding = 16384 - len(canonical(base))
+        at_bound = {'x': 'a' * padding}
+        over_bound = {'x': 'a' * (padding + 1)}
+        self.assertEqual(len(canonical(at_bound)), 16384)
+        self.assertEqual(len(canonical(over_bound)), 16385)
+        self.assertIn('details', ModelFailure('test', details=at_bound).evidence)
+        self.assertNotIn('details', ModelFailure('test', details=over_bound).evidence)
+
+
 class McpProxyTests(unittest.TestCase):
     def bridge_config(self, handle):
         bridge = Bridge(handle, tool_definitions(("finish",)), timeout=60)
