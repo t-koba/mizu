@@ -299,6 +299,17 @@ class ProposalSchemaV2Tests(Fixture):
         self.assertFalse(out["complete"])
         self.assertEqual(out["cursor"], "c2")
 
+    def test_proposal_cursor_schema_accepts_its_shared_maximum(self):
+        cursor = "x" * vcs.MAX_PROPOSAL_CURSOR
+        config = dataclasses.replace(
+            self.config, vcs=adapter_settings(proposals_code({
+                "proposals": [], "complete": False, "cursor": cursor})))
+        out = vcs.read_via(config.vcs, "proposals", {"cursor": cursor})
+        self.assertEqual(out["cursor"], cursor)
+        from mizu.vcs_proposal_poll import _valid_proposal_cursor
+        self.assertEqual(_valid_proposal_cursor(cursor), cursor)
+        self.assertIsNone(_valid_proposal_cursor(cursor + "x"))
+
     def test_partial_envelope_shapes_refused(self):
         for payload in ({"proposals": [], "complete": "yes"},
                         {"proposals": [], "cursor": ""},
@@ -567,6 +578,18 @@ print(json.dumps(response))
         self.assertEqual(state["proposal_cursor"], "useful-token")
         self.assertEqual(state["last_proposal_poll"], 60.0)
         self.assertEqual(event["trust"], "external-untrusted")
+
+    def test_poll_error_diagnostic_is_bounded(self):
+        from mizu.vcs_proposal_poll import MAX_PROPOSAL_POLL_ERROR_CHARS
+        state = {}
+
+        def fail(settings, op, params):
+            raise Denied("x" * (MAX_PROPOSAL_POLL_ERROR_CHARS + 50))
+
+        event = poll_proposals(self._config(), self.project, state, now=76.0,
+                               interval=15.0, reader=fail)
+        self.assertFalse(event["ok"])
+        self.assertEqual(event["error"], "x" * MAX_PROPOSAL_POLL_ERROR_CHARS)
 
     def test_poll_failure_is_visible_and_preserves_cursor(self):
         state = {"proposal_cursor": "useful-token"}

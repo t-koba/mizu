@@ -9,15 +9,15 @@ from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                               vcs_poll_proposals_enabled,
                               vcs_poll_status_timeout)
 
-#: Opaque adapter pagination tokens are persisted for resumption, but never
-#: rendered into events or prompts. The VCS schema fixes this bound.
-MAX_PROPOSAL_CURSOR = 256
+#: Proposal-poll diagnostics can include adapter/storage errors; retain only a
+#: bounded preview so an untrusted error cannot inflate an event.
+MAX_PROPOSAL_POLL_ERROR_CHARS = 512
 
 
 def _valid_proposal_cursor(value) -> str | None:
     """Return a usable opaque proposal cursor, else None (never raises)."""
     try:
-        if not isinstance(value, str) or not value or len(value) > MAX_PROPOSAL_CURSOR:
+        if not isinstance(value, str) or not value or len(value) > _vcs.MAX_PROPOSAL_CURSOR:
             return None
         _vcs._reject_terminal_controls(value, "Invalid VCS proposals cursor")
         return value
@@ -135,7 +135,7 @@ def poll_proposals(config, project, state: dict, *, now: float,
                 "trust": "external-untrusted", "time": now_iso()}
     except (Denied, OSError, ValueError, TypeError) as exc:
         message = str(exc) or type(exc).__name__
-        message = message[:512]
+        message = message[:MAX_PROPOSAL_POLL_ERROR_CHARS]
         state["proposal_last_error"] = message
         return {"event": "proposal_poll", "ok": False,
                 "observed": observed, "recorded": recorded,

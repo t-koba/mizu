@@ -578,6 +578,8 @@ ACQUIRE_SCOPES = frozenset({"head", "full"})
 MAX_ARTIFACTS = 256
 #: Tool-schema maximum opaque artifact-list cursor characters.
 MAX_ARTIFACT_CURSOR = 256
+#: Tool-schema maximum opaque proposal-pagination cursor characters.
+MAX_PROPOSAL_CURSOR = 256
 #: Maximum CI artifact file-name chars (relative Unix path, no traversal).
 MAX_ARTIFACT_NAME = 512
 #: Intrinsic signed-64-bit adapter byte-position/size arithmetic range.
@@ -977,7 +979,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
             request["branch"] = branch
         cursor = params.get("cursor")
         if cursor is not None:
-            if (not isinstance(cursor, str) or not cursor or len(cursor) > 256):
+            if (not isinstance(cursor, str) or not cursor
+                    or len(cursor) > MAX_PROPOSAL_CURSOR):
                 raise Denied("Invalid VCS proposals cursor")
             _reject_terminal_controls(cursor, "Invalid VCS proposals cursor")
             request["cursor"] = cursor
@@ -1037,7 +1040,7 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         cursor_out = data.get("cursor", None)
         if cursor_out is not None and (
                 not isinstance(cursor_out, str) or not cursor_out
-                or len(cursor_out) > 256):
+                or len(cursor_out) > MAX_PROPOSAL_CURSOR):
             raise Denied("Invalid VCS proposals cursor")
         if isinstance(cursor_out, str) and cursor_out:
             _reject_terminal_controls(cursor_out, "Invalid VCS proposals cursor")

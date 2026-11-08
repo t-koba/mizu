@@ -12,7 +12,9 @@ The editor search byte, match and excerpt defaults are configured policy in
 maximum excerpt, strict settings-file read cap and MAX_FRAME-derived canonical
 response cap remain fixed safety/framing bounds, checked against their uses.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
-ceilings for untrusted content; their audit found no host-cost policy bound.
+ceilings for untrusted content; it owns the shared proposal cursor format bound.
+The proposal poll's surfaced diagnostic preview is a fixed safety cap; its
+pagination behavior otherwise follows the VCS schema without a provider guess.
 The `project.py` git-tree import time bounds are configured policy; its
 remaining output caps are fixed safety ceilings. The `insights.py` module
 constants are fixed record and evidence safety bounds; its explicit-history
@@ -680,6 +682,9 @@ DECLARATIONS = {
         'MAX_ACQUIRE_CONTENT': (
             '524288', 'safety', 'VCS acquire / bounded acquired content; callers narrow scope'),
         'MAX_ARTIFACT_CURSOR': ('256', 'format', 'VCS artifacts / tool-schema opaque cursor character bound'),
+        'MAX_PROPOSAL_CURSOR': (
+            '256', 'format',
+            'VCS proposals / shared tool-schema opaque pagination cursor character bound'),
         'MAX_ARTIFACTS': ('256', 'mechanism', 'VCS artifacts / bounded true artifact entries'),
         'MAX_ARTIFACT_NAME': (
             '512', 'mechanism', 'VCS artifacts / bounded relative file-name chars'),
@@ -951,9 +956,9 @@ DECLARATIONS = {
             'unit prompts / age render clamp'),
     },
     'vcs_proposal_poll.py': {
-        'MAX_PROPOSAL_CURSOR': (
-            '256', 'format',
-            'proposal polling / cursor character bound'),
+        'MAX_PROPOSAL_POLL_ERROR_CHARS': (
+            '512', 'safety',
+            'proposal polling / bounded surfaced adapter and recording diagnostics'),
     },
     'wait_events.py': {
         'MAX_ROW_BYTES': (
@@ -2344,12 +2349,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('vcs.py', 'read_via', 1, 0): (
         '128', 'safety',
         'VCS read / bound an untrusted proposal identifier before adapter use'),
-    ('vcs.py', 'read_via', 1, 1): (
-        '256', 'format',
-        'VCS read / opaque request cursor follows the public cursor schema'),
-    ('vcs.py', 'read_via', 1, 2): (
-        '256', 'format',
-        'VCS read / opaque adapter cursor follows the same local page format'),
     ('vcs.py', '_ci_timestamp', 1, 0): (
         '64', 'safety',
         'VCS CI status / cap untrusted timestamp text before ISO-8601 parsing'),

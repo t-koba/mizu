@@ -91,8 +91,7 @@ from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               vcs_poll_proposals_enabled, vcs_poll_status_timeout)
 from .ci_polling import (_merge_ci_success_maps, _merge_ci_success_rows,
                          _prune_ci_branch_map, _live_ci_branches, poll_ci)
-from .vcs_proposal_poll import (MAX_PROPOSAL_CURSOR, _valid_proposal_cursor,
-                                poll_proposals)
+from .vcs_proposal_poll import _valid_proposal_cursor, poll_proposals
 from .vcs_upstream_poll import poll_upstream, refresh_upstream
 from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS, UNIT_BEGINS_STATEMENT,
                             _decision_task, _open_backlog, _prompt_capture_limit,
