@@ -340,17 +340,25 @@ class WaitResolutionTests(Fixture):
         self.project = Project(self.config, 'sample')
         self.store = self.project.work_items
         self.baseline = self.project.snapshots.get()
-        items = [self.block(f'page-overflow-{index}') for index in range(3)]
-        self.snapshot('all three waits are due')
+        # Both bounded prompt pages may advance distinct proofs in one run.
+        # Five waits force progression over more than two page pairs while
+        # avoiding an assumption about how many new proofs each pass presents.
+        items = [self.block(f'page-overflow-{index}') for index in range(5)]
+        self.snapshot('all five waits are due')
         expected = {f"{item['id']}:{item['rev']}" for item in items}
         item_ids = {item['id'] for item in items}
         delivered_ids = set()
+        observed_idle = False
 
-        for _ in range(3):
+        for _ in range(len(items) + 1):
             driver = ScriptDriver()
             result = Engine(self.config, driver=driver).run(
                 self.project, 'worker', event_trigger=True)
-            self.assertEqual(result['status'], 'completed')
+            if result.get('skipped') == 'no-event':
+                self.assertFalse(driver.calls)
+                observed_idle = True
+                break
+            self.assertEqual(result.get('status'), 'completed')
             self.assertEqual(len(driver.calls), 1)
             prompt = json.loads(driver.calls[0][1])
             shown_ids = {
@@ -370,12 +378,13 @@ class WaitResolutionTests(Fixture):
                 token for token in expected if token.split(":", 1)[0] in delivered_ids
             })
 
+        self.assertTrue(observed_idle, 'delivery did not reach a no-event pass within the bound')
         self.assertEqual(delivered_ids, item_ids)
         self.assertEqual(progress, expected)
         idle_driver = ScriptDriver()
         idle = Engine(self.config, driver=idle_driver).run(
             self.project, 'worker', event_trigger=True)
-        self.assertEqual(idle['skipped'], 'no-event')
+        self.assertEqual(idle.get('skipped'), 'no-event')
         self.assertFalse(idle_driver.calls)
 
     def test_resolution_high_water_advances_beyond_200_and_quiesces(self):
