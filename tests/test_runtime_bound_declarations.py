@@ -145,8 +145,9 @@ Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
-`usage.py`, `config.py`, `runtime.py`, `project.py` and `vcs.py`; it is not a
-global numeric comparison linter.
+`usage.py`, `config.py`, `runtime.py`, `project.py` and `vcs.py`; the
+`admission.py` slice uses magnitude 2 to include its exact two-lock resource
+ceiling. This is not a global numeric comparison linter.
 """
 import ast
 from pathlib import Path
@@ -1689,6 +1690,21 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('runtime.py', '_declared_next', 1, 1): (
         '4096', 'format',
         'writer handoff / actionable Next step follows the documented declaration format bound'),
+    ('admission.py', '_valid_resource', 1, 0): (
+        '3', 'format',
+        'admission resource key / project, locks directory and lock filename are exactly three path components'),
+    ('admission.py', '_valid_enqueued_at', 1, 0): (
+        '32', 'safety',
+        'admission queue / cap untrusted timestamp text before ISO-8601 parsing'),
+    ('admission.py', '_read_state', 1, 0): (
+        '32', 'format',
+        'admission ticket / UUID hex identity is exactly 32 lowercase hexadecimal characters'),
+    ('admission.py', '_read_state', 1, 1): (
+        '2', 'mechanism',
+        'admission ticket / at most one role exclusion plus the optional workspace exclusion'),
+    ('admission.py', '_Queue.__init__', 1, 0): (
+        '2', 'mechanism',
+        'admission request / at most one role exclusion plus the optional workspace exclusion'),
     ('project.py', 'Project.backpressure._checked_limit', 2, 0): (
         '1073741824', 'configured policy',
         'backpressure / revalidate the shared configured maximum for open_work_items and producer_inputs_per_source'),
@@ -1982,8 +1998,8 @@ def numeric(node, symbolic=()):
     return isinstance(node, ast.Name) and node.id in symbolic
 
 
-def comparison_argument_inventory(tree):
-    """Inventory direct numeric comparison operands with magnitude at least 3."""
+def comparison_argument_inventory(tree, *, minimum_magnitude=3):
+    """Inventory direct numeric comparison operands at or above a scoped threshold."""
     found, occurrences = {}, {}
 
     def literal_value(node):
@@ -2015,7 +2031,7 @@ def comparison_argument_inventory(tree):
             scope = '.'.join(self.scope) or '<module>'
             for index, operand in enumerate([node.left, *node.comparators]):
                 value = literal_value(operand)
-                if value is None or abs(value) < 3:
+                if value is None or abs(value) < minimum_magnitude:
                     continue
                 base = (scope, index)
                 occurrence = occurrences.get(base, 0)
@@ -2238,9 +2254,11 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         for filename in (
                 'acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'ci_requests.py',
                 'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
-                'project.py', 'vcs.py'):
+                'project.py', 'admission.py', 'vcs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-            for site, expression in comparison_argument_inventory(tree).items():
+            minimum = 2 if filename == 'admission.py' else 3
+            for site, expression in comparison_argument_inventory(
+                    tree, minimum_magnitude=minimum).items():
                 found[(filename, *site)] = expression
         self.assertEqual(found, {
             site: entry[0] for site, entry in COMPARISON_BOUND_ARGUMENTS.items()})
@@ -2264,6 +2282,10 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
         changed = source.replace('value > 64', 'value > 96')
         self.assertNotEqual(comparison_argument_inventory(ast.parse(changed)),
                             comparison_argument_inventory(ast.parse(source)))
+        small_bound = ast.parse('def queue(resources): return len(resources) > 2')
+        self.assertEqual(comparison_argument_inventory(small_bound), {})
+        self.assertEqual(comparison_argument_inventory(small_bound, minimum_magnitude=2),
+                         {('queue', 1, 0): '2'})
 
     def test_symbolic_range_argument_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
