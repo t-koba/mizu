@@ -1238,6 +1238,29 @@ class McpProxyTests(unittest.TestCase):
         lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         self.assertEqual([t["name"] for t in lines[1]["result"]["tools"]], ["mizu_finish"])
 
+    def test_tcp_port_bounds_match_the_shared_bridge_format(self):
+        from mizu.bridge import TCP_PORT_MAX, TCP_PORT_MIN, connect
+        valid_config = {"transport": "tcp", "host": "127.0.0.1", "token": "x", "tools": []}
+        for port in (TCP_PORT_MIN, TCP_PORT_MAX):
+            config = {**valid_config, "port": port}
+            with self.subTest(port=port), unittest.mock.patch.dict(
+                    os.environ, {"MIZU_BRIDGE_CONFIG": "unused"}), \
+                    unittest.mock.patch("mizu.mcp_proxy.read_json", return_value=config):
+                self.assertEqual(load_bridge(), config)
+            with self.subTest(connect_port=port), unittest.mock.patch(
+                    "mizu.bridge.socket.create_connection", return_value="connected"):
+                self.assertEqual(connect(config), "connected")
+
+        for port in (TCP_PORT_MIN - 1, TCP_PORT_MAX + 1):
+            config = {**valid_config, "port": port}
+            with self.subTest(port=port), unittest.mock.patch.dict(
+                    os.environ, {"MIZU_BRIDGE_CONFIG": "unused"}), \
+                    unittest.mock.patch("mizu.mcp_proxy.read_json", return_value=config):
+                with self.assertRaises(Denied):
+                    load_bridge()
+            with self.subTest(connect_port=port), self.assertRaises(Denied):
+                connect(config)
+
     def test_missing_bridge_env_is_refused(self):
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(Denied):

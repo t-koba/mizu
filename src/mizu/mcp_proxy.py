@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 
 from .bridge import (
-    DEFAULT_BRIDGE_TIMEOUT_MS, LOOPBACK_HOSTS, connect as _bridge_connect,
+    DEFAULT_BRIDGE_TIMEOUT_MS, LOOPBACK_HOSTS, TCP_PORT_MAX, TCP_PORT_MIN,
+    connect as _bridge_connect,
 )
 from .errors import Denied
 from .fs import MAX_FRAME, canonical, loads_finite, read_json
@@ -48,8 +49,11 @@ def load_bridge() -> dict:
     if transport == "unix":
         if not config.get("socket"):
             raise Denied("Invalid bridge configuration")
-    elif config.get("host") not in LOOPBACK_HOSTS or (type(config.get("port")) is not int or not 1 <= config["port"] <= 65535):
-        raise Denied("Invalid bridge configuration")
+    else:
+        host, port = config.get("host"), config.get("port")
+        if (host not in LOOPBACK_HOSTS or type(port) is not int
+                or not TCP_PORT_MIN <= port <= TCP_PORT_MAX):
+            raise Denied("Invalid bridge configuration")
     return config
 
 

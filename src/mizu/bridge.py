@@ -58,6 +58,9 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 BRIDGE_BACKLOG_LIMIT = 16
 #: Fallback for bridge configs that omit the writer-populated per-request deadline.
 DEFAULT_BRIDGE_TIMEOUT_MS = 60_000
+#: Valid TCP dial ports; zero is the ephemeral-bind sentinel, not a connect target.
+TCP_PORT_MIN = 1
+TCP_PORT_MAX = 65535
 
 
 def default_transport() -> str:
@@ -96,7 +99,8 @@ def connect(config: dict) -> socket.socket:
     if transport == "tcp":
         host, port = config.get("host"), config.get("port")
         # Port zero requests an ephemeral bind and is not a valid dial target.
-        if host not in LOOPBACK_HOSTS or type(port) is not int or not 1 <= port <= 65535:
+        if (host not in LOOPBACK_HOSTS or type(port) is not int
+                or not TCP_PORT_MIN <= port <= TCP_PORT_MAX):
             raise Denied("Bridge TCP endpoint must be loopback with a valid port")
         return socket.create_connection((host, port), timeout=timeout)
     if transport != "unix":

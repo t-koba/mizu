@@ -285,6 +285,11 @@ DECLARATIONS = {
         'DEFAULT_BRIDGE_TIMEOUT_MS': (
             '60000', 'mechanism',
             'bridge / fallback for incomplete local configs; runtime configs carry the configured model-request deadline'),
+        'TCP_PORT_MIN': (
+            '1', 'format',
+            'bridge / port zero is a bind-time ephemeral sentinel, not a valid dial target'),
+        'TCP_PORT_MAX': (
+            '65535', 'format', 'bridge / maximum value of the 16-bit port field'),
     },
     'mcp_proxy.py': {
         'MCP_PROXY_RECV_CHUNK_BYTES': (
@@ -1929,11 +1934,6 @@ SYMBOLIC_RANGE_ARGUMENTS = {
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
-    ('bridge.py', 'connect', 0, 0): (
-        '1', 'format',
-        'TCP bridge / port zero is a bind-time ephemeral sentinel, not a valid dial target'),
-    ('bridge.py', 'connect', 2, 0): (
-        '65535', 'format', 'TCP bridge / maximum value of the 16-bit port field'),
     ('ci_observation.py', '_valid_ci_run', 1, 0): (
         '128', 'safety',
         'CI observation / bound the opaque cached run identity before persistence and projection'),
@@ -3047,6 +3047,7 @@ def sibling():
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
                 'mcp_loop.py',
+                'mcp_proxy.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'doctor.py', 'materialize.py',
