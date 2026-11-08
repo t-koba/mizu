@@ -41,6 +41,24 @@ class InsightHistoryLimitConfigTests(Fixture):
                         load(self.file)
 
 
+class WaitEventsLimitConfigTests(Fixture):
+    def test_default_override_and_refusals(self):
+        base = re.sub(r'(?m)^wait_events_limit = .*\n', '', self.file.read_text())
+        self.file.write_text(base)
+        self.assertEqual(load(self.file).limits.wait_events_limit, 10)
+        self.assertEqual(Limits().wait_events_limit, 10)
+        self.assertEqual(_LIMIT_RANGES["wait_events_limit"], (1, 100))
+        for value in ("1", "10", "100", "0", "101", "-1", "true", "1.0", '"10"', "[]", "{}"):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace(
+                    "\n[limits]\n", f"\n[limits]\nwait_events_limit = {value}\n"))
+                if value in ("1", "10", "100"):
+                    self.assertEqual(load(self.file).limits.wait_events_limit, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, "limits.wait_events_limit"):
+                        load(self.file)
+
+
 class WorkItemReadViewCacheConfigTests(Fixture):
     def test_defaults_exact_overrides_and_refusals(self):
         defaults = {

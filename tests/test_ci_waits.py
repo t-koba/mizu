@@ -522,6 +522,24 @@ class CiWaitTests(CiWaitFixture):
         self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), "worker"))
         self.assertEqual(self.store.get(item["id"]), item)
 
+    def test_dispatch_uses_configured_wait_events_limit_for_each_source(self):
+        limit = 3
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, wait_events_limit=limit))
+        self.project.config = self.config
+        engine = Engine(self.config, driver=ScriptDriver())
+        role = self.config.roles["worker"]
+        with patch.object(self.project.insights, "due_waits", return_value=[]) as due_waits, \
+                patch.object(self.project.insights, "pending_obligations", return_value=[]) as obligations, \
+                patch("mizu.runtime.ci_waits.delivery", return_value=([], [])) as ci_delivery, \
+                patch("mizu.runtime.proposal_waits.delivery", return_value=([], [])) as proposal_delivery, \
+                patch("mizu.runtime.readonly_view", side_effect=lambda store, **kwargs: store):
+            engine._dispatch_state(self.project, "worker", role, event_trigger=True)
+        due_waits.assert_called_once_with("worker", self.project.snapshots.get(), limit=limit)
+        obligations.assert_called_once_with("worker", limit=limit)
+        ci_delivery.assert_called_once_with(self.project.work_items, "worker", limit=limit)
+        proposal_delivery.assert_called_once_with(self.project.work_items, "worker", limit=limit)
+
     def test_dispatch_view_preserves_ci_delivery_and_rechecks_waiter(self):
         item = self.block()
         self.poll()

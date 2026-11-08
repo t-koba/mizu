@@ -56,6 +56,9 @@ than treated as new independent numeric policies.
 The `work_item_read_view.py` snapshot, file and parsed-item retention budgets
 are configured policy under `[limits]`; misses repeat validated reads. Their
 exact defaults and uses are checked separately; the path-key cache stays fixed.
+The configured `[limits].wait_events_limit` applies independently to each
+structured wait/obligation delivery page; readiness existence probes still need
+only one candidate and the fixed 100-row route ceilings remain unchanged.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
 spawn-reap bounds are fixed mechanism or safety. POSIX pipe idle polling is
 configured policy owned by `[limits].pipe_poll_interval_ms` (default 100 ms,
@@ -1402,6 +1405,8 @@ CALLS = {
             '1', 'mechanism', 'runtime / one-row work-item event check'),
         ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row decision-delivery check'),
+        ('_role_events_due', 'project.insights.due_waits', 'limit', 0): (
+            '1', 'mechanism', 'runtime / one-row due-wait existence check'),
         ('_role_events_due', '_receipt_wait_due', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row combined receipt-wait check'),
         ('should_run', '_receipt_wait_due', 'limit', 0): (
@@ -1573,13 +1578,13 @@ PARAMETER_DEFAULTS = {
     ('ci_requests.py', 'CiRequests.page', 'offset'): (
         '0', 'mechanism', 'CI requests / initial dispatch page position'),
     ('ci_waits.py', 'pending', 'limit'): (
-        '10', 'policy', 'CI waits / caller-selected pending delivery batch'),
+        '10', 'configured policy', 'CI waits / project [limits].wait_events_limit per-source delivery batch'),
     ('ci_waits.py', 'readiness_init', 'limit'): (
         '10', 'policy', 'CI waits / caller-selected readiness candidate batch'),
     ('ci_waits.py', '_shared_page', 'limit'): (
-        '10', 'policy', 'CI waits / caller-selected shared delivery batch'),
+        '10', 'configured policy', 'CI waits / project [limits].wait_events_limit per-source delivery batch'),
     ('ci_waits.py', 'delivery', 'limit'): (
-        '10', 'policy', 'CI waits / caller-selected frozen delivery batch'),
+        '10', 'configured policy', 'CI waits / project [limits].wait_events_limit per-source delivery batch'),
     ('fs.py', 'page', 'offset'): (
         '0', 'mechanism', 'fs / initial list projection position'),
     ('fs.py', 'page', 'limit'): (
@@ -1600,9 +1605,9 @@ PARAMETER_DEFAULTS = {
     ('insights.py', 'Insights.list_page', 'limit'): (
         '30', 'policy', 'insights / caller-selected live/archive cursor page size'),
     ('insights.py', 'Insights.due_waits', 'limit'): (
-        '10', 'policy', 'insights / caller-selected due-wait delivery batch'),
+        '10', 'configured policy', 'insights / project [limits].wait_events_limit per-source due-wait delivery batch'),
     ('insights.py', 'Insights.pending_obligations', 'limit'): (
-        '10', 'policy', 'insights / caller-selected obligation delivery batch'),
+        '10', 'configured policy', 'insights / project [limits].wait_events_limit per-source obligation delivery batch'),
     ('insights.py', 'Insights.decision_events', 'limit'): (
         '10', 'policy', 'insights / caller-selected decision-event batch'),
     ('insights.py', 'Insights.pending_insight_events', 'limit'): (
@@ -1614,9 +1619,9 @@ PARAMETER_DEFAULTS = {
     ('pi_durable_store.py', 'project_context', 'max_bytes'): (
         '65536', 'policy', 'Pi durable store / caller-selected summary truncation marker threshold, not a read cap'),
     ('proposal_waits.py', 'delivery', 'limit'): (
-        '10', 'policy', 'proposal waits / caller-selected frozen delivery batch'),
+        '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
     ('proposal_waits.py', 'pending', 'limit'): (
-        '10', 'policy', 'proposal waits / caller-selected pending delivery batch'),
+        '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
     ('proposal_waits.py', 'readiness_init', 'limit'): (
         '10', 'policy', 'proposal waits / caller-selected readiness candidate batch'),
     ('protocol.py', 'text', 'maximum'): (
@@ -1967,6 +1972,46 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_waits.py', '_shared_page', 2, 0): (
         '100', 'mechanism',
         'CI wait delivery / fixed maximum page size for the bounded shared receipt projection'),
+    ('insights.py', '_validate_decision_projection', 1, 0): (
+        '64', 'safety', 'decision projection / bound timestamp text before ISO-8601 parsing'),
+    ('insights.py', '_validate_pending_projection', 1, 0): (
+        '64', 'safety', 'pending insight projection / bound timestamp text before ISO-8601 parsing'),
+    ('insights.py', '_check_origin', 2, 0): (
+        '256', 'safety', 'insight origin / bound opaque caller label before persistence'),
+    ('insights.py', 'Insights.submit', 2, 0): (
+        '200', 'format', 'insight submit / title follows the public 1-200 character contract'),
+    ('insights.py', 'Insights.revise', 2, 0): (
+        '200', 'format', 'insight revision / title follows the public 1-200 character contract'),
+    ('insights.py', 'Insights.list_page', 2, 0): (
+        '1000', 'mechanism', 'insight listing / fixed maximum cursor-page size'),
+    ('insights.py', 'Insights._page_cursor', 2, 0): (
+        '4096', 'safety', 'insight cursor / bound encoded cursor text before decoding'),
+    ('insights.py', 'Insights._page_cursor', 2, 1): (
+        '253402300799', 'format', 'insight cursor / Unix timestamp ceiling for datetime year 9999'),
+    ('insights.py', 'Insights.read', 1, 0): (
+        '32', 'format', 'insight lookup / only shorter hexadecimal IDs enter prefix resolution'),
+    ('insights.py', 'Insights.due_waits', 1, 0): (
+        '100', 'mechanism', 'insight waits / fixed maximum per-source delivery page'),
+    ('insights.py', 'Insights.pending_obligations', 1, 0): (
+        '100', 'mechanism', 'insight obligations / fixed maximum per-source delivery page'),
+    ('insights.py', 'Insights.pending_insight_events', 2, 0): (
+        '100', 'mechanism', 'pending insight events / fixed maximum delivery page'),
+    ('insights.py', 'Insights.shared_decision_page', 2, 0): (
+        '100', 'mechanism', 'shared decision events / fixed maximum delivery page'),
+    ('insights.py', 'Insights._scan_decision_delivery', 2, 0): (
+        '100', 'mechanism', 'decision delivery scan / fixed maximum candidate page'),
+    ('insights.py', 'Insights.acknowledge_decisions', 1, 0): (
+        '512', 'safety', 'decision acknowledgement / cap the caller-supplied token batch'),
+    ('insights.py', 'Insights._archivable', 2, 0): (
+        '200', 'format', 'insight archive / title follows the public 1-200 character contract'),
+    ('proposal_waits.py', 'normalize', 1, 0): (
+        '3', 'format', 'proposal endpoint / repo, ref and SHA must have exactly three components'),
+    ('proposal_waits.py', '_validate', 2, 0): (
+        '256', 'mechanism', 'proposal wait / revision follows the bounded work-item history contract'),
+    ('proposal_waits.py', 'delivery', 2, 0): (
+        '100', 'mechanism', 'proposal wait / fixed maximum per-source delivery page'),
+    ('proposal_waits.py', 'readiness_init', 2, 0): (
+        '100', 'mechanism', 'proposal wait readiness / fixed maximum candidate page'),
     ('ci_wake.py', '_ci_rewake_seconds', 0, 0): (
         '60', 'configured policy',
         'CI wake / [vcs] ci_rewake_seconds validated lower interval bound'),
@@ -2617,6 +2662,57 @@ def sibling():
         self.assertIn('len(items) >= limits.work_item_read_view_item_cache_entries', comparisons)
         self.assertIn('item_bytes + size > limits.work_item_read_view_item_cache_bytes', comparisons)
 
+    def test_wait_event_limit_is_configured_and_used_by_prompt_projections(self):
+        from mizu.config import _LIMIT_RANGES
+
+        config_tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in config_tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        defaults = {node.target.id: ast.unparse(node.value) for node in limits.body
+                    if isinstance(node, ast.AnnAssign)}
+        self.assertEqual(defaults['wait_events_limit'], '10')
+        self.assertEqual(_LIMIT_RANGES['wait_events_limit'], (1, 100))
+
+        runtime = ast.parse((ROOT / 'runtime.py').read_text(encoding='utf-8'))
+        dispatch = next(node for node in ast.walk(runtime)
+                        if isinstance(node, ast.FunctionDef) and node.name == '_dispatch_state')
+        self.assertIn('wait_limit = project.config.limits.wait_events_limit',
+                      {ast.unparse(node) for node in ast.walk(dispatch)
+                       if isinstance(node, (ast.Assign, ast.AnnAssign))})
+        configured_calls = {
+            ast.unparse(call.func): {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+            for call in ast.walk(dispatch) if isinstance(call, ast.Call)
+            and ast.unparse(call.func) in {
+                'ci_waits.delivery', 'proposal_waits.delivery',
+                'project.insights.due_waits', 'project.insights.pending_obligations'}
+        }
+        self.assertEqual(configured_calls, {
+            'ci_waits.delivery': {'limit': 'wait_limit'},
+            'proposal_waits.delivery': {'limit': 'wait_limit'},
+            'project.insights.due_waits': {'limit': 'wait_limit'},
+            'project.insights.pending_obligations': {'limit': 'wait_limit'},
+        })
+        work_order = ast.parse((ROOT / 'work_order.py').read_text(encoding='utf-8'))
+        fresh = next(node for node in ast.walk(work_order)
+                     if isinstance(node, ast.FunctionDef) and node.name == '_fresh_generation_for_role')
+        self.assertIn('wait_limit = project.config.limits.wait_events_limit',
+                      {ast.unparse(node) for node in ast.walk(fresh)
+                       if isinstance(node, (ast.Assign, ast.AnnAssign))})
+        fresh_calls = {
+            ast.unparse(call.func): {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+            for call in ast.walk(fresh) if isinstance(call, ast.Call)
+            and ast.unparse(call.func) in {
+                'project.insights.due_waits',
+                'project.insights.pending_obligations',
+                '_ciw.pending', '_pww.pending'}
+        }
+        self.assertEqual(fresh_calls, {
+            'project.insights.due_waits': {'limit': 'wait_limit'},
+            'project.insights.pending_obligations': {'limit': 'wait_limit'},
+            '_ciw.pending': {'limit': 'wait_limit'},
+            '_pww.pending': {'limit': 'wait_limit'},
+        })
+
     def test_editor_search_bounds_are_declared_and_used(self):
         tree = ast.parse((ROOT / 'editor.py').read_text(encoding='utf-8'))
         capsule = next(node for node in tree.body
@@ -2674,7 +2770,8 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
-                'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
+                'insights.py', 'proposal_waits.py', 'cli.py', 'codex.py',
+                'usage.py', 'config.py', 'runtime.py',
                 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))

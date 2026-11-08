@@ -603,6 +603,9 @@ class Limits:
     #: each source uses only its own project default unless the role
     #: overrides it. The 100-event cap stays fixed mechanism.
     work_item_events_limit: int = 10
+    #: Operator-selected per-source batch for structured wait and obligation
+    #: events (1-100; default 10). The 100-row delivery ceiling stays mechanism.
+    wait_events_limit: int = 10
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
     #: usage or wall-clock conversation lifetime reaches a bound, carrying the
@@ -655,6 +658,7 @@ _LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
                  "work_item_read_view_item_cache_entries": (1, TOML_INTEGER_MAX),
                  "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),
+                 "wait_events_limit": (1, 100),
                  "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
                  "event_stream_bytes": (1048576, 268435456),
                  "role_state_bytes": (1024, 65536),

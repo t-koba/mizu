@@ -2610,14 +2610,17 @@ class Engine:
             limit=role_work_item_events_limit(project.config, role))
         terminal_page = work_item_events.delivery(role_name, terminal_page)
         terminal_events = terminal_page["events"]
-        ci_events, ci_manifest = ci_waits.delivery(work_items, role_name)
-        proposal_events, proposal_manifest = proposal_waits.delivery(work_items, role_name)
-        wait_events = project.insights.due_waits(role_name, snapshot) + ci_events + proposal_events
+        wait_limit = project.config.limits.wait_events_limit
+        ci_events, ci_manifest = ci_waits.delivery(work_items, role_name, limit=wait_limit)
+        proposal_events, proposal_manifest = proposal_waits.delivery(
+            work_items, role_name, limit=wait_limit)
+        wait_events = (project.insights.due_waits(role_name, snapshot, limit=wait_limit)
+                       + ci_events + proposal_events)
         has_wait = bool(wait_events or check_jobs.wake_ready(project, role_name))
         # Dependency obligations addressed to this role ride along when
         # it runs for other reasons; they never admit a run on their
         # own, so no new wake source is implied.
-        obligations = project.insights.pending_obligations(role_name)
+        obligations = project.insights.pending_obligations(role_name, limit=wait_limit)
         # Event-triggered dispatch (platform file triggers) admits only on a
         # addressed operator record, subscribed decision/terminal event, due wait,
         # or an undelivered, role-owned exact wait-resolution proof.
@@ -4640,7 +4643,7 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
               or any(d.get("action") != "defer" for d in troubled)):
             return True
         try:
-            if (project.insights.due_waits(name, snapshot)
+            if (project.insights.due_waits(name, snapshot, limit=1)
                     or (not wait_probes_completed
                         and _receipt_wait_due(project.work_items, name, limit=1))):
                 return True

@@ -502,6 +502,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `queue_observations` | Contended execution-admission observations retained in `started.json` (0–100; default 8). This is an upper bound: runtime also trims the sample to the retained-evidence read cap (64 KiB, or lower `file_bytes`), and every observation not retained increments `omitted` instead of growing the record. Run-local evidence only; no scheduling, admission or history effect |
 | `decision_reconciliation_bytes` | Serialized host-only activation plan/report write and validation bound in bytes (1–67108864; default 8388608, 8 MiB). The plan pins the complete current decision and addressed-pending set, so this is history policy, not a transport frame. A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan and 1.9 MiB post-map report; the default covers several thousand routed rows. Runtime authority verifies the report's exact bytes and digest but does not parse the body; activation and explicit host retry validate `plan_digest` against the retained body. Measured digest-only authority calls on the reference host: 1.9 MiB 4 ms / 4 MB peak, 8 MiB 13 ms / 17 MB, 64 MiB 217 ms / 138 MB; one role evaluation can make two to four checks. The 64 MiB ceiling bounds this retained-evidence check; raise it only with a new measurement |
 | `work_item_events_limit` | Terminal work-item events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Independent of the decision batch: each source uses only its own limit |
+| `wait_events_limit` | Structured insight waits, CI waits, proposal-merge waits, and dependency obligations delivered per dispatch (1–100; default 10). The same policy applies independently to each source; there is no shared total. Existing oldest-first delivery and explicit acknowledgement are unchanged; the 100-row ceiling is fixed mechanism |
 | `session_max_tokens` | Cumulative session tokens at which a resumed persistent session restarts with a fresh session key (0 disables; 0–1,073,741,824; default 0). The published snapshot and composed policy reload on the next unit; Pi accumulates per-run usage into the session record, Codex/Claude reuse their saved cumulative totals, unknown shapes count 0 (age still rotates) |
 | `session_max_cost_usd` | Estimated session cost (USD) at which a resumed persistent session restarts (0 disables; 0–1,000,000; default 0). Cost is the native provider estimate where reported (ADR-005); sessions without cost evidence never rotate on this bound |
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
@@ -1714,13 +1715,17 @@ and complete current chain, oldest terminal instant first (aware timestamps
 normalized to UTC, then item ID/revision). Dispatch batches are independent per
 source: the role-effective `work_item_events_limit` (role override when set,
 else the project default) bounds terminal rows, 1–100 per dispatch, while the
-role-effective `decision_events_limit` bounds only decisions. Either role
+role-effective `decision_events_limit` bounds only decisions. Structured wait
+and obligation sources each use the project `wait_events_limit` (1–100; default
+10), independently rather than as one combined cap. Either existing role
 override is 1–100 with `None` meaning inherit; the fixed 100-event mechanism
-cap still applies to both. Choose each batch to fit the role's
-`requests_per_run`: both sources require explicit per-row selections in
-`finish.ack_events` (above); unselected rows replay oldest-first. Each terminal
-row, including its delivery token, is at most 8192 canonical bytes, the page at most 1 MiB; title retains the seed's
-200-character bound and reason is a 1024-byte preview with a truncation flag.
+cap applies to each route. Choose each per-source batch to fit the role's
+`requests_per_run`: terminal, decision, wait, and obligation rows require
+explicit per-row selections in `finish.ack_events` (above); unselected rows
+replay oldest-first. Each terminal row, including its delivery token, is at
+most 8192 canonical bytes, and the page is at most 1 MiB. The title retains
+the seed's 200-character bound and the reason is a 1024-byte preview with a
+truncation flag.
 Delivered rows include a role/payload-bound `ack_token`, stable
 `event: "work_item:<item-id>:<terminal-rev>"`, `source`,
 `type`, item/origin references, transition, terminal time, actor and routing.

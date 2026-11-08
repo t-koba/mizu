@@ -25,6 +25,25 @@ class WorkOrderTests(Fixture):
         self.project.snapshots.publish(snap)
         return snap
 
+    def test_fresh_generation_uses_configured_wait_events_limit(self):
+        from unittest.mock import ANY, patch
+        from mizu import ci_waits, proposal_waits
+
+        limit = 4
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, wait_events_limit=limit))
+        self.project.config = self.config
+        role = self.config.roles["worker"]
+        with patch.object(self.project.insights, "due_waits", return_value=[]) as due_waits, \
+                patch.object(self.project.insights, "pending_obligations", return_value=[]) as obligations, \
+                patch.object(ci_waits, "pending", return_value=[]) as ci_pending, \
+                patch.object(proposal_waits, "pending", return_value=[]) as proposal_pending:
+            self.assertIsInstance(plan._fresh_generation_for_role(self.project, role), str)
+        due_waits.assert_called_once_with("worker", ANY, limit=limit)
+        obligations.assert_called_once_with("worker", limit=limit)
+        ci_pending.assert_called_once_with(self.project.work_items, "worker", limit=limit)
+        proposal_pending.assert_called_once_with(self.project.work_items, "worker", limit=limit)
+
     def test_capability_is_writer_only_and_children_cannot_hold_it(self):
         from mizu.config import CAPABILITIES
         self.assertIn("work_order", CAPABILITIES)

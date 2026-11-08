@@ -244,6 +244,7 @@ work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-
 session_delta_details = "elide"  # full|elide: unchanged work-item/owned-check details; shared-check details stay full; rows/liveness stay explicit.
 decision_events_limit = 10  # Decision events per dispatch per role (1-100; default 10). Bound stays 100; value is policy.
 work_item_events_limit = 10 # Terminal work-item events per dispatch per role (1-100; default 10). Independent of the decision batch above.
+wait_events_limit = 10      # Structured insight/CI/proposal waits and dependency obligations per source (1-100; default 10).
 session_max_tokens = 0          # Restart a resumed persistent session once cumulative tokens reach N (0 disables).
 session_max_cost_usd = 0         # Restart a resumed persistent session once estimated cost (USD) reaches N (0 disables).
 session_max_age_seconds = 0      # Restart a resumed persistent session once wall-clock conversation lifetime reaches N seconds (stable creation surviving same-id saves; 0 disables).
@@ -518,7 +519,9 @@ interval_seconds = 900
 # decision_sources = "any"  # decisions from any source; requires decision_events.
 # work_item_sources = "own" # terminal events by origin submitter, never actor.
 # Dispatch batches are independent per source: decision_events_limit bounds only
-# decisions, work_item_events_limit only terminal events (role override or project default).
+# decisions and work_item_events_limit only terminal events (role override or
+# project default). wait_events_limit is project-wide and applies separately to
+# each structured-wait/obligation source; there is no shared total.
 # Migration: omitted work_item_sources inherits legacy decision_sources for terminal
 # delivery; terminal-only legacy decision_sources="any" resolves to decision own, work-item any.
 # A red ci_branch wakes only roles with ci_wake (default true for write roles,
