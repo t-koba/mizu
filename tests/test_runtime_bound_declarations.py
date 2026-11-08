@@ -1882,6 +1882,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('errors.py', 'ModelFailure.__init__', 2, 0): (
         '253402300799', 'format',
         'model failure / retry timestamps stop at the Unix-second ceiling for year 9999'),
+    ('explain.py', '_control', 1, 0): (
+        '128', 'safety',
+        'explain control / cap wake-generation text in the bounded status projection'),
+    ('explain.py', '_control', 1, 1): (
+        '512', 'safety',
+        'explain control / cap operator-authored reason text in the status projection'),
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
@@ -2952,7 +2958,7 @@ def sibling():
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
-                'insights.py', 'proposal_waits.py', 'selection.py',
+                'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py'):

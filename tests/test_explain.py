@@ -70,6 +70,25 @@ class ExplainTests(Fixture):
         self.assertNotIn("private error text", serialized)
         self.assertNotIn("will_run", result)
 
+    def test_control_projection_bounds_wake_generation_and_reason(self):
+        from mizu.explain import _control
+        from mizu.fs import write_json
+
+        path = self.project.root / "control.json"
+        cases = (
+            ("wake_generation", "w" * 128, "current"),
+            ("wake_generation", "w" * 129, "unavailable"),
+            ("reason", "r" * 512, "current"),
+            ("reason", "r" * 513, "unavailable"),
+        )
+        for field, value, expected in cases:
+            with self.subTest(field=field, length=len(value)):
+                write_json(path, {"armed": False, "paused": False, "draining": False, field: value})
+                result = _control(self.project)
+                self.assertEqual(result["status"], expected)
+                if expected == "current":
+                    self.assertEqual(result["record"][field], value)
+
     def test_role_is_required_for_multi_role_project_and_must_be_enabled(self):
         with self.assertRaises(ConfigError):
             execute(self._args())
