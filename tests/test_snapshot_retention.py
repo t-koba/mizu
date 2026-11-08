@@ -111,6 +111,34 @@ class SnapshotRetentionTests(Fixture):
         self.assertEqual([self.path(s).exists() for s in snaps], [True, True, True, True])
         self.assertEqual(self.collect()['snapshots'], 0)
 
+    def test_large_file_map_is_audited_and_expired_under_default_file_limit(self):
+        self.assertEqual(self.project.snapshots.max_files, 20_000)
+        entry = next(iter(self.captured['files'].values()))
+        files = {f'{index:010d}': dict(entry) for index in range(10_000)}
+        captured = dict(self.captured, files=files, code_digest=digest(canonical(files)))
+        large = self.snapshot(age=40, captured=captured)
+        path = self.path(large)
+        self.assertGreater(path.stat().st_size, storage._AUDIT_JSON_BYTES)
+        # Noncanonical map order/whitespace still hashes to the same identity.
+        large['files'] = dict(reversed(list(files.items())))
+        path.write_text(json.dumps(large, ensure_ascii=False, indent=1), encoding='utf-8')
+        report = storage.audit(self.project)
+        self.assertEqual(report['snapshots']['skipped'], 0, report)
+        parsed = self.project.snapshots.audit_manifest(
+            large['id'], metadata_bytes=storage._AUDIT_JSON_BYTES,
+            maximum=storage._SNAPSHOT_AUDIT_BYTES)
+        # Audit-only record carries no file map, goal, or names, only digests.
+        self.assertNotIn('goal', parsed)
+        self.assertNotIn('files', parsed)
+        self.assertNotIn('file_names', parsed)
+        self.assertEqual(len(parsed['file_shas']), len(files))
+        self.assertEqual(set(parsed['file_shas']),
+                         {entry['sha256'] for entry in files.values()})
+        self.assertEqual(parsed['code_digest'], digest(canonical(files)))
+        result = self.collect()
+        self.assertEqual(result['status'], 'collected', result)
+        self.assertFalse(path.exists())
+
     def test_historical_goal_manifest_is_audited_after_limit_decreases(self):
         goal_limit = 1_050_000
         self.project.config = dataclasses.replace(

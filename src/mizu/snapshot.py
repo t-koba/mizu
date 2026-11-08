@@ -20,7 +20,7 @@ from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflic
 from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, safe_read_stream, write_json, relative_parts
 from .distribution import is_private_name
 from .startup import HOST_STATE_FILES
-from .snapshot_manifest import read_manifest
+from .snapshot_manifest import decoded_path_limit, file_member_limit, read_manifest
 from .vcs import REF_PREFIX
 
 
@@ -775,15 +775,55 @@ class Snapshots:
         return self._validate_manifest_fields(snapshot_id, record)
 
     def audit_manifest(self, snapshot_id: str, *, metadata_bytes: int, maximum: int) -> dict:
-        """Safely validate historical content without materializing its goal."""
+        """Validate historical content without loading a serialized file map.
+
+        Decoded members needed for canonical sorting are bounded by max_files
+        and platform-derived per-member limits; no second serialized map is
+        built. File members stream with platform-derived per-member bounds (POSIX
+        PATH_MAX via pathconf on this store's filesystem, Windows
+        extended-length limit); the file-size ceiling adds max_files times
+        that bound (not times the generic 1 MiB cap). Code and
+        content-address digests were already hashed member-by-member in
+        sorted order, so no serialized map or canonical JSON is built here.
+        """
         if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
             raise Denied("Invalid snapshot ID")
+        path_limit = decoded_path_limit(self.root)
+        member_limit = file_member_limit(path_limit)
         record, goal_digest = safe_read_stream(
-            self.root, f"snapshots/{snapshot_id}.json", maximum,
-            lambda stream: read_manifest(stream, metadata_bytes, snapshot_id))
+            self.root, f"snapshots/{snapshot_id}.json",
+            maximum + self.max_files * member_limit,
+            lambda stream: read_manifest(
+                stream, metadata_bytes, snapshot_id, self.max_files, self.max_file,
+                path_limit))
         if goal_digest != record.get("goal_digest"):
             raise Denied("Snapshot goal digest mismatch")
-        return self._validate_manifest_fields(snapshot_id, record)
+        return self._validate_audit_fields(snapshot_id, record)
+
+    def _validate_audit_fields(self, snapshot_id: str, record: dict) -> dict:
+        """Audit-only validation over the streaming reader's minimal record.
+
+        Content identity, code digest and entry schema were already proven
+        member-by-member during the stream. Only parent, progress and host
+        path policy remain, validated here without rebuilding any map.
+        """
+        if "parent" in record and record["parent"] is not None and (
+                not isinstance(record["parent"], str) or not DIGEST.fullmatch(record["parent"])):
+            raise Denied("Invalid parent snapshot ID")
+        if "progress" in record:
+            validate_progress(record["progress"])
+        names = record.get("file_names")
+        shas = record.get("file_shas")
+        if (not isinstance(names, list) or not isinstance(shas, list)
+                or len(names) != len(shas) or len(names) > self.max_files
+                or any(not isinstance(n, str) for n in names)
+                or any(not isinstance(s, str) or not DIGEST.fullmatch(s) for s in shas)):
+            raise Denied("Invalid snapshot files")
+        # Reuse the exact host path/collision policy without entries or a
+        # second file-name map. Names are no longer needed after validation.
+        self._validate_paths_once(snapshot_id, names)
+        record.pop("file_names")
+        return record
 
     def _validate_manifest_fields(self, snapshot_id: str, record: dict) -> dict:
         """Shared structural validation, only after content identity is proven."""

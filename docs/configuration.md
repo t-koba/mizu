@@ -795,16 +795,32 @@ reused.
 Snapshot retention reads pin a regular, non-hardlinked file with the same
 no-follow/stability checks as other safe reads. Each scan recomputes the goal,
 code and content-addressed manifest digests; no stat-only content cache is used.
-The audit retains at most 1 MiB of textual non-goal metadata plus bounded goal
-chunks, not a decoded or serialized whole goal. It rereads the goal token on the
-same open handle to hash it between canonical metadata fields, comparing the
-token's content hash across passes before accepting the manifest ID.
+The audit result retains no file map or goal, only parent/time and
+file-object digest references for GC. Validation reads one file member at a
+time within platform-derived bounds: decoded paths at most PATH_MAX from
+pathconf on the project filesystem on POSIX hosts (typically 4096 bytes), or
+the Windows extended-length limit (32767 UTF-16 units, consistent with the
+store's Windows path rules which impose no shorter Mizu cap), with at most 6x
+JSON escape expansion. Fixed-schema entries (~113 canonical bytes) fit within
+4 KiB. A member's framing bound includes its path token, colon, entry,
+delimiter, and three whitespace runs of up to 1 KiB each. The audit retains
+decoded members needed for canonical sorting, bounded by max_files and these
+per-member limits; it hashes sorted members without a second serialized map
+or canonical JSON copy. The safe-read ceiling adds max_files times that
+per-member bound, not times the generic 1 MiB cap. All fields outside
+goal/files still share the 1 MiB textual metadata budget; this does not
+increase the generic reference-record cap, and there is no max_files times
+1 MiB aggregate allowance. Goal reads retain only bounded chunks, not a
+decoded or serialized whole goal.
+The audit rereads the goal token on the same open handle to hash it between
+canonical metadata fields, comparing the token's content hash across passes
+before accepting the manifest ID.
 
 For retention auditing, the goal JSON string must use Mizu's canonical UTF-8
 spelling: literal non-ASCII UTF-8, standard short escapes where available, and
 lowercase `\u00xx` for other C0 controls. Alternate Unicode escapes and escaped
-slashes are refused, as are duplicate top-level keys. Non-goal field order and
-whitespace need not be canonical. All manifests written by Mizu use the accepted
+slashes are refused, as are duplicate top-level or file-map keys. Non-goal field
+order and whitespace need not be canonical. All manifests written by Mizu use the accepted
 spelling; manually rewritten alternative spellings fail the scan closed even
 when they decode to the same text. This narrow textual contract avoids an
 unbounded general JSON decoder for the historical goal. Normal manifest reads

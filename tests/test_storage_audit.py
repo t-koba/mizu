@@ -2,14 +2,15 @@
 import io
 import json
 import os
+import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 from support import Fixture, bind_delivery
-from mizu.errors import Denied
+from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical, digest, safe_read_stream, write_json
-from mizu.snapshot_manifest import read_manifest
+from mizu.snapshot_manifest import decoded_path_limit, file_member_limit, read_manifest
 from mizu.storage import (_AUDIT_JSON_BYTES,
                           _session_accounting, audit, reclaim)
 
@@ -546,10 +547,16 @@ class StorageReclaimTests(Fixture):
                     read_bytes.append(wrapped.total)
             return safe_read_stream(root, name, maximum, count)
 
-        with mock.patch("mizu.snapshot.safe_read_stream", side_effect=tracked):
-            self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
-            from mizu.storage import _automatic_snapshot_gc
-            result = _automatic_snapshot_gc(self.project, 2_000_000_000)
+        tracemalloc.start()
+        try:
+            with mock.patch("mizu.snapshot.safe_read_stream", side_effect=tracked):
+                self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+                from mizu.storage import _automatic_snapshot_gc
+                result = _automatic_snapshot_gc(self.project, 2_000_000_000)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 * _AUDIT_JSON_BYTES)
         self.assertEqual(result["status"], "refused", result)
         self.assertTrue(path.exists())
         self.assertTrue(read_bytes)
@@ -563,7 +570,10 @@ class StorageReclaimTests(Fixture):
         record['goal'], record['goal_digest'] = goal, digest(goal.encode())
         record['id'] = digest(canonical({k: v for k, v in record.items() if k != 'id'}))
         raw = json.dumps(record, ensure_ascii=False, indent=2).encode()
-        parsed, goal_digest = read_manifest(io.BytesIO(raw), _AUDIT_JSON_BYTES, record['id'])
+        parsed, goal_digest = read_manifest(io.BytesIO(raw), _AUDIT_JSON_BYTES, record['id'],
+                                            self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
         self.assertNotIn('goal', parsed)
         self.assertEqual(goal_digest, record['goal_digest'])
         for bad in (raw.replace(b'"goal":', b'"goal":"duplicate", "goal":', 1),
@@ -571,25 +581,313 @@ class StorageReclaimTests(Fixture):
                     raw.replace(b'"goal": "', b'"goal": "changed', 1),
                     raw + b'trailing'):
             with self.subTest(prefix=bad[:40]), self.assertRaises((Denied, ValueError)):
-                read_manifest(io.BytesIO(bad), _AUDIT_JSON_BYTES, record['id'])
+                read_manifest(io.BytesIO(bad), _AUDIT_JSON_BYTES, record['id'],
+                              self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
         # Invalid continuation bytes must not become an ever-growing tail.
         with self.assertRaises((Denied, ValueError)):
             read_manifest(io.BytesIO(b'{"goal":"' + b'\x80' * 32768),
-                          _AUDIT_JSON_BYTES, record['id'])
+                          _AUDIT_JSON_BYTES, record['id'], self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+
+    def test_file_map_whitespace_run_is_bounded(self):
+        record = self.project.snapshots.get()
+        raw = canonical(record)
+        marker = b'"files":{'
+        self.assertIn(marker, raw)
+        for count in (1024, 1025):
+            changed = raw.replace(marker, marker + b' ' * count, 1)
+            with self.subTest(count=count):
+                if count == 1024:
+                    parsed, _ = read_manifest(
+                        io.BytesIO(changed), _AUDIT_JSON_BYTES, record['id'],
+                        self.project.snapshots.max_files, self.project.snapshots.max_file,
+                        decoded_path_limit(self.project.root))
+                    self.assertEqual(len(parsed['file_shas']), len(record['files']))
+                else:
+                    with self.assertRaisesRegex(LimitExceeded, 'file member exceeds'):
+                        read_manifest(
+                            io.BytesIO(changed), _AUDIT_JSON_BYTES, record['id'],
+                            self.project.snapshots.max_files, self.project.snapshots.max_file,
+                            decoded_path_limit(self.project.root))
 
     def test_streamed_manifest_accepts_whitespace_across_reader_chunks(self):
         record = self.project.snapshots.get()
         raw = canonical(record)
         raw = raw[:1] + b' ' * (io.DEFAULT_BUFFER_SIZE + 3) + raw[1:]
         parsed, goal_digest = read_manifest(io.BytesIO(raw), _AUDIT_JSON_BYTES,
-                                            record['id'])
+                                        record['id'], self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
         self.assertNotIn('goal', parsed)
         self.assertEqual(goal_digest, record['goal_digest'])
+
+    def test_streamed_file_map_bounds_and_duplicate_keys(self):
+        record = self.project.snapshots.get()
+        raw = canonical(record)
+        name, entry = next(iter(record['files'].items()))
+        member = canonical(name)[:-1] + b':' + canonical(entry)[:-1]
+        # Duplicate decoded names (including alternate spelling) must not be
+        # silently collapsed into a content-address-valid map.
+        duplicate = raw.replace(member, member + b',' + member, 1)
+        escaped = member.replace(name[0].encode(),
+                                 ('\\u%04x' % ord(name[0])).encode(), 1)
+        for bad in (duplicate, raw.replace(member, escaped + b',' + member, 1)):
+            with self.assertRaisesRegex(Denied, 'Duplicate snapshot file key'):
+                read_manifest(io.BytesIO(bad), _AUDIT_JSON_BYTES, record['id'],
+                              self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+        changed = canonical(dict(entry, executable=not entry['executable']))[:-1]
+        with self.assertRaisesRegex(Denied, 'code digest mismatch'):
+            read_manifest(io.BytesIO(raw.replace(canonical(entry)[:-1], changed, 1)),
+                          _AUDIT_JSON_BYTES, record['id'], self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+        # A content-address-valid manifest still requires the files field;
+        # an empty-map code digest must not make a missing field look valid.
+        missing_files = dict(record)
+        missing_files.pop('files')
+        missing_files['code_digest'] = digest(canonical({}))
+        missing_files['id'] = digest(canonical({k: v for k, v in missing_files.items()
+                                                if k != 'id'}))
+        with self.assertRaisesRegex(Denied, 'Invalid snapshot manifest'):
+            read_manifest(io.BytesIO(canonical(missing_files)), _AUDIT_JSON_BYTES,
+                          missing_files['id'], self.project.snapshots.max_files,
+                          self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+
+        # Small fields on both sides of files still share one metadata budget.
+        padding = b'x' * (_AUDIT_JSON_BYTES // 2)
+        with self.assertRaisesRegex(LimitExceeded, 'metadata exceeds'):
+            read_manifest(io.BytesIO(b'{"before":"' + padding + b'","files":{' +
+                                     member + b'},"after":"' + padding + b'"}'),
+                          _AUDIT_JSON_BYTES, record['id'], self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+        with self.assertRaisesRegex(LimitExceeded, 'file count'):
+            read_manifest(io.BytesIO(raw), _AUDIT_JSON_BYTES, record['id'], 0,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+        # Oversized file members are rejected within the platform-derived
+        # per-member bound, not the generic 1 MiB cap, with bounded reads.
+        with self.assertRaisesRegex(LimitExceeded, 'file member exceeds'):
+            read_manifest(io.BytesIO(b'{"files":{"oversized":{"padding":"' +
+                                     b'x' * (_AUDIT_JSON_BYTES + 1)),
+                          _AUDIT_JSON_BYTES, record['id'], self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+
+    def test_streamed_file_member_oversized_is_bounded(self):
+        from mizu.snapshot_manifest import decoded_path_limit as _decoded_limit, file_member_limit as _member_limit
+        record = self.project.snapshots.get()
+        # Corrupt member with huge extra field (100 KiB) stays below the generic
+        # 1 MiB cap, so only the platform-derived per-member bound rejects it.
+        huge = (b'{"files":{"oversized":{"sha256":"' + b'a' * 64 +
+                b'","bytes":1,"executable":false,"padding":"' + b'x' * 100000 + b'"}}}')
+        tracemalloc.start()
+        try:
+            with self.assertRaisesRegex(LimitExceeded, 'file member exceeds'):
+                read_manifest(io.BytesIO(huge), _AUDIT_JSON_BYTES, record['id'],
+                              self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 * _AUDIT_JSON_BYTES)
+        # Decoded paths longer than the POSIX pathconf bound are rejected
+        # on POSIX hosts (typically 4096 bytes); Windows hosts allow the
+        # extended-length limit (see next test).
+        long_name = 'a' * 5000
+        long_member = (canonical(long_name)[:-1] + b':{"sha256":"' + b'a' * 64 +
+                       b'","bytes":1,"executable":false}')
+        with self.assertRaisesRegex(LimitExceeded, 'file member exceeds'):
+            read_manifest(io.BytesIO(b'{"files":{' + long_member + b'}}'),
+                          _AUDIT_JSON_BYTES, record['id'],
+                          self.project.snapshots.max_files,
+                          self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+        # Disk reads for a huge corrupt member stay bounded to the per-member
+        # bound plus I/O buffering, not the whole multi-hundred-KiB file.
+        from mizu.storage import _SNAPSHOT_AUDIT_BYTES
+        raw = canonical(record)
+        name, entry = next(iter(record['files'].items()))
+        member = canonical(name)[:-1] + b':' + canonical(entry)[:-1]
+        corrupt = raw.replace(member, b'"oversized":{"sha256":"' + b'a' * 64 +
+                              b'","bytes":1,"executable":false,"padding":"' +
+                              b'x' * 200000 + b'"}', 1)
+        # Build a syntactically valid carrier with the huge member so the
+        # reader must stream past it to reject; keep other fields small.
+        path = self.project.root / 'snapshots' / (record['id'] + '.json')
+        # Use a fresh ID for the corrupt carrier to avoid clobbering live state;
+        # the audit must still reject it as oversized before any identity check.
+        original = path.read_bytes()
+        try:
+            path.write_bytes(corrupt)
+            read_bytes = []
+            orig_stream = __import__('mizu.snapshot', fromlist=['safe_read_stream']).safe_read_stream
+            def tracked(root, name_, maximum, consume):
+                from mizu.fs import safe_read_stream as real
+                class Counted:
+                    def __init__(self, stream):
+                        self.stream = stream
+                        self.total = 0
+                    def read(self, size=-1):
+                        chunk = self.stream.read(size)
+                        self.total += len(chunk)
+                        return chunk
+                    def seek(self, *args, **kwargs):
+                        return self.stream.seek(*args, **kwargs)
+                    def tell(self):
+                        return self.stream.tell()
+                def count(stream):
+                    wrapped = Counted(stream)
+                    try:
+                        return consume(wrapped)
+                    finally:
+                        read_bytes.append(wrapped.total)
+                return real(root, name_, maximum, count)
+            with mock.patch('mizu.snapshot.safe_read_stream', side_effect=tracked):
+                with self.assertRaises(LimitExceeded):
+                    self.project.snapshots.audit_manifest(
+                        record['id'], metadata_bytes=_AUDIT_JSON_BYTES,
+                        maximum=_SNAPSHOT_AUDIT_BYTES)
+            self.assertTrue(read_bytes)
+            self.assertLessEqual(max(read_bytes),
+                                 _AUDIT_JSON_BYTES + _member_limit(_decoded_limit(self.project.root)) + 8192)
+        finally:
+            path.write_bytes(original)
+
+    def test_long_windows_path_accepted_by_audit_under_windows_semantics(self):
+        from mizu import platform as _platform
+        from mizu.storage import _SNAPSHOT_AUDIT_BYTES
+        base = self.project.snapshots.get()
+        entry = next(iter(base['files'].values()))
+        long_name = 'a' * 5000
+        files = {long_name: dict(entry)}
+        record = dict(base, files=files, code_digest=digest(canonical(files)))
+        record['id'] = digest(canonical({k: v for k, v in record.items()
+                                         if k != 'id'}))
+        # The normal reader accepts the 5000-character path under the
+        # existing Windows collision/path policy (no Mizu length cap).
+        with mock.patch.object(_platform, 'IS_WINDOWS', True):
+            self.project.snapshots._path_validation_cache.clear()
+            try:
+                self.assertEqual(
+                    self.project.snapshots.validate_manifest(
+                        record['id'], record)['code_digest'],
+                    record['code_digest'])
+            finally:
+                self.project.snapshots._path_validation_cache.clear()
+        # On POSIX hosts the same 5000-character path exceeds PATH_MAX from
+        # pathconf, so the retention parser rejects it there.
+        with self.assertRaisesRegex(LimitExceeded, 'file member exceeds'):
+            read_manifest(io.BytesIO(canonical(record)), _AUDIT_JSON_BYTES,
+                          record['id'], self.project.snapshots.max_files,
+                          self.project.snapshots.max_file,
+                          decoded_path_limit(self.project.root))
+        path = self.project.root / 'snapshots' / (record['id'] + '.json')
+        write_json(path, record)
+        try:
+            with mock.patch.object(_platform, 'IS_WINDOWS', True):
+                self.project.snapshots._path_validation_cache.clear()
+                try:
+                    tracemalloc.start()
+                    try:
+                        parsed, goal_digest = read_manifest(
+                            io.BytesIO(canonical(record)), _AUDIT_JSON_BYTES,
+                            record['id'], self.project.snapshots.max_files,
+                            self.project.snapshots.max_file,
+                            decoded_path_limit(self.project.root))
+                        self.assertNotIn('goal', parsed)
+                        self.assertNotIn('files', parsed)
+                        self.assertIn(long_name, parsed['file_names'])
+                        self.assertEqual(goal_digest, record['goal_digest'])
+                        self.assertEqual(audit(self.project)["snapshots"]["skipped"], 0)
+                        audited = self.project.snapshots.audit_manifest(
+                            record['id'], metadata_bytes=_AUDIT_JSON_BYTES,
+                            maximum=_SNAPSHOT_AUDIT_BYTES)
+                        self.assertNotIn('file_names', audited)
+                        self.assertNotIn('files', audited)
+                        _, peak = tracemalloc.get_traced_memory()
+                    finally:
+                        tracemalloc.stop()
+                    self.assertLess(peak, 4 * _AUDIT_JSON_BYTES)
+                finally:
+                    self.project.snapshots._path_validation_cache.clear()
+        finally:
+            if path.exists():
+                path.unlink()
+
+    def test_streamed_file_map_code_and_content_identity(self):
+        record = self.project.snapshots.get()
+        raw = canonical(record)
+        name, entry = next(iter(record['files'].items()))
+        # Tampered code_digest field alone (files unchanged) is a code mismatch.
+        bad_code = raw.replace(record['code_digest'].encode(), b'b' * 64, 1)
+        with self.assertRaisesRegex(Denied, 'code digest mismatch'):
+            read_manifest(io.BytesIO(bad_code), _AUDIT_JSON_BYTES, record['id'],
+                          self.project.snapshots.max_files,
+                          self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+        # Tampered files with a matching tampered code_digest still fail the
+        # content-addressed ID, which binds the exact sorted file map.
+        tampered_entry = dict(entry, executable=not entry['executable'])
+        tampered_files = dict(record['files'])
+        tampered_files[name] = tampered_entry
+        tampered_code = digest(canonical(tampered_files))
+        tampered_raw = raw.replace(canonical(entry)[:-1],
+                                   canonical(tampered_entry)[:-1], 1)
+        tampered_raw = tampered_raw.replace(record['code_digest'].encode(),
+                                            tampered_code.encode(), 1)
+        with self.assertRaisesRegex(Denied, 'integrity failure'):
+            read_manifest(io.BytesIO(tampered_raw), _AUDIT_JSON_BYTES, record['id'],
+                          self.project.snapshots.max_files,
+                          self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
+
+    def test_streamed_file_map_path_collision_and_windows_casefold(self):
+        from mizu import platform as _platform
+        base = self.project.snapshots.get()
+        entry = next(iter(base['files'].values()))
+        # Directory/file prefix collision fails closed on every host.
+        files = {'collision': entry, 'collision/child': entry}
+        record = dict(base, files=files, code_digest=digest(canonical(files)))
+        record['id'] = digest(canonical({k: v for k, v in record.items() if k != 'id'}))
+        path = self.project.root / 'snapshots' / (record['id'] + '.json')
+        write_json(path, record)
+        try:
+            self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+        finally:
+            path.unlink()
+        # Case-only collision passes on POSIX but fails when Windows casefold applies.
+        files = {'A': entry, 'a': entry}
+        record = dict(base, files=files, code_digest=digest(canonical(files)))
+        record['id'] = digest(canonical({k: v for k, v in record.items() if k != 'id'}))
+        path = self.project.root / 'snapshots' / (record['id'] + '.json')
+        write_json(path, record)
+        try:
+            self.assertEqual(audit(self.project)["snapshots"]["skipped"], 0)
+            with mock.patch.object(_platform, 'IS_WINDOWS', True):
+                # Drop the process-local path cache so the Windows view is fresh.
+                self.project.snapshots._path_validation_cache.clear()
+                try:
+                    self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+                finally:
+                    self.project.snapshots._path_validation_cache.clear()
+        finally:
+            if path.exists():
+                path.unlink()
 
     def test_streamed_manifest_preserves_field_validation(self):
         base = self.project.snapshots.get()
         bad_files = (dict(base['files'], **{'../outside': next(iter(base['files'].values()))}),
-                     {name: dict(entry, bytes=-1) for name, entry in base['files'].items()})
+                     {name: dict(entry, bytes=-1) for name, entry in base['files'].items()},
+                     {'collision': next(iter(base['files'].values())),
+                      'collision/child': next(iter(base['files'].values()))})
         changes = ({'goal_digest': 'a' * 64}, {'code_digest': 'b' * 64},
                    {'parent': 'invalid'}, {'progress': {}},
                    *({'files': files, 'code_digest': digest(canonical(files))}
@@ -668,7 +966,10 @@ class StorageReclaimTests(Fixture):
                 return super().seek(offset, whence)
 
         with self.assertRaisesRegex(Denied, 'changed while reading'):
-            read_manifest(Changing(raw), _AUDIT_JSON_BYTES, record['id'])
+            read_manifest(Changing(raw), _AUDIT_JSON_BYTES, record['id'],
+                          self.project.snapshots.max_files,
+                              self.project.snapshots.max_file,
+                              decoded_path_limit(self.project.root))
 
     def test_active_history_reads_are_bounded_and_reused(self):
         from mizu.fs import safe_read

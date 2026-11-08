@@ -707,7 +707,11 @@ MAX_SNAPSHOT_GOAL_JSON_EXPANSION = 6
 #: Snapshot histories can outlive the current goal setting. Use the stable
 #: supported maximum, not today's smaller project_goal_bytes, and allow its
 #: worst-case canonical-JSON expansion. This is a file-size ceiling only:
-#: audit_manifest streams goals and independently caps all other fields at 1 MiB.
+#: audit_manifest streams goals with the supported maximum and file members
+#: with platform-derived per-member bounds (POSIX PATH_MAX via pathconf,
+#: Windows extended limit; see snapshot_manifest); other fields share 1 MiB.
+#: The store adds max_files times that per-member bound to the file ceiling,
+#: never max_files times the generic 1 MiB cap.
 _SNAPSHOT_AUDIT_BYTES = (_AUDIT_JSON_BYTES
                          + MAX_PROJECT_GOAL_BYTES * MAX_SNAPSHOT_GOAL_JSON_EXPANSION)
 #: Sample lists stay small; full counts/bytes are always exact.
@@ -867,10 +871,11 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
             record = project.snapshots.audit_manifest(
                 sid, metadata_bytes=_AUDIT_JSON_BYTES, maximum=_SNAPSHOT_AUDIT_BYTES)
             # GC needs only parent/time after validation; retain content digests
-            # separately so large embedded goals do not accumulate across the scan.
+            # separately so large embedded goals and file maps do not
+            # accumulate across the scan. The audit record carries no file map.
             manifests[sid] = {"parent": record.get("parent"),
                               "created_at": record.get("created_at")}
-            manifest_objects[sid] = {entry["sha256"] for entry in record["files"].values()}
+            manifest_objects[sid] = set(record["file_shas"])
             del record
         except (OSError, Denied, LimitExceeded, ValueError, TypeError, RecursionError):
             manifest_skipped += 1

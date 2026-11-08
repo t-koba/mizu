@@ -166,6 +166,8 @@ CANDIDATE = re.compile(
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
+    'snapshot_manifest.py': frozenset({'_WINDOWS_EXTENDED_PATH_UNITS',
+                                       '_MAX_FILES_WHITESPACE_RUN'}),
     'model_catalog.py': frozenset({'MAXIMUM'}),
     'web.py': frozenset({'PROBE_MAX_HEADERS'}),
     'work_items.py': frozenset({'_SIDECAR_MAX_BYTES'}),
@@ -298,6 +300,17 @@ DECLARATIONS = {
             '30.0', 'mechanism',
             'fs / ADR-026 intra-process lock-wait bound; fixed until scheduled-contention '
             'work proves a replay-safe boundary'),
+    },
+    'snapshot_manifest.py': {
+        '_WINDOWS_EXTENDED_PATH_UNITS': (
+            '32767', 'format',
+            'snapshot manifest / Windows extended-length filesystem path limit in UTF-16 code units'),
+        '_MAX_ENTRY_JSON_BYTES': (
+            '4096', 'safety',
+            'snapshot manifest / bounded one-member JSON entry before decoding untrusted fields'),
+        '_MAX_FILES_WHITESPACE_RUN': (
+            '1024', 'safety',
+            'snapshot manifest / bound formatting-only whitespace scan between file-map tokens'),
     },
     'platform.py': {
         'LOCK_TIMEOUT': (
@@ -1562,6 +1575,9 @@ RANGE_ARGUMENTS = {
         '1', 'mechanism', 'snapshot merge / begin path-component traversal after the root'),
     ('snapshot.py', 'Snapshots.validate_paths', 0, 0): (
         '1', 'mechanism', 'snapshot paths / begin ancestor checks after the root component'),
+    ('snapshot_manifest.py', '_goal', 0, 0): (
+        '3', 'format',
+        'snapshot manifest / maximum UTF-8 continuation bytes after a leading byte'),
     ('web.py', 'Web.fetch', 0, 0): (
         '4', 'safety',
         'web fetch / fixed redirect-hop ceiling; every hop revalidates the destination'),
