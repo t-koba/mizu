@@ -10,7 +10,7 @@ from .config import Role, role_policy_text
 from .engine_config import effective, adapter_digest, local_settings_digest
 from .errors import Cancelled, ConfigError, Denied, ProtocolError, ModelFailure
 from .fs import canonical, digest, mkdir, now, read_json, write_json
-from .selection import (DEFAULT_CLASSIFIER_INPUTS, _clip, bounded, validate_labels, work_inputs)
+from .selection import (DEFAULT_CLASSIFIER_INPUTS, _clip, bounded, timestamp, validate_labels, work_inputs)
 from .usage import attempt_usage, normalize
 
 
@@ -167,7 +167,7 @@ def classify(engine, project, role, snapshot, facts, *, preview=False):
         if not isinstance(exc, (ModelFailure, ClassificationOutputError)):
             raise
         cached = {'run': run, 'key': key, 'status': 'failed', 'error': str(exc)[:4000],
-                  'retry_at': time.time() + definition['retry_seconds'],
+                  'retry_at': timestamp(time.time() + definition['retry_seconds']),
                   'source': 'inference', 'reason': 'inference failed; fallback applies'}
         write_json(path, cached)
         return {}, {**cached, 'waiting': definition['on_failure'] == 'wait'}

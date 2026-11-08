@@ -20,7 +20,7 @@ from .errors import Busy, Cancelled, ConfigError, Denied, InfraExceeded, LimitEx
 from .fs import canonical, digest, lock, mkdir, read_json
 from .project import Project
 from .selection import (INTENT_RESERVE_BYTES, State, active, bounded, consume_intent_reservation,
-                        prune_probe_events, terminal_intent)
+                        prune_probe_events, terminal_intent, timestamp)
 
 # Execution ceilings, not a quota policy. Every admission still uses the real
 # sponsor Budget and smaller configured limits win. Work per tick: one event.
@@ -278,9 +278,10 @@ def _service(config, store, identity, stop, resolve, reload_config, at, clock):
                 e = consume_intent_reservation(e, updates)
                 e = terminal_intent(e, {'status': 'unknown', 'finished_at': at, 'reason': 'interrupted'})
                 state['events'][c['claim']] = e
+            next_probe_at = timestamp(at + c['probe_seconds'])
             shutil.rmtree(store.root / 'work' / c['claim'], ignore_errors=True)
             c.update(claim=None, last_event=c['claim'], revision=c['revision'] + 1,
-                     next_probe_at=at + c['probe_seconds'], reason='uncertain_event')
+                     next_probe_at=next_probe_at, reason='uncertain_event')
             prune_probe_events(state, identity, store.event_limit)
             store.save_or_close(state, previous)
             return {'event': 'recovery_probe', 'status': 'unknown', 'contribution': identity}

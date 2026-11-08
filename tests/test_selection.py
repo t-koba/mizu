@@ -61,7 +61,8 @@ class PredicateTests(unittest.TestCase):
 class SelectionFixture(Fixture):
     def setup_selection(self, spec=None, *, role_name='worker'):
         spec = copy.deepcopy(spec or specification())
-        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
+        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent,
+                           self.config.limits.selection_max_interval_seconds)
         role = dataclasses.replace(self.config.roles[role_name], profile='', selector='dynamic', on_change=False)
         self.config = dataclasses.replace(self.config, selectors={'dynamic': spec}, roles={**self.config.roles, role_name: role})
         self.project.config = self.config
@@ -74,6 +75,82 @@ class SelectionFixture(Fixture):
 
 
 class SelectionTests(SelectionFixture):
+    def test_saved_probe_intervals_survive_lowered_configuration_cap(self):
+        raised = 31536001
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, selection_max_interval_seconds=raised))
+        spec = specification()
+        spec['on_error'] = [{'scope': 'profile', 'probe_seconds': raised, 'seconds': raised}]
+        role, _ = self.setup_selection(spec)
+        decision = self.decision(role)
+        store = State(self.config)
+        error = ModelFailure('synthetic', code='synthetic-exhausted')
+        receipt = store.result(decision, run='saved', error=error, at=1000)
+        saved = store.read()
+        before = store.path.read_bytes()
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, selection_max_interval_seconds=1))
+        spec['retry_seconds'] = 1
+        spec['on_error'][0].update(probe_seconds=1, seconds=1)
+        self.setup_selection(spec)
+        lowered = State(self.config)
+        self.assertEqual(lowered.read(), saved)
+        self.assertEqual(lowered.result(decision, run='saved', error=error, at=2000), receipt)
+        self.assertEqual(lowered.path.read_bytes(), before)
+        contribution = saved['contributions'][receipt['contribution']]
+        self.assertEqual(contribution['probe_seconds'], raised)
+        self.assertEqual(contribution['next_probe_at'], 1000 + raised)
+        # The old timestamp format still applies regardless of the policy cap.
+        saved['contributions'][receipt['contribution']]['next_probe_at'] = 253402300800
+        write_json(store.path, saved)
+        with self.assertRaisesRegex(ConfigError, 'finite Unix seconds'):
+            lowered.read()
+
+    def test_unrepresentable_timer_deadlines_fail_before_persistence(self):
+        from mizu.config import TOML_INTEGER_MAX
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, selection_max_interval_seconds=TOML_INTEGER_MAX))
+        spec = specification()
+        spec['retry_seconds'] = TOML_INTEGER_MAX
+        role, _ = self.setup_selection(spec)
+        with self.assertRaisesRegex(ConfigError, 'finite Unix seconds'):
+            self.decision(role)
+        # A nearer known deadline still wins; only the resulting timestamp must fit.
+        store = State(self.config)
+        store.observe({'group': 'shared', 'observed_at': 900, 'expires_at': 1100, 'facts': {}})
+        self.assertEqual(self.decision(role)['next_evaluation_at'], 1100)
+        store.delete('shared')
+        before = store.path.read_bytes()
+        spec['retry_seconds'] = 1
+        for rule in ({'scope': 'profile', 'seconds': TOML_INTEGER_MAX},
+                     {'scope': 'profile', 'probe_seconds': 1, 'seconds': TOML_INTEGER_MAX},
+                     {'scope': 'profile', 'probe_seconds': TOML_INTEGER_MAX}):
+            with self.subTest(rule=rule):
+                spec['on_error'] = [rule]
+                role, _ = self.setup_selection(spec)
+                store = State(self.config)
+                with self.assertRaisesRegex(ConfigError, 'finite Unix seconds'):
+                    store.result(self.decision(role), run='overflow', at=1000,
+                                 error=ModelFailure('synthetic', code='synthetic-exhausted'))
+                self.assertEqual(store.path.read_bytes(), before)
+
+    def test_saved_probe_reschedule_cannot_overflow_timestamp_format(self):
+        store = self._state_policy()
+        state = store.read()
+        identity = self._add_synthetic_contribution(state, 0, status='active', protected_intent=True)
+        contribution = state['contributions'][identity]
+        contribution['probe_seconds'] = 31536001
+        state['receipts'][identity]['action']['probe_seconds'] = 31536001
+        claim = contribution['claim']
+        event = state['events'][claim]
+        event.pop('reserve')
+        event.update(status='failure', finished_at=2)
+        store.save(state)
+        before = store.path.read_bytes()
+        with self.assertRaisesRegex(ConfigError, 'finite Unix seconds'):
+            store.probe_update(identity, revision=1, claim=claim, at=253402300799)
+        self.assertEqual(store.path.read_bytes(), before)
+
     def _state_policy(self, terminal=256, events=8):
         path = self.config.data / 'selection' / 'policy.json'
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1376,6 +1453,19 @@ class ClassificationTests(SelectionFixture):
         self.assertEqual(result['selection']['attribute_sources']['difficulty'], 'rule:0')
         self.assertEqual(result['selection']['classification']['status'], 'explicit')
         self.assertEqual(self.classifying_calls(driver), [])
+
+    def test_classifier_retry_deadline_must_fit_timestamp_format(self):
+        from mizu.config import TOML_INTEGER_MAX
+        role, spec = self.classifier()
+        spec['classifier']['retry_seconds'] = TOML_INTEGER_MAX
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, selection_max_interval_seconds=TOML_INTEGER_MAX))
+        self.setup_selection(spec)
+        def fail(*_):
+            raise ModelFailure('synthetic classifier failure', code='synthetic-exhausted')
+        with self.assertRaisesRegex(ConfigError, 'finite Unix seconds'):
+            Engine(self.config, driver=ScriptDriver(fail)).run(self.project, role.name)
+        self.assertFalse((self.project.root / 'selection' / f'{role.name}-classification.json').exists())
 
     def test_classifier_and_work_share_daily_budget(self):
         role, _ = self.classifier()

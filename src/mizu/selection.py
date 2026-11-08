@@ -5,6 +5,7 @@ import copy
 import math
 import time
 
+from .config import Limits, TOML_INTEGER_MAX
 from .errors import ConfigError, Denied, LimitExceeded, ModelFailure
 from .fs import DIGEST, ID, canonical, digest, lock, read_json, text_preview, write_json
 
@@ -93,9 +94,10 @@ def attributes(value):
     return value
 
 
-def seconds(value):
-    if type(value) is not int or not 1 <= value <= 31536000:
-        raise ConfigError('Selection intervals must be 1..31536000 seconds')
+def seconds(value, maximum=TOML_INTEGER_MAX):
+    # Saved intervals obey the representation, not the current configuration cap.
+    if type(value) is not int or not 1 <= value <= maximum:
+        raise ConfigError(f'Selection intervals must be 1..{maximum} seconds')
     return value
 
 
@@ -188,7 +190,7 @@ def evaluate(cond, facts):
             'gt': value > expected, 'gte': value >= expected}[op]
 
 
-def validate_selectors(value, profiles, base):
+def validate_selectors(value, profiles, base, max_interval_seconds=Limits().selection_max_interval_seconds):
     if not isinstance(value, dict) or len(value) > MAX_ITEMS:
         raise ConfigError('selectors must contain at most 64 definitions')
     bounded(value)
@@ -196,10 +198,10 @@ def validate_selectors(value, profiles, base):
         name(key)
         table(spec, {'rules', 'classify_rules', 'classifier', 'on_error', 'retry_seconds',
                      'recommendation_validity', 'reselection_interval_seconds'}, 'selector')
-        seconds(spec.get('retry_seconds'))
+        seconds(spec.get('retry_seconds'), max_interval_seconds)
         interval = spec.get('reselection_interval_seconds', 0)
-        if type(interval) is not int or not 0 <= interval <= 31536000:
-            raise ConfigError('reselection_interval_seconds must be 0..31536000')
+        if type(interval) is not int or not 0 <= interval <= max_interval_seconds:
+            raise ConfigError(f'reselection_interval_seconds must be 0..{max_interval_seconds}')
         validity = spec.get('recommendation_validity', 'once')
         if validity not in ('once', 'sticky'):
             raise ConfigError('recommendation_validity must be once or sticky')
@@ -237,11 +239,11 @@ def validate_selectors(value, profiles, base):
             if 'probe_seconds' in rule:
                 if 'action' in rule or 'retries' in rule:
                     raise ConfigError('Probe rules cannot use action/retries')
-                seconds(rule['probe_seconds'])
+                seconds(rule['probe_seconds'], max_interval_seconds)
                 if 'until' in rule:
                     raise ConfigError('Probe rules cannot use until')
                 if 'seconds' in rule:
-                    seconds(rule['seconds'])
+                    seconds(rule['seconds'], max_interval_seconds)
                 continue
             action = rule.get('action', 'fallback')
             if action not in ('fallback', 'retry'):
@@ -254,7 +256,7 @@ def validate_selectors(value, profiles, base):
             if ('seconds' in rule) == ('until' in rule):
                 raise ConfigError('Error rule needs seconds or until')
             if 'seconds' in rule:
-                seconds(rule['seconds'])
+                seconds(rule['seconds'], max_interval_seconds)
             elif rule['until'] != 'error.retry_at':
                 raise ConfigError('until must reference error.retry_at')
         if 'classifier' in spec:
@@ -264,7 +266,7 @@ def validate_selectors(value, profiles, base):
                 raise ConfigError('Classifier requires a fixed configured profile')
             if classifier.get('on_failure') not in ('continue', 'wait'):
                 raise ConfigError('Classifier on_failure must be continue or wait')
-            seconds(classifier.get('retry_seconds'))
+            seconds(classifier.get('retry_seconds'), max_interval_seconds)
             from .config import path_value
             policy = classifier.get('policy')
             if not isinstance(policy, str) or not policy:
@@ -509,7 +511,7 @@ class State:
                         continue
                     counts_as_failure = rule.get('counts_as_failure', False)
                     if 'probe_seconds' in rule:
-                        until = at + rule['seconds'] if 'seconds' in rule else None
+                        until = timestamp(at + rule['seconds']) if 'seconds' in rule else None
                         matched = {'rule': index, 'until': until, 'scope': rule['scope'],
                                    'probe_seconds': rule['probe_seconds'], 'contribution': identity,
                                    'counts_as_failure': counts_as_failure}
@@ -517,6 +519,7 @@ class State:
                         until = at + rule['seconds'] if 'seconds' in rule else error.evidence.get('retry_at')
                         if type(until) not in (int, float) or until <= at:
                             continue
+                        timestamp(until)
                         action = rule.get('action', 'fallback')
                         retries = rule.get('retries', DEFAULT_ON_ERROR_RETRIES)
                         if (action not in ('fallback', 'retry')
@@ -543,7 +546,7 @@ class State:
                         'sponsor_binding': decision.get('probe_sponsor') or sponsor_binding(self.config, sponsor, role),
                         'target': binding, 'selector': decision['selector'], 'rule': decision['rule'],
                         'error_rule': matched['rule'], 'created_at': at, 'until': matched['until'],
-                        'probe_seconds': matched['probe_seconds'], 'next_probe_at': at + matched['probe_seconds'],
+                        'probe_seconds': matched['probe_seconds'], 'next_probe_at': timestamp(at + matched['probe_seconds']),
                         'status': 'active', 'revision': 1, 'claim': None, 'last_event': None, 'reason': None}
                 else:
                     old = state['blocks'].get(key, {})
@@ -614,7 +617,7 @@ class State:
             elif c['until'] is not None and c['until'] <= at:
                 c['status'] = 'expired'
             c.update(claim=None, last_event=claim, revision=revision + 1,
-                     next_probe_at=at + c['probe_seconds'], reason=reason)
+                     next_probe_at=timestamp(at + c['probe_seconds']), reason=reason)
             prune_probe_events(state, identity, self.event_limit)
             self.save_or_close(state, previous)
             return True
@@ -1031,7 +1034,7 @@ def select(config, role, facts, sources, *, at=None, classification=None):
                 decision.update(profile=profile, group=group, facts={k: v for k, v in candidate_facts.items() if k != 'task'})
                 break
         break
-    decision['next_evaluation_at'] = min(times)
+    decision['next_evaluation_at'] = timestamp(min(times))
     decision['next_unblock_at'] = min(unblocks) if unblocks and not decision['profile'] else None
     if decision['profile'] and any('probe_seconds' in r for r in spec.get('on_error', [])):
         from .probes import target_binding, sponsor_binding

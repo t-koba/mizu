@@ -414,6 +414,8 @@ def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
 
 @dataclasses.dataclass(frozen=True)
 class Limits:
+    #: Operator-selected selector timer ceiling; TOML integer range, not a timestamp.
+    selection_max_interval_seconds: int = 31536000
     #: Seconds per blocking local/kernel lock acquire; 0 probes immediately.
     #: Host/load policy, shared by all projects in one execution (0–86400).
     lock_timeout_seconds: int = LOCK_TIMEOUT
@@ -621,7 +623,8 @@ class Limits:
 # here except session_max_cost_usd, which uses the finite-cost validator.
 # daily_requests 0 disables (fail-closed); max_failures 0 disables the
 # auto-pause brake only (budgets/deadlines still bound spend and time).
-_LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
+_LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
+                 "lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
                  "lock_retry_interval_ms": (1, MAX_WAIT_SECONDS * 1000),
                  "pipe_poll_interval_ms": (1, 500),
                  "probe_executable_bytes": (1, TOML_INTEGER_MAX),
@@ -1684,7 +1687,8 @@ def load(file: Path) -> Config:
                 raise ConfigError("Resource requires a unique path and SHA-256 digest")
             seen.add(entry["path"])
     from .selection import validate_selectors, attributes
-    selectors = validate_selectors(data.get("selectors", {}), profiles, file.parent)
+    selectors = validate_selectors(data.get("selectors", {}), profiles, file.parent,
+                                   limits.selection_max_interval_seconds)
     roles: dict[str, Role] = {}
     role_tables = data.get("roles", {})
     if not isinstance(role_tables, dict):

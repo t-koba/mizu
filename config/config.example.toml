@@ -144,6 +144,7 @@ retention = "permanent"
 # See docs/shared-records.md#role-authenticated-data-writes-and-author-only-retrieval for the tool schemas.
 
 [limits]
+selection_max_interval_seconds = 31536000 # Selector timer ceiling (1..TOML signed-64-bit max); computed timestamps must still fit year 9999.
 # Provisional project cap on open/doing/blocked work; 0 disables.
 # Existing over-limit items are preserved; only new seeds are refused.
 open_work_items = 100

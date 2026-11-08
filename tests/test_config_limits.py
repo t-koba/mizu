@@ -19,6 +19,64 @@ from mizu.project import Project
 from mizu import fs, platform
 
 
+class SelectionIntervalLimitConfigTests(Fixture):
+    def test_default_range_and_refusals(self):
+        base = re.sub(r'(?m)^selection_max_interval_seconds = .*\n', '', self.file.read_text())
+        self.file.write_text(base)
+        self.assertEqual(load(self.file).limits.selection_max_interval_seconds, 31536000)
+        self.assertEqual(Limits().selection_max_interval_seconds, 31536000)
+        self.assertEqual(_LIMIT_RANGES['selection_max_interval_seconds'], (1, TOML_INTEGER_MAX))
+        for value in ('1', '31536001', str(TOML_INTEGER_MAX), '0', '-1',
+                      str(TOML_INTEGER_MAX + 1), 'true', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace(
+                    '\n[limits]\n', f'\n[limits]\nselection_max_interval_seconds = {value}\n'))
+                if value in ('1', '31536001', str(TOML_INTEGER_MAX)):
+                    self.assertEqual(load(self.file).limits.selection_max_interval_seconds, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.selection_max_interval_seconds'):
+                        load(self.file)
+
+    def test_one_cap_applies_to_every_configuration_timer(self):
+        base = re.sub(r'(?m)^selection_max_interval_seconds = .*\n', '', self.file.read_text())
+        policy = self.root / 'classifier.md'
+        policy.write_text('Synthetic classifier policy')
+        fields = ('retry', 'classifier_retry', 'error_seconds', 'probe_seconds',
+                  'probe_expiry', 'reselection')
+        for cap in (None, 10, 31536001):
+            maximum = 31536000 if cap is None else cap
+            configured = base if cap is None else base.replace(
+                '\n[limits]\n', f'\n[limits]\nselection_max_interval_seconds = {cap}\n')
+            for field in fields:
+                for value in (0, 1, maximum, maximum + 1):
+                    with self.subTest(cap=cap, field=field, value=value):
+                        timers = dict.fromkeys(fields, 1)
+                        timers[field] = value
+                        selector = f"""
+[selectors.timer]
+retry_seconds = {timers['retry']}
+reselection_interval_seconds = {timers['reselection']}
+rules = [{{candidates = [{{profile = "primary"}}]}}]
+on_error = [{{scope = "profile", seconds = {timers['error_seconds']}}}, {{scope = "profile", probe_seconds = {timers['probe_seconds']}, seconds = {timers['probe_expiry']}}}]
+[selectors.timer.classifier]
+profile = "primary"
+policy = {json.dumps(str(policy))}
+on_failure = "continue"
+retry_seconds = {timers['classifier_retry']}
+attributes = {{label = {{type = "string"}}}}
+"""
+                        self.file.write_text(configured + selector)
+                        if value > maximum or value == 0 and field != 'reselection':
+                            with self.assertRaisesRegex(ConfigError, 'seconds'):
+                                load(self.file)
+                        else:
+                            spec = load(self.file).selectors['timer']
+                            self.assertEqual((spec['retry_seconds'], spec['classifier']['retry_seconds'],
+                                              spec['on_error'][0]['seconds'], spec['on_error'][1]['probe_seconds'],
+                                              spec['on_error'][1]['seconds'], spec['reselection_interval_seconds']),
+                                             tuple(timers[f] for f in fields))
+
+
 class InsightHistoryLimitConfigTests(Fixture):
     def test_default_override_range_and_project_wiring(self):
         self.assertEqual(MAX_INSIGHT_HISTORY_ENTRIES, 1000)

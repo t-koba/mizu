@@ -108,7 +108,10 @@ startup floor/multiplier/ceiling and probe/record caps, the ADR-006/ADR-013
 paid smoke wall cap, and the recovery-probe execution ceilings are fixed
 mechanism or safety bounds. Recovery-probe executable hashing has a separate
 host I/O policy under `[limits].probe_executable_bytes` (default 256 MiB), with
-a fixed 64 KiB streaming buffer. Selection retention is the exception:
+a fixed 64 KiB streaming buffer. Selection timer ceilings are configured policy owned by
+`[limits].selection_max_interval_seconds` (default 31,536,000); saved intervals
+use the TOML integer representation and timestamps retain the year-9999 format
+bound independently of the current policy cap. Selection retention is also policy:
 `MAX_TERMINAL_CONTRIBUTIONS` and
 `MAX_PROBE_EVENTS` are `configured policy` defaults for the optional
 data-dir `selection/policy.json`; absence keeps 256/8 and malformed values
@@ -2018,21 +2021,17 @@ COMPARISON_BOUND_ARGUMENTS = {
         '4096', 'safety', 'selection scalar / bound an individual string before canonical encoding'),
     ('selection.py', 'scalar', 1, 1): (
         '2 ** 53', 'format', 'selection scalar / numeric magnitude follows the exact IEEE-754 JSON contract'),
-    ('selection.py', 'seconds', 2, 0): (
-        '31536000', 'policy', 'selection timers / fixed one-year ceiling on operator-selected retry intervals'),
     ('selection.py', 'timestamp', 2, 0): (
         '253402300799', 'format', 'selection evidence / Unix timestamp ceiling for datetime year 9999'),
     ('selection.py', 'validate_condition', 1, 0): (
         '12', 'safety', 'selection conditions / limit recursive policy nesting'),
     ('selection.py', 'validate_condition', 1, 1): (
         '512', 'safety', 'selection condition / bound dotted-path text before splitting'),
-    ('selection.py', 'validate_selectors', 2, 0): (
-        '31536000', 'policy', 'selector configuration / one-year ceiling on optional reselection intervals'),
     ('selection.py', 'validate_selectors', 1, 0): (
         '65536', 'safety', 'classifier policy / cap the operator-selected policy file before reading'),
     ('selection.py', 'validate_selectors', 0, 0): (
         '256', 'safety', 'classifier inputs / require a minimally useful text budget'),
-    ('selection.py', 'validate_selectors', 2, 1): (
+    ('selection.py', 'validate_selectors', 2, 0): (
         '65536', 'safety', 'classifier inputs / cap per-classifier text collection at 64 KiB'),
     ('selection.py', 'State.read', 1, 0): (
         '128', 'format', 'selection state / run identity follows the bounded run-id format'),
@@ -3320,6 +3319,25 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(Limits().pipe_poll_interval_ms, platform.PIPE_POLL_INTERVAL_MS)
         self.assertEqual(_LIMIT_RANGES['pipe_poll_interval_ms'], (1, 500))
         self.assertEqual(DECLARATIONS['platform.py']['PIPE_POLL_INTERVAL_MS'][1], 'configured policy')
+
+    def test_selection_timer_ceiling_is_configured_policy(self):
+        from mizu.config import Limits, TOML_INTEGER_MAX, _LIMIT_RANGES
+        self.assertEqual(Limits().selection_max_interval_seconds, 31536000)
+        self.assertEqual(_LIMIT_RANGES['selection_max_interval_seconds'], (1, TOML_INTEGER_MAX))
+        tree = ast.parse((ROOT / 'selection.py').read_text(encoding='utf-8'))
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        validation = functions['validate_selectors']
+        self.assertEqual(ast.unparse(validation.args.defaults[0]), 'Limits().selection_max_interval_seconds')
+        calls = [node for node in ast.walk(validation) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'seconds']
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(all(ast.unparse(node.args[1]) == 'max_interval_seconds' for node in calls))
+        self.assertIn('0 <= interval <= max_interval_seconds', ast.unparse(validation))
+        self.assertEqual(ast.unparse(functions['seconds'].args.defaults[0]), 'TOML_INTEGER_MAX')
+        config = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        call = next(node for node in ast.walk(config) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == 'validate_selectors')
+        self.assertEqual(ast.unparse(call.args[3]), 'limits.selection_max_interval_seconds')
 
     def test_probe_executable_identity_uses_configured_bound(self):
         from mizu.config import (DEFAULT_PROBE_EXECUTABLE_BYTES, Limits,

@@ -17,6 +17,17 @@ no eligible candidate, yields a waiting result without launching the main model.
 `retry_seconds` is required and controls reevaluation when there is no earlier
 known block/observation deadline.
 
+All selector/classifier `retry_seconds`, on-error `seconds` and `probe_seconds`
+are positive integers capped by `[limits].selection_max_interval_seconds`
+(default 31,536,000). The cap accepts 1 through TOML's signed-64-bit maximum
+(9,223,372,036,854,775,807). Operators may raise or lower it without changing
+individual timer values or defaults; any configured timer above it is refused.
+It also caps `reselection_interval_seconds`, where `0` still disables reselection.
+Lowering the cap does not invalidate saved selector/contribution intervals or
+receipts. Persisted timestamps retain their existing finite Unix-seconds range
+through year 9999; a computed deadline outside that format fails closed before
+it is written, even when its interval is allowed by policy.
+
 For example, with separately configured profiles named `free` and `subscription`:
 
 ```toml
@@ -122,7 +133,8 @@ probe_seconds = 60
 seconds = 3600 # optional upper expiry, measured from the original failure
 ```
 
-`scope` is required. `probe_seconds` is an integer in 1..31,536,000 seconds;
+`scope` is required. `probe_seconds` is an integer in
+1..`limits.selection_max_interval_seconds` seconds;
 there is no default and no probing without this explicit grant. In probe mode,
 `seconds` is an optional upper bound, also in that interval range. `until` is
 rejected. Without an upper bound the obligation remains until an exact-target
@@ -619,8 +631,8 @@ performed by selection.
 ## Opt-in Pi upgrades within a submission
 
 `selectors.<name>.reselection_interval_seconds` is an integer from 0 to
-31,536,000 (seconds). Omitted or `0` retains once-per-unit selection and the
-ordinary profile-specific session keys. It does not change `retry_seconds`.
+`limits.selection_max_interval_seconds` (seconds; default cap 31,536,000).
+Omitted or `0` retains once-per-unit selection and the ordinary profile-specific session keys. It does not change `retry_seconds`.
 A positive value enables host-authorized upgrades for **persistent,
 non-ephemeral Pi only**; every candidate in every rule must be compatible.
 Other engines, including `pi-durable`, are not supported by this option. Pi virtual
