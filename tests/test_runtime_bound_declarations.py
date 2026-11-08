@@ -75,7 +75,9 @@ defer an operator setting until the pilot integration can actually consume it,
 rather than expose an inert option.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
-safety bounds. The `drivers.py` event-stream default is the configured
+safety bounds. The `engine_config.py` reviewed-resource byte and tree-entry ceilings are
+fixed safety bounds; the 4096-entry traversal budget also bounds file count.
+The `drivers.py` event-stream default is the configured
 `[limits] event_stream_bytes` policy default; its per-record transport ceiling,
 stderr diagnostics tail and error-evidence tail are fixed safety bounds. The
 character-count and maximum suffixes are part of the inventory so
@@ -699,6 +701,12 @@ DECLARATIONS = {
         'MAX_SESSION_TOKENS': (
             '2 ** 63 - 1', 'format',
             'engine config / signed 64-bit session-token range'),
+        'MAX_RESOURCE_BYTES': (
+            '64 * 1024 * 1024', 'safety',
+            'engine config / fixed per-resource file and tree-byte ceiling'),
+        'MAX_RESOURCE_TREE_ENTRIES': (
+            '4096', 'safety',
+            'engine config / fixed bounded directory traversal; each file is one entry'),
     },
     'explain.py': {
         'RECORD_BYTES': (
@@ -1211,6 +1219,9 @@ CONFIG_MODULE_BOUNDS = {
         '64', 'mechanism', 'config / fixed CI wake branch-set bound'),
     'MAX_WAIT_SECONDS': (
         '86400', 'format', 'protocol / finish wait_seconds wire bound; config also reuses it as the lock-wait policy envelope'),
+    'MAX_NO_PROGRESS_BACKOFF_SECONDS': (
+        'MAX_WAIT_SECONDS', 'safety',
+        'config / shared upper bound for no-progress timers and their bounded snapshot diagnostic'),
     'MAX_INCLUDE_DEPTH': (
         '8', 'mechanism', 'config include / fixed graph depth'),
     'MAX_INCLUDE_FILES': (
@@ -1782,12 +1793,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('config.py', 'load', 1, 8): (
         '256', 'format',
         'VCS configuration / protected-ref length follows the shared 256-character branch-name contract'),
-    ('runtime.py', '_ready_work_observation', 1, 0): (
-        '4', 'format',
-        'snapshot progress / schema-4 delivery-token receipt compatibility guard'),
-    ('runtime.py', '_ready_work_observation', 1, 1): (
-        '5', 'format',
-        'snapshot progress / schema-5 resolution-specific high-water receipt guard'),
     ('runtime.py', 'Context._handle', 1, 0): (
         '65536', 'safety',
         'runtime usage / fixed canonical bridge-frame byte ceiling for one observation'),
@@ -2235,6 +2240,7 @@ def range_argument_inventory(tree, *, symbolic=False):
 SYMBOLIC_BOUNDS = {
     'fs.py': {'_LOCAL_BLOCKING_TIMEOUT': frozenset({'_platform.LOCK_TIMEOUT'})},
     'config.py': {
+        'MAX_NO_PROGRESS_BACKOFF_SECONDS': frozenset({'MAX_WAIT_SECONDS'}),
         'MAX_USAGE_POLICY_COUNT': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),
         'MAX_USAGE_RUNS_SCANNED': frozenset({'MAX_USAGE_POLICY_COUNT'}),
         'MAX_DISPATCH_EVIDENCE_COUNT': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),

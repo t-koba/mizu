@@ -1470,8 +1470,9 @@ SDK/launcher tests cover the source gate, cache and exact-model resolution; they
 do not prove an actual provider endpoint or new OS confinement.
 
 `resources` are reviewed local files or directory trees with `{kind, path, sha256}` (maximum 64).
-Tree hashes cover names, content and executable bits; no symlinks, at most 4096
-files and 64 MiB per resource. Claude supports local skill/plugin resources,
+Tree hashes cover names, content and executable bits; no symlinks, a 4,096-entry
+traversal budget (including directories) and 64 MiB per resource. These are fixed
+safety ceilings; the entry bound also caps files. Claude supports local skill/plugin resources,
 Codex local skill resources, Pi extension/skill/prompt/theme resources.
 Each run verifies content before launch. Profile `options` and `mcp_servers`
 are each capped at 262,144 canonical JSON bytes; `mcp_servers` accepts at most

@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 from . import platform as _platform
-from .config import role_no_progress_backoff_seconds, role_progress_signals
+from .config import (MAX_NO_PROGRESS_BACKOFF_SECONDS,
+                     role_no_progress_backoff_seconds, role_progress_signals)
 from .errors import CaptureLimitExceeded, Denied, LimitExceeded, SnapshotConflict
 from .fs import DIGEST, ID, PREVIEW_BYTES, PRIVATE_EVIDENCE_TREES, atomic_write, canonical, digest, lock, mkdir, now, publish_pointer, read_json, safe_read, safe_read_info, safe_read_stream, write_json, relative_parts
 from .distribution import is_private_name
@@ -120,7 +121,7 @@ def validate_progress(value: dict) -> dict:
                     "deadline", "code_change", "insight_decided", "dependency",
                     "ci", "publication_ci", "proposal_merged"}
                 or type(conversion.get("backoff_seconds")) is not int
-                or not 1 <= conversion["backoff_seconds"] <= 86400
+                or not 1 <= conversion["backoff_seconds"] <= MAX_NO_PROGRESS_BACKOFF_SECONDS
                 or value.get("ready_work") is not True):
             raise Denied("Invalid snapshot writer wait-conversion diagnostic")
     signals = value["signals"]

@@ -111,6 +111,7 @@ MAX_RESOURCES = 64
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
 #: Protocol wait bound mirrored in protocol.finish.wait_seconds; keep both at 86400.
 MAX_WAIT_SECONDS = 86400
+MAX_NO_PROGRESS_BACKOFF_SECONDS = MAX_WAIT_SECONDS
 #: Safety ceiling for configured doctor probe wall bounds; a probe that does
 #: not answer within this bound is reported as bounded, never as a missing
 #: capability.
@@ -635,8 +636,8 @@ _LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
                  "admission_wait_seconds": (0, 86400),
                  "no_progress_continuations": (0, 100),
                  "no_progress_recovery_after": (1, 100),
-                 "no_progress_backoff_seconds": (0, 86400),
-                 "writer_no_progress_backoff_seconds": (0, 86400),
+                 "no_progress_backoff_seconds": (0, MAX_NO_PROGRESS_BACKOFF_SECONDS),
+                 "writer_no_progress_backoff_seconds": (0, MAX_NO_PROGRESS_BACKOFF_SECONDS),
                  "missing_finish_followups": (0, 3),
                  "safe_point_yield_quantum": (0, 1000),
                  "missing_finish_recovery_after": (1, 100),
@@ -1795,7 +1796,8 @@ def load(file: Path) -> Config:
             number(role_doing, f"roles.{name}.work_items_doing", 1, 100)
         role_backoff = role.get("no_progress_backoff_seconds")
         if role_backoff is not None:
-            number(role_backoff, f"roles.{name}.no_progress_backoff_seconds", 0, 86400)
+            number(role_backoff, f"roles.{name}.no_progress_backoff_seconds",
+                   0, MAX_NO_PROGRESS_BACKOFF_SECONDS)
         role_cooldown = role.get("cooldown_seconds")
         if role_cooldown is not None:
             number(role_cooldown, f"roles.{name}.cooldown_seconds", 1, 1073741824)

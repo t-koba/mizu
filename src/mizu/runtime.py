@@ -40,7 +40,8 @@ from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _ci_wake_enabled, _ci_wake_fact_digest, _ci_wake_path,
                       _normalize_ci_wake_branches, read_ci_wake, write_ci_wake)
 from .budget import Budget
-from .config import (DAEMON_POLICIES, Config, Role, load,
+from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
+                     Config, Role, load,
                      role_cooldown_seconds, role_daemon_spacing_seconds, role_no_progress_backoff_seconds,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
@@ -4326,7 +4327,7 @@ def _writer_wait_conversion(config, role, finished, ready_work_present, *,
     if kind not in _WRITER_CONVERTIBLE_WAIT_KINDS:
         return None
     backoff = role_no_progress_backoff_seconds(config, role)
-    if type(backoff) is not int or not 1 <= backoff <= 86400:
+    if type(backoff) is not int or not 1 <= backoff <= MAX_NO_PROGRESS_BACKOFF_SECONDS:
         return None
     return {"status": "converted", "reason": "ready_work_with_pending_structured_wait",
             "wait_kind": kind, "backoff_seconds": backoff}

@@ -1473,6 +1473,23 @@ class CurrentFormatTests(Fixture):
         (tree/'link').symlink_to(file)
         with self.assertRaises(ConfigError):resource_digest(tree)
 
+    def test_resource_digest_uses_declared_byte_and_entry_ceilings(self):
+        from mizu import engine_config
+        from mizu.engine_config import resource_digest
+        single = self.root / 'large-resource'
+        single.write_bytes(b'xx')
+        with unittest.mock.patch.object(engine_config, 'MAX_RESOURCE_BYTES', 1):
+            with self.assertRaisesRegex(ConfigError, 'Resource exceeds byte bound'):
+                resource_digest(single)
+
+        tree = self.root / 'resource-tree'
+        tree.mkdir()
+        (tree / 'one').write_bytes(b'1')
+        (tree / 'two').write_bytes(b'2')
+        with unittest.mock.patch.object(engine_config, 'MAX_RESOURCE_TREE_ENTRIES', 1):
+            with self.assertRaisesRegex(ConfigError, 'Resource tree exceeds entry bound'):
+                resource_digest(tree)
+
     def test_stdio_mcp_uses_existing_oci_floor(self):
         from mizu.engine_config import connected_servers
         ctx=self.context('consult')

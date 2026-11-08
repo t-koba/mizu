@@ -7,12 +7,16 @@ from .config import role_policy_text
 from .fs import canonical, digest, mkdir, read_json, write_json
 
 
+MAX_RESOURCE_BYTES = 64 * 1024 * 1024
+MAX_RESOURCE_TREE_ENTRIES = 4096
+
+
 def resource_digest(path):
     """Bounded reviewed local content; tree hashes include names and executable bits."""
     if path.is_symlink():
         raise ConfigError('Resource symlinks are not permitted')
     if path.is_file():
-        if path.stat().st_size > 64*1024*1024:
+        if path.stat().st_size > MAX_RESOURCE_BYTES:
             raise ConfigError('Resource exceeds byte bound')
         return digest(path.read_bytes())
     if not path.is_dir():
@@ -22,13 +26,13 @@ def resource_digest(path):
     scanned = 0
     for item in path.rglob('*'):
         scanned += 1
-        if scanned > 4096:
+        if scanned > MAX_RESOURCE_TREE_ENTRIES:
             raise ConfigError('Resource tree exceeds entry bound')
         if item.is_symlink():
             raise ConfigError('Resource tree contains a symlink')
         if item.is_file():
             size += item.stat().st_size
-            if size > 64*1024*1024 or len(entries) >= 4096:
+            if size > MAX_RESOURCE_BYTES:
                 raise ConfigError('Resource tree exceeds bounds')
             entries[item.relative_to(path).as_posix()] = {'sha256': digest(item.read_bytes()), 'executable': bool(item.stat().st_mode & 0o111)}
         elif not item.is_dir():
