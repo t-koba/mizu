@@ -205,14 +205,15 @@ operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`
 `insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`, `config.py`,
 `runtime.py`, `project.py`, `services.py`, `persistent_exec.py`, `cli.py`,
 `vcs.py`, `model_catalog.py`, `pi_durable.py`, `platform.py`,
-`work_item_seed.py`, `work_item_retirement.py`, `work_item_waits.py` and
-`work_item_resolution.py`; numeric-only arithmetic operands, including bounded
-integer powers, are evaluated without source execution. The `services.py` entries
+`work_item_seed.py`, `work_item_retirement.py`, `work_item_waits.py`,
+`work_item_resolution.py` and `work_item_events.py`; numeric-only arithmetic
+operands, including bounded integer powers, are evaluated without source
+execution. The `services.py` entries
 pin Windows Task Scheduler's one-minute minimum and 31-day maximum repetition
 interval. The `admission.py` slice uses magnitude 2 for its two-lock ceiling;
-the `pi_durable.py` slice uses magnitude 1 for attempt identity, and the four
-work-item slices use magnitude 1 for positive revisions, schema versions,
-nonempty fields, and positive page sizes.
+the `pi_durable.py` slice uses magnitude 1 for attempt identity, and the
+selected work-item slices use magnitude 1 for positive revisions, schema
+versions, nonempty fields, and positive page sizes.
 This is not a global numeric comparison linter.
 """
 import ast
@@ -2035,6 +2036,16 @@ COMPARISON_BOUND_ARGUMENTS = {
         '25', 'format', 'wait-resolution timestamp / exact UTC seconds-precision ISO-8601 text length'),
     ('work_item_resolution.py', 'reconcile', 0, 0): (
         '1', 'mechanism', 'wait-resolution scan / a bounded page must request at least one row'),
+    ('work_item_events.py', '_pending_pages', 0, 0): (
+        '1', 'mechanism', 'work-item event page / a positive page size is required'),
+    ('work_item_events.py', '_pending_pages', 2, 0): (
+        '100', 'safety', 'work-item event page / cap each oldest-first result at 100 rows'),
+    ('work_item_events.py', 'acknowledge', 1, 0): (
+        '100', 'safety', 'work-item receipt writes / cap one acknowledgement batch at 100 events'),
+    ('work_item_events.py', 'progress', 0, 0): (
+        '1', 'mechanism', 'work-item event progress / a positive role-summary page is required'),
+    ('work_item_events.py', 'progress', 2, 0): (
+        '100', 'safety', 'work-item event progress / cap each role-summary page at 100 rows'),
     ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
         '4', 'format',
         'delegation ledger / require the exact persisted schema version before interpreting state'),
@@ -3129,7 +3140,7 @@ def sibling():
                 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'model_catalog.py',
                 'pi_durable.py', 'platform.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py',
+                'work_item_resolution.py', 'work_item_events.py',
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
@@ -3138,7 +3149,7 @@ def sibling():
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py'}
+                'work_item_resolution.py', 'work_item_events.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

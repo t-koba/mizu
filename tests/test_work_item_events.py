@@ -5,6 +5,7 @@ import json
 import os
 import threading
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks
@@ -478,6 +479,35 @@ class WorkItemEventTests(Fixture):
         self.assertLessEqual(len(canonical(row)), 8192)
         events.acknowledge(self.store, "reviewer", [row])
         self.assertEqual(self.page()["events"], [])
+
+    def test_pending_page_limit_edges(self):
+        self.terminal()
+        self.assertEqual(self.page(limit=1)["pending"], 1)
+        self.assertEqual(self.page(limit=100)["pending"], 1)
+        for limit in (0, 101):
+            with self.subTest(limit=limit), self.assertRaises(Denied):
+                self.page(limit=limit)
+
+    def test_acknowledgement_batch_accepts_100_and_rejects_101(self):
+        item = {"id": "wi_" + "a" * 32, "rev": 1}
+        with patch.object(events, "_validate_payload", return_value=item) as validate, \
+                patch.object(events, "_received", return_value=True):
+            events.acknowledge(self.store, "reviewer", [{}] * 100)
+            self.assertEqual(validate.call_count, 100)
+            with self.assertRaisesRegex(Denied, "Invalid work-item acknowledgement batch"):
+                events.acknowledge(self.store, "reviewer", [{}] * 101)
+            self.assertEqual(validate.call_count, 100)
+
+    def test_progress_role_page_limit_edges(self):
+        role = SimpleNamespace(work_item_events=("done",), work_item_sources="own")
+        roles = {f"role_{index:03d}": role for index in range(101)}
+        one = events.progress(self.store, roles, limit=1)
+        self.assertEqual((one["total"], len(one["roles"])), (101, 1))
+        full = events.progress(self.store, roles, limit=100)
+        self.assertEqual((full["total"], len(full["roles"])), (101, 100))
+        for limit in (0, 101):
+            with self.subTest(limit=limit), self.assertRaises(Denied):
+                events.progress(self.store, roles, limit=limit)
 
     def test_timestamp_normalization_ties_rollback_and_limit_drain(self):
         times = ("2030-03-01T09:00:00+09:00", "2030-03-01T00:00:00+00:00",
