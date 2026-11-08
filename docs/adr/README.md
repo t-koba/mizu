@@ -194,7 +194,7 @@ Configuration loading and project construction never mutate a global timeout. Ex
 boundaries bind a configuration-local context, explicitly including tool/consultation
 threads and daemon reloads, and restore the previous context on exit. A lock captures
 one value for both halves; standalone primitives retain the 30-second default.
-Embedding lower-level operations requires `with config.lock_policy(): ...`.
+Embedding lower-level operations requires `with config.runtime_policy(): ...`.
 
 ## ADR-027 — Composed role policies from ordered Markdown parts
 A role's `policy` accepts one path or an ordered array of paths, composed in order as the

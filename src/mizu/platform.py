@@ -14,6 +14,7 @@ plus thin per-platform text emitters in services.py.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
 import os
 import socketserver as _socketserver
@@ -437,14 +438,33 @@ def prepare_pipe(stream) -> None:
         os.set_blocking(stream.fileno(), False)
 
 
-def wait_pipe(stream, stop, timeout=.1) -> bool:
-    """Wait for POSIX pipe readiness without idle read polling.
+# Host/load policy default; Config.runtime_policy binds the operator value.
+PIPE_POLL_INTERVAL_MS = 100
+_PIPE_POLL_INTERVAL = contextvars.ContextVar("pipe_poll_interval", default=PIPE_POLL_INTERVAL_MS / 1000)
 
-    Windows anonymous pipes keep their existing nonblocking PeekNamedPipe path.
-    The 100-ms default is a fixed POSIX poll quantum: readiness wakes immediately,
-    while idle cancellation is observed within one quantum. This avoids busy
-    polling and lets readers join before fd teardown. EOF is readable, so
-    consumers still drain and detect closed transports.
+
+def current_pipe_poll_interval() -> float:
+    """Current execution's POSIX idle wait, in seconds; capture before threading."""
+    return _PIPE_POLL_INTERVAL.get()
+
+
+@contextlib.contextmanager
+def pipe_poll_policy(interval_ms: int = PIPE_POLL_INTERVAL_MS):
+    """Bind an execution-local idle quantum; restore it on exit, including errors."""
+    token = _PIPE_POLL_INTERVAL.set(interval_ms / 1000)
+    try:
+        yield
+    finally:
+        _PIPE_POLL_INTERVAL.reset(token)
+
+
+def wait_pipe(stream, stop, timeout=None) -> bool:
+    """Wait for POSIX readiness using the current policy or explicit seconds.
+
+    The standalone default is 100 ms; configured policy trades idle wakeups
+    against cancellation latency (1–500 ms). Readiness and EOF wake immediately.
+    Threads must capture/pass their owner's interval: ContextVars do not flow
+    into new threads. Windows retains its nonblocking PeekNamedPipe path.
     """
     if stop.is_set():
         return False
@@ -452,7 +472,7 @@ def wait_pipe(stream, stop, timeout=.1) -> bool:
         import select
         poller = select.poll()
         poller.register(stream, select.POLLIN)
-        return bool(poller.poll(timeout * 1000))
+        return bool(poller.poll((current_pipe_poll_interval() if timeout is None else timeout) * 1000))
     return True
 
 

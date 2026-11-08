@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from support import Fixture
+from mizu import platform
 from mizu.drivers import DIAGNOSTICS_TAIL_BYTES, EVENT_RECORD_BYTES, EVENT_STREAM_BYTES
 from mizu.engine_channel import Channel, stream_budget
 from mizu.errors import ProtocolError
@@ -52,7 +53,7 @@ class EventEvidenceTests(Fixture):
         channel.retained_bytes = channel.dropped_bytes = 0
         channel.truncated = False
         with patch("mizu.engine_channel.platform.wait_pipe", return_value=True), patch("mizu.engine_channel.platform.read_pipe", side_effect=[*blocks, b""]):
-            channel._read(object(), True)
+            channel._read(object(), True, .1)
         items = []
         while not channel.records.empty():
             items.append(channel.records.get_nowait())
@@ -66,7 +67,7 @@ class EventEvidenceTests(Fixture):
         payload = b"o" * DIAGNOSTICS_TAIL_BYTES + b"new log\n" + marker
         blocks = self._chunks(payload)
         with patch("mizu.engine_channel.platform.wait_pipe", return_value=True), patch("mizu.engine_channel.platform.read_pipe", side_effect=[*blocks, b""]):
-            channel._read(object(), False)
+            channel._read(object(), False, .1)
 
         retained = bytes(channel.diagnostics)
         self.assertEqual(len(retained), DIAGNOSTICS_TAIL_BYTES)
@@ -116,6 +117,23 @@ class EventEvidenceTests(Fixture):
         self.assertEqual(marker["stream_budget"], budget)
         self.assertEqual(marker["retained_bytes"], budget)
         self.assertEqual(marker["dropped_bytes"], total - budget)
+
+    def test_readers_capture_configured_pipe_policy(self):
+        config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, pipe_poll_interval_ms=500))
+        wait, seen = platform.wait_pipe, []
+        def observe(stream, stop, timeout=None):
+            seen.append((timeout, platform.current_pipe_poll_interval()))
+            return wait(stream, stop, timeout)
+        with config.runtime_policy(), patch('mizu.engine_channel.platform.wait_pipe', side_effect=observe):
+            channel = self._channel([sys.executable, '-c', 'import json; print(json.dumps({"type":"done"}))'], 'policy')
+            try:
+                self.assertEqual(self._drain(channel), 1)
+            finally:
+                channel.close()
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {(.5, .1)})
+        self.assertTrue(all(not reader.is_alive() for reader in channel.readers))
 
     def test_no_marker_without_overflow(self):
         channel = self._channel(

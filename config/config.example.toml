@@ -195,6 +195,8 @@ lock_timeout_seconds = 30
 # Milliseconds between kernel-lock probes (1–86400000); each sleep is clipped
 # to the remaining timeout. The first probe is immediate; no retry at/after expiry.
 lock_retry_interval_ms = 50
+# POSIX pipe idle wait (1–500 ms); data/EOF readiness remains immediate.
+pipe_poll_interval_ms = 100
 # Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for
 # scheduled units); no collection or extra output when disabled.
 lock_diagnostics = false

@@ -420,7 +420,7 @@ def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) 
 _LOCAL_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 # Execution-local policy, never set by loading a config or constructing a project.
-# New threads must bind their owning Config.lock_policy() explicitly.
+# New threads must bind their owning Config.runtime_policy() explicitly.
 _LOCAL_BLOCKING_TIMEOUT = _platform.LOCK_TIMEOUT
 _lock_timeout = contextvars.ContextVar("lock_timeout_seconds", default=None)
 _lock_retry_interval_ms = contextvars.ContextVar(

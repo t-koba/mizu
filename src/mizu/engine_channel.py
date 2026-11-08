@@ -50,9 +50,10 @@ class Channel:
         self.retained_bytes, self.dropped_bytes = 0, 0
         self.truncated = False
         self.readers = []
+        poll_interval = platform.current_pipe_poll_interval()
         for stream, events in ((self.process.stdout, True), (self.process.stderr, False)):
             platform.prepare_pipe(stream)
-            thread = threading.Thread(target=self._read, args=(stream, events), daemon=True)
+            thread = threading.Thread(target=self._read, args=(stream, events, poll_interval), daemon=True)
             self.readers.append(thread)
             thread.start()
 
@@ -64,11 +65,11 @@ class Channel:
             except queue.Full:
                 pass
 
-    def _read(self, stream, events):
+    def _read(self, stream, events, poll_interval):
         pending = bytearray()
         try:
             while not self.stop.is_set():
-                if not platform.wait_pipe(stream, self.stop):
+                if not platform.wait_pipe(stream, self.stop, poll_interval):
                     continue
                 try:
                     block = platform.read_pipe(stream, 65536)

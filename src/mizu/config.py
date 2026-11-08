@@ -1,6 +1,7 @@
 """Strict TOML configuration. Mechanisms interpret grants, not role prose."""
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 import os
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError, Denied
 from .fs import ID, canonical, relative_parts, lock_policy
-from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT
+from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT, PIPE_POLL_INTERVAL_MS, pipe_poll_policy
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
@@ -404,6 +405,8 @@ class Limits:
     lock_timeout_seconds: int = LOCK_TIMEOUT
     #: Milliseconds between kernel probes, clipped to the acquisition deadline.
     lock_retry_interval_ms: int = LOCK_RETRY_INTERVAL_MS
+    #: POSIX pipe idle-wait policy; readiness remains immediate (1–500 ms).
+    pipe_poll_interval_ms: int = PIPE_POLL_INTERVAL_MS
     lock_diagnostics: bool = False
     # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
     open_work_items: int = 100
@@ -589,6 +592,7 @@ class Limits:
 # auto-pause brake only (budgets/deadlines still bound spend and time).
 _LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
                  "lock_retry_interval_ms": (1, MAX_WAIT_SECONDS * 1000),
+                 "pipe_poll_interval_ms": (1, 500),
                  "open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
@@ -1332,7 +1336,7 @@ class Config:
 
         Loading/deriving configs has no side effects.
 
-        CLI/Engine and tool/consultation thread boundaries bind this scope.
+        runtime_policy() includes this scope at execution/thread boundaries.
         Embedders doing lower-level operations bind it around their execution.
         """
         seconds = self.limits.lock_timeout_seconds
@@ -1343,6 +1347,20 @@ class Config:
         if type(interval) is not int or not low <= interval <= high:
             raise ConfigError(f"limits.lock_retry_interval_ms must be an integer in [{low}, {high}]")
         return lock_policy(seconds, retry_interval_ms=interval)
+
+    @contextlib.contextmanager
+    def runtime_policy(self):
+        """Bind lock and pipe policy for this execution, without global mutation.
+
+        CLI/Engine and worker-thread entry points own this scope. Low-level
+        embedders bind it explicitly; pipe readers capture its value at start.
+        """
+        interval = self.limits.pipe_poll_interval_ms
+        low, high = _LIMIT_RANGES["pipe_poll_interval_ms"]
+        if type(interval) is not int or not low <= interval <= high:
+            raise ConfigError(f"limits.pipe_poll_interval_ms must be an integer in [{low}, {high}]")
+        with self.lock_policy(), pipe_poll_policy(interval):
+            yield
 
     def _raw_profile(self, profile: str) -> dict:
         try:

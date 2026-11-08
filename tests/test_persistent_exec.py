@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch, Mock
 
 from support import Fixture
-from mizu import check_jobs
+from mizu import check_jobs, platform
 from mizu.config import load
 from mizu.errors import ConfigError, Denied, ProtocolError
 from mizu.fs import read_json
@@ -54,6 +54,22 @@ class PersistentExecTests(Fixture):
 
     def call(self, script):
         return exec_experiment(self.ctx, 'exec', {'script': script})
+
+    def test_readers_capture_configured_pipe_policy(self):
+        config = dataclasses.replace(self.ctx.config, limits=dataclasses.replace(
+            self.ctx.config.limits, pipe_poll_interval_ms=500))
+        wait, seen = platform.wait_pipe, []
+        def observe(stream, stop, timeout=None):
+            seen.append((timeout, platform.current_pipe_poll_interval()))
+            return wait(stream, stop, timeout)
+        with config.runtime_policy(), patch('mizu.persistent_exec.platform.wait_pipe', side_effect=observe):
+            result = self.call('printf out; printf err >&2')
+            self.assertEqual((result['stdout'], result['stderr'], result['exit_code']), ('out', 'err', 0))
+            session = self.ctx.exec_session
+            session.close()
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {(.5, .1)})
+        self.assertTrue(all(not reader.is_alive() for reader in session.threads))
 
     def test_state_status_markers_background_and_evidence(self):
         first = self.call("cd /tmp; export MIZU_TEST=value; f() { printf function; }; sleep 100 & bg=$!")

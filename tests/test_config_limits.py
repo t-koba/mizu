@@ -1,5 +1,6 @@
 """Limits validation and settings-table coverage, not a code-only bounds inventory."""
 import dataclasses
+import threading
 from pathlib import Path
 import re
 import unittest
@@ -12,6 +13,7 @@ from mizu.config import (MAX_CHECK_RETAINED, MAX_DECISION_PROJECTION_RECORDS,
                          Limits, ROOT_KEYS,
                          _LIMIT_RANGES, load)
 from mizu.errors import ConfigError
+from mizu import fs, platform
 
 
 class LimitsCoverageTests(unittest.TestCase):
@@ -50,6 +52,61 @@ class LockTimeoutConfigTests(Fixture):
                 else:
                     with self.assertRaisesRegex(ConfigError, 'limits.lock_timeout_seconds'):
                         load(self.file)
+
+
+class PipePollConfigTests(Fixture):
+    def test_default_override_and_fail_closed_range(self):
+        self.assertEqual(Limits().pipe_poll_interval_ms, 100)
+        self.assertEqual(_LIMIT_RANGES['pipe_poll_interval_ms'], (1, 500))
+        original = re.sub(r'(?m)^pipe_poll_interval_ms = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.pipe_poll_interval_ms, 100)
+        for value in ('1', '100', '500', '0', '-1', '501', 'true', 'false',
+                      '1.5', 'nan', 'inf', '"100"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n', f'\n[limits]\npipe_poll_interval_ms = {value}\n'))
+                if value in ('1', '100', '500'):
+                    self.assertEqual(load(self.file).limits.pipe_poll_interval_ms, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.pipe_poll_interval_ms'):
+                        load(self.file)
+
+    def configured(self, value):
+        return dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, pipe_poll_interval_ms=value, lock_timeout_seconds=7,
+            lock_retry_interval_ms=9))
+
+    def test_runtime_policy_is_nested_exception_safe_and_thread_local(self):
+        outer, inner = self.configured(500), self.configured(1)
+        self.assertEqual(platform.current_pipe_poll_interval(), .1)
+        seen = []
+        def worker():
+            seen.append(platform.current_pipe_poll_interval())
+            with inner.runtime_policy():
+                seen.append(platform.current_pipe_poll_interval())
+            seen.append(platform.current_pipe_poll_interval())
+        with outer.runtime_policy():
+            self.assertEqual(platform.current_pipe_poll_interval(), .5)
+            self.assertEqual(fs._lock_timeout.get(), 7)
+            self.assertEqual(fs._lock_retry_interval_ms.get(), 9)
+            with self.assertRaisesRegex(RuntimeError, 'restore'):
+                with inner.runtime_policy():
+                    self.assertEqual(platform.current_pipe_poll_interval(), .001)
+                    raise RuntimeError('restore')
+            self.assertEqual(platform.current_pipe_poll_interval(), .5)
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join(1)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(platform.current_pipe_poll_interval(), .5)
+        self.assertEqual(seen, [.1, .001, .1])
+        self.assertEqual(platform.current_pipe_poll_interval(), .1)
+        for value in (0, 501, True, 1.5, '100'):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigError, 'limits.pipe_poll_interval_ms'):
+                with self.configured(value).runtime_policy():
+                    self.fail('invalid derived config bound policy')
+        self.assertEqual(platform.current_pipe_poll_interval(), .1)
 
 
 class RootOwnerTemplateTests(unittest.TestCase):

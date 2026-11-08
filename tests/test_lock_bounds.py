@@ -321,23 +321,24 @@ class LockPolicyTests(Fixture):
 
     def test_cli_engine_and_tool_thread_bind_the_owning_config(self):
         from mizu import cli, runtime
-        config = self.configured(7)
+        config = dataclasses.replace(self.configured(7), limits=dataclasses.replace(
+            self.configured(7).limits, pipe_poll_interval_ms=300))
 
         def observed(*args, **kwargs):
-            return fs._lock_timeout.get()
+            return fs._lock_timeout.get(), platform.current_pipe_poll_interval()
 
         with patch.object(cli, "load", return_value=config), \
                 patch.object(cli, "_execute", side_effect=observed):
-            self.assertEqual(cli.execute(SimpleNamespace(command="doctor", config=self.file)), 7)
+            self.assertEqual(cli.execute(SimpleNamespace(command="doctor", config=self.file)), (7, .3))
         engine = runtime.Engine(config)
         with patch.object(engine, "_run", side_effect=observed):
-            self.assertEqual(engine.run(self.project, "worker"), 7)
+            self.assertEqual(engine.run(self.project, "worker"), (7, .3))
         self.config = config
         ctx = self.context()
         seen = []
 
         def tool(*args):
-            seen.append(fs._lock_timeout.get())
+            seen.append((fs._lock_timeout.get(), platform.current_pipe_poll_interval()))
             raise Busy("stop after policy binding")
 
         def peer():
@@ -349,7 +350,7 @@ class LockPolicyTests(Fixture):
             other.start()
             other.join(timeout=10)
         self.assertFalse(other.is_alive())
-        self.assertEqual(seen, [7])
+        self.assertEqual(seen, [(7, .3)])
         self.assertIsNone(fs._lock_timeout.get())
 
     def test_daemon_rebinds_after_reload_and_restores_outer_scope(self):
@@ -358,11 +359,11 @@ class LockPolicyTests(Fixture):
         seen = []
 
         def service(*args):
-            seen.append(fs._lock_timeout.get())
+            seen.append((fs._lock_timeout.get(), platform.current_pipe_poll_interval()))
             stop.set()
             raise ConfigError("stop after reload")
 
-        with self.configured(7).lock_policy(), \
+        with platform.pipe_poll_policy(500), self.configured(7).lock_policy(), \
                 patch.object(runtime, "load", return_value=self.configured(17)), \
                 patch.object(runtime.threading, "Event", return_value=stop), \
                 patch.object(runtime.signal, "signal"), \
@@ -370,8 +371,10 @@ class LockPolicyTests(Fixture):
                 patch.object(probes, "next_deadline", return_value=None), \
                 patch("sys.stdout", new_callable=io.StringIO):
             runtime.daemon(self.config, "sample", "worker")
-            self.assertEqual(seen, [17])
+            self.assertEqual(seen, [(17, .1)])
             self.assertEqual(fs._lock_timeout.get(), 7)
+            self.assertEqual(platform.current_pipe_poll_interval(), .5)
+        self.assertEqual(platform.current_pipe_poll_interval(), .1)
         self.assertIsNone(fs._lock_timeout.get())
 
 

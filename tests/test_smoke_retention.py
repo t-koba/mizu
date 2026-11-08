@@ -1200,7 +1200,7 @@ class SmokeRetentionTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 validate({**args, 'smoke_refs': [self.a, self.a]}, DEFINITIONS[operation][1])
         with patch('mizu.cli.load', return_value=SimpleNamespace(
-                data=self.data, lock_policy=nullcontext)):
+                data=self.data, runtime_policy=nullcontext)):
             self.assertEqual(execute(parser().parse_args(['smoke-retention']))['days'], 31)
             self.assertEqual(execute(parser().parse_args(['smoke-retention', '--set-days', '0'])), {'days': 0})
         self.assertNotIn('smoke-retention', DEFINITIONS)

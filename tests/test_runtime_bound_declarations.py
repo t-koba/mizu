@@ -48,10 +48,10 @@ contracts; its delivered-token set covers prior progress plus one opening page,
 and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
 The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
-spawn-reap and pipe-readiness bounds are fixed mechanism or safety. The POSIX
-pipe poll uses a 100-ms default, wakes immediately for data and bounds idle
-cancellation observation; a bounded local comparison found the expected
-latency/wake-count trade-off without material CPU cost. The bridge timeout fallback
+spawn-reap bounds are fixed mechanism or safety. POSIX pipe idle polling is
+configured policy owned by `[limits].pipe_poll_interval_ms` (default 100 ms,
+range 1–500 ms), captured explicitly by reader threads. Data and EOF wake
+immediately; the ceiling preserves subsecond idle cancellation. The bridge timeout fallback
 is shared between `bridge.py` and `mcp_proxy.py` for incomplete configs; normal
 bridge configs carry a deadline derived from model-request policy. The MCP
 proxy receive chunk bounds transient allocation while `MAX_FRAME` caps the full
@@ -184,7 +184,7 @@ CANDIDATE = re.compile(
 )
 # Module-level names outside CANDIDATE that still bound public resource behavior.
 EXTRA_CANDIDATES = {
-    'platform.py': frozenset({'LOCK_RETRY_INTERVAL_MS'}),
+    'platform.py': frozenset({'LOCK_RETRY_INTERVAL_MS', 'PIPE_POLL_INTERVAL_MS'}),
     'snapshot_manifest.py': frozenset({'_WINDOWS_EXTENDED_PATH_UNITS',
                                        '_MAX_FILES_WHITESPACE_RUN'}),
     'model_catalog.py': frozenset({'MAXIMUM'}),
@@ -339,6 +339,9 @@ DECLARATIONS = {
             'snapshot manifest / bound formatting-only whitespace scan between file-map tokens'),
     },
     'platform.py': {
+        'PIPE_POLL_INTERVAL_MS': (
+            '100', 'configured policy',
+            'platform / shared default for [limits].pipe_poll_interval_ms; reader threads capture the execution policy'),
         'LOCK_RETRY_INTERVAL_MS': (
             '50', 'configured policy',
             'platform / shared default for [limits].lock_retry_interval_ms; fs forwards the execution policy'),
@@ -1507,9 +1510,6 @@ PARAMETER_DEFAULTS = {
         '10', 'policy', 'insights / caller-selected decision-event diagnostic projection size'),
     ('pi_durable_store.py', 'project_context', 'max_bytes'): (
         '65536', 'policy', 'Pi durable store / caller-selected summary truncation marker threshold, not a read cap'),
-    ('platform.py', 'wait_pipe', 'timeout'): (
-        '0.1', 'mechanism',
-        'platform / fixed POSIX readiness-poll quantum; data wakes immediately and idle cancellation is observed within one 100-ms wait'),
     ('proposal_waits.py', 'delivery', 'limit'): (
         '10', 'policy', 'proposal waits / caller-selected frozen delivery batch'),
     ('proposal_waits.py', 'pending', 'limit'): (
@@ -2907,6 +2907,13 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(Limits().lock_retry_interval_ms, platform.LOCK_RETRY_INTERVAL_MS)
         self.assertEqual(_LIMIT_RANGES['lock_retry_interval_ms'], (1, MAX_WAIT_SECONDS * 1000))
         self.assertEqual(DECLARATIONS['platform.py']['LOCK_RETRY_INTERVAL_MS'][1], 'configured policy')
+
+    def test_pipe_poll_is_configured_policy(self):
+        from mizu.config import Limits, _LIMIT_RANGES
+        from mizu import platform
+        self.assertEqual(Limits().pipe_poll_interval_ms, platform.PIPE_POLL_INTERVAL_MS)
+        self.assertEqual(_LIMIT_RANGES['pipe_poll_interval_ms'], (1, 500))
+        self.assertEqual(DECLARATIONS['platform.py']['PIPE_POLL_INTERVAL_MS'][1], 'configured policy')
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

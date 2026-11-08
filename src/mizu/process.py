@@ -257,11 +257,11 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
     changed = threading.Event()
     output_lock = threading.Lock()
     errors = []
-    def pump(stream, key):
+    def pump(stream, key, poll_interval):
         _platform.prepare_pipe(stream)
         try:
             while not stop.is_set():
-                if not _platform.wait_pipe(stream, stop):
+                if not _platform.wait_pipe(stream, stop, poll_interval):
                     continue
                 try:
                     chunk = _platform.read_pipe(stream, 65536)
@@ -281,8 +281,9 @@ def run(argv: Sequence[str], *, timeout: float | Callable[[], float | None], max
                 errors.append(exc)
         finally:
             changed.set()
-    readers = [threading.Thread(target=pump, args=(process.stdout, "stdout"), daemon=True, name="mizu-output"),
-               threading.Thread(target=pump, args=(process.stderr, "stderr"), daemon=True, name="mizu-output")]
+    poll_interval = _platform.current_pipe_poll_interval()
+    readers = [threading.Thread(target=pump, args=(process.stdout, "stdout", poll_interval), daemon=True, name="mizu-output"),
+               threading.Thread(target=pump, args=(process.stderr, "stderr", poll_interval), daemon=True, name="mizu-output")]
     for reader in readers:
         reader.start()
     input_errors = []

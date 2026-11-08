@@ -51,13 +51,14 @@ class ExecSession:
         self.process = platform.spawn(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0, env=env,
                                         **platform.popen_kwargs())
+        poll_interval = platform.current_pipe_poll_interval()
         for key in ("stdout", "stderr"):
             stream = getattr(self.process, key)
             platform.prepare_pipe(stream)
-            def pump(stream=stream, key=key):
+            def pump(stream=stream, key=key, poll_interval=poll_interval):
                 try:
                     while not self.stop.is_set():
-                        if not platform.wait_pipe(stream, self.stop):
+                        if not platform.wait_pipe(stream, self.stop, poll_interval):
                             continue
                         try:
                             chunk = platform.read_pipe(stream, 4096)

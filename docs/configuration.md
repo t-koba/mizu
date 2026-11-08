@@ -422,6 +422,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 |---|---|
 | `lock_timeout_seconds` | Integer 0–86,400, default `30`. Operator host/load policy for **each** blocking lock-acquisition half: the in-process guard and POSIX/Windows kernel retries use the same captured value. `0` makes one immediate attempt per half; it does not disable locking. Contention still raises `Busy`; `blocking=false` remains immediate regardless of this setting. |
 | `lock_retry_interval_ms` | Integer 1–86,400,000 ms, default `50`. Operator host/load policy for the interval between contended POSIX/Windows kernel-lock probes; the ceiling matches the 24-hour total lock-timeout ceiling. The first probe is immediate; each sleep is clipped to the remaining `lock_timeout_seconds` deadline, and no retry starts at or after that deadline. A longer interval never extends the deadline. `0` timeout still probes once; `blocking=false` never sleeps. |
+| `pipe_poll_interval_ms` | Integer 1–500 ms, default `100`. POSIX pipe idle-wait policy for subprocess output, engine channels and persistent exec. Trades idle wakeups against cancellation latency; the 500-ms ceiling preserves subsecond idle cancellation. Data/EOF readiness wakes immediately. Windows PeekNamedPipe behavior, command deadlines and output caps are unchanged. |
 | `lock_diagnostics` | Boolean, default `false`. Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for scheduled units); no collection or extra output when disabled. See the fixed diagnostic format below. |
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
 | `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
@@ -504,9 +505,17 @@ successful reload. Concurrent or nested configurations cannot overwrite one anot
 policy. Each half has its own budget (up to twice the configured value in total, not
 including filesystem operations or the critical section). The validated 86,400-second
 ceiling reuses `MAX_WAIT_SECONDS` as a finite policy envelope, not a kernel limit.
-Embedding callers doing lower-level operations use `with config.lock_policy(): ...`;
-standalone filesystem/platform primitives keep the 30-second default. A new thread
+Embedding callers doing lower-level operations use `with config.runtime_policy(): ...`;
+standalone lock primitives keep the 30-second default. A new thread
 must explicitly bind its owning configuration; no thread-inheritance behavior is assumed.
+
+The same `runtime_policy()` scope binds the POSIX pipe idle interval. Loading a
+configuration does not mutate it. Reader threads explicitly capture the current
+interval at creation; context variables are not inherited by new threads.
+Standalone `platform.wait_pipe` defaults to 100 ms and accepts an explicit timeout
+in seconds, overriding the context. Cancellation is observed within one idle
+quantum; data and EOF remain immediately readable. Policy exits restore the
+previous scope even on errors, without changing Windows readiness handling.
 
 When `limits.lock_diagnostics = true`, each Engine run emits one compact JSON
 line on success or error: `{"lock_diagnostics":{"version":1,"observations":[],"omitted":0}}`.
@@ -1089,6 +1098,7 @@ detected bound without declaring it:
 | **Smoke probe** | `SMOKE_REQUESTS_PER_RUN` / `TOOLS` / `SECONDS` (`smoke.py`) | 4 / 5 / 120 s | Paid `smoke --live` spend cap with margin for one benign listing plus one auxiliary request; applied as `min(fixed, operator limits)` |
 | **Config include** | `MAX_INCLUDE_DEPTH` / `MAX_INCLUDE_FILES` / `MAX_INCLUDE_BYTES` (`config.py`) | 8 / 32 / 1 MiB | Shared-fragment recursion, file-count, and total-byte bounds; per-file entries max 32, entry length max 4096 |
 | **Locks** | `LOCK_TIMEOUT` / `LOCK_RETRY_INTERVAL_MS` (`platform.py`), execution-local policy + per-path guard (`fs.py`) | 30 s / 50 ms defaults | Configured host/load policy: `[limits].lock_timeout_seconds` bounds each local/kernel acquisition half; `lock_retry_interval_ms` trades kernel-probe frequency against acquisition latency. Clipping sleeps and refusing retries at/after the deadline preserve the liveness contract (ADR-026); standalone primitives retain the defaults. |
+| **Pipe idle polling** | `PIPE_POLL_INTERVAL_MS` (`platform.py`), execution-local policy captured by reader threads | 100 ms default | Configured host/load policy: `[limits].pipe_poll_interval_ms` (1–500 ms) trades wake frequency against idle cancellation latency while readiness stays immediate. Standalone waits retain the default or accept an explicit seconds timeout. |
 | **Decisions** | `defer` requires a revisit value (`insights.py`) | always | Accountability floor: a deferral without a revisit condition parks work with no observable trigger; worker policy defers only with a revisit trigger |
 | **Completion** | `done` requires passing acceptance commands on the exact code digest (`runtime.py`) | always | Publication integrity floor: a goal cannot be declared done without binding proof to the final unchanged tree; never weakened to pass |
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
