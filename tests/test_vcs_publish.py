@@ -802,6 +802,19 @@ class PublicationLineageTests(PublishFixture):
                 else:
                     self.assertIsNone(outcome["observation"])
 
+    def test_lineage_ref_control_and_timestamp_length_bounds(self):
+        from mizu import lineage
+        for code, valid in ((0x1f, False), (0x20, False), (0x21, True),
+                            (0x7f, False), (0x80, False), (0x9f, False), (0xa0, True)):
+            with self.subTest(code=code):
+                self.assertEqual(lineage._valid_target_ref('refs/heads/a' + chr(code) + 'b'), valid)
+        common = self.fact(observed_at='2025-01-01T00:00:00.12345678901234+00:00')
+        self.assertEqual(len(common['observed_at']), 40)
+        self.assertIsNotNone(lineage._check_common(common, 'b' * 40))
+        common['observed_at'] = '2025-01-01T00:00:00.123456789012345+00:00'
+        self.assertEqual(len(common['observed_at']), 41)
+        self.assertIsNone(lineage._check_common(common, 'b' * 40))
+
     def test_missing_publication_observation_is_unknown(self):
         config, role, _, published = self.publish(lambda: None)
         receipt = Publication.read_receipt(self.project.root, published["publication_id"])

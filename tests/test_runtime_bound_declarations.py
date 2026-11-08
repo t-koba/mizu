@@ -2361,6 +2361,16 @@ COMPARISON_BOUND_ARGUMENTS = {
         'Windows Task Scheduler / repetition intervals have a 31-day maximum'),
     # VCS adapter text is external-untrusted. These are Mizu's local parser
     # contracts; none asserts an upstream provider maximum.
+    ('lineage.py', '_valid_target_ref', 1, 0): (
+        '32', 'format',
+        'lineage target refs / exclude space and C0 control characters through U+0020'),
+    ('lineage.py', '_valid_target_ref', 0, 0): (
+        '127', 'format', 'lineage target refs / ASCII DEL starts the rejected DEL/C1 control range'),
+    ('lineage.py', '_valid_target_ref', 2, 0): (
+        '159', 'format', 'lineage target refs / U+009F ends the rejected DEL/C1 control range'),
+    ('lineage.py', '_check_common', 1, 0): (
+        '40', 'safety',
+        'lineage observations / cap untrusted timestamp text before ISO-8601 parsing'),
     ('vcs.py', '_reject_terminal_controls', 1, 0): (
         '32', 'format',
         'VCS forge text / first ASCII C0 control code boundary'),
@@ -3020,7 +3030,7 @@ def sibling():
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
-                'work_items.py', 'persistent_exec.py', 'sandbox.py'):
+                'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
                        else 2 if filename == 'admission.py' else 3)
