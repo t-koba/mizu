@@ -1298,7 +1298,8 @@ A profile explicitly selects `engine`, `provider`, `model`, and `session`
 that engine: Pi `thinkingLevel`, `cacheRetention` (`none`|`short`|`long`; unset keeps the Pi default `short`; `long` via the Pi env channel, `none` degrades to the Pi default on pi), `settings`, `codemode`, `toolSearch`,
 `excludeTools`, `scopedModels`; pi-durable `thinkingLevel` plus `cacheRetention` (`none`|`short`|`long`; unset keeps the engine/provider default; passed natively as `settings.stream.cacheRetention`, retuning keeps the store)
 `durable_backend` (`sqlite`), `durable_resume` (`compatible`|`fresh`),
-`durable_retention_days` (0-3650), and the per-profile
+`durable_retention_days` (optional Mizu-managed retention of old terminal runs,
+0-3650 days; unset or 0 disables time-based pruning), and the per-profile
 live-context bound `durable_compaction_reserve_tokens`,
 `durable_compaction_keep_recent_tokens`, `durable_compaction_background_tokens`
 (each 0-1073741824; omit to keep the engine/provider default, 0 disables

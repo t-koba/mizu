@@ -146,6 +146,15 @@ class PolicyTests(Fixture):
             with self.assertRaises(ConfigError, msg=key):
                 pi_durable.durable_options({"options": {key: "16384"}})
 
+    def test_retention_days_are_optional_bounded_profile_policy(self):
+        self.assertIsNone(pi_durable.durable_options({"options": {}})["retention_days"])
+        for days in (0, 3650):
+            self.assertEqual(pi_durable.durable_options(
+                {"options": {"durable_retention_days": days}})["retention_days"], days)
+        for days in (-1, 3651, True, "30"):
+            with self.assertRaises(ConfigError):
+                pi_durable.durable_options({"options": {"durable_retention_days": days}})
+
     def test_compaction_only_change_keeps_session_identity(self):
         from mizu.engine_config import conversation_settings, effective, session_record
         profile = self._durable_profile()
@@ -1374,6 +1383,7 @@ class StoreTests(unittest.TestCase):
                 conn.execute("INSERT INTO durable_turns(run_key, seq, kind, payload_json, state) VALUES(?,?,?,?,?)",
                              (key, 1, "prompt", '{"a":1}', state))
             conn.commit()
+            self.assertEqual(retention_candidates(conn, retention_days=0, now=time.time()), [])
             candidates = retention_candidates(conn, retention_days=31, now=time.time())
             self.assertEqual(candidates, ["done"])
             preview = prune(conn, candidates, dry_run=True)

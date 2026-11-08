@@ -9,7 +9,7 @@ from support import Fixture
 from mizu.cli import parser, execute
 from mizu.errors import ConfigError
 from mizu.model_catalog import (inspect, MAXIMUM, OBSERVATIONS, OBSERVATION_BYTES,
-                                OBSERVATION_COUNT)
+                                OBSERVATION_COUNT, _timestamp, _validate_report)
 
 
 class ModelCatalogTests(Fixture):
@@ -30,6 +30,59 @@ class ModelCatalogTests(Fixture):
                 return inspect(self.config, 'primary', refresh=refresh)
             finally:
                 self.assertEqual(child.call_count, 1, 'never retry the provider')
+
+    def validate_rows(self, rows):
+        profile = self.config.profiles['primary']
+        selected = {'provider': profile['provider'], 'model': profile['model']}
+        base = {
+            'engine': 'pi', 'provider': selected['provider'],
+            'selected_model': selected['model'], 'inference': 'not_run',
+            'source': 'registered_native_provider', 'status': 'available',
+            'models': [], 'refresh': 'not_requested', 'error': None,
+            'last_successful_observation': None, 'freshness': 'unknown',
+            'completeness': 'unknown',
+        }
+        return _validate_report({'models': rows}, base, selected)
+
+    def test_model_catalog_timestamp_and_id_format_bounds(self):
+        timestamp = '2026-01-01T00:00:00+00:00'
+        self.assertEqual(_timestamp(timestamp).isoformat(timespec='seconds'), timestamp)
+        for malformed in (timestamp[:-1], timestamp + '0'):
+            with self.assertRaisesRegex(ValueError, 'invalid observation time'):
+                _timestamp(malformed)
+
+        for model_id in (' ', '~'):
+            self.assertEqual(self.validate_rows([
+                {'id': model_id, 'resolvable': True}])['models'][0]['id'], model_id)
+        for model_id in ('\x1f', '\x7f'):
+            with self.assertRaisesRegex(ValueError, 'invalid model id'):
+                self.validate_rows([{'id': model_id, 'resolvable': True}])
+
+        maximum_id = '😀' * 256  # 512 UTF-16 code units.
+        self.assertEqual(self.validate_rows([
+            {'id': maximum_id, 'resolvable': True}])['models'][0]['id'], maximum_id)
+        with self.assertRaisesRegex(ValueError, 'invalid model id'):
+            self.validate_rows([{'id': '😀' * 257, 'resolvable': True}])
+
+    def test_model_catalog_row_count_and_encoded_size_caps(self):
+        rows = [{'id': f'{index:04d}' + 'x' * 159, 'resolvable': True}
+                for index in range(4096)]
+        for row in rows[:-1]:
+            row['id'] += 'x'
+        encoded = json.dumps(rows, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        self.assertEqual(len(encoded), 768 * 1024)
+        self.assertEqual(len(self.validate_rows(rows)['models']), 4096)
+
+        too_large = copy.deepcopy(rows)
+        too_large[-1]['id'] += 'x'
+        self.assertEqual(len(json.dumps(too_large, ensure_ascii=False,
+                                        separators=(',', ':')).encode('utf-8')), 768 * 1024 + 1)
+        with self.assertRaisesRegex(ValueError, 'model rows exceed output bound'):
+            self.validate_rows(too_large)
+
+        rows.append({'id': 'overflow-row', 'resolvable': True})
+        with self.assertRaisesRegex(ValueError, 'invalid model rows'):
+            self.validate_rows(rows)
 
     def test_success_then_cache_age_is_source_bound_and_read_only(self):
         before = self.catalog()

@@ -203,13 +203,14 @@ contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
 `insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`, `config.py`,
-`runtime.py`, `project.py`, `services.py`, `persistent_exec.py`, `cli.py` and
-`vcs.py`; numeric-only arithmetic operands, including bounded integer powers,
-are evaluated without source execution. The `services.py` entries pin
+`runtime.py`, `project.py`, `services.py`, `persistent_exec.py`, `cli.py`,
+`vcs.py`, `model_catalog.py`, `pi_durable.py` and `platform.py`; numeric-only
+arithmetic operands, including bounded integer powers, are evaluated without
+source execution. The `services.py` entries pin
 Windows Task Scheduler's one-minute minimum and 31-day maximum repetition
-interval. The `admission.py` slice uses
-magnitude 2 to include its exact two-lock resource ceiling. This is not a global
-numeric comparison linter.
+interval. The `admission.py` slice uses magnitude 2 for its two-lock ceiling;
+the `pi_durable.py` slice uses magnitude 1 to include its attempt-identity
+formats. This is not a global numeric comparison linter.
 """
 import ast
 import math
@@ -1959,6 +1960,40 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('materialize.py', 'invoke', 1, 0): (
         '64', 'format',
         'materialized content digest / exact SHA-256 hexadecimal text length'),
+    ('model_catalog.py', '_timestamp', 1, 0): (
+        '25', 'format',
+        'model catalog observation timestamp / exact seconds-precision UTC ISO-8601 text length'),
+    ('model_catalog.py', '_validate_report', 1, 0): (
+        '4096', 'safety',
+        'model catalog / cap untrusted model rows before validation and projection'),
+    ('model_catalog.py', '_validate_report', 1, 1): (
+        '32', 'format',
+        'model catalog ID / ASCII C0 control characters end below U+0020'),
+    ('model_catalog.py', '_validate_report', 1, 2): (
+        '127', 'format',
+        'model catalog ID / ASCII DEL is U+007F'),
+    ('model_catalog.py', '_validate_report', 1, 3): (
+        '512', 'safety',
+        'model catalog ID / cap validated UTF-16 code units before retaining opaque provider labels'),
+    ('model_catalog.py', '_validate_report', 1, 4): (
+        '768 * 1024', 'safety',
+        'model catalog / cap serialized model rows at 768 KiB independently of '
+        'provider-output size'),
+    ('pi_durable.py', 'durable_options', 2, 0): (
+        '3650', 'configured policy',
+        'pi-durable / operator profile retention setting follows the documented 0-3650-day range'),
+    ('pi_durable.py', 'PiDurableDriver.execute', 1, 0): (
+        '1', 'format',
+        'pi-durable / first turn uses the base request identity before continuation suffixes'),
+    ('pi_durable.py', '_runtime_evidence', 1, 0): (
+        '2', 'format',
+        'pi-durable / runtime usage key is an exact attempt-and-request tuple'),
+    ('platform.py', 'spawn', 1, 0): (
+        '4294967295', 'mechanism',
+        'Windows ResumeThread / DWORD all-ones return is the API failure sentinel'),
+    ('platform.py', 'cancel_pipe_io', 1, 0): (
+        '1168', 'mechanism',
+        'Windows synchronous-I/O cancellation / preserve the existing benign no-pending-work error'),
     ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
         '4', 'format',
         'delegation ledger / require the exact persisted schema version before interpreting state'),
@@ -3050,13 +3085,14 @@ def sibling():
                 'mcp_proxy.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
-                'cli.py', 'codex.py', 'doctor.py', 'materialize.py',
+                'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'model_catalog.py',
+                'pi_durable.py', 'platform.py',
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
-            minimum = (1 if filename == 'bridge.py'
+            minimum = (1 if filename in {'bridge.py', 'pi_durable.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
