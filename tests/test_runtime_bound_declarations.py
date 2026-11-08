@@ -29,11 +29,13 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
-The `acceptance.py` retained-evidence ceiling and public invalid-producer
-diagnostic sample cap, CI observation total-row/prompt caps and wake-branch
-ceiling, and `ci_waits.py` diagnostic page caps are fixed safety bounds. The
-acceptance sample is capped at 32 rows while total/omitted report coverage and
-the complete internal exclusion set remain intact. `check_jobs.py` names its
+The `acceptance.py` retained-evidence ceiling, half-envelope scope cap and
+public invalid-producer diagnostic sample cap, CI observation total-row/prompt
+caps and wake-branch ceiling, and `ci_waits.py` diagnostic page caps are fixed
+safety bounds. The scope cap reserves half the receipt envelope for proof
+metadata; the complete receipt still uses the full ceiling. The acceptance
+sample is capped at 32 rows while total/omitted report coverage and the complete
+internal exclusion set remain intact. `check_jobs.py` names its
 check-summary/evidence row caps,
 identity suffix, text-preview widths and shared capture-error excerpt; its
 caller-visible page and command-array limits remain checked against their
@@ -250,6 +252,10 @@ DECLARATIONS = {
             '1048576', 'safety',
             'acceptance / fixed retained-evidence read and canonical-value ceiling; '
             'limits.file_bytes may narrow reads'),
+        'MAX_ACCEPTANCE_SCOPE_BYTES': (
+            'MAX_BYTES // 2', 'safety',
+            'acceptance / reserve half the receipt envelope for scope metadata; '
+            'the complete receipt remains bounded by MAX_BYTES'),
         'MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES': (
             '32', 'safety',
             'acceptance / fixed public diagnostic sample envelope for untrusted entries; '
@@ -2604,6 +2610,9 @@ def range_argument_inventory(tree, *, symbolic=False):
 
 
 SYMBOLIC_BOUNDS = {
+    'acceptance.py': {
+        'MAX_ACCEPTANCE_SCOPE_BYTES': frozenset({'MAX_BYTES'}),
+    },
     'editor.py': {
         'EDITOR_SEARCH_RESPONSE_BYTES': frozenset({'MAX_FRAME'}),
         'EDITOR_SEARCH_SKIPPED_BYTES': frozenset({'EDITOR_SEARCH_RESPONSE_BYTES'}),
@@ -3187,6 +3196,17 @@ def no_defaults(limit, /, count, *, size):
                               SYMBOLIC_BOUNDS.get(filename)),
                     {name: entry[0] for name, entry in declarations.items()})
 
+
+    def test_acceptance_scope_uses_named_receipt_envelope(self):
+        tree = ast.parse((ROOT / 'acceptance.py').read_text(encoding='utf-8'))
+        scope = next(node for node in ast.walk(tree)
+                     if isinstance(node, ast.FunctionDef) and node.name == '_scope')
+        bounds = [ast.unparse(comparator)
+                  for node in ast.walk(scope) if isinstance(node, ast.Compare)
+                  for operator, comparator in zip(node.ops, node.comparators)
+                  if isinstance(operator, ast.Gt)]
+        self.assertEqual(bounds, ['MAX_ACCEPTANCE_SCOPE_BYTES',
+                                  'MAX_ACCEPTANCE_SCOPE_BYTES'])
 
     def test_restore_streaming_uses_declared_chunk_bound(self):
         tree = ast.parse((ROOT / 'storage.py').read_text(encoding='utf-8'))

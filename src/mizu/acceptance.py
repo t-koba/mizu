@@ -16,6 +16,8 @@ from .errors import Denied, LimitExceeded
 from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
 
 MAX_BYTES = 1048576
+# Reserve half the receipt envelope for scope; full receipts still use MAX_BYTES.
+MAX_ACCEPTANCE_SCOPE_BYTES = MAX_BYTES // 2
 MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES = 32
 _BASE = 'evidence/acceptance'
 
@@ -328,7 +330,7 @@ def _scope(value):
         local = {k: v for k, v in value.items() if k != 'ci'}
         if ci['policy']['acceptance_scope'] != _scope(local):
             raise Denied('CI policy acceptance scope mismatch')
-        if len(canonical(value)) > MAX_BYTES // 2:
+        if len(canonical(value)) > MAX_ACCEPTANCE_SCOPE_BYTES:
             raise Denied('Acceptance scope exceeds receipt bound')
         return digest(canonical(value))
     if (not isinstance(value, dict) or set(value) not in ({'commands', 'execution', 'environment', 'image'},
@@ -342,7 +344,7 @@ def _scope(value):
             or not isinstance(value['commands'], list) or not 1 <= len(value['commands']) <= 32
             or any(not isinstance(c, str) or not c or '\x00' in c or '\n' in c for c in value['commands'])):
         raise Denied('Invalid acceptance scope')
-    if len(canonical(value)) > MAX_BYTES // 2:
+    if len(canonical(value)) > MAX_ACCEPTANCE_SCOPE_BYTES:
         raise Denied('Acceptance scope exceeds receipt bound')
     return digest(canonical(value))
 
