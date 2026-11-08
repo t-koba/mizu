@@ -8,7 +8,8 @@ from test_ci_waits import CiWaitFixture, SHA
 from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import now, read_json, write_json
-from mizu.runtime import Engine, _writer_progress_fallback, _writer_wait_liveness, should_run
+from mizu.runtime import (Engine, _writer_progress_fallback, _writer_wait_liveness,
+                           _writer_wait_sources, should_run)
 
 
 class WriterWaitTests(Fixture):
@@ -134,10 +135,13 @@ class WriterWaitTests(Fixture):
         Engine(self.config, driver=ScriptDriver()).run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
         due = self.backoff_time(snapshot)
-        page = self.project.work_items.page_open_readonly()
+        status = self.project.work_items.open_state_readonly(
+            limit=self.config.limits.work_items_prompt, writer_roles={'worker'})
         for field, value in (('coverage_complete', False), ('truncated', True)):
+            blocked = {**status['blocked_work'], field: value}
             with self.subTest(field=field), patch.object(
-                    self.project.work_items, 'page_open_readonly', return_value={**page, field: value}):
+                    self.project.work_items, 'open_state_readonly',
+                    return_value={**status, 'blocked_work': blocked}):
                 self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
                 self.assertFalse(_writer_progress_fallback(
                     snapshot, self.config, self.role(), False, due, project=self.project))
@@ -238,13 +242,14 @@ class WriterWaitTests(Fixture):
         due = stamp + self.config.limits.writer_no_progress_backoff_seconds
         self.assertFalse(should_run(self.project, snapshot, role_name='worker', current_time=due - 1))
         for live in (True, None, False):
-            with self.subTest(live=live), patch('mizu.runtime._writer_wait_liveness', return_value=live):
+            with self.subTest(live=live), patch(
+                    'mizu.runtime._writer_wait_sources', return_value=(live, False, None)):
                 self.assertEqual(should_run(self.project, snapshot, role_name='worker', current_time=due),
                                  live is False)
                 self.assertFalse(_writer_progress_fallback(
                     snapshot, self.config, self.role(), False, due, project=self.project))
         with patch('mizu.runtime.time.time', return_value=due), patch(
-                'mizu.runtime._writer_wait_liveness', return_value=True):
+                'mizu.runtime._writer_wait_sources', return_value=(True, False, None)):
             self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
             # Neither a fallback timer nor plain wait becomes an event subscription.
             self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
@@ -273,16 +278,143 @@ class WriterWaitTests(Fixture):
         self.assertFalse(_writer_progress_fallback(
             {**snapshot, 'progress': {}}, self.config, self.role(), True, due, project=self.project))
         for key in ('truncated', 'coverage_complete'):
-            page = self.project.work_items.page_open_readonly()
-            page[key] = key == 'truncated'
-            with patch.object(self.project.work_items, 'page_open_readonly', return_value=page):
+            status = self.project.work_items.open_state_readonly(
+                limit=self.config.limits.work_items_prompt, writer_roles={'worker'})
+            status['blocked_work'][key] = key == 'truncated'
+            with patch.object(self.project.work_items, 'open_state_readonly', return_value=status):
                 self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
         for error in (OSError, Busy, LimitExceeded):
-            with patch.object(self.project.work_items, 'page_open_readonly', side_effect=error('fixture')):
+            with patch.object(self.project.work_items, 'open_state_readonly', side_effect=error('fixture')):
                 self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
 
 
 class WriterCiWaitTests(CiWaitFixture):
+    def dispatch(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        CiRequests(self.project.root, self.config.ci_requests).mark_dispatch(identity, {
+            "request_id": identity, "publication_id": self.receipt["publication_id"],
+            "sha": SHA, "workflows": ["ci"], "dispatched_at": now()})
+        return identity
+
+    def ready_item(self, key="independent-ready"):
+        return self.store.create(actor="worker", idempotency_key=key,
+                                 title="Independent ready work")["record"]["work_item"]
+
+    def test_live_held_ci_wait_reenters_after_backoff_and_reports_conversion(self):
+        item = self.block()
+        for index in range(32):
+            self.ready_item(f"independent-ready-{index}")
+        self.dispatch()
+        self.assertEqual(_writer_wait_sources(
+            self.project, self.config.roles["worker"], include_structured_wait=True),
+            (True, False, "ci"))
+        engine = Engine(self.config, driver=ScriptDriver())
+        result = engine.run(self.project, "worker")
+        snapshot = self.project.snapshots.get()
+        conversion = {"status": "converted",
+                      "reason": "ready_work_with_pending_structured_wait",
+                      "wait_kind": "ci", "backoff_seconds": 300}
+        self.assertIs(result["finish"]["wait_liveness"], True)
+        self.assertNotIn("wait_conversion", result["finish"])
+        self.assertEqual(snapshot["progress"]["schema"], 6)
+        self.assertEqual(snapshot["progress"]["wait_conversion"], conversion)
+        self.assertEqual(self.project.status()["progress"]["record"]["wait_conversion"], conversion)
+        from mizu.snapshot import validate_progress
+        for bad in (
+                {**conversion, "status": "not-converted"},
+                {**conversion, "wait_kind": "unknown"},
+                {**conversion, "backoff_seconds": 0},
+                {**conversion, "extra": True}):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                validate_progress({**snapshot["progress"], "wait_conversion": bad})
+        with self.assertRaises(Denied):
+            validate_progress({key: value for key, value in snapshot["progress"].items()
+                               if key != "wait_conversion"})
+        current = self.store.get(item["id"])
+        self.assertEqual((current["status"], current["holder"], current["wait"]["kind"]),
+                         ("blocked", "worker", "ci"))
+        stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
+        due = stamp + conversion["backoff_seconds"]
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
+
+    def test_future_deadline_item_wait_can_be_converted_without_ci_dispatch(self):
+        item = self.store.create(actor="worker", idempotency_key="deadline-held",
+                                 title="Deadline-held work")["record"]["work_item"]
+        deadline = {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}
+        self.store.transition(item["id"], expected_rev=1, actor="worker",
+                              status="blocked", wait=deadline)
+        self.ready_item("deadline-independent-ready")
+        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        self.assertEqual(self.project.snapshots.get()["progress"]["wait_conversion"]["wait_kind"],
+                         "deadline")
+        current = self.store.get(item["id"])
+        self.assertEqual((current["status"], current["holder"], current["wait"]),
+                         ("blocked", "worker", deadline))
+
+    def test_live_wait_conversion_requires_ready_work_and_complete_held_item_evidence(self):
+        item = self.block()
+        self.dispatch()
+        engine = Engine(self.config, driver=ScriptDriver())
+        no_ready = engine.run(self.project, "worker")
+        self.assertIs(no_ready["finish"]["wait_liveness"], True)
+        self.assertIs(no_ready["finish"].get("wait_conversion"), None)
+        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+        self.assertEqual(self.store.get(item["id"])["status"], "blocked")
+
+        self.ready_item("incomplete-ready")
+        snapshot_before = self.project.snapshots.get()
+        original = self.store.open_state_readonly
+        def incomplete_page(*args, **kwargs):
+            status = original(*args, **kwargs)
+            status["blocked_work"]["coverage_complete"] = False
+            return status
+        with patch.object(self.store, "open_state_readonly", side_effect=incomplete_page):
+            incomplete = engine.run(self.project, "worker")
+            self.assertIs(incomplete["finish"]["wait_liveness"], True)
+            current = self.project.snapshots.get()
+            self.assertEqual(current["parent"], snapshot_before["id"])
+            self.assertNotIn("wait_conversion", current["progress"])
+            stamp = dt.datetime.fromisoformat(current["progress"]["recorded_at"]).timestamp()
+            due = stamp + self.config.limits.writer_no_progress_backoff_seconds
+            self.assertFalse(should_run(self.project, current, role_name="worker", current_time=due))
+
+    def test_free_standing_question_and_disabled_policy_do_not_convert_live_wait(self):
+        self.ready_item()
+        question = self.project.insights.submit(
+            source="worker", title="External wait", body="Q: Await operator input?",
+            base_snapshot=None, kind="question", addressee="operator")
+        engine = Engine(self.config, driver=ScriptDriver())
+        result = engine.run(self.project, "worker")
+        self.assertIs(result["finish"]["wait_liveness"], True)
+        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+        self.assertIs(_writer_wait_liveness(self.project, self.config.roles["worker"]), True)
+
+        # A held CI wait is a structured source, but the explicit policy can
+        # preserve the requested run-level wait without changing the item.
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, writer_wait_with_ready_work=False))
+        self.project.config = self.config
+        item = self.block(key="disabled-policy")
+        self.dispatch()
+        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        self.assertIs(result["finish"]["wait_liveness"], True)
+        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+        current = self.store.get(item["id"])
+        self.assertEqual((current["status"], current["wait"]["kind"]), ("blocked", "ci"))
+
+    def test_other_holders_wait_does_not_count_as_conversion_witness(self):
+        item = self.block(key="other-holder", actor="reviewer")
+        self.ready_item("writer-ready")
+        self.dispatch()
+        self.assertEqual(_writer_wait_sources(
+            self.project, self.config.roles["worker"], include_structured_wait=True),
+            (False, False, None))
+        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        self.assertIs(result["finish"]["wait_liveness"], False)
+        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+        self.assertEqual(self.store.get(item["id"])["holder"], "reviewer")
+
     def test_exact_held_ci_request_and_terminal_evidence(self):
         role = self.config.roles['worker']
         item = self.block()

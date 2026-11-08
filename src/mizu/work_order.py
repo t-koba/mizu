@@ -306,10 +306,10 @@ def _capture_opening(context) -> dict:
             previous_tokens = (
                 previous_progress["wait_resolution_tokens"]
                 if isinstance(previous_progress, dict)
-                and previous_progress["schema"] >= 4
+                and "wait_resolution_tokens" in previous_progress
                 and previous_progress["role"] == context.role.name else [])
             if (isinstance(previous_progress, dict)
-                    and previous_progress["schema"] >= 5
+                    and "wait_resolution_high_water" in previous_progress
                     and previous_progress["role"] == context.role.name):
                 ready_args["_wait_resolution_high_water"] = previous_progress["wait_resolution_high_water"]
             # The open-work page has already shown these proof rows. Prefer

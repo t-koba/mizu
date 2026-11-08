@@ -169,6 +169,7 @@ no_progress_continuations = 0 # Immediate no-progress self-admissions (0-100); w
 no_progress_recovery_after = 2 # Consecutive empty continue/bounded units before next persistent-session dispatch starts fresh (1-100).
 no_progress_backoff_seconds = 0 # Read-only on-change timer default; per-role override also applies to writers.
 writer_no_progress_backoff_seconds = 300 # Writer fallback after no-progress continue/bounded, only with ready work (0 disables, max 86400).
+writer_wait_with_ready_work = true # Convert a writer wait when ready work and a held structured wait are verified.
 default_wait_seconds = 1800
 maximum_wait_seconds = 86400
 max_failures = 3

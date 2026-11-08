@@ -231,6 +231,20 @@ durations are unchanged; a timer fallback is not an event subscription. The
 `idle_with_open_work` status remains the recorded-at-finish diagnostic, not a
 live scheduler verdict.
 
+When `[limits].writer_wait_with_ready_work` is enabled (default), the same
+bounded fallback also applies while an external source remains live, but only
+when finish-time evidence proves both role-eligible ready work and a current,
+held work item with a pending supported structured wait. This lets the blocked
+item keep its exact CI, dependency, question, deadline or other wait while the
+writer resumes unrelated ready work after the effective `writer_no_progress_backoff_seconds`
+(default 300 seconds, with the existing per-role override). It does not change
+the item's status, holder or wait, shorten `maximum_wait_seconds`, or make a
+free-standing check/question sufficient. Disabled policy, no ready work, or
+incomplete evidence preserves the requested wait; no-live and self-resolvable
+fallback behavior is unchanged. The immutable snapshot status projection reports
+a successful conversion at `progress.record.wait_conversion`, including the
+cause, wait kind and delay; older snapshots without that field remain valid.
+
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the
 same Next, even after work, does not renew it. When this is the dispatch cause,

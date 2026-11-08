@@ -213,6 +213,26 @@ class IdleWithOpenWorkTests(Fixture):
             _progress_record({}, 'worker', (), {name: False for name in PROGRESS_SIGNALS},
                              'wait', wait_resolution_high_water=boundary)
 
+    def test_writer_wait_conversion_schema_is_bounded_and_projected(self):
+        conversion = {"status": "converted",
+                      "reason": "ready_work_with_pending_structured_wait",
+                      "wait_kind": "ci", "backoff_seconds": 300}
+        progress = _progress_record(
+            {}, "worker", (), {name: False for name in PROGRESS_SIGNALS}, "wait",
+            ready_work=True, wait_conversion=conversion)
+        self.assertEqual(progress["schema"], 6)
+        validate_progress(progress)
+        self.assertEqual(progress_projection(progress)["wait_conversion"], conversion)
+        for bad in (
+                None, {}, {**conversion, "wait_kind": "unsupported"},
+                {**conversion, "backoff_seconds": True},
+                {**conversion, "backoff_seconds": 86401},
+                {**conversion, "extra": 1}):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                validate_progress({**progress, "wait_conversion": bad})
+        with self.assertRaises(Denied):
+            validate_progress({**progress, "ready_work": False})
+
     def test_writer_run_binds_true_and_single_row_probe(self):
         self.item("ready-at-finish")
         seen = {}

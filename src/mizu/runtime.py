@@ -239,7 +239,7 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
     """Return ready-set change, presence and a resolution-qualified change.
 
     Current store/read or malformed progress errors close all three facts. The
-    full signature reports ready-set change; schema-4/5 writer progress separately
+    full signature reports ready-set change; schema-4–6 writer progress separately
     qualifies resolution wakes by exact item/revision tokens actually shown in
     the opening pages. Legacy progress retains its conservative changed-set
     fallback because it has no delivery tokens. The progress role and fingerprint
@@ -254,13 +254,14 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
         store = project.work_items if work_items is None else work_items
         delivered_tokens = None
         if (role is not None and isinstance(previous, dict)
-                and previous.get("schema") >= 4):
+                and "wait_resolution_tokens" in previous):
             delivered_tokens = (previous["wait_resolution_tokens"]
                                 if previous["role"] == role.name else [])
         ready_args = {"limit": 1, **({"role_name": role.name} if role is not None else {})}
         if delivered_tokens is not None:
             ready_args["_delivered_wait_resolution_tokens"] = delivered_tokens
-            if previous["schema"] >= 5 and previous["role"] == role.name:
+            if ("wait_resolution_high_water" in previous
+                    and previous["role"] == role.name):
                 ready_args["_wait_resolution_high_water"] = previous["wait_resolution_high_water"]
         page = store.page_ready(**ready_args)
         signature = page.get("signature")
@@ -470,6 +471,7 @@ class Context:
         self.progress_decision = False
         self.progress_insight = False
         self.progress_input = False
+        self.wait_conversion_kind: str | None = None
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
         # points at the caller; everyone else spends their own role.
@@ -1986,8 +1988,10 @@ class Context:
             # verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
         if self.role.workspace == "write" and args["outcome"] == "wait":
-            args["wait_liveness"] = _writer_wait_liveness(
-                self.project, self.role, releases=releases)
+            wait_liveness, _, held_wait_kind = _writer_wait_sources(
+                self.project, self.role, releases=releases, include_structured_wait=True)
+            args["wait_liveness"] = wait_liveness
+            self.wait_conversion_kind = held_wait_kind
         self.close_exec()
         finished = {**args, "wait_seconds": wait, "recorded_at": now(),
                     **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
@@ -3453,10 +3457,19 @@ class Engine:
                     # Unreadable ledgers record explicit unknown (None) so the
                     # diagnostic fails closed without blocking publication.
                     try:
-                        ready_work_at_finish = bool(
-                            project.work_items.page_ready(limit=1, role_name=role_name)["items"])
+                        ready_page_at_finish = project.work_items.page_ready(
+                            limit=1, role_name=role_name)
+                        ready_work_at_finish = bool(ready_page_at_finish["items"])
+                        ready_work_complete = ready_page_at_finish.get("coverage_complete") is True
                     except (Denied, OSError):
                         ready_work_at_finish = None
+                        ready_work_complete = False
+                    wait_conversion = _writer_wait_conversion(
+                        self.config, role, finished, ready_work_at_finish,
+                        wait_kind=getattr(context, "wait_conversion_kind", None),
+                        ready_work_complete=ready_work_complete)
+                    progress_kwargs = ({"wait_conversion": wait_conversion}
+                                       if wait_conversion is not None else {})
                     progress = _progress_record(context.snapshot, role_name, selected_progress,
                                                observed_progress, finished["outcome"],
                                                obligations_digest=context.progress_obligations_digest,
@@ -3465,7 +3478,8 @@ class Engine:
                                                wait_resolution_tokens=getattr(
                                                    context, "wait_resolution_tokens", _READY_WORK_UNSET),
                                                wait_resolution_high_water=getattr(
-                                                   context, "wait_resolution_high_water", _READY_WORK_UNSET))
+                                                   context, "wait_resolution_high_water", _READY_WORK_UNSET),
+                                               **progress_kwargs)
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
@@ -4201,64 +4215,121 @@ def _writer_wait_liveness(project, role, *, releases=()) -> bool | None:
     return _writer_wait_sources(project, role, releases=releases)[0]
 
 
-def _writer_wait_sources(project, role, *, releases=()) -> tuple[bool | None, bool]:
-    """Return (external liveness, self-resolvable witness) from bounded local reads.
+def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=False) -> tuple[bool | None, bool, str | None]:
+    """Return external liveness, a self-wait witness, and a held-wait witness.
 
-    Liveness is True for live, False for absent/terminal/self, None for unknown.
-    No adapter calls, new registrations or inferred remote completion. Incomplete
-    inventories can prove a positive witness, never absence. A pending CI wait
-    alone does not prove CI was requested; require its exact publication request.
+    The held-wait witness comes from the bounded blocked-item status projection
+    and is emitted only for a current supported pending wait in a complete scan.
+    Exact CI dispatch evidence remains required; a free-standing check/question
+    cannot substitute for an item-held wait. No adapter calls or inferred remote
+    completion. Incomplete inventories can prove positive liveness, never absence
+    or a conversion witness.
     """
     try:
         unknown = False
+        external = False
         self_resolvable = False
+        held_wait_kind = None
         if "check_job" in role.capabilities:
             from .acceptance import discover
             jobs, invalid = discover(project)
             if any(job["role"] == role.name and job["id"] not in releases
                    and job["status"] in ("queued", "running") for job in jobs.values()):
-                return True, False
+                external = True
+                if not include_structured_wait:
+                    return True, False, None
             unknown = bool(invalid)
         if project.insights.unresolved_counts(
                 [role.name], kind="question", addressee="operator")[role.name]:
-            return True, False
+            external = True
+            if not include_structured_wait:
+                return True, False, None
         store = project.work_items
-        page = store.page_open_readonly(limit=project.config.limits.work_items_prompt)
-        unknown |= not page["coverage_complete"] or page["truncated"]
-        from .work_item_waits import liveness
         writers = {name for name in project.roles
                    if project.config.roles[name].workspace == "write"}
+        status = store.open_state_readonly(
+            limit=project.config.limits.work_items_prompt, writer_roles=writers)
+        blocked = status.get("blocked_work") if isinstance(status, dict) else None
+        if not isinstance(blocked, dict) or not isinstance(blocked.get("items"), list):
+            return None, False, None
+        page_complete = (blocked.get("coverage_complete") is True
+                         and blocked.get("truncated") is False
+                         and blocked.get("diagnostic") is None)
+        unknown |= not page_complete
         requests = None
-        for item in page["items"]:
-            if item["holder"] != role.name or item["status"] != "blocked":
+        for row in blocked["items"]:
+            if row.get("holder") != role.name:
                 continue
-            if item["wait"]["kind"] not in ("ci", "publication_ci"):
-                observed = liveness(store, item["wait"], None, item=item, writer_roles=writers)
-                if observed["state"] == "unknown":
-                    unknown = True
-                elif observed["self_resolvable"]:
-                    self_resolvable = True
-                elif observed["state"] in ("pending", "receipt_bound"):
-                    return True, False
-                continue
-            if ci_waits.evidence(store, item) is not None:
-                continue
-            wait = ci_waits._resolved(store, item["wait"])
-            if wait is None:
+            kind = row.get("wait_kind")
+            if row.get("state") == "unknown":
                 unknown = True
                 continue
-            if requests is None:
-                requests = CiRequests(project.root, project.config.ci_requests).daily()
-            if any(request["publication_id"] == wait["publication_id"]
-                   and request["sha"] == wait["sha"]
-                   for day in requests["days"] for request in day["items"]):
-                return True, False
-            # Missing dispatch evidence is not evidence of remote inactivity.
-            unknown = True
-        return (None if unknown else False), self_resolvable
+            if kind in ("ci", "publication_ci"):
+                if row.get("state") not in ("pending", "receipt_bound"):
+                    continue
+                item = store.get(row["id"])
+                if (item["rev"] != row["rev"] or item["status"] != "blocked"
+                        or item["holder"] != role.name or item["wait"]["kind"] != kind):
+                    unknown = True
+                    continue
+                if ci_waits.evidence(store, item) is not None:
+                    continue
+                wait = ci_waits._resolved(store, item["wait"])
+                if wait is None:
+                    unknown = True
+                    continue
+                if requests is None:
+                    requests = CiRequests(project.root, project.config.ci_requests).daily()
+                if any(request["publication_id"] == wait["publication_id"]
+                       and request["sha"] == wait["sha"]
+                       for day in requests["days"] for request in day["items"]):
+                    external = True
+                    if (include_structured_wait and page_complete and held_wait_kind is None
+                            and kind in _WRITER_CONVERTIBLE_WAIT_KINDS):
+                        held_wait_kind = kind
+                else:
+                    # Missing dispatch evidence is not evidence of remote inactivity.
+                    unknown = True
+                if external and not include_structured_wait:
+                    return True, False, None
+                continue
+            if row.get("self_resolvable"):
+                self_resolvable = True
+                continue
+            if row.get("state") in ("pending", "receipt_bound"):
+                external = True
+                if (include_structured_wait and page_complete and held_wait_kind is None
+                        and kind in _WRITER_CONVERTIBLE_WAIT_KINDS):
+                    held_wait_kind = kind
+                if not include_structured_wait:
+                    return True, False, None
+        live = True if external else None if unknown else False
+        return live, self_resolvable, held_wait_kind
     except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        return None, False
+        return None, False, None
 
+
+_WRITER_CONVERTIBLE_WAIT_KINDS = frozenset((
+    "deadline", "code_change", "insight_decided", "dependency",
+    "ci", "publication_ci", "proposal_merged"))
+
+
+def _writer_wait_conversion(config, role, finished, ready_work_present, *,
+                            wait_kind=None, ready_work_complete=False):
+    """Describe only a verified live structured wait converted for ready work."""
+    if (role.workspace != "write" or finished.get("outcome") != "wait"
+            or finished.get("wait_liveness") is not True
+            or getattr(config.limits, "writer_wait_with_ready_work", True) is not True
+            or ready_work_present is not True or ready_work_complete is not True):
+        return None
+    kind = wait_kind
+    if kind not in _WRITER_CONVERTIBLE_WAIT_KINDS:
+        return None
+    backoff = role_no_progress_backoff_seconds(config, role)
+    if type(backoff) is not int or not 1 <= backoff <= 86400:
+        return None
+    return {"status": "converted", "reason": "ready_work_with_pending_structured_wait",
+            "wait_kind": kind, "backoff_seconds": backoff}
 
 def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
                               *, project=None) -> bool:
@@ -4276,11 +4347,17 @@ def _writer_progress_fallback(record, config, role, ready_work_present, current_
             timestamp = progress_timestamp(progress)
             backoff = role_no_progress_backoff_seconds(config, role)
             current_time = time.time() if current_time is None else current_time
-            return (progress["role"] == role.name and timestamp is not None
-                    and backoff > 0 and current_time >= timestamp + backoff
-                    and project is not None
-                    and (_writer_wait_liveness(project, role) is False if ready_work_present
-                         else _writer_wait_sources(project, role) == (False, True)))
+            if progress["role"] != role.name or timestamp is None or backoff <= 0 \
+                    or current_time < timestamp + backoff or project is None:
+                return False
+            if ready_work_present:
+                if getattr(config.limits, "writer_wait_with_ready_work", True) is True:
+                    live, _, held_wait_kind = _writer_wait_sources(
+                        project, role, include_structured_wait=True)
+                    return live is False or held_wait_kind is not None
+                return _writer_wait_liveness(project, role) is False
+            live, self_resolvable, _ = _writer_wait_sources(project, role)
+            return live is False and self_resolvable
         except (Denied, AttributeError, TypeError, ValueError):
             return False
     if not ready_work_present:
@@ -4580,7 +4657,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     ready_work: bool | None | object = _READY_WORK_UNSET,
                     ready_work_signature: str | None | object = _READY_WORK_UNSET,
                     wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET,
-                    wait_resolution_high_water: dict | object = _READY_WORK_UNSET) -> dict:
+                    wait_resolution_high_water: dict | object = _READY_WORK_UNSET,
+                    wait_conversion: dict | object = _READY_WORK_UNSET) -> dict:
     """Build compact unit evidence and its bounded consecutive no-progress count.
 
     ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
@@ -4644,6 +4722,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         record.update(schema=4, wait_resolution_tokens=wait_resolution_tokens)
     if wait_resolution_high_water is not _READY_WORK_UNSET:
         record.update(schema=5, wait_resolution_high_water=wait_resolution_high_water)
+    if wait_conversion is not _READY_WORK_UNSET:
+        record.update(schema=6, wait_conversion=wait_conversion)
     return validate_progress(record)
 
 

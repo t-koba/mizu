@@ -21,7 +21,7 @@ class LimitsCoverageTests(unittest.TestCase):
         # These fields use the boolean, progress-signal or finite-cost validators
         # in load(), rather than the integer range table.
         special = {"lock_diagnostics", "drain_yield", "missing_finish_counts_as_failure",
-                   "progress_signals", "session_max_cost_usd"}
+                   "writer_wait_with_ready_work", "progress_signals", "session_max_cost_usd"}
         fields = {field.name for field in dataclasses.fields(Limits)}
         self.assertFalse(set(_LIMIT_RANGES) & special)
         self.assertEqual(fields, set(_LIMIT_RANGES) | special)
@@ -107,6 +107,24 @@ class PipePollConfigTests(Fixture):
                 with self.configured(value).runtime_policy():
                     self.fail('invalid derived config bound policy')
         self.assertEqual(platform.current_pipe_poll_interval(), .1)
+
+
+class WriterWaitPolicyConfigTests(Fixture):
+    def test_default_boolean_and_strict_type(self):
+        self.assertIs(Limits().writer_wait_with_ready_work, True)
+        original = re.sub(r'(?m)^writer_wait_with_ready_work = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertIs(load(self.file).limits.writer_wait_with_ready_work, True)
+        for value in ('true', 'false', '1', '0', '"true"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n', f'\n[limits]\nwriter_wait_with_ready_work = {value}\n'))
+                if value in ('true', 'false'):
+                    self.assertIs(load(self.file).limits.writer_wait_with_ready_work,
+                                  value == 'true')
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.writer_wait_with_ready_work'):
+                        load(self.file)
 
 
 class RootOwnerTemplateTests(unittest.TestCase):

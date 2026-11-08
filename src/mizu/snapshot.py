@@ -61,45 +61,46 @@ def validate_wait_resolution_high_water(value: dict) -> dict:
 
 
 def validate_progress(value: dict) -> dict:
-    """Validate the compact, immutable progress record; legacy absence is valid.
+    """Validate compact immutable progress; legacy schemas stay readable.
 
-    Schema 1 is the original no-progress record without any ready-work
-    observation. Schema 2 adds ``ready_work`` (True/False for the bounded
-    ``page_ready(limit=1)`` existence probe taken at writer run completion,
-    None when that probe was unreadable). Schema 3 also records the full
-    role-eligible ready-set ``ready_work_signature`` at the prompt boundary
-    (64 lowercase hex, or None if no input was delivered). Legacy schemas stay
-    readable; their missing signature never hides nonempty current ready work.
-    Schema 4 adds at most 200 exact shown resolution tokens. Schema 5 adds a
-    resolution-set fingerprint and nullable exact token boundary, covering a
-    contiguous shown prefix without growing that list.
+    Schema 1 is the original progress record. Schema 2 adds the bounded finish-time
+    ready-work observation; schema 3 adds the prompt ready-set signature; schemas
+    4–5 add exact wait-resolution delivery receipts. Schema 6 adds a bounded
+    writer wait-conversion diagnostic to any schema-2–5 record.
     """
     fields_v1 = {"schema", "signals", "selected", "role", "has_progress",
-              "no_progress_count", "obligations_digest", "recorded_at"}
+                 "no_progress_count", "obligations_digest", "recorded_at"}
     fields_v2 = fields_v1 | {"ready_work"}
     fields_v3 = fields_v2 | {"ready_work_signature"}
     fields_v4 = fields_v3 | {"wait_resolution_tokens"}
     fields_v5 = fields_v4 | {"wait_resolution_high_water"}
+    base_fields = {1: fields_v1, 2: fields_v2, 3: fields_v3, 4: fields_v4, 5: fields_v5}
     if not isinstance(value, dict):
         raise Denied("Invalid snapshot progress record")
     schema = value.get("schema")
-    if type(schema) is not int or schema not in (1, 2, 3, 4, 5):
+    if type(schema) is not int or schema not in (1, 2, 3, 4, 5, 6):
         raise Denied("Invalid snapshot progress schema")
-    if schema == 1:
-        if set(value) != fields_v1:
+    if schema == 6:
+        if "wait_conversion" not in value:
+            raise Denied("Invalid snapshot progress record")
+        base = frozenset(set(value) - {"wait_conversion"})
+        base_schema = next((version for version, fields in base_fields.items()
+                            if frozenset(fields) == base), None)
+        if base_schema is None or base_schema < 2:
             raise Denied("Invalid snapshot progress record")
     else:
-        expected = {2: fields_v2, 3: fields_v3, 4: fields_v4, 5: fields_v5}[schema]
-        if set(value) != expected:
+        base_schema = schema
+        if set(value) != base_fields[schema]:
             raise Denied("Invalid snapshot progress record")
-        ready = value.get("ready_work")
+    if "ready_work" in value:
+        ready = value["ready_work"]
         if ready is not None and type(ready) is not bool:
             raise Denied("Invalid snapshot ready-work observation")
-    if schema >= 3:
+    if "ready_work_signature" in value:
         signature = value["ready_work_signature"]
         if signature is not None and (not isinstance(signature, str) or not DIGEST.fullmatch(signature)):
             raise Denied("Invalid snapshot ready-work signature")
-    if schema >= 4:
+    if "wait_resolution_tokens" in value:
         tokens = value["wait_resolution_tokens"]
         if (not isinstance(tokens, list) or len(tokens) > MAX_WAIT_RESOLUTION_TOKENS
                 or any(not isinstance(token, str)
@@ -107,8 +108,21 @@ def validate_progress(value: dict) -> dict:
                        or int(token.rsplit(":", 1)[1]) > 256 for token in tokens)
                 or len(tokens) != len(set(tokens))):
             raise Denied("Invalid snapshot wait-resolution delivery")
-    if schema >= 5:
+    if "wait_resolution_high_water" in value:
         validate_wait_resolution_high_water(value["wait_resolution_high_water"])
+    if schema == 6:
+        conversion = value["wait_conversion"]
+        if (not isinstance(conversion, dict)
+                or set(conversion) != {"status", "reason", "wait_kind", "backoff_seconds"}
+                or conversion.get("status") != "converted"
+                or conversion.get("reason") != "ready_work_with_pending_structured_wait"
+                or conversion.get("wait_kind") not in {
+                    "deadline", "code_change", "insight_decided", "dependency",
+                    "ci", "publication_ci", "proposal_merged"}
+                or type(conversion.get("backoff_seconds")) is not int
+                or not 1 <= conversion["backoff_seconds"] <= 86400
+                or value.get("ready_work") is not True):
+            raise Denied("Invalid snapshot writer wait-conversion diagnostic")
     signals = value["signals"]
     if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
             or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
@@ -142,7 +156,6 @@ def validate_progress(value: dict) -> dict:
         raise Denied("Invalid snapshot progress timestamp") from exc
     return value
 
-
 def progress_timestamp(value: dict) -> float | None:
     """Return a validated progress timestamp, or None for malformed evidence."""
     try:
@@ -163,14 +176,16 @@ def progress_projection(value: dict | None) -> dict | None:
                  "has_progress": value["has_progress"],
                  "no_progress_count": value["no_progress_count"],
                  "recorded_at": value["recorded_at"]}
-    if value["schema"] >= 2:
+    if "ready_work" in value:
         projected["ready_work"] = value["ready_work"]
-    if value["schema"] >= 3:
+    if "ready_work_signature" in value:
         projected["ready_work_signature"] = value["ready_work_signature"]
-    if value["schema"] >= 4:
+    if "wait_resolution_tokens" in value:
         projected["wait_resolution_tokens"] = list(value["wait_resolution_tokens"])
-    if value["schema"] >= 5:
+    if "wait_resolution_high_water" in value:
         projected["wait_resolution_high_water"] = dict(value["wait_resolution_high_water"])
+    if "wait_conversion" in value:
+        projected["wait_conversion"] = dict(value["wait_conversion"])
     return projected
 
 

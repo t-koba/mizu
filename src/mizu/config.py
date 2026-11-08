@@ -437,6 +437,7 @@ class Limits:
     no_progress_recovery_after: int = 2
     no_progress_backoff_seconds: int = 0
     writer_no_progress_backoff_seconds: int = 300
+    writer_wait_with_ready_work: bool = True
     default_wait_seconds: int = 1800
     maximum_wait_seconds: int = 86400
     max_failures: int = 3
@@ -1431,7 +1432,8 @@ def load(file: Path) -> Config:
                 raise ConfigError("limits.progress_signals must contain unique supported signal names")
             lim[k] = values
             continue
-        if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics"):
+        if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics",
+                 "writer_wait_with_ready_work"):
             boolean(v, f"limits.{k}")
             continue
         if k == "session_max_cost_usd":
