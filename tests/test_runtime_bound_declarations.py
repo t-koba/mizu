@@ -60,6 +60,7 @@ header-pair count, model-catalog provider-command output ceiling, and runtime
 wrap-up allowance defaults, whose names fall outside the pattern.
 MCP and persistent-exec cleanup walls use `[sandbox].cleanup_timeout_seconds`;
 project-wide cleanup uses `[sandbox].bulk_cleanup_timeout_seconds`.
+Checkpoint-image inspection uses `[sandbox].checkpoint_inspect_timeout_seconds`;
 Systemd-analyze verification uses `[services].systemd_verify_timeout_seconds`.
 Their output reads are safety.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
@@ -1422,9 +1423,6 @@ CALLS = {
             'work items / bounded request-local path-key cache, eviction revalidates'),
     },
     'sandbox.py': {
-        ('assert_no_checkpoint', 'run', 'timeout', 0): (
-            '15', 'policy', 'sandbox / host-dependent checkpoint-image inspect wall; '
-            'policy pending measurement'),
         ('remove_leftover', 'run', 'maximum', 0): (
             '8192', 'safety', 'sandbox / bounded leftover-container list output'),
         ('remove_leftover', 'run', 'maximum', 1): (
@@ -2703,12 +2701,26 @@ def no_defaults(limit, /, count, *, size):
             'bulk_cleanup_timeout_seconds': (
                 '30', 'configured policy',
                 'sandbox / per-OCI-call project-wide removal deadline'),
+            'checkpoint_inspect_timeout_seconds': (
+                '15', 'configured policy',
+                'sandbox / host-side checkpoint-image preflight inspection deadline'),
         }
         for name, (default, category, rationale) in expected.items():
             with self.subTest(setting=name):
                 self.assertEqual(fields[name], default)
                 self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
+
+        sandbox_tree = ast.parse((ROOT / 'sandbox.py').read_text(encoding='utf-8'))
+        inspect = next(node for node in ast.walk(sandbox_tree)
+                       if isinstance(node, ast.FunctionDef)
+                       and node.name == 'assert_no_checkpoint')
+        inspect_run = next(node for node in ast.walk(inspect)
+                           if isinstance(node, ast.Call) and callee_name(node.func) == 'run')
+        inspect_timeout = next(keyword.value for keyword in inspect_run.keywords
+                               if keyword.arg == 'timeout')
+        self.assertEqual(ast.unparse(inspect_timeout),
+                         'config.sandbox.checkpoint_inspect_timeout_seconds')
 
         for filename, function_name, expected_runs, expected_timeout in (
                 ('engine_config.py', 'stop_engine_containers', 1,

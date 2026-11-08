@@ -669,6 +669,8 @@ class Sandbox:
     #: Defaults preserve the 15s per-call and 30s bulk-removal limits.
     cleanup_timeout_seconds: int = 15
     bulk_cleanup_timeout_seconds: int = 30
+    #: Host/runtime-dependent wall for the checkpoint-image preflight inspect.
+    checkpoint_inspect_timeout_seconds: int = 15
     selinux_label: bool = True
     #: Container network selected by policy. `none` preserves the previous
     #: behavior. Any other value is passed to the runtime as `--network=<value>`
@@ -1421,7 +1423,8 @@ def load(file: Path) -> Config:
     for k in ("memory_mb", "cpus", "pids", "temporary_mb", "file_mb"):
         if k in sb:
             number(sb[k], f"sandbox.{k}", 1, 1048576)
-    for k in ("cleanup_timeout_seconds", "bulk_cleanup_timeout_seconds"):
+    for k in ("cleanup_timeout_seconds", "bulk_cleanup_timeout_seconds",
+              "checkpoint_inspect_timeout_seconds"):
         if k in sb:
             number(sb[k], f"sandbox.{k}", 1, TOML_INTEGER_MAX)
     for k in ("executable", "image"):

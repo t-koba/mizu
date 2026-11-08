@@ -127,8 +127,10 @@ def assert_no_checkpoint(config: Config, env: dict[str, str]) -> None:
     if not config.sandbox.image:
         raise ConfigError("Build and pin sandbox.image before running commands")
     try:
-        result = run(checkpoint_inspect_argv(config), timeout=15,
-                     maximum=CHECKPOINT_INSPECT_MAXIMUM, env=env)
+        result = run(
+            checkpoint_inspect_argv(config),
+            timeout=config.sandbox.checkpoint_inspect_timeout_seconds,
+            maximum=CHECKPOINT_INSPECT_MAXIMUM, env=env)
     except OSError as exc:
         raise Denied(
             "Cannot verify sandbox.image is not a Podman checkpoint image "

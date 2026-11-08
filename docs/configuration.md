@@ -1179,6 +1179,7 @@ The container interior is always Linux. The runtime must support standard flags 
 | `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`) |
 | `cleanup_timeout_seconds` | `15` | Per-OCI-call deadline for leftover listing/removal, project-container listing, and post-command removal; positive TOML integer seconds |
 | `bulk_cleanup_timeout_seconds` | `30` | Per-OCI-call deadline for project-wide container removal; positive TOML integer seconds |
+| `checkpoint_inspect_timeout_seconds` | `15` | Per-OCI-call deadline for the fail-closed checkpoint-image preflight inspect; positive TOML integer seconds |
 | `selinux_label` | `true` | Linux-only `:z` volume relabeling |
 | `mounts` | `[]` | Extra read-only host mounts (`{source, target}`); system/harness paths rejected |
 | `env` | `{}` | Extra environment variables; runtime vars (`HOME`, `TMPDIR`, `PATH`, `PYTHONDONTWRITEBYTECODE`, `PYTHONPYCACHEPREFIX`), process-startup hijack vars (`NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `BASH_ENV`) and tokens matching `(^|_)(KEY|SECRET|TOKEN)(_|$)` rejected (`HF_TOKEN`, `PUBLIC_KEY_PATH` rejected; `MONKEY_PATH`, `TOKENIZERS_*` allowed) |
@@ -1187,7 +1188,14 @@ The container interior is always Linux. The runtime must support standard flags 
 | `check_reuse` | `false` | Share matching check executions and evidence across roles. Matching source, command kind/list, execution environment, observed dependency inputs and verification cache inputs coalesce queued or running checks and reuse completed passing results; changed dependencies invalidate reuse, and unbound dependency evidence is refused rather than accepted. See [check jobs](check-jobs.md) |
 | `check_input_files`, `check_input_bytes` | `250000`, `8589934592` | Bounds on dependency traversal and, separately, verification cache traversal (1-1099511627776 each). Entries include directories, absent configured cache names and each hardlink name. Over-bound dependencies disable sharing; over-bound configured verification caches are refused before queueing. Custom checks without those caches can still run |
 
-The cleanup deadlines preserve the previous 15-second per-command and 30-second bulk-removal defaults. They are operator policy because OCI runtime and storage latency vary by host; each bounds an individual runtime invocation, not a total cleanup sequence. A timeout or failed removal remains a cleanup failure and is never treated as successful container removal. Read-only root, dropped capabilities, `no-new-privileges`, user mapping, and the seccomp floor stay strictly enforced regardless of settings. For total disk storage capping, use a dedicated volume quota.
+The cleanup deadlines preserve the previous 15-second per-command and 30-second bulk-removal
+defaults. They are operator policy because OCI runtime and storage latency vary by host; each bounds
+an individual runtime invocation, not a total cleanup sequence. `checkpoint_inspect_timeout_seconds`
+separately bounds the host-side preflight image inspect (default 15 seconds); timeout or unverifiable
+output refuses launch. A timeout or failed removal remains a cleanup failure and is never treated as
+successful container removal. Read-only root, dropped capabilities, `no-new-privileges`, user
+mapping, and the seccomp floor stay strictly enforced regardless of settings. For total disk storage
+capping, use a dedicated volume quota.
 
 `mode` is `rootless` by default on every OS. On Linux hosts without
 subordinate-ID delegation only, set `mode = "single"` and additionally configure `namespace_helper` (absolute

@@ -1,4 +1,4 @@
-"""OCI cleanup wall deadlines are host policy with unchanged defaults."""
+"""OCI cleanup and preflight walls are host policy with unchanged defaults."""
 import dataclasses
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +14,7 @@ class SandboxCleanupTimeoutConfigTests(Fixture):
     names = {
         "cleanup_timeout_seconds": 15,
         "bulk_cleanup_timeout_seconds": 30,
+        "checkpoint_inspect_timeout_seconds": 15,
     }
 
     def source_with(self, key, value, text=None):
@@ -49,7 +50,8 @@ class SandboxCleanupTimeoutConfigTests(Fixture):
     def test_cleanup_commands_use_configured_per_call_deadlines(self):
         configured_sandbox = dataclasses.replace(
             self.config.sandbox, executable="podman", cleanup_timeout_seconds=7,
-            bulk_cleanup_timeout_seconds=19)
+            bulk_cleanup_timeout_seconds=19, checkpoint_inspect_timeout_seconds=11,
+            image="sha256:" + "a" * 64)
         config = dataclasses.replace(self.config, sandbox=configured_sandbox)
 
         with patch("mizu.sandbox.run", side_effect=[
@@ -65,6 +67,11 @@ class SandboxCleanupTimeoutConfigTests(Fixture):
                              {"removed": 2})
         self.assertEqual([call.kwargs["timeout"] for call in invoke.call_args_list], [7, 19])
 
+        with patch("mizu.sandbox.run", return_value=
+                   Result(0, "{}", "", "exited", 0.01)) as invoke:
+            sandbox.assert_no_checkpoint(config, {})
+        self.assertEqual(invoke.call_args.kwargs["timeout"], 11)
+
         run_dir = self.project.root / "runs" / "cleanup-timeout-test"
         (run_dir / "commands").mkdir(parents=True)
         executor = sandbox.Sandbox(config, self.project.root, "worker", run_dir)
@@ -74,7 +81,7 @@ class SandboxCleanupTimeoutConfigTests(Fixture):
                 Result(0, "", "", "exited", 0.01)]) as invoke:
             executor.execute(self.project.workspace, "true", writable=True)
         self.assertEqual([call.kwargs["timeout"] for call in invoke.call_args_list],
-                         [15, config.limits.command_seconds, 7])
+                         [config.sandbox.checkpoint_inspect_timeout_seconds, config.limits.command_seconds, 7])
 
 
 if __name__ == "__main__":
