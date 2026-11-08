@@ -434,8 +434,10 @@ def wait_pipe(stream, stop, timeout=.1) -> bool:
     """Wait for POSIX pipe readiness without idle read polling.
 
     Windows anonymous pipes keep their existing nonblocking PeekNamedPipe path.
-    The bounded POSIX wait lets cancellation join readers before fd teardown.
-    EOF is readable, so consumers still drain and detect closed transports.
+    The 100-ms default is a fixed POSIX poll quantum: readiness wakes immediately,
+    while idle cancellation is observed within one quantum. This avoids busy
+    polling and lets readers join before fd teardown. EOF is readable, so
+    consumers still drain and detect closed transports.
     """
     if stop.is_set():
         return False

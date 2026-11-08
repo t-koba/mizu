@@ -47,8 +47,11 @@ revision, delivered-token and sidecar bounds are fixed mechanism or safety
 contracts; its delivered-token set covers prior progress plus one opening page,
 and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
-The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth
-and spawn-reap bounds are fixed mechanism or safety. The bridge timeout fallback
+The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
+spawn-reap and pipe-readiness bounds are fixed mechanism or safety. The POSIX
+pipe poll uses a 100-ms default, wakes immediately for data and bounds idle
+cancellation observation; a bounded local comparison found the expected
+latency/wake-count trade-off without material CPU cost. The bridge timeout fallback
 is shared between `bridge.py` and `mcp_proxy.py` for incomplete configs; normal
 bridge configs carry a deadline derived from model-request policy. The MCP
 proxy receive chunk bounds transient allocation while `MAX_FRAME` caps the full
@@ -64,9 +67,11 @@ Checkpoint-image inspection uses `[sandbox].checkpoint_inspect_timeout_seconds`;
 Systemd-analyze verification uses `[services].systemd_verify_timeout_seconds`.
 Their output reads are safety.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
-not-yet-wired single-child delegation pilot. Its 1024-job history cap is
-shared project-state capacity policy pending the pilot's configuration section:
-capacity exhaustion refuses new starts rather than forgetting keys.
+not-yet-wired single-child delegation pilot. Its 1024-job history cap is shared
+project-state capacity policy: exhaustion refuses new starts rather than
+forgetting keys. The module has no `src/mizu` consumer or configuration route;
+defer an operator setting until the pilot integration can actually consume it,
+rather than expose an inert option.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
 safety bounds. The `drivers.py` event-stream default is the configured
@@ -274,8 +279,8 @@ DECLARATIONS = {
             'async delegation / canonical JSON byte overhead for the explicit intent:null member'),
         'MAX_JOBS': (
             '1024', 'policy',
-            'async delegation / shared project-state job-history capacity; lifetime tombstones '
-            'are retained and exhaustion refuses new starts, pending pilot configuration'),
+            'async delegation / shared project-state tombstone capacity; the private store has no '
+            'src/mizu consumer yet, so defer a configuration setting until pilot integration'),
         'MAX_BINDING_BYTES': (
             '8192', 'safety',
             'async delegation / bounded active binding and provisioning-intent inventory'),
@@ -1498,7 +1503,8 @@ PARAMETER_DEFAULTS = {
     ('pi_durable_store.py', 'project_context', 'max_bytes'): (
         '65536', 'policy', 'Pi durable store / caller-selected summary truncation marker threshold, not a read cap'),
     ('platform.py', 'wait_pipe', 'timeout'): (
-        '0.1', 'policy', 'platform / host-dependent pipe wait and cancellation responsiveness'),
+        '0.1', 'mechanism',
+        'platform / fixed POSIX readiness-poll quantum; data wakes immediately and idle cancellation is observed within one 100-ms wait'),
     ('proposal_waits.py', 'delivery', 'limit'): (
         '10', 'policy', 'proposal waits / caller-selected frozen delivery batch'),
     ('proposal_waits.py', 'pending', 'limit'): (
