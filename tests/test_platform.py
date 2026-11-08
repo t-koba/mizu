@@ -559,6 +559,29 @@ class ServiceRendererTests(unittest.TestCase):
         reporter = ET.fromstring(units["mizu-3-svc-reporter.xml"])
         self.assertIsNotNone(reporter.find("t:Triggers/t:CalendarTrigger", ns))
 
+    def test_windows_repetition_interval_bounds_follow_task_scheduler(self):
+        import dataclasses
+        from mizu.errors import Denied
+        from mizu.services import render
+
+        def with_interval(seconds):
+            roles = dict(self.config.roles)
+            roles["reporter"] = dataclasses.replace(
+                roles["reporter"], interval_seconds=seconds, calendar=(), daemon=False)
+            return dataclasses.replace(self.config, roles=roles)
+
+        for seconds in (60, 31 * 86400):
+            with self.subTest(seconds=seconds):
+                windows = render(with_interval(seconds), self.project,
+                                 ROOT / "bin/mizu", system="windows")
+                self.assertIn(f"<Interval>PT{seconds}S</Interval>",
+                              windows["mizu-3-svc-reporter.xml"])
+        for seconds in (59, 31 * 86400 + 1):
+            with self.subTest(seconds=seconds):
+                with self.assertRaisesRegex(Denied, "between 60 seconds and 31 days"):
+                    render(with_interval(seconds), self.project,
+                           ROOT / "bin/mizu", system="windows")
+
     def test_event_trigger_watches_decisions_and_waits(self):
         import dataclasses
         import plistlib

@@ -147,11 +147,15 @@ Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
-`usage.py`, `config.py`, `runtime.py`, `project.py` and `vcs.py`; the
-`admission.py` slice uses magnitude 2 to include its exact two-lock resource
-ceiling. This is not a global numeric comparison linter.
+`usage.py`, `config.py`, `runtime.py`, `project.py`, `services.py` and
+`vcs.py`; numeric-only arithmetic operands are evaluated without source
+execution. The `services.py` entries pin Windows Task Scheduler's one-minute
+minimum and 31-day maximum repetition interval. The `admission.py` slice uses
+magnitude 2 to include its exact two-lock resource ceiling. This is not a global
+numeric comparison linter.
 """
 import ast
+import math
 from pathlib import Path
 import re
 import unittest
@@ -1649,7 +1653,8 @@ SYMBOLIC_RANGE_ARGUMENTS = {
         'work items / replay every validated revision within MAX_REVISIONS'),
 }
 
-# Direct comparison operands with magnitude >= 3 in the selected modules.
+# Direct numeric comparison operands with magnitude >= 3 in selected modules.
+# Numeric-only basic arithmetic is evaluated; no source is executed.
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
@@ -1910,6 +1915,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('usage.py', 'summarize', 1, 0): (
         '1048576', 'safety',
         'usage / fixed per-record read ceiling for retained run evidence; no whole-report byte cap'),
+    ('services.py', 'render', 0, 0): (
+        '60', 'mechanism',
+        'Windows Task Scheduler / repetition intervals have a one-minute minimum'),
+    ('services.py', 'render', 2, 0): (
+        '31 * 86400', 'mechanism',
+        'Windows Task Scheduler / repetition intervals have a 31-day maximum'),
     # VCS adapter text is external-untrusted. These are Mizu's local parser
     # contracts; none asserts an upstream provider maximum.
     ('vcs.py', '_reject_terminal_controls', 1, 0): (
@@ -2062,12 +2073,38 @@ def comparison_argument_inventory(tree, *, minimum_magnitude=3):
 
     def literal_value(node):
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            return node.value
-        if (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd))
-                and isinstance(node.operand, ast.Constant)
-                and type(node.operand.value) in (int, float)):
-            return (-1 if isinstance(node.op, ast.USub) else 1) * node.operand.value
-        return None
+            value = node.value
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            operand = literal_value(node.operand)
+            if operand is None:
+                return None
+            value = -operand if isinstance(node.op, ast.USub) else operand
+        elif isinstance(node, ast.BinOp):
+            left, right = literal_value(node.left), literal_value(node.right)
+            if left is None or right is None:
+                return None
+            try:
+                if isinstance(node.op, ast.Add):
+                    value = left + right
+                elif isinstance(node.op, ast.Sub):
+                    value = left - right
+                elif isinstance(node.op, ast.Mult):
+                    value = left * right
+                elif isinstance(node.op, ast.FloorDiv):
+                    value = left // right
+                elif isinstance(node.op, ast.Div):
+                    value = left / right
+                elif isinstance(node.op, ast.Mod):
+                    value = left % right
+                else:
+                    return None
+            except (ArithmeticError, OverflowError):
+                return None
+        else:
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
 
     class Comparisons(ast.NodeVisitor):
         def __init__(self):
@@ -2336,7 +2373,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py',
                 'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
-                'project.py', 'admission.py', 'vcs.py'):
+                'project.py', 'admission.py', 'services.py', 'vcs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
                        else 2 if filename == 'admission.py' else 3)
@@ -2353,22 +2390,30 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             "        return value\n"
             "    def nested():\n"
             "        return value > 64\n"
+            "    return value <= 31 * 86400\n"
             "class Reader:\n"
             "    def read(self):\n"
             "        return 128 >= 0\n"
         )
         self.assertEqual(comparison_argument_inventory(ast.parse(source)), {
             ('outer', 2, 0): '32',
+            ('outer', 1, 0): '31 * 86400',
             ('outer.nested', 1, 0): '64',
             ('Reader.read', 0, 0): '128',
         })
         changed = source.replace('value > 64', 'value > 96')
         self.assertNotEqual(comparison_argument_inventory(ast.parse(changed)),
                             comparison_argument_inventory(ast.parse(source)))
+        changed_arithmetic = source.replace('31 * 86400', '30 * 86400')
+        self.assertNotEqual(comparison_argument_inventory(ast.parse(changed_arithmetic)),
+                            comparison_argument_inventory(ast.parse(source)))
         small_bound = ast.parse('def queue(resources): return len(resources) > 2')
         self.assertEqual(comparison_argument_inventory(small_bound), {})
         self.assertEqual(comparison_argument_inventory(small_bound, minimum_magnitude=2),
                          {('queue', 1, 0): '2'})
+        arithmetic_bound = ast.parse('def queue(resources): return len(resources) > 1 + 2')
+        self.assertEqual(comparison_argument_inventory(arithmetic_bound),
+                         {('queue', 1, 0): '1 + 2'})
 
     def test_symbolic_range_argument_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
