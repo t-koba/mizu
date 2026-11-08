@@ -100,7 +100,7 @@ def read(project, job_id):
     job = raw_read(project, job_id)
     if job.get('shared_job') and not job.get('detached'):
         original = raw_read(project, job['shared_job'])
-        for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key', 'cache_diagnostics'):
+        for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'cache_input_empty', 'shared_key', 'cache_diagnostics'):
             if key in original:
                 job[key] = original[key]
     elif job.get('detached'):
@@ -251,7 +251,7 @@ def cache_guard(project, *, blocking=True):
         guard.__exit__(None, None, None)
 
 
-def cache_input(project, *, diagnostic=None):
+def cache_input(project, *, diagnostic=None, state=None):
     """Fingerprint configured pre-execution trees while holding cache_guard.
 
     None means unbound, never empty. Count directories and absent names as
@@ -262,7 +262,9 @@ def cache_input(project, *, diagnostic=None):
     every name of their inode is found inside these trees. Bind their topology
     by a deterministic relative name, not by a host inode number. Each name
     still counts against both traversal and byte bounds. On failure, diagnostic
-    optionally receives a bounded reason and safe cache-relative path.
+    optionally receives a bounded reason and safe cache-relative path. On a
+    successful traversal, state (when supplied) receives the execution-input
+    emptiness classification from those same validated entries.
     """
     from . import platform
     from .fs import _same_file
@@ -394,6 +396,9 @@ def cache_input(project, *, diagnostic=None):
                 after = None
             if after != before:
                 return unbound(relative=relative)
+        if state is not None:
+            state['empty'] = all(value.get('absent') or value.get('children') == []
+                                 for value in entries.values())
         return digest(canonical({'names': list(names), 'entries': entries}))
     except (OSError, Denied, ValueError, UnicodeError):
         return unbound('unsafe_or_unreadable', relative)
@@ -438,15 +443,15 @@ def reset_cache(project):
         raise Denied('Configured check cache reset failed') from None
 
 
-def recover_cache(project, job, phase):
+def recover_cache(project, job, phase, *, state=None):
     diagnostic = {'phase': phase, 'reason': 'unstable'}
-    current = cache_input(project, diagnostic=diagnostic)
+    current = cache_input(project, diagnostic=diagnostic, state=state)
     if current is not None:
         return current
     job.setdefault('cache_diagnostics', []).append(diagnostic)
     try:
         reset_cache(project)
-        current = cache_input(project)
+        current = cache_input(project, state=state)
         if current is None:
             raise Denied('Clean cache cannot be bound')
         return current if phase == 'input' else None
@@ -1324,7 +1329,8 @@ def _execute(project, job, stop, sandbox_factory, slot):
         if 'cache_input' not in job and job.get('cache_binding_pending') != 1:
             return refuse('Execution configuration, dependency or cache inputs changed')
         try:
-            current_cache = recover_cache(project, job, 'input')
+            cache_state = {}
+            current_cache = recover_cache(project, job, 'input', state=cache_state)
         except Denied:
             return refuse('Configured check cache reset failed')
     else:
@@ -1335,6 +1341,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
         # the execution reuse identity and must match the recorded input so
         # later reuse requires the same current cache.
         job['cache_input'] = current_cache
+        job['cache_input_empty'] = cache_state['empty']
         job.pop('cache_binding_pending', None)
         if job.get('environment') is not None and not job.get('scratch_paths'):
             job['shared_key'] = digest(canonical({'source': job['code_digest'], 'execution': job['execution'],
@@ -1401,6 +1408,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
                       'evidence': 'check-jobs/' + job['id'] + '/commands/' + r['id'] + '.json'} for r in results]}
         if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
             record['cache_input'] = job['cache_input']
+            record['cache_input_empty'] = job['cache_input_empty']
         write_json(directory / 'result.json', record)
         job.update(status='cancelled' if (directory / 'cancel.json').exists() else 'completed', passed=passed and not (directory / 'cancel.json').exists(), finished_at=now())
     except Exception as exc:
@@ -1491,6 +1499,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
                              'environment': job['environment'], 'image': record['image']}
                     if 'cache_input' in job:
                         bound['cache_input'] = job['cache_input']
+                        bound['cache_input_empty'] = job['cache_input_empty']
                     from .acceptance import MAX_BYTES
                     if len(canonical(record)) > project.config.limits.file_bytes:
                         # The exact canonical result bytes are what recovery reads.

@@ -358,3 +358,21 @@ class CIAcceptanceTests(Fixture):
             with self.assertRaises(Denied):
                 read()
         self.assertEqual(json.loads(path.read_bytes()), value)
+
+    def test_local_cache_policy_does_not_relax_exact_ci_cache_scope(self):
+        self.project.config = dataclasses.replace(self.project.config,
+            sandbox=dataclasses.replace(self.project.config.sandbox, check_cache_paths=('target',)))
+        self.local = acceptance.scope(self.project)
+        self.project.settings['ci_acceptance']['acceptance_scope'] = digest(canonical(self.local))
+        receipt_id = self.retain()
+        receipt = acceptance.get(self.project.root, receipt_id)
+        self.assertNotIn('cache_input_empty', receipt['scope'])
+        self.assertEqual(acceptance.effective(self.project, self.snapshot)['receipt_id'], receipt_id)
+        cache = self.project.root / 'check-cache' / check_jobs.execution_key(self.project.config) / 'target'
+        cache.mkdir(parents=True)
+        (cache / 'object').write_text('changed cache input')
+        for allow in (False, True):
+            self.project.settings['acceptance'] = {'allow_nonempty_cache': allow}
+            self.assertIsNone(acceptance.effective(self.project, self.snapshot))
+        self.assertEqual(acceptance.get(self.project.root, receipt_id), receipt)
+        self.assertEqual(acceptance.audit(self.project.root), 1)

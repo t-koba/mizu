@@ -56,6 +56,32 @@ class WorkItemTests(Fixture):
             store.publish(snapshot)
         return snapshot
 
+    def test_completion_diagnostic_is_bounded_and_legacy_callback_is_compatible(self):
+        self.change()
+        snapshot = self.snapshot()
+        binding = self.bind(snapshot)
+        # Standalone callers may still supply the original proof-only callback.
+        calls = []
+        store = WorkItems(self.project.root, self.project.snapshots, self.project.insights,
+                          effective_verification=lambda value: calls.append(value['id']))
+        message = "Completion snapshot must have passing digest-bound verification"
+        with self.assertRaises(Denied) as refused:
+            store.transition(self.item_id, expected_rev=binding['rev'], status='done',
+                             actor='worker', snapshot_id=snapshot['id'])
+        self.assertEqual(str(refused.exception), message)
+        self.assertEqual(calls, [snapshot['id']])
+        # Unknown diagnostic data must not escape into the tool error, even
+        # when it contains long strings or control characters.
+        store.effective_verification = None
+        store.effective_verification_projection = lambda value: (None, {
+            'reason': 'unsafe\n' + 'x' * 10000, 'receipt_id': 'private-data'})
+        with self.assertRaises(Denied) as refused:
+            store.transition(self.item_id, expected_rev=binding['rev'], status='done',
+                             actor='worker', snapshot_id=snapshot['id'])
+        self.assertEqual(str(refused.exception), message)
+        self.assertEqual(calls, [snapshot['id']])
+        self.assertEqual(self.store.get(self.item_id), binding)
+
     def status_readers(self):
         return (self.store.count_open, self.store.count_open_readonly,
                 self.store.page_open, self.store.page_open_readonly, self.store.page_ready,

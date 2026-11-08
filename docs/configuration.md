@@ -2739,9 +2739,30 @@ The generation binds semantic unit-opening inputs, captured once per unit and re
 ## Project metadata
 
 `projects/NAME/PROJECT.md` is the human goal. `project.toml` has `roles`,
-repeatable `verify` command strings, optional `attributes`, `work_item_wait_resolution`, per-project `vcs`, and an optional `recorded_batches` table
+repeatable `verify` command strings, optional `attributes`, `work_item_wait_resolution`, per-project `vcs`, `acceptance`, and an optional `recorded_batches` table
 of operator-owned named custom batches. These are outside the workspace and
 are not exposed as writable model tools. Alter them as operator while paused.
+For local retained completion proof, the per-project acceptance policy is:
+
+```toml
+[acceptance]
+allow_nonempty_cache = false
+```
+
+`allow_nonempty_cache` is a strict boolean, default `false`; unknown keys and
+non-boolean values refuse project settings. With preserved verification caches,
+empty-input proofs may satisfy completion by default. Set `true` only to permit
+proofs produced with nonempty cache input as well. Emptiness is recorded from the
+validated cache at execution start (absent or empty configured root directories),
+not inferred from current cache state. Receipts retain the actual fingerprint
+and classification as immutable provenance. Local proof selection binds the exact
+code, ordered commands, execution, dependencies and pinned image independently
+of later cache mutation; execution sharing/reuse still binds exact cache input.
+Current unsafe/unbound inputs and corrupt evidence still fail closed. Old cache
+receipts without the classification remain auditable, not promoted or migrated.
+This setting does not relax CI acceptance scope. See [check jobs](check-jobs.md)
+for exact lookup, diagnostics and cache lifecycle.
+
 Verification command exit status alone does not prove semantic correctness,
 particularly when the repository's tests are editable. Use independent review
 and external acceptance fixtures for critical requirements.

@@ -1202,7 +1202,7 @@ class Context:
         if not self.project.verify:
             raise Denied("No operator acceptance commands are configured")
         from . import acceptance
-        bound = acceptance.scope(self.project)
+        bound = acceptance.scope(self.project, producer=True)
         if bound is not None and check_jobs.execution_key(self.config) != bound['execution']:
             bound = None  # A context cannot attest another execution config.
         self.close_exec()
@@ -1214,7 +1214,7 @@ class Context:
                   and [r["script"] for r in results] == list(self.project.verify))
         representable = not before["skipped"] and not after["skipped"]
         unchanged = before["code_digest"] == after["code_digest"]
-        dependencies_unchanged = bound is None or acceptance.scope(self.project) == bound
+        dependencies_unchanged = bound is None or acceptance.scope(self.project, producer=True) == bound
         self.verification = {"passed": passed and unchanged and representable and dependencies_unchanged,
                              "dependencies_unchanged": dependencies_unchanged,
                              "snapshot_representable": representable,
@@ -1223,6 +1223,8 @@ class Context:
                              "commands": [{"id": r["id"], "exit_code": r["exit_code"], "reason": r["reason"],
                                            "script": r["script"]} for r in results],
                              "run": self.run_dir.name, "created_at": now()}
+        if bound is not None and 'cache_input_empty' in bound:
+            self.verification.update({k: bound[k] for k in ('cache_input', 'cache_input_empty')})
         producer_record = dict(self.verification)
         if self.verification['passed'] and bound is not None and not self.tools_cancelled():
             producer_record['acceptance_scope'] = bound

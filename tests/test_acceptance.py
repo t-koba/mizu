@@ -1058,7 +1058,8 @@ class AcceptanceTests(Fixture):
                     self.assertEqual(self.project.status()['retained_verification'],
                                      {**proof, 'applicability': 'unassessed'})
                     fingerprint.assert_not_called()
-                    self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+                    effective = acceptance.effective(self.project, ctx.snapshot)
+                    self.assertEqual(effective, proof if function == 'cache_input' and value is not None else None)
                     if function == 'cache_input' and value is None:
                         queued = check_jobs.submit(self.context())
                         self.assertEqual(queued['status'], 'queued')
@@ -1153,7 +1154,7 @@ class AcceptanceTests(Fixture):
                     self.assertTrue(acceptance.read_job(self.project, queued['id'])['cache_binding_pending'])
                     with self.assertRaises(check_jobs.CacheOwned):
                         check_jobs.join(ctx, job['id'])
-                    with self.assertRaises(Denied):
+                    with self.assertRaisesRegex(Denied, 'verification: cache_owned'):
                         self.project.work_items.transition(item['id'], expected_rev=binding['rev'],
                             status='done', actor='worker', snapshot_id=ctx.snapshot['id'])
                     custom = check_jobs.submit(ctx, script='true')
@@ -1206,7 +1207,7 @@ class AcceptanceTests(Fixture):
         with self.assertRaises(TypeError):
             acceptance.scope(self.project, _cache_locked=True)
 
-    def test_cache_input_binds_retained_lookup_but_not_live_cache_on_import(self):
+    def test_cache_input_is_provenance_not_retained_lookup_identity(self):
         cache = self.configure_cache()
         ctx, job, proof = self.produce()
         receipt = acceptance.get(self.project.root, proof['receipt_id'])
@@ -1215,12 +1216,12 @@ class AcceptanceTests(Fixture):
         self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
         cache.mkdir(parents=True)
         (cache / 'object').write_text('different input')
-        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
         later = self.context()
         imported = check_jobs.result(later, job['id'])
         self.assertTrue(imported['accepted_for_current_source'])
         self.assertEqual(later.verification['cache_input'], original['cache_input'])
-        # The old receipt remains auditable but cannot attest the new inputs.
+        # Provenance remains the actual producer input, not the current cache.
         self.assertEqual(acceptance.get(self.project.root, proof['receipt_id']), receipt)
         self.assertEqual(acceptance.audit(self.project.root), 1)
 
@@ -1280,7 +1281,7 @@ class AcceptanceTests(Fixture):
                 worker.join(10)
         self.assertFalse(worker.is_alive())
         self.assertTrue(mutated.is_set())
-        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
 
     def test_no_cache_scope_and_selection_need_no_cache_lock_or_fingerprint(self):
         ctx, job, proof = self.produce()
@@ -1300,18 +1301,25 @@ class AcceptanceTests(Fixture):
         cache = self.configure_cache()
         cache.mkdir(parents=True)
         (cache / 'object').write_text('one')
+        self.project.settings['acceptance'] = {'allow_nonempty_cache': True}
         ctx, job, proof = self.produce()
         self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
         self.assertEqual(check_jobs.submit(self.context())['shared_job'], job['id'])
         (cache / 'object').write_text('two')
-        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
         new = check_jobs.submit(self.context())
         self.assertNotIn('shared_job', new)
         self.assertEqual(self.run_job()['status'], 'completed')
         new_proof = acceptance.effective(self.project, ctx.snapshot)
-        self.assertNotEqual(new_proof['receipt_id'], proof['receipt_id'])
+        self.assertEqual(new_proof, proof)  # First-writer index, not latest verdict.
+        original = check_jobs.raw_read(self.project, new['id'])
+        own = acceptance.get(self.project.root, original['acceptance_receipt_id'])
+        self.assertNotEqual(own['scope']['cache_input'],
+                            acceptance.get(self.project.root, proof['receipt_id'])['scope']['cache_input'])
+        acceptance.recover_job(self.project, new['id'])
+        self.assertEqual(acceptance.audit(self.project.root), 2)
 
-    def test_mutated_cache_proof_is_importable_but_not_reusable_for_output(self):
+    def test_empty_input_proof_survives_own_cache_mutation_without_execution_reuse(self):
         cache = self.configure_cache()
         ctx = self.context()
         job = check_jobs.submit(ctx)
@@ -1326,7 +1334,16 @@ class AcceptanceTests(Fixture):
         receipt = acceptance.get(self.project.root, original['acceptance_receipt_id'])
         self.assertEqual(receipt['scope']['cache_input'], before)
         self.assertNotEqual(acceptance.scope(self.project)['cache_input'], before)
-        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertTrue(receipt['scope']['cache_input_empty'])
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot)['receipt_id'],
+                         original['acceptance_receipt_id'])
+        item = self.project.work_items.create(actor='worker', idempotency_key='compiled-proof',
+            title='Complete the cache-producing snapshot', scope='Retained acceptance')['record']['work_item']
+        binding = bind_delivery(self.project, item['id'], ctx.snapshot['id'])
+        completed = self.project.work_items.transition(item['id'], expected_rev=binding['rev'],
+            status='done', actor='worker', snapshot_id=ctx.snapshot['id'])
+        self.assertEqual(completed['verification']['receipt_id'],
+                         original['acceptance_receipt_id'])
         self.assertEqual((cache / 'object').read_text(), 'compiled')
         imported = check_jobs.result(ctx, job['id'])
         self.assertTrue(imported['accepted_for_current_source'])
@@ -1343,6 +1360,7 @@ class AcceptanceTests(Fixture):
         raw = check_jobs.read(self.project, job['id'])
         legacy = dict(raw['acceptance_scope'])
         legacy.pop('cache_input')
+        legacy.pop('cache_input_empty')
         record = json.loads((check_jobs.root(self.project) / job['id'] / 'result.json').read_bytes())
         legacy_id = acceptance.retain(self.project, record, legacy,
             producer={'kind': 'check_verify', 'id': job['id'], 'run': ctx.run_dir.name})
@@ -1359,7 +1377,15 @@ class AcceptanceTests(Fixture):
         (cache / 'object').write_text('too big')
         self.configure(check_input_bytes=1)
         self.assertIsNone(acceptance.scope(self.project))
-        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        self.assertEqual(acceptance.effective_projection(self.project, ctx.snapshot),
+                         (None, {'status': 'uncomputable', 'reason': 'cache_input_unbound'}))
+        item = self.project.work_items.create(actor='worker', idempotency_key='unbound-cache-refusal',
+            title='Refuse uncomputable cache input')['record']['work_item']
+        binding = bind_delivery(self.project, item['id'], ctx.snapshot['id'])
+        with self.assertRaisesRegex(Denied, 'verification: cache_input_unbound'):
+            ctx.handle('work_items_transition', {'id': item['id'], 'expected_rev': binding['rev'],
+                'status': 'done', 'snapshot_id': ctx.snapshot['id']})
+        self.assertEqual(self.project.work_items.get(item['id']), binding)
         self.assertTrue(check_jobs.result(ctx, job['id'])['accepted_for_current_source'])
         self.assertIsNotNone(acceptance.get(self.project.root, proof['receipt_id']))
         self.configure(check_input_bytes=8589934592)
@@ -1381,3 +1407,160 @@ class AcceptanceTests(Fixture):
         for bad in (None, 'invalid', 2):
             with self.subTest(bad=bad), self.assertRaises(Denied):
                 acceptance._scope({**bound, 'cache_input': bad})
+
+    def test_nonempty_input_policy_uses_execution_start_not_enqueue_or_current_cache(self):
+        cache = self.configure_cache()
+        ctx = self.context()
+        job = check_jobs.submit(ctx)  # Cache is absent at enqueue.
+        cache.mkdir(parents=True)
+        (cache / 'object').write_text('producer input')
+        with check_jobs.cache_guard(self.project):
+            before = check_jobs.cache_input(self.project)
+
+        class Cleaner(FakeSandbox):
+            def execute(inner, workspace, script, **kwargs):
+                (workspace / 'target/object').unlink()
+                return super().execute(workspace, script, **kwargs)
+
+        self.assertTrue(self.run_job(Cleaner)['passed'])
+        raw = check_jobs.raw_read(self.project, job['id'])
+        receipt = acceptance.get(self.project.root, raw['acceptance_receipt_id'])
+        self.assertEqual(receipt['scope']['cache_input'], before)
+        self.assertIs(receipt['scope']['cache_input_empty'], False)
+        proof, diagnostic = acceptance.effective_projection(self.project, ctx.snapshot)
+        self.assertIsNone(proof)
+        self.assertEqual(diagnostic, {'status': 'inapplicable', 'reason': 'nonempty_cache_input',
+            'allow_nonempty_cache': False, 'receipt_id': raw['acceptance_receipt_id']})
+        self.assertEqual(list(cache.iterdir()), [])  # Current emptiness cannot promote it.
+        item = self.project.work_items.create(actor='worker', idempotency_key='cache-policy-refusal',
+            title='Require eligible cache provenance')['record']['work_item']
+        binding = bind_delivery(self.project, item['id'], ctx.snapshot['id'])
+        request = {'id': item['id'], 'expected_rev': binding['rev'],
+                   'status': 'done', 'snapshot_id': ctx.snapshot['id']}
+        with self.assertRaisesRegex(Denied, r'nonempty_cache_input \(allow_nonempty_cache=false\)'):
+            ctx.handle('work_items_transition', request)
+        self.assertEqual(self.project.work_items.get(item['id']), binding)
+        self.project.settings['acceptance'] = {'allow_nonempty_cache': True}
+        self.assertEqual(acceptance.effective(self.project, ctx.snapshot)['receipt_id'], raw['acceptance_receipt_id'])
+        completed = ctx.handle('work_items_transition', request)
+        self.assertEqual(completed['status'], 'done')
+        self.assertEqual(completed['verification']['receipt_id'], raw['acceptance_receipt_id'])
+        self.project.settings['acceptance']['allow_nonempty_cache'] = False
+        self.assertIsNone(acceptance.effective(self.project, ctx.snapshot))
+        # A later empty-input producer gets its own slot, independent of the
+        # rejected nonempty first writer. Its proof survives output mutation.
+        check_jobs.submit(ctx, fresh=True)
+        self.assertTrue(self.run_job()['passed'])
+        selected = acceptance.effective(self.project, ctx.snapshot)
+        self.assertIsNotNone(selected)
+        self.assertNotEqual(selected['receipt_id'], raw['acceptance_receipt_id'])
+        self.assertEqual(acceptance.audit(self.project.root), 2)
+
+    def test_cache_classification_is_bound_with_fingerprint_and_validated(self):
+        cache = self.configure_cache()
+        for shape, empty in (('absent', True), ('directory', True), ('nested', False), ('file', False)):
+            with self.subTest(shape=shape):
+                if cache.exists():
+                    shutil.rmtree(cache)
+                if shape != 'absent':
+                    cache.mkdir(parents=True)
+                if shape == 'nested':
+                    (cache / 'nested').mkdir()
+                if shape == 'file':
+                    (cache / 'zero-bytes').touch()
+                state = {}
+                with check_jobs.cache_guard(self.project):
+                    self.assertIsNotNone(check_jobs.cache_input(self.project, state=state))
+                self.assertIs(state['empty'], empty)
+        shutil.rmtree(cache)
+        ctx, job, proof = self.produce()
+        raw = check_jobs.raw_read(self.project, job['id'])
+        record = json.loads((check_jobs.root(self.project) / job['id'] / 'result.json').read_bytes())
+        for bad in (None, 1, 'true', False):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                acceptance.normalize({**record, 'cache_input_empty': bad}, raw['acceptance_scope'],
+                    producer={'kind': 'check_verify', 'id': job['id'], 'run': ctx.run_dir.name})
+        raw['cache_input_empty'] = False
+        write_json(check_jobs.root(self.project) / job['id'] / 'job.json', raw)
+        with self.assertRaises(acceptance.InvalidProducer):
+            acceptance.recover_job(self.project, job['id'])
+        with self.subTest(malformed_job='classification_without_cache'):
+            malformed = dict(raw)
+            malformed.pop('cache_input')
+            write_json(check_jobs.root(self.project) / job['id'] / 'job.json', malformed)
+            with self.assertRaises(acceptance.InvalidProducer):
+                acceptance.read_job(self.project, job['id'])
+        with self.subTest(malformed_job='classification_on_experiment'):
+            malformed = dict(raw, kind='experiment')
+            malformed.pop('cache_request', None)
+            write_json(check_jobs.root(self.project) / job['id'] / 'job.json', malformed)
+            with self.assertRaises(acceptance.InvalidProducer):
+                acceptance.read_job(self.project, job['id'])
+        write_json(check_jobs.root(self.project) / job['id'] / 'job.json', raw)
+        # A tampered immutable object cannot change policy eligibility either.
+        value = acceptance.get(self.project.root, proof['receipt_id'])
+        value['scope']['cache_input_empty'] = False
+        write_json(self.object_path(proof['receipt_id']), value)
+        with self.assertRaises(Denied):
+            acceptance.audit(self.project.root)
+
+    def test_legacy_cache_bound_receipt_is_auditable_but_not_promoted(self):
+        self.configure_cache()
+        ctx, job, proof = self.produce()
+        raw = check_jobs.raw_read(self.project, job['id'])
+        bound = dict(raw['acceptance_scope'])
+        bound.pop('cache_input_empty')
+        record = json.loads((check_jobs.root(self.project) / job['id'] / 'result.json').read_bytes())
+        legacy_id = acceptance.retain(self.project, record, bound,
+            producer={'kind': 'check_verify', 'id': job['id'], 'run': ctx.run_dir.name})
+        (self.project.root / acceptance._index(self.project.root, raw['code_digest'], raw['acceptance_scope'])).unlink()
+        self.project.settings['acceptance'] = {'allow_nonempty_cache': True}
+        before = self.object_path(legacy_id).read_bytes()
+        selected, diagnostic = acceptance.effective_projection(self.project, ctx.snapshot)
+        self.assertIsNone(selected)
+        self.assertEqual(diagnostic['reason'], 'cache_input_unclassified')
+        acceptance.recover(self.project.root)
+        self.assertEqual(self.object_path(legacy_id).read_bytes(), before)
+        self.assertIsNotNone(acceptance.get(self.project.root, legacy_id))
+        self.assertEqual(acceptance.audit(self.project.root), 2)
+
+    def test_project_cache_acceptance_policy_validation(self):
+        from mizu.errors import ConfigError
+        from mizu.project import check_project_settings
+        for policy in ({}, {'allow_nonempty_cache': False}, {'allow_nonempty_cache': True}):
+            check_project_settings({'acceptance': policy})
+        for policy in (True, [], {'unknown': True}, {'allow_nonempty_cache': 1},
+                       {'allow_nonempty_cache': 'true'}, {'allow_nonempty_cache': None}):
+            with self.subTest(policy=policy), self.assertRaisesRegex(ConfigError, 'project.acceptance'):
+                check_project_settings({'acceptance': policy})
+        path = self.project.root / 'project.toml'
+        path.write_text('roles = ["worker"]\nverify = ["true"]\n[acceptance]\nallow_nonempty_cache = true\n')
+        self.project.refresh_settings()
+        self.assertIs(self.project.settings['acceptance']['allow_nonempty_cache'], True)
+        path.write_text('roles = ["worker"]\nverify = ["true"]\n')
+        self.project.refresh_settings()
+        self.assertFalse(self.project.settings.get('acceptance', {}).get('allow_nonempty_cache', False))
+
+    def test_sync_cache_receipt_records_start_classification_and_policy(self):
+        cache = self.configure_cache()
+        self.configure(detached=False)
+        for nonempty in (False, True):
+            with self.subTest(nonempty=nonempty):
+                if nonempty:
+                    cache.mkdir(parents=True)
+                    (cache / 'object').write_text('input')
+                    # Different ordered commands give an independent proof slot.
+                    self.project.verify = ('another command',)
+                ctx = self.context()
+                with patch.object(ctx.sandbox, 'execute', side_effect=lambda w, s, **kw:
+                        FakeSandbox(None, None, None, None).execute(w, s)):
+                    self.assertTrue(ctx._op_verify({})['passed'])
+                receipt_id = acceptance.recover_run(self.project, ctx.run_dir.name)
+                receipt = acceptance.get(self.project.root, receipt_id)
+                self.assertIs(receipt['scope']['cache_input_empty'], not nonempty)
+                proof, diagnostic = acceptance.effective_projection(self.project, ctx.snapshot)
+                if nonempty:
+                    self.assertIsNone(proof)
+                    self.assertEqual(diagnostic['reason'], 'nonempty_cache_input')
+                else:
+                    self.assertEqual(proof['receipt_id'], receipt_id)

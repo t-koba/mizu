@@ -244,10 +244,10 @@ wait: full and delta prompt `published_snapshot` headers expose null
 `effective_verification` and a separate `effective_verification_diagnostic` of
 `{status: "uncomputable", reason: "cache_owned", owner_job: null}`. Null owner
 means unknown, not an assertion about which job owns the lock; this diagnostic
-is not proof or authority. The diagnostic is null when lookup is computable.
+is not proof or authority. Other bounded cache-input/policy diagnostics are described under retained acceptance below.
 Historical snapshot `verification` remains unchanged and distinct. Selection
-and completion cannot use a stale retained receipt. After the lock is released,
-a retry recomputes the exact current cache input; unsafe paths, malformed
+and completion cannot use unvalidated inputs. After the lock is released,
+a retry validates the current cache; unsafe paths, malformed
 evidence and I/O errors still fail closed rather than becoming a busy diagnosis.
 Read-only project status instead reports retained evidence with applicability
 unassessed: it never takes this lock or fingerprints mounts/cache inputs, even
@@ -411,8 +411,12 @@ following symlinks/reparse points, then fingerprints the clean cache before runn
 A reset or clean-rebind failure explicitly refuses the job without acceptance.
 The runner fingerprints the configured cache under the same exclusive lock
 immediately before moving any cache tree into frozen source and atomically
-persists the execution-start value in the running job (`cache_input`) and
-sharing key before staging. Only the validated version 1 pending marker permits
+persists the execution-start fingerprint (`cache_input`) and classification
+(`cache_input_empty`) in the running job before staging. The fingerprint also
+binds the sharing key. Empty means every configured cache root is absent or an
+empty directory; any child, including a zero-byte file or empty nested directory,
+is nonempty. Classification comes from the same validated traversal as the
+fingerprint, never from enqueue-time state or post-execution outputs. Only the validated version 1 pending marker permits
 missing enqueue-time binding; legacy missing-binding records are refused. A
 started execution is interrupted, not rebound, on runner recovery. Results and acceptance scopes bind the execution input.
 The execution-long lock, cache-free checks and custom experiments retain their
@@ -437,12 +441,34 @@ of at most 256 characters. Absolute paths and raw filesystem exceptions are neve
 included in these diagnostics. Reset shares the existing portable filesystem trust
 boundary: POSIX pins parent components; the portable fallback checks parents and
 uses no-follow deletion while commands are quiescent under exclusive ownership.
-Later discovery, joining, submission and retained-acceptance lookup still compare
-the current cache fingerprint with the recorded execution input under `check-cache.lock`,
+Later execution discovery, joining and submission still compare the current
+cache fingerprint with the recorded execution input under `check-cache.lock`,
 never with `cache_output`: changed inputs require a new execution, not reuse of
-the old proof. Old jobs or receipts lacking `cache_input` remain auditable, but
-cannot match when verification caches are configured. No-cache scopes retain
-their existing form. Experiments, including cache-backed custom scratch, never
+old outputs. Retained local completion proof is different: lookup binds exact
+code, ordered commands, execution, observed dependencies and pinned image, not
+the current cache fingerprint. A successful empty-input verification therefore
+stays selectable after its own commands populate the cache. The producer's
+actual `cache_input` and `cache_input_empty` remain immutable receipt provenance.
+
+The operator-owned project setting `[acceptance] allow_nonempty_cache` defaults
+to `false`: only empty-input cache proofs may satisfy completion. Setting it to
+`true` also permits nonempty-input proofs. Each class has a separate immutable
+first-writer index, so a nonempty producer cannot block a later empty-input
+proof. Selection tries empty first, then nonempty, with fixed exact-index reads,
+not a producer/history scan. Later producers keep their own exact provenance
+receipts even when the class index already selects an earlier producer.
+Changing policy never rewrites or promotes a receipt. A rejected nonempty proof
+returns a bounded diagnostic `{status: "inapplicable", reason:
+"nonempty_cache_input", allow_nonempty_cache: false, receipt_id}`. A work-item
+completion refusal appends only the fixed reason token (for example,
+`nonempty_cache_input (allow_nonempty_cache=false)`); arbitrary diagnostic data is
+never echoed. An exact legacy cache-bound index without execution-start classification can report
+`cache_input_unclassified`; such receipts remain auditable but cannot satisfy
+this cache policy, even with opt-in. No legacy history is scanned or migrated.
+Unbound current cache validation reports `{status: "uncomputable", reason:
+"cache_input_unbound"}`; unsafe evidence and store I/O still fail closed.
+CI acceptance retains its exact cache-bound scope and policy semantics; this
+local policy does not broaden CI. No-cache scopes retain their existing form. Experiments, including cache-backed custom scratch, never
 mint configured verification acceptance.
 
 Development and CI can use `python scripts/check.py --fail-fast` to report a
@@ -496,10 +522,11 @@ unrepresentable check can mint a passing receipt.
 
 The existing `sandbox.check_reuse` input-binding mechanism supplies the scope:
 full configured acceptance commands (not command previews), execution-key digest,
-observed dependency fingerprint, configured verification cache-input fingerprint
-(when present), and pinned image. An unbound environment (`None`),
-network-enabled execution or mutable image is not reusable evidence. No new
-policy switch is introduced. Scope is bounded to 512 KiB of canonical JSON;
+observed dependency fingerprint and pinned image. Configured verification
+cache inputs and their execution-start classification are retained as local
+producer provenance; the class and project acceptance policy govern completion
+as described above. An unbound environment (`None`), network-enabled execution
+or mutable image is not reusable evidence. Scope is bounded to 512 KiB of canonical JSON;
 scopes that cannot fit are nonreusable. Each normalized receipt is at most 1 MiB,
 contains only source/scope, producer identity and successful command outcomes,
 and retains **no stdout, stderr or command-log bodies**. Existing producer
@@ -636,8 +663,9 @@ Full and delta prompt `published_snapshot` headers still compute
 `effective_verification`: `null`, or `{passed: true, code_digest,
 source: "retained_acceptance", receipt_id}` for a representable tree and the
 current exact configured scope, plus the separate diagnostic described above.
-Execution/reuse, selector work inputs and completion likewise still fingerprint
-fresh inputs and fail closed on changes or unavailable inputs. Work inputs keep
+Execution/reuse still requires the exact fresh cache fingerprint. Selector work
+inputs and completion validate fresh dependencies and cache safety, but select
+local proof independently of cache mutation under the project acceptance policy. Work inputs keep
 their publication-time `verified` verdict separate from `retained_verification`
 (the exact effective reference, unlike the unassessed status summary).
 These projections never rewrite manifests or import current-workspace proof.

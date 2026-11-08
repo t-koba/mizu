@@ -217,6 +217,7 @@ class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  blocked_max_age_seconds=604800,
+                 effective_verification_projection=None,
                  publication_evidence: PublicationEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
@@ -225,6 +226,9 @@ class WorkItems:
                                      else PublicationEvidence())
         self.record_kinds = record_kinds or {}
         self.effective_verification = effective_verification
+        # Optional proof+diagnostic callback; legacy proof-only callers keep
+        # their existing contract. The selected callback runs once per attempt.
+        self.effective_verification_projection = effective_verification_projection
         self.doing_limit, self.doing_limits = doing_limit, dict(doing_limits or {})
         self.stale_seconds = stale_seconds
         if type(blocked_max_age_seconds) is not int or not 1 <= blocked_max_age_seconds <= TOML_INTEGER_MAX:
@@ -3218,10 +3222,27 @@ class WorkItems:
                 if (current["status"] == "dropped" or not isinstance(verification, dict)
                         or verification.get("passed") is not True
                         or verification.get("code_digest") != snapshot["code_digest"]):
-                    verification = (self.effective_verification(snapshot)
-                                    if self.effective_verification is not None else None)
+                    diagnostic = None
+                    if self.effective_verification is not None:
+                        # Explicit proof-only callbacks remain authoritative for
+                        # standalone callers and existing project integrations.
+                        verification = self.effective_verification(snapshot)
+                    elif self.effective_verification_projection is not None:
+                        verification, diagnostic = self.effective_verification_projection(snapshot)
+                    else:
+                        verification = None
                     if not isinstance(verification, dict):
-                        raise Denied("Completion snapshot must have passing digest-bound verification")
+                        message = "Completion snapshot must have passing digest-bound verification"
+                        # Emit only fixed reason tokens, never receipt contents,
+                        # paths, or arbitrary diagnostic text from a callback.
+                        if isinstance(diagnostic, dict):
+                            reason = diagnostic.get("reason")
+                            if reason in ("nonempty_cache_input", "cache_input_unbound",
+                                          "cache_input_unclassified", "cache_owned"):
+                                message += f": {reason}"
+                                if reason == "nonempty_cache_input" and diagnostic.get("allow_nonempty_cache") is False:
+                                    message += " (allow_nonempty_cache=false)"
+                        raise Denied(message)
                     from .acceptance import get
                     receipt = get(self.root, verification.get("receipt_id"))
                     verification_scope = digest(canonical(receipt["scope"]))

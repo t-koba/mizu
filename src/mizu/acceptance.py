@@ -85,7 +85,7 @@ def read_job(project, job_id):
                'purpose')
     identities = ('code_digest', 'execution', 'environment', 'cache_input', 'shared_key',
                   'shared_job', 'replaced_by', 'acceptance_receipt_id', 'cache_request')
-    flags = ('acknowledged', 'detached', 'passed')
+    flags = ('acknowledged', 'detached', 'passed', 'cache_input_empty')
     if (not isinstance(job, dict) or job.get('id') != job_id
             or any(k in job and not isinstance(job[k], str) for k in strings)
             or any(k in job and job[k] is not None and not _digest(job[k]) for k in identities)
@@ -93,6 +93,9 @@ def read_job(project, job_id):
             or not isinstance(job.get('commands', []), list)
             or len(job.get('commands', [])) > 32
             or any(not isinstance(c, str) for c in job.get('commands', []))):
+        raise InvalidProducer(job_id, 'job_schema')
+    if ('cache_input_empty' in job
+            and (job.get('kind') != 'verify' or not _digest(job.get('cache_input')))):
         raise InvalidProducer(job_id, 'job_schema')
     if not valid_cache_diagnostics(job.get('cache_diagnostics', [])):
         raise InvalidProducer(job_id, 'job_schema')
@@ -103,7 +106,8 @@ def read_job(project, job_id):
     if ('cache_binding_pending' in job
             and (type(job['cache_binding_pending']) is not int or job['cache_binding_pending'] != 1 or not _digest(job.get('cache_request')) or job.get('kind') != 'verify'
                  or not project.config.sandbox.check_cache_paths
-                 or 'cache_input' in job or 'shared_key' in job or job.get('shared_job')
+                 or 'cache_input' in job or 'cache_input_empty' in job
+                 or 'shared_key' in job or job.get('shared_job')
                  or job.get('acceptance_scope') is not None or job.get('acceptance_receipt_id') is not None
                  or job.get('status') not in ('queued', 'refused', 'cancelled', 'interrupted'))):
         raise InvalidProducer(job_id, 'job_schema')
@@ -181,7 +185,7 @@ def _inspect_evidence(project, job):
     if (not isinstance(bound, dict) or job.get('shared_job') or job.get('kind') != 'verify'
             or job.get('status') != 'completed' or job.get('passed') is not True
             or _present(project.root, f'check-jobs/{job_id}/cancel.json')
-            or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment', 'cache_input'))):
+            or any(bound.get(k) != job.get(k) for k in ('commands', 'execution', 'environment', 'cache_input', 'cache_input_empty'))):
         raise InvalidProducer(job_id, 'job_integrity')
     try:
         _scope(bound)
@@ -234,7 +238,7 @@ def discover(project):
                 if original is None:
                     invalid[job_id] = 'job_subscription'
                     continue
-                for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'shared_key', 'cache_diagnostics'):
+                for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'cache_input_empty', 'shared_key', 'cache_diagnostics'):
                     if key in original:
                         job[key] = original[key]
             elif job.get('detached'):
@@ -279,13 +283,13 @@ def _read(root, relative, maximum=MAX_BYTES):
         raise Denied('Malformed acceptance evidence') from exc
 
 
-def scope(project):
+def scope(project, *, producer=False):
     from .check_jobs import cache_guard
     with cache_guard(project, blocking=False):
-        return _current_scope(project)
+        return _current_scope(project, producer=producer)
 
 
-def _current_scope(project):
+def _current_scope(project, *, producer=False, diagnostic=None):
     """Build a scope with cache_guard already held; never reacquire it."""
     from .check_jobs import environment, execution_key, cache_input
     if not project.verify:
@@ -296,10 +300,15 @@ def _current_scope(project):
     value = {'commands': list(project.verify), 'execution': execution_key(project.config),
              'environment': env, 'image': project.config.sandbox.image}
     if project.config.sandbox.check_cache_paths:
-        current = cache_input(project)
+        state = {}
+        current = cache_input(project, state=state) if producer else cache_input(project)
         if current is None:
+            if diagnostic is not None:
+                diagnostic.update(status='uncomputable', reason='cache_input_unbound')
             return None
         value['cache_input'] = current
+        if producer:
+            value['cache_input_empty'] = state['empty']
     try:
         _scope(value)
     except Denied:
@@ -322,8 +331,10 @@ def _scope(value):
             raise Denied('Acceptance scope exceeds receipt bound')
         return digest(canonical(value))
     if (not isinstance(value, dict) or set(value) not in ({'commands', 'execution', 'environment', 'image'},
-                                                         {'commands', 'execution', 'environment', 'image', 'cache_input'})
+                                                         {'commands', 'execution', 'environment', 'image', 'cache_input'},
+                                                         {'commands', 'execution', 'environment', 'image', 'cache_input', 'cache_input_empty'})
             or 'cache_input' in value and not _digest(value['cache_input'])
+            or 'cache_input_empty' in value and type(value['cache_input_empty']) is not bool
             or not _digest(value['execution']) or not _digest(value['environment'])
             or not isinstance(value['image'], str)
             or not re.fullmatch(r'(?:.*@)?sha256:[a-f0-9]{64}', value['image'])
@@ -355,6 +366,10 @@ def normalize(record, bound, *, producer):
             or record.get('run') != producer['run']
             or (producer['kind'] == 'check_verify' and record.get('job') != producer['id'])):
         raise Denied('Invalid acceptance producer identity')
+    if 'cache_input_empty' in bound and (record.get('cache_input') != bound['cache_input']
+            or type(record.get('cache_input_empty')) is not bool
+            or record['cache_input_empty'] != bound['cache_input_empty']):
+        raise Denied('Invalid acceptance cache input provenance')
     commands = record.get('commands')
     if (not isinstance(commands, list) or len(commands) != len(bound['commands'])
             or any(not isinstance(c, dict) or c.get('reason') != 'exited'
@@ -383,7 +398,8 @@ def _validate(value, receipt_id):
         raise Denied('Invalid acceptance receipt identity')
     record = {**value, 'snapshot_representable': True, 'unchanged_during_verification': True,
               'dependencies_unchanged': True, 'image': value['scope'].get('image'),
-              'run': value['producer'].get('run'), 'job': value['producer'].get('id')}
+              'run': value['producer'].get('run'), 'job': value['producer'].get('id'),
+              **{k: value['scope'][k] for k in ('cache_input', 'cache_input_empty') if k in value['scope']}}
     if normalize(record, value['scope'], producer=value['producer']) != value:
         raise Denied('Invalid acceptance receipt')
     return value
@@ -400,10 +416,22 @@ def get(root, receipt_id):
     return value
 
 
+def _proof_scope(bound):
+    """Local cache provenance is immutable, but not completion identity.
+
+    The execution-start classification gives two fixed lookup slots. Legacy
+    cache-bound receipts and CI keep their exact scopes and remain auditable.
+    """
+    _scope(bound)
+    if 'ci' not in bound and 'cache_input_empty' in bound:
+        bound = {k: v for k, v in bound.items() if k != 'cache_input'}
+    return digest(canonical(bound))
+
+
 def _index(root, code, bound):
     if not _digest(code):
         raise Denied('Invalid acceptance source digest')
-    return f'{_BASE}/index/{code}/{_scope(bound)}.json'
+    return f'{_BASE}/index/{code}/{_proof_scope(bound)}.json'
 
 
 def _selected(root, name, code, bound=None):
@@ -411,8 +439,8 @@ def _selected(root, name, code, bound=None):
     if not isinstance(value, dict) or set(value) != {'schema', 'receipt_id'} or type(value['schema']) is not int or value['schema'] != 1:
         raise Denied('Invalid acceptance index')
     receipt = get(root, value['receipt_id'])
-    if (receipt['code_digest'] != code or _scope(receipt['scope']) != Path(name).stem
-            or bound is not None and receipt['scope'] != bound):
+    if (receipt['code_digest'] != code or _proof_scope(receipt['scope']) != Path(name).stem
+            or bound is not None and _proof_scope(receipt['scope']) != _proof_scope(bound)):
         raise Denied('Acceptance index scope mismatch')
     return value['receipt_id']
 
@@ -438,7 +466,10 @@ def _retain(root, value):
             atomic_write(target, canonical(value), exclusive=True)
         # Object is durable before index. A retry repairs this crash window.
         if (root / name).exists() or (root / name).is_symlink():
-            return _selected(root, name, value['code_digest'], value['scope'])
+            selected = _selected(root, name, value['code_digest'], value['scope'])
+            # A class index may select another input. Pin this producer's
+            # exact provenance, not the selected producer's scope, in its job.
+            return receipt_id if 'cache_input_empty' in value['scope'] else selected
         atomic_write(root / name, canonical({'schema': 1, 'receipt_id': receipt_id}), exclusive=True)
     return receipt_id
 
@@ -477,24 +508,46 @@ def effective_projection(project, snapshot):
     if snapshot.get("skipped"):
         return None, None
     from .check_jobs import CacheOwned, cache_guard
-    # Keep the observed cache input stable through final receipt selection.
+    # Validate cache safety under exclusion; only CI selection binds its
+    # current fingerprint. Local selection uses execution-start provenance.
     try:
         with cache_guard(project, blocking=False):
-            bound = _current_scope(project)
+            diagnostic = {}
+            bound = _current_scope(project, diagnostic=diagnostic)
             if bound is None:
-                return None, None
-            name = _index(project.root, snapshot['code_digest'], bound)
-            if not _present(project.root, name):
-                from .ci_acceptance import bound as ci_bound
-                bound = ci_bound(project, snapshot, bound)
-                if bound is None:
-                    return None, None
-                name = _index(project.root, snapshot['code_digest'], bound)
+                return None, diagnostic or None
+            diagnostic = None
+            candidates = [bound]
+            if 'cache_input' in bound:
+                candidates = [{**bound, 'cache_input_empty': empty} for empty in (True, False)]
+            allow = project.settings.get('acceptance', {}).get('allow_nonempty_cache', False)
+            for candidate in candidates:
+                name = _index(project.root, snapshot['code_digest'], candidate)
                 if not _present(project.root, name):
-                    return None, None
-            receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
-            return ({'passed': True, 'code_digest': snapshot['code_digest'],
-                     'source': 'retained_acceptance', 'receipt_id': receipt_id}, None)
+                    continue
+                receipt_id = _selected(project.root, name, snapshot['code_digest'], candidate)
+                if candidate.get('cache_input_empty') is False and not allow:
+                    diagnostic = {'status': 'inapplicable', 'reason': 'nonempty_cache_input',
+                                  'allow_nonempty_cache': False, 'receipt_id': receipt_id}
+                    continue
+                return ({'passed': True, 'code_digest': snapshot['code_digest'],
+                         'source': 'retained_acceptance', 'receipt_id': receipt_id}, None)
+            if 'cache_input' in bound and diagnostic is None:
+                name = _index(project.root, snapshot['code_digest'], bound)
+                if _present(project.root, name):
+                    receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
+                    diagnostic = {'status': 'inapplicable', 'reason': 'cache_input_unclassified',
+                                  'receipt_id': receipt_id}
+            # CI remains bound to the exact current scope, including cache input.
+            from .ci_acceptance import bound as ci_bound
+            bound = ci_bound(project, snapshot, bound)
+            if bound is not None:
+                name = _index(project.root, snapshot['code_digest'], bound)
+                if _present(project.root, name):
+                    receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
+                    return ({'passed': True, 'code_digest': snapshot['code_digest'],
+                             'source': 'retained_acceptance', 'receipt_id': receipt_id}, None)
+            return None, diagnostic
     except CacheOwned:
         return None, {'status': 'uncomputable', 'reason': 'cache_owned', 'owner_job': None}
 

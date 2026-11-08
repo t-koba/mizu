@@ -146,7 +146,7 @@ class Project:
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
                                     record_kinds=config.record_kinds,
                                     publication_evidence=config.publication_evidence,
-                                    effective_verification=self.effective_verification,
+                                    effective_verification_projection=self.effective_verification_projection,
                                     doing_limit=config.limits.work_items_doing,
                                     doing_limits={name: role.work_items_doing for name, role in config.roles.items()
                                                   if role.work_items_doing is not None},
@@ -264,9 +264,12 @@ class Project:
                 continue
         return reset
 
+    def effective_verification_projection(self, snapshot):
+        from .acceptance import effective_projection
+        return effective_projection(self, snapshot)
+
     def effective_verification(self, snapshot):
-        from .acceptance import effective
-        return effective(self, snapshot)
+        return self.effective_verification_projection(snapshot)[0]
 
     def backpressure(self, *, open_count=_UNSET) -> dict:
         """Report configured producer/open-work congestion and current load.
@@ -529,13 +532,18 @@ def check_recorded_batches(value) -> dict[str, tuple[str, ...]]:
 def check_project_settings(
         settings) -> tuple[list[str], tuple[str, ...], dict[str, tuple[str, ...]], dict | None]:
     """Validate the complete operator-owned project.toml schema in one place."""
-    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs", "ci_acceptance", "work_item_wait_resolution"}, "project")
+    keys(settings, {"roles", "verify", "attributes", "recorded_batches", "vcs",
+                    "ci_acceptance", "acceptance", "work_item_wait_resolution"}, "project")
     if settings.get("work_item_wait_resolution", "reopen") not in ("reopen", "manual"):
         raise ConfigError("project.work_item_wait_resolution must be reopen or manual")
     from .selection import attributes
     attributes(settings.get("attributes", {}))
     roles = strings(settings.get("roles", []), "project.roles")
     verify = check_verify(settings.get("verify", []))
+    acceptance = settings.get("acceptance", {})
+    keys(acceptance, {"allow_nonempty_cache"}, "project.acceptance")
+    if type(acceptance.get("allow_nonempty_cache", False)) is not bool:
+        raise ConfigError("project.acceptance.allow_nonempty_cache must be boolean")
     from .ci_acceptance import configured
     configured(settings, verify)
     recorded_batches = check_recorded_batches(settings.get("recorded_batches"))
