@@ -134,11 +134,13 @@ partial; absence from the tables is not evidence that a value is not a decision.
 Expressions are inventoried without evaluating source. The call detector covers
 local arithmetic only when it appears in a selected bound-bearing keyword; the
 separate timed-wait table covers numeric positional arguments to selected
-`wait`/`sleep` calls. These tests still do not lint arbitrary numeric literals,
-alias-only values, nested assignments, symbolic non-`range` loop bounds,
-positional arguments outside that timed-wait set, or call keywords outside the
-listed set. The exact range tables do not infer other loop forms. Expand
-coverage as the behavior-based inventory reaches other owners.
+`wait`/`sleep` calls. Explicit maximum arguments to the shared `bounded()` JSON
+helper are also inventoried across source modules. These tests still do not lint
+arbitrary numeric literals, alias-only values outside declared names and these
+selected calls, nested assignments, symbolic non-`range` loop bounds, positional
+arguments outside those selected sets, or call keywords outside the listed set.
+The exact range tables do not infer other loop forms. Expand coverage as the
+behavior-based inventory reaches other owners.
 The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
 PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults, VCS
 polling fallback defaults, the retained-check Limits field and ceiling, and
@@ -1355,8 +1357,35 @@ CALL_KEYWORDS = frozenset({
     'timeout', 'timeout_seconds', 'maximum', 'max_bytes', 'max_files',
     'max_entries', 'max_depth', 'limit', 'maxsize', 'length',
 })
-# (enclosing scope, callee, keyword, occurrence): (expression, class, rationale)
+# (enclosing scope, callee, keyword or bounded-maximum arg, occurrence):
+#     (expression, class, rationale)
 CALLS = {
+    'classification.py': {
+        ('_model_summary', 'bounded', 'maximum', 0): (
+            'MAX_CLASSIFICATION_MODEL_SUMMARY_BYTES', 'safety',
+            'classification / cap the normalized model summary before canonical encoding'),
+        ('classify', 'bounded', 'maximum', 0): (
+            'MAX_CLASSIFICATION_CACHE_BYTES', 'safety',
+            'classification / cap the cached result envelope before persistence'),
+    },
+    'probes.py': {
+        ('_service', 'bounded', 'maximum', 0): (
+            '4096', 'safety', 'recovery probes / cap the shared per-event JSON evidence record'),
+    },
+    'selection.py': {
+        ('attributes', 'bounded', 'maximum', 0): (
+            '16384', 'safety', 'selection / cap canonical classifier attributes before retaining them'),
+        ('validate_condition', 'bounded', 'maximum', 0): (
+            '16384', 'safety', 'selection / cap each canonical condition before recursive validation'),
+        ('validate_event', 'bounded', 'maximum', 0): (
+            '4096', 'safety', 'selection / cap one persisted probe event envelope'),
+        ('work_inputs', 'bounded', 'maximum', 0): (
+            'MAX_WORK_BYTES', 'safety', 'selection / cap assembled classifier inputs before returning the work document'),
+        ('select', 'bounded', 'maximum', 0): (
+            '262144', 'safety', 'selection / cap assembled decision evidence before returning it'),
+        ('write_wait', 'bounded', 'maximum', 0): (
+            '262144', 'safety', 'selection / cap one saved wait-coalescing record before writing'),
+    },
     'usage.py': {},
     'dispatch_evidence.py': {},
     'workspace_cache.py': {
@@ -2017,6 +2046,9 @@ COMPARISON_BOUND_ARGUMENTS = {
         '100', 'mechanism', 'proposal wait / fixed maximum per-source delivery page'),
     ('proposal_waits.py', 'readiness_init', 2, 0): (
         '100', 'mechanism', 'proposal wait readiness / fixed maximum candidate page'),
+    ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
+        '4096', 'safety',
+        'Pi reselection / bound session-file identity text before retaining it in family state'),
     ('selection.py', 'scalar', 1, 0): (
         '4096', 'safety', 'selection scalar / bound an individual string before canonical encoding'),
     ('selection.py', 'scalar', 1, 1): (
@@ -2543,13 +2575,23 @@ def call_inventory(tree):
 
         def visit_Call(self, node):
             callee = callee_name(node.func)
+            scope = '.'.join(self.scope) or '<module>'
+            maximum = node.args[1] if callee == 'bounded' and len(node.args) > 1 else next(
+                (keyword.value for keyword in node.keywords
+                 if callee == 'bounded' and keyword.arg == 'maximum'), None)
+            if maximum is not None:
+                base = (scope, callee, 'maximum')
+                index = occurrences.get(base, 0)
+                occurrences[base] = index + 1
+                found[(*base, index)] = ast.unparse(maximum)
             for keyword in node.keywords:
                 has_literal = any(
                     isinstance(value, ast.Constant) and type(value.value) in (int, float)
                     for value in ast.walk(keyword.value))
-                if keyword.arg not in CALL_KEYWORDS or not has_literal:
+                if (keyword.arg not in CALL_KEYWORDS or not has_literal
+                        or callee == 'bounded' and keyword.arg == 'maximum'):
                     continue
-                base = ('.'.join(self.scope) or '<module>', callee, keyword.arg)
+                base = (scope, callee, keyword.arg)
                 index = occurrences.get(base, 0)
                 occurrences[base] = index + 1
                 found[(*base, index)] = ast.unparse(keyword.value)
@@ -2833,7 +2875,7 @@ def sibling():
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
                 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
-                'project.py', 'admission.py', 'services.py', 'vcs.py',
+                'pi_reselection.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
@@ -3616,6 +3658,8 @@ def outer():
 
 def sibling():
     run(timeout=7)
+    bounded({}, 2 ** 10)
+    bounded({}, maximum=LIMIT)
 '''
         expected = {
             ('outer', 'run', 'timeout', 0): '5',
@@ -3629,6 +3673,8 @@ def sibling():
             ('outer', 'other', 'max_depth', 0): '2',
             ('outer', 'page', 'limit', 0): '1',
             ('sibling', 'run', 'timeout', 0): '7',
+            ('sibling', 'bounded', 'maximum', 0): '2 ** 10',
+            ('sibling', 'bounded', 'maximum', 1): 'LIMIT',
         }
         self.assertEqual(call_inventory(ast.parse(source)), expected)
         for changed in (
