@@ -46,6 +46,13 @@ class ContinuationFixture(Fixture):
 
 
 class ContinuationTests(ContinuationFixture):
+    def test_aware_timestamp_text_is_bounded_before_parsing(self):
+        accepted = "2020-01-01T00:00:00.123456+00:00"
+        oversized = "2020-01-01T00:00:00.1234567+00:00"
+        self.assertEqual((len(accepted), len(oversized)), (32, 33))
+        self.assertTrue(c._aware_time(accepted))
+        self.assertFalse(c._aware_time(oversized))
+
     def test_prepared_without_commit_cannot_reserve(self):
         source, snapshot = self.seal()
         row = self.prepare(source, snapshot)

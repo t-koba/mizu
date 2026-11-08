@@ -1870,6 +1870,9 @@ COMPARISON_BOUND_ARGUMENTS = {
         '100', 'format', 'Claude SDK error evidence / HTTP status codes begin at 100'),
     ('claude.py', 'validated_api_error_status', 2, 0): (
         '599', 'format', 'Claude SDK error evidence / HTTP status codes end at 599'),
+    ('continuations.py', '_aware_time', 1, 0): (
+        '32', 'safety',
+        'continuation state / bound persisted timestamp text before ISO-8601 parsing'),
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
@@ -2939,7 +2942,7 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
-                'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
+                'continuations.py', 'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py'):
