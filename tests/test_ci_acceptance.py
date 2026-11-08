@@ -359,20 +359,33 @@ class CIAcceptanceTests(Fixture):
                 read()
         self.assertEqual(json.loads(path.read_bytes()), value)
 
-    def test_local_cache_policy_does_not_relax_exact_ci_cache_scope(self):
+    def test_ci_proof_selection_is_independent_of_local_cache_and_policy(self):
         self.project.config = dataclasses.replace(self.project.config,
             sandbox=dataclasses.replace(self.project.config.sandbox, check_cache_paths=('target',)))
         self.local = acceptance.scope(self.project)
+        # A legacy cache-bound declaration is not silently reinterpreted.
         self.project.settings['ci_acceptance']['acceptance_scope'] = digest(canonical(self.local))
+        self.assertIsNone(ci_acceptance.bound(self.project, self.snapshot, self.local))
+        stable = {k: v for k, v in self.local.items() if k != 'cache_input'}
+        self.project.settings['ci_acceptance']['acceptance_scope'] = digest(canonical(stable))
         receipt_id = self.retain()
         receipt = acceptance.get(self.project.root, receipt_id)
-        self.assertNotIn('cache_input_empty', receipt['scope'])
+        self.assertEqual({k: v for k, v in receipt['scope'].items() if k != 'ci'}, stable)
         self.assertEqual(acceptance.effective(self.project, self.snapshot)['receipt_id'], receipt_id)
         cache = self.project.root / 'check-cache' / check_jobs.execution_key(self.project.config) / 'target'
         cache.mkdir(parents=True)
         (cache / 'object').write_text('changed cache input')
         for allow in (False, True):
             self.project.settings['acceptance'] = {'allow_nonempty_cache': allow}
-            self.assertIsNone(acceptance.effective(self.project, self.snapshot))
+            self.assertNotEqual(acceptance.scope(self.project)['cache_input'], self.local['cache_input'])
+            self.assertEqual(acceptance.effective(self.project, self.snapshot)['receipt_id'], receipt_id)
+            self.assertEqual(ci_acceptance.selected(self.project, self.snapshot['id']), (receipt_id, receipt))
+            self.assertEqual(ci_acceptance.bound(self.project, self.snapshot,
+                acceptance.scope(self.project, producer=True)), receipt['scope'])
+        with patch.object(vcs, 'invoke', side_effect=AssertionError('must not query')):
+            self.assertEqual(self.retain(), receipt_id)
+        for key, bad in (('cache_input', 'invalid'), ('cache_input_empty', 1)):
+            with self.subTest(key=key), self.assertRaises(Denied):
+                ci_acceptance.bound(self.project, self.snapshot, {**self.local, key: bad})
         self.assertEqual(acceptance.get(self.project.root, receipt_id), receipt)
         self.assertEqual(acceptance.audit(self.project.root), 1)

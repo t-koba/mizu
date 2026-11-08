@@ -467,9 +467,11 @@ never echoed. An exact legacy cache-bound index without execution-start classifi
 this cache policy, even with opt-in. No legacy history is scanned or migrated.
 Unbound current cache validation reports `{status: "uncomputable", reason:
 "cache_input_unbound"}`; unsafe evidence and store I/O still fail closed.
-CI acceptance retains its exact cache-bound scope and policy semantics; this
-local policy does not broaden CI. No-cache scopes retain their existing form. Experiments, including cache-backed custom scratch, never
-mint configured verification acceptance.
+[CI acceptance](ci-acceptance.md) excludes local cache input from its identity,
+while retaining exact workflow/check/publication bindings and current input
+safety validation; this local policy does not govern CI producers. No-cache
+scopes retain their existing form. Experiments, including cache-backed custom
+scratch, never mint configured verification acceptance.
 
 Development and CI can use `python scripts/check.py --fail-fast` to report a
 Python contract failure immediately instead of spending minutes running the

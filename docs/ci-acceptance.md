@@ -35,9 +35,11 @@ provider or default equivalence. The existing operator-configured `[vcs].command
 is the sole adapter authority; it must implement the protocol below. The policy
 is not a workspace file and cannot be supplied by a model tool.
 
-`acceptance_scope` is the SHA-256 of canonical JSON for the existing local
+`acceptance_scope` is the SHA-256 of canonical JSON for the stable local
 acceptance scope: full ordered `verify` scripts, execution fingerprint, observed
-local environment, pinned image and (when configured) cache-input fingerprint.
+local environment (including dependencies) and pinned image. Exclude local
+`cache_input` and `cache_input_empty`; they remain local producer provenance,
+not CI identity. Code is bound separately by the exact snapshot and publication.
 An operator can obtain it without a build using the installed host Python API:
 
 ```python
@@ -48,13 +50,17 @@ from mizu.fs import canonical, digest
 project = Project(load(config_path), project_name, read_only=True)
 bound = scope(project)
 assert bound is not None
-print(digest(canonical(bound)))
+stable = {k: v for k, v in bound.items() if k not in ("cache_input", "cache_input_empty")}
+print(digest(canonical(stable)))
 ```
 
 As for local retained proof, this requires representable inputs: check reuse
 explicitly enabled, no-network digest-pinned sandbox and fingerprintable mounts
-and caches. A changed acceptance command, image, dependency or cache input needs
-a newly reviewed scope declaration, not automatic equivalence. `version` is an
+and caches. A changed acceptance command, execution, environment, image or
+dependency needs a newly reviewed scope declaration, not automatic equivalence.
+Local cache mutation does not invalidate CI proof, and `allow_nonempty_cache`
+does not govern CI producers. Unsafe or unbound current inputs still fail closed;
+existing receipts and cache-bound declarations are not migrated. `version` is an
 operator-owned revision label; the entire policy, not just that label, is bound
 into the receipt's scope along with a digest of the configured VCS settings and
 the exact Mizu snapshot ID.

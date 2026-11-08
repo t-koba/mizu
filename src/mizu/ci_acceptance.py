@@ -61,7 +61,7 @@ def configured(settings, commands):
 
 
 def bound(project, snapshot, local):
-    """Pure selection scope; no adapter I/O and no evidence writes."""
+    """Cache-independent CI identity; no adapter I/O or evidence writes."""
     from .acceptance import _digest
     value = configured(project.settings, project.verify)
     if value is None or local is None or not project.config.vcs.get('command'):
@@ -71,6 +71,9 @@ def bound(project, snapshot, local):
     if snapshot.get('skipped') or not _digest(snapshot.get('id')):
         return None
     from .acceptance import _scope
+    # Validate provenance before excluding it; cache safety is still required.
+    _scope(local)
+    local = {k: v for k, v in local.items() if k not in ('cache_input', 'cache_input_empty')}
     if value['acceptance_scope'] != _scope(local):
         return None
     return {**local, 'ci': {'policy': value, 'adapter': digest(canonical(project.config.vcs)),

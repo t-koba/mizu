@@ -2779,8 +2779,11 @@ code, ordered commands, execution, dependencies and pinned image independently
 of later cache mutation; execution sharing/reuse still binds exact cache input.
 Current unsafe/unbound inputs and corrupt evidence still fail closed. Old cache
 receipts without the classification remain auditable, not promoted or migrated.
-This setting does not relax CI acceptance scope. See [check jobs](check-jobs.md)
-for exact lookup, diagnostics and cache lifecycle.
+This setting applies only to local producers. [CI acceptance](ci-acceptance.md)
+binds code, commands, execution, dependencies/environment and image plus the
+exact workflow/check policy, adapter and published snapshot; local cache input
+is not CI acceptance identity. Cache safety validation still applies. See
+[check jobs](check-jobs.md) for exact lookup, diagnostics and cache lifecycle.
 
 Verification command exit status alone does not prove semantic correctness,
 particularly when the repository's tests are editable. Use independent review

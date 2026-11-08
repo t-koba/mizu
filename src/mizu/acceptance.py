@@ -508,8 +508,8 @@ def effective_projection(project, snapshot):
     if snapshot.get("skipped"):
         return None, None
     from .check_jobs import CacheOwned, cache_guard
-    # Validate cache safety under exclusion; only CI selection binds its
-    # current fingerprint. Local selection uses execution-start provenance.
+    # Validate cache safety under exclusion, not as completion identity.
+    # Local selection uses execution-start provenance; CI excludes cache input.
     try:
         with cache_guard(project, blocking=False):
             diagnostic = {}
@@ -538,7 +538,7 @@ def effective_projection(project, snapshot):
                     receipt_id = _selected(project.root, name, snapshot['code_digest'], bound)
                     diagnostic = {'status': 'inapplicable', 'reason': 'cache_input_unclassified',
                                   'receipt_id': receipt_id}
-            # CI remains bound to the exact current scope, including cache input.
+            # CI binds the stable scope plus exact policy/adapter/snapshot identity.
             from .ci_acceptance import bound as ci_bound
             bound = ci_bound(project, snapshot, bound)
             if bound is not None:
