@@ -199,21 +199,22 @@ built-in `range(...)` calls by file, scope, argument and occurrence. A separate
 exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
-contexts remain outside these inventories. A direct-comparison slice records
-operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`,
-`ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
-`insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`, `config.py`,
-`runtime.py`, `project.py`, `services.py`, `persistent_exec.py`, `cli.py`,
-`vcs.py`, `model_catalog.py`, `pi_durable.py`, `platform.py`,
+contexts remain outside these inventories. Direct-comparison inventories record operands by file, scope, argument and
+occurrence. Most slices use magnitude 3 in `check_jobs.py`, `codex.py`,
+`acceptance.py`, `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`,
+`ci_wake.py`, `insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`,
+`config.py`, `runtime.py`, `project.py`, `services.py`, `persistent_exec.py`,
+`cli.py`, `vcs.py`, `model_catalog.py`, `pi_durable.py`, `platform.py`,
 `work_item_seed.py`, `work_item_retirement.py`, `work_item_waits.py`,
 `work_item_resolution.py` and `work_item_events.py`; numeric-only arithmetic
 operands, including bounded integer powers, are evaluated without source
-execution. The `services.py` entries
-pin Windows Task Scheduler's one-minute minimum and 31-day maximum repetition
-interval. The `admission.py` slice uses magnitude 2 for its two-lock ceiling;
-the `pi_durable.py` slice uses magnitude 1 for attempt identity, and the
-selected work-item slices use magnitude 1 for positive revisions, schema
-versions, nonempty fields, and positive page sizes.
+execution. The `services.py` entries pin Windows Task Scheduler's one-minute
+minimum and 31-day maximum repetition interval. Lower-threshold slices are
+explicit: `admission.py` uses magnitude 2 for its two-lock ceiling;
+`pi_durable.py` uses magnitude 1 for attempt identity; selected work-item
+slices use magnitude 1 for positive revisions, schema versions, nonempty
+fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
+constructor inputs, persisted shapes and filesystem-safety comparisons.
 This is not a global numeric comparison linter.
 """
 import ast
@@ -2297,10 +2298,118 @@ COMPARISON_BOUND_ARGUMENTS = {
         '4000', 'format', 'work items / stored reconciliation reason matches the public reason field limit'),
     ('work_items.py', 'WorkItems.reconcile', 1, 0): (
         '32', 'format', 'work items / decision event identity is exactly 32 hexadecimal characters'),
-    ('work_items.py', 'WorkItems.reconcile', 1, 1): (
+    ('work_items.py', 'WorkItems.reconcile', 1, 2): (
         '4000', 'format', 'work items / reconciliation request reason matches the public reason field limit'),
     ('work_items.py', 'WorkItems._submitter_item_status', 1, 0): (
         '4096', 'safety', 'work items / cap canonical submitter-status projection bytes'),
+    ('work_items.py', 'wait_resolution_token', 0, 0): (
+        '1', 'format', 'wait-resolution identity / token revision is a positive work-item revision'),
+    ('work_items.py', 'wait_resolution_tokens', 0, 0): (
+        '1', 'format', 'retained wait-resolution token / parsed revision is positive'),
+    ('work_items.py', 'WorkItems.__init__', 0, 0): (
+        '1', 'configured policy', 'blocked-wait lifetime / [limits].work_items_blocked_max_age_seconds is positive'),
+    ('work_items.py', 'WorkItems.__init__', 0, 1): (
+        '1', 'configured policy', 'history-temporary cleanup / [limits].history_temporaries is a positive cap'),
+    ('work_items.py', 'WorkItems.__init__', 0, 2): (
+        '1', 'configured policy', 'doing-slot cap / project and role work_items_doing values are positive'),
+    ('work_items.py', 'WorkItems.__init__', 0, 3): (
+        '1', 'configured policy', 'stale visibility / [limits].work_items_stale_seconds is positive'),
+    ('work_items.py', 'WorkItems._create_id', 0, 0): (
+        '1', 'format', 'work-item create key / the caller-supplied idempotency key is nonempty'),
+    ('work_items.py', 'WorkItems._proof_identity', 1, 0): (
+        '1', 'safety', 'proof-source cache / only an unaliased regular-file identity is eligible'),
+    ('work_items.py', 'WorkItems._validation_sources', 1, 0): (
+        '2', 'format', 'retained acceptance source / schema two binds publication evidence'),
+    ('work_items.py', 'WorkItems._sidecar_store', 1, 0): (
+        '1', 'safety', 'current-state sidecar / only a single-link regular file may be replaced'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 0): (
+        '1', 'format', 'sidecar history witness / a missing history directory represents only seed revision one'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 1): (
+        '2', 'format', 'sidecar history witness / identity is the fixed pair of directory and entries'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 2): (
+        '1', 'format', 'sidecar history witness / no numbered history entries means seed revision one'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 0): (
+        '1', 'safety', 'current-state sidecar / reject multiply-linked cache files'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 1): (
+        '1', 'format', 'sidecar seed state / without a previous record the current revision must be one'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 2): (
+        '1', 'format', 'sidecar seed state / revision one must equal the immutable seed'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 3): (
+        '1', 'format', 'sidecar transition / previous revision one is validated as the seed'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 4): (
+        '1', 'format', 'sidecar transition / revision-one predecessor follows the seed schema'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 5): (
+        '1', 'format', 'retirement sidecar / require its exact persisted schema version'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 6): (
+        '1', 'format', 'work-item seed / the first immutable record is revision one'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 7): (
+        '1', 'format', 'sidecar predecessor / revision one is the immutable seed record'),
+    ('work_items.py', 'WorkItems.backfill_current_states', 0, 0): (
+        '1', 'mechanism', 'sidecar backfill / a bounded scan page must request at least one item'),
+    ('work_items.py', 'WorkItems.backfill_current_states', 1, 0): (
+        '1', 'format', 'sidecar backfill / revision one uses the seed as current state'),
+    ('work_items.py', 'WorkItems.backfill_current_states', 1, 1): (
+        '2', 'format', 'sidecar backfill / revision two has the seed as its sole predecessor'),
+    ('work_items.py', 'WorkItems._legacy_source', 1, 0): (
+        '1', 'format', 'legacy decision origin / referenced revision is positive'),
+    ('work_items.py', 'WorkItems._validate_decision_key', 1, 0): (
+        '1', 'format', 'keyed decision / bound insight revision is positive'),
+    ('work_items.py', 'WorkItems._legacy_seed', 0, 0): (
+        '1', 'format', 'legacy work-item title / the public title field is nonempty'),
+    ('work_items.py', 'WorkItems.reconcile', 1, 1): (
+        '1', 'format', 'legacy reconciliation / the expected event revision is positive'),
+    ('work_items.py', 'WorkItems.page_legacy', 0, 0): (
+        '1', 'mechanism', 'legacy audit page / a bounded page must request at least one event'),
+    ('work_items.py', 'WorkItems._seed', 1, 0): (
+        '1', 'format', 'work-item seed event / the source decision revision is positive'),
+    ('work_items.py', 'WorkItems._optional_record', 1, 0): (
+        '2', 'format', 'optional work-item record / its relative path has exactly directory and file components'),
+    ('work_items.py', 'WorkItems._optional_record', 1, 1): (
+        '1', 'safety', 'optional work-item record / accept only an unaliased regular file'),
+    ('work_items.py', 'WorkItems._origin_revision', 1, 0): (
+        '1', 'format', 'work-item origin / referenced decision revision is positive'),
+    ('work_items.py', 'WorkItems._origin_revision', 1, 1): (
+        '1', 'format', 'work-item origin / reject zero or negative referenced revisions'),
+    ('work_items.py', 'WorkItems._validate_current_decision_shape', 1, 0): (
+        '1', 'format', 'current decision shape / a decision revision is positive'),
+    ('work_items.py', 'WorkItems._history_revisions', 1, 0): (
+        '1', 'safety', 'work-item recovery / one link identifies an uncommitted temporary'),
+    ('work_items.py', 'WorkItems._history_revisions', 1, 1): (
+        '2', 'safety', 'work-item recovery / two links identify one post-link temporary alias'),
+    ('work_items.py', 'WorkItems._history_revisions', 1, 2): (
+        '1', 'safety', 'work-item recovery / a temporary must match exactly one committed revision'),
+    ('work_items.py', 'WorkItems._validate_delivery', 1, 0): (
+        '1', 'format', 'work-item delivery / require the exact persisted delivery schema'),
+    ('work_items.py', 'WorkItems._retained_verification', 1, 0): (
+        '2', 'format', 'retained acceptance evidence / schema two carries its publication binding'),
+    ('work_items.py', 'WorkItems._validate_transition', 1, 0): (
+        '1', 'format', 'work-item transition / revision-one predecessor is the immutable seed'),
+    ('work_items.py', 'WorkItems.explain', 0, 0): (
+        '1', 'mechanism', 'work-item history page / a bounded page must request at least one revision'),
+    ('work_items.py', 'WorkItems._prepare_decision_history', 1, 0): (
+        '2', 'safety', 'decision-history recovery / a post-link temporary has exactly two hard links'),
+    ('work_items.py', 'WorkItems._prepare_decision_history', 1, 1): (
+        '2', 'safety', 'decision-history alias / the committed target retains the temporary hard link'),
+    ('work_items.py', 'WorkItems._prepare_decision_history', 1, 2): (
+        '2', 'safety', 'decision-history alias / require the exact two-link target identity'),
+    ('work_items.py', 'WorkItems._prepare_decision_history', 1, 3): (
+        '1', 'safety', 'decision-history recovery / more than one matching event is ambiguous'),
+    ('work_items.py', 'WorkItems._prepare_decision_history', 1, 4): (
+        '1', 'safety', 'decision-history recovery / each temporary alias has exactly one path'),
+    ('work_items.py', 'WorkItems._prepare_decision_history', 1, 5): (
+        '1', 'safety', 'decision-history recovery / each alias resolves to exactly one event record'),
+    ('work_items.py', 'WorkItems._page_open_impl', 0, 0): (
+        '1', 'format', 'open-page cursor / the encoded work-item revision is positive'),
+    ('work_items.py', 'WorkItems._page_open_impl', 0, 1): (
+        '1', 'mechanism', 'open-item page / a bounded page must request at least one item'),
+    ('work_items.py', 'WorkItems.blocked_liveness_readonly', 0, 0): (
+        '1', 'mechanism', 'blocked-liveness page / a bounded page must request at least one item'),
+    ('work_items.py', 'WorkItems.open_state_readonly', 0, 0): (
+        '1', 'mechanism', 'open-state page / a bounded page must request at least one item'),
+    ('work_items.py', 'WorkItems.transition', 1, 0): (
+        '1', 'format', 'work-item transition CAS / expected revision is positive'),
+    ('work_items.py', 'WorkItems.transition', 1, 1): (
+        '1', 'format', 'work-item transition / revision-one predecessor is the immutable seed'),
     ('work_items.py', 'WorkItems._page_open_impl', 1, 0): (
         '4', 'mechanism', 'work items / cached projection tuple shape includes its proof witness'),
     ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
@@ -3149,7 +3258,7 @@ def sibling():
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py', 'work_item_events.py'}
+                'work_item_resolution.py', 'work_item_events.py', 'work_items.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

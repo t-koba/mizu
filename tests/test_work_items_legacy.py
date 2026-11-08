@@ -78,6 +78,24 @@ class LegacyWorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.get(f"wi_{dropped}")
 
+    def test_legacy_resolution_title_reason_edges_and_expected_revision(self):
+        for title, reason in (("x", "r"), ("t" * 200, "r" * 4000)):
+            with self.subTest(title_length=len(title), reason_length=len(reason)):
+                event_id, _, _ = self.legacy()
+                record = self.store.reconcile(
+                    event_id, expected_action="accept", expected_rev=1, outcome="open",
+                    reason=reason, title=title, actor="worker")["record"]
+                self.assertEqual(record["reason"], reason)
+                self.assertEqual(record["work_item"]["title"], title)
+
+        for changes in ({"title": ""}, {"title": "t" * 201}, {"reason": ""},
+                        {"reason": " "}, {"reason": "r" * 4001}, {"expected_rev": 0}):
+            with self.subTest(changes=changes):
+                event_id, _, _ = self.legacy()
+                with self.assertRaises(Denied):
+                    self.resolve(event_id, **changes)
+                self.assertFalse(self.sidecar(event_id).exists())
+
     def test_backfill_legacy_sidecars_converges_across_bounded_calls(self):
         if work_items_module.IS_WINDOWS:
             self.skipTest("POSIX-only current-state sidecar cache")
