@@ -2047,7 +2047,8 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('insights.py', 'Insights.revise', 2, 0): (
         '200', 'format', 'insight revision / title follows the public 1-200 character contract'),
     ('insights.py', 'Insights.list_page', 2, 0): (
-        '1000', 'mechanism', 'insight listing / fixed maximum cursor-page size'),
+        '1000', 'format',
+        'insight page API / 1-1000 cursor-page contract shared by runtime and CLI'),
     ('insights.py', 'Insights._page_cursor', 2, 0): (
         '4096', 'safety', 'insight cursor / bound encoded cursor text before decoding'),
     ('insights.py', 'Insights._page_cursor', 2, 1): (
@@ -2065,7 +2066,8 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('insights.py', 'Insights._scan_decision_delivery', 2, 0): (
         '100', 'mechanism', 'decision delivery scan / fixed maximum candidate page'),
     ('insights.py', 'Insights.acknowledge_decisions', 1, 0): (
-        '512', 'safety', 'decision acknowledgement / cap the caller-supplied token batch'),
+        '512', 'format',
+        'decision acknowledgement / match the public finish ack_events maximum batch size'),
     ('insights.py', 'Insights._archivable', 2, 0): (
         '200', 'format', 'insight archive / title follows the public 1-200 character contract'),
     ('engine_config.py', 'child_authority_digest', 1, 0): (

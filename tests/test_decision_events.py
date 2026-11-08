@@ -23,6 +23,19 @@ def _reject(project, source, title="Finding", insight_id=None):
     return item
 
 
+class DecisionAcknowledgementBatchTests(Fixture):
+    def test_finish_acknowledgement_batch_limit_is_inclusive(self):
+        events = [{"ack_token": f"{index:064x}", "source": "reviewer"}
+                  for index in range(512)]
+        with (patch.object(self.project.insights, "_decision_token",
+                           side_effect=lambda role, event: event["ack_token"]),
+              patch.object(self.project.insights, "_decision_received", return_value=True)):
+            self.project.insights.acknowledge_decisions("reviewer", events)
+            with self.assertRaises(Denied):
+                extra = {"ack_token": f"{512:064x}", "source": "reviewer"}
+                self.project.insights.acknowledge_decisions("reviewer", events + [extra])
+
+
 class DecisionTriggerTests(Fixture):
     def test_unchanged_code_rejection_admits_origin_role_only(self):
         config = _trigger_config(self.config)
