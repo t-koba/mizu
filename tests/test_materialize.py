@@ -97,6 +97,15 @@ class MaterializeAdapterTests(Fixture):
         with self.assertRaises(Denied):
             materialize.invoke(settings([sys.executable, "-c", code]), "need deps")
 
+    def test_digest_text_requires_exact_sha256_width(self):
+        for echoed in ('a' * 63, 'a' * 65):
+            response = json.dumps({'content': 'content', 'digest': echoed})
+            result = SimpleNamespace(stdout=response, reason='exited', exit_code=0, stderr='')
+            with self.subTest(length=len(echoed)), patch(
+                    'mizu.materialize.run', return_value=result):
+                with self.assertRaises(Denied):
+                    materialize.invoke(settings(['adapter']), 'need deps')
+
     def test_nonzero_exit_refused(self):
         with self.assertRaises(Denied):
             materialize.invoke(settings([sys.executable, "-c", "import sys; sys.exit(3)"]), "need deps")

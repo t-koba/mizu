@@ -1950,6 +1950,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('doctor.py', 'container_runtime', 1, 0): (
         '4', 'format',
         'single-mode namespace helper / exact whitespace-token shape for uid_map plus uid'),
+    ('materialize.py', 'invoke', 1, 0): (
+        '64', 'format',
+        'materialized content digest / exact SHA-256 hexadecimal text length'),
     ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
         '4', 'format',
         'delegation ledger / require the exact persisted schema version before interpreting state'),
@@ -3039,7 +3042,8 @@ def sibling():
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
-                'cli.py', 'codex.py', 'doctor.py', 'usage.py', 'config.py', 'runtime.py',
+                'cli.py', 'codex.py', 'doctor.py', 'materialize.py',
+                'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py'):
