@@ -1127,7 +1127,7 @@ The container interior is always Linux. The runtime must support standard flags 
 | `image` | `""` | Local `sha256:<hex>` or digest-pinned image reference (runtime pulls are forbidden) |
 | `network` | `"none"` | Container network name; `"none"` ensures networkless isolation |
 | `entrypoint` | `"/bin/sh"` | Container entrypoint; the image must provide it |
-| `entrypoint_args` | `[]` | Ordered runner arguments appended after the image and before the harness-managed `-c` script arguments; one argv item each, never shell-split or exported. Empty keeps the existing command. Example: `entrypoint = "/bin/bash"` with `entrypoint_args = ["-o", "pipefail"]` keeps `pipefail` out of child shells (unlike exported `SHELLOPTS`) |
+| `entrypoint_args` | `[]` | Ordered runner arguments appended after the image and before the harness-managed `-c` script arguments; at most 32 nonempty argv items, each at most 4096 characters and without NUL or LF. Never shell-split or exported. Empty keeps the existing command. Example: `entrypoint = "/bin/bash"` with `entrypoint_args = ["-o", "pipefail"]` keeps `pipefail` out of child shells (unlike exported `SHELLOPTS`) |
 | `memory_mb`, `cpus`, `pids` | `2048`, `2`, `256` | Container resource limits |
 | `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`) |
 | `cleanup_timeout_seconds` | `15` | Per-OCI-call deadline for leftover listing/removal, project-container listing, and post-command removal; positive TOML integer seconds |
@@ -1406,8 +1406,9 @@ do not prove an actual provider endpoint or new OS confinement.
 Tree hashes cover names, content and executable bits; no symlinks, at most 4096
 files and 64 MiB per resource. Claude supports local skill/plugin resources,
 Codex local skill resources, Pi extension/skill/prompt/theme resources.
-Each run verifies content before launch. `mcp_servers` uses engine-native
-connection configuration. The runtime owns the `mizu` server. Stdio commands
+Each run verifies content before launch. Profile `options` and `mcp_servers`
+are each capped at 262,144 canonical JSON bytes; `mcp_servers` accepts at most
+64 explicit servers. The runtime owns the `mizu` server. Stdio commands
 run inside the existing readonly OCI floor and require executables already
 present in the selected image; environment belongs in `sandbox.env`. Prefer
 stdio `command` servers: `url` HTTP servers stay explicit operator endpoints
@@ -1689,7 +1690,8 @@ grants check ownership nor imports acceptance. See [scheduling](scheduling.md#as
 for the separate one-shot dispatch marker and crash semantics.
 
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
-`capabilities`, `engine_tools` (maximum 128 explicit names), `on_change`,
+`capabilities`, `engine_tools` (at most 128 unique, nonempty names of at most
+256 characters), `on_change`,
 `decision_events` (at most 8 unique lowercase decision actions, never
 `withdraw`), `work_item_events` (unique `done`/`dropped` values, default `[]`) plus `ci_wake` (whether a red on the configured CI wake set wakes
 this role: default true for writable roles, false otherwise), `held_at_capacity` (whether this non-writable `submit_insight` role opts into an open-work producer hold; default false, independent of per-source holds), and `decision_sources` (`own` default routing only this role's findings,
@@ -2109,7 +2111,7 @@ names); completion still binds to `code_digest` via `verify`. Failure: `ConfigEr
 out-of-range bounds; `Denied` on unconfigured adapter, oversize request,
 timeout, oversize response, nonzero exit, or malformed/non-object JSON. A normally exited nonzero command may include the configured final stderr tail in its error; timeouts, output-limit and protocol failures stay generic. The stderr is model-visible and may contain private host data, so set `[vcs].diagnostic_bytes = 0` to suppress it.
 
-Defaults apply when `[vcs]` is absent so existing configs keep loading. `retire_grant` (default `false`) is the explicit operator grant for branch retirement; `owned_prefixes` (default `[]`, e.g. `["mizu/"]`) names the temporary integration namespaces; `protected_refs` (default `[]`, e.g. `["main"]`) names exact long-lived refs that always win over owned prefixes. Mizu `close_grant` (default `false`) is required for routine proposal close and conditional close; the separate operator-owned host adapter `[vcs] close_adopted` gate must also allow conditional close. Mizu does not configure or verify that adapter setting. `merge_grant` (default `false`) is the separate explicit grant for proposal merge; merges additionally require a recorded human `GO <branch>` approval for the integrated tree. No project, bot, or provider names are hardcoded: an empty policy classifies nothing as owned, so nothing retires. `request_grant` (default `false`) is the explicit operator grant for asking the provider to run CI at an exact published commit; without it the `vcs_request` capability stays unusable even for a role that holds it.
+Defaults apply when `[vcs]` is absent so existing configs keep loading. `retire_grant` (default `false`) is the explicit operator grant for branch retirement; `owned_prefixes` (default `[]`, e.g. `["mizu/"]`) names the temporary integration namespaces; `protected_refs` (default `[]`, e.g. `["main"]`) names exact long-lived refs that always win over owned prefixes. Prefixes and protected refs are at most 256 characters; protected refs must be nonempty and contain no whitespace. Mizu `close_grant` (default `false`) is required for routine proposal close and conditional close; the separate operator-owned host adapter `[vcs] close_adopted` gate must also allow conditional close. Mizu does not configure or verify that adapter setting. `merge_grant` (default `false`) is the separate explicit grant for proposal merge; merges additionally require a recorded human `GO <branch>` approval for the integrated tree. No project, bot, or provider names are hardcoded: an empty policy classifies nothing as owned, so nothing retires. `request_grant` (default `false`) is the explicit operator grant for asking the provider to run CI at an exact published commit; without it the `vcs_request` capability stays unusable even for a role that holds it.
 
 `ci_branch` (default `""`) names the operator-selected CI/reporting branch. It is exposed as `ci_branch` in full and delta prompts, but only to roles holding the `vcs_read` engine tool; every other role sees `null`, and an empty value reads as `null` everywhere. `ci_wake_extra_branches` (default `[]`) adds up to 64 valid branch names to the wake set; the effective set is the deduplicated nonempty `ci_branch` plus these extras. Thus absent/empty extras preserve `[ci_branch]`, while an empty `ci_branch` and no extras still fails closed. Extra names use the VCS branch-name validation rules; malformed entries and arrays over 64 fail configuration load. The same gated prompts carry the unfiltered `ci_failures` projection (`null` without `vcs_read`, otherwise a capped list, empty when green): the last polled red per branch, independent of insight decisions. A parked role with `ci_wake` (writable roles by default) wakes on a selected red only on change -- a new branch/SHA/check/run fact in the whole selected set, a moved published head, or every `ci_rewake_seconds` (default `1800`, range 60-86,400) for an otherwise unchanged red -- so a red belonging to a previous head cannot re-admit a waiting writer every tick while its fix is in flight. The wake record stores a bounded digest of the selected branch-specific facts. Adapters MUST keep run identity stable for the same run across polls (churn would re-wake every poll). Reporters must select CI evidence explicitly and never guess a branch. Unknown keys still fail load; `ci_branch` must be a string no longer than 256 chars and without whitespace.
 

@@ -142,10 +142,9 @@ built-in `range(...)` calls by file, scope, argument and occurrence. A separate
 exact table classifies all currently symbolic `range` arguments across
 `src/mizu`, including their configuration owners and data-derived bounds.
 Arbitrary loop conditions, slices, aliases and numeric literals in other
-contexts remain outside these inventories. A direct-comparison slice records
-operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
-`ci_acceptance.py` and `usage.py`; it is not a global numeric comparison
-linter.
+contexts remain outside these inventories. A direct-comparison slice records operands of magnitude at least 3 in
+`check_jobs.py`, `acceptance.py`, `ci_acceptance.py`, `usage.py` and
+`config.py`; it is not a global numeric comparison linter.
 """
 import ast
 from pathlib import Path
@@ -1598,6 +1597,66 @@ SYMBOLIC_RANGE_ARGUMENTS = {
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
+    ('config.py', '_vcs_prefix', 1, 0): (
+        '256', 'format',
+        'VCS configuration / branch-prefix length follows the shared 256-character branch-name contract'),
+    ('config.py', '_include_target', 1, 0): (
+        '4096', 'mechanism',
+        'configuration include / fixed per-entry path bound in the ADR-006 include contract'),
+    ('config.py', 'role_decision_events_limit', 2, 0): (
+        '100', 'mechanism',
+        'role policy / effective batch must honor the documented fixed 100-event delivery ceiling'),
+    ('config.py', 'role_work_item_events_limit', 2, 0): (
+        '100', 'mechanism',
+        'role policy / effective batch must honor the documented fixed 100-event delivery ceiling'),
+    ('config.py', 'role_no_progress_backoff_seconds', 2, 0): (
+        '86400', 'configured policy',
+        'role policy / effective timer override follows the [limits] 0–86,400-second range'),
+    ('config.py', 'role_cooldown_seconds', 2, 0): (
+        '1073741824', 'configured policy',
+        'role policy / effective cooldown override follows the [limits] configured range'),
+    ('config.py', 'role_daemon_spacing_seconds', 2, 0): (
+        '1073741824', 'configured policy',
+        'role policy / explicit daemon spacing follows the configured one-to-1073741824-second range'),
+    ('config.py', 'workspace_cache_policy', 1, 0): (
+        '32', 'safety',
+        'workspace cache / bound the root list and its pairwise overlap validation'),
+    ('config.py', 'workspace_cache_policy', 1, 1): (
+        '1024', 'safety',
+        'workspace cache / cap each UTF-8 relative root path before path processing'),
+    ('config.py', 'workspace_cache_policy', 1, 2): (
+        '32', 'safety',
+        'workspace cache / cap root path components before filesystem processing'),
+    ('config.py', 'load', 2, 0): (
+        '1000000', 'configured policy',
+        'limits / session_max_cost_usd is an operator-selected session-rotation threshold, not a bill'),
+    ('config.py', 'load', 1, 0): (
+        '32', 'safety',
+        'sandbox / bound runner argv count passed into the configured container'),
+    ('config.py', 'load', 1, 1): (
+        '4096', 'safety',
+        'sandbox / bound each configured runner argv string before process construction'),
+    ('config.py', 'load', 1, 2): (
+        '262144', 'safety',
+        'profiles / cap canonical engine options and MCP configuration to 256 KiB'),
+    ('config.py', 'load', 1, 3): (
+        '64', 'safety',
+        'profiles / bound explicit MCP server configuration count'),
+    ('config.py', 'load', 1, 4): (
+        '128', 'safety',
+        'roles / bound the explicit native engine-tool grant list'),
+    ('config.py', 'load', 1, 5): (
+        '256', 'safety',
+        'roles / bound each configured native engine-tool name'),
+    ('config.py', 'load', 1, 6): (
+        '8', 'safety',
+        'roles / bound the subscribed decision-action list'),
+    ('config.py', 'load', 1, 7): (
+        '256', 'format',
+        'VCS configuration / CI branch length follows the shared 256-character branch-name contract'),
+    ('config.py', 'load', 1, 8): (
+        '256', 'format',
+        'VCS configuration / protected-ref length follows the shared 256-character branch-name contract'),
     ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
         '256', 'safety',
         'acceptance / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -1995,7 +2054,7 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertIn(category, categories)
             self.assertTrue(rationale.strip())
         found = {}
-        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py'):
+        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py', 'config.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             for site, expression in comparison_argument_inventory(tree).items():
                 found[(filename, *site)] = expression
