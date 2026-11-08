@@ -285,6 +285,23 @@ class BoundaryTests(Fixture):
         self.assertEqual(calls,[])
         self.assertEqual(len(output.getvalue().splitlines()),1)
 
+    def test_mcp_request_identifier_bounds(self):
+        from mizu.mcp_loop import serve_stdio
+        accepted_ids = [-(2**63), 2**63 - 1, 'é' * 128]
+        rejected_ids = [-(2**63) - 1, 2**63, 'é' * 128 + 'a']
+        messages = [{"jsonrpc": "2.0", "id": value, "method": "ping"}
+                    for value in accepted_ids + rejected_ids]
+        output = io.BytesIO()
+        serve_stdio(input_stream=io.BytesIO(b''.join(
+            json.dumps(message).encode() + b'\n' for message in messages)),
+            output_stream=output, server_name="test", list_tools=lambda: [],
+            call_tool=lambda *args: {})
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([row['id'] for row in responses[:len(accepted_ids)]], accepted_ids)
+        self.assertTrue(all(row.get('result') == {} for row in responses[:len(accepted_ids)]))
+        self.assertTrue(all(row.get('error', {}).get('code') == -32600
+                            and row['id'] is None for row in responses[len(accepted_ids):]))
+
     def test_mcp_nonfinite_numbers_rejected(self):
         from mizu.fs import loads_finite
         from mizu.mcp_loop import serve_stdio

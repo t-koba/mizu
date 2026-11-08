@@ -1950,6 +1950,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('doctor.py', 'container_runtime', 1, 0): (
         '4', 'format',
         'single-mode namespace helper / exact whitespace-token shape for uid_map plus uid'),
+    ('mcp_loop.py', 'serve_stdio', 0, 0): (
+        '-2 ** 63', 'format', 'MCP request ID / signed 64-bit integer minimum'),
+    ('mcp_loop.py', 'serve_stdio', 1, 0): (
+        '256', 'safety', 'MCP request ID / cap returned string IDs at 256 UTF-8 bytes'),
+    ('mcp_loop.py', 'serve_stdio', 2, 0): (
+        '2 ** 63', 'format', 'MCP request ID / exclusive signed 64-bit integer upper bound'),
     ('materialize.py', 'invoke', 1, 0): (
         '64', 'format',
         'materialized content digest / exact SHA-256 hexadecimal text length'),
@@ -3040,6 +3046,7 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
+                'mcp_loop.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'doctor.py', 'materialize.py',
