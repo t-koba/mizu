@@ -494,9 +494,9 @@ class SnapshotRetentionTests(Fixture):
             # regression cannot hang the test on POSIX. The holder remains locked
             # throughout: each call must return Busy before it is released.
             acquire = fs._platform.lock_fd
-            def nonblocking(fd, *, blocking):
+            def nonblocking(fd, *, blocking, timeout=None):
                 self.assertFalse(blocking)
-                return acquire(fd, blocking=blocking)
+                return acquire(fd, blocking=blocking, timeout=timeout)
             with mock.patch.object(fs._platform, 'lock_fd', side_effect=nonblocking), \
                  mock.patch.object(self.project.snapshots, 'get', side_effect=AssertionError('snapshot read')), \
                  mock.patch('sys.stdin', new=io.StringIO('body')):

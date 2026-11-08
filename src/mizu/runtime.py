@@ -880,7 +880,7 @@ class Context:
     def _handle(self, operation: str, arguments: dict) -> dict:
         if not isinstance(operation, str) or not isinstance(arguments, dict):
             raise Denied("Invalid operation")
-        with self.mutex, lock_diagnostics.bind(self._lock_diagnostics):
+        with self.config.lock_policy(), self.mutex, lock_diagnostics.bind(self._lock_diagnostics):
             delegation_gates.check_access(self._reservation_view, self.role.name,
                                           self.snapshot, operation, arguments)
             checkpoint_protocol = self.checkpoint_seal_only and operation in ("_model_usage", "_request_done")
@@ -2746,7 +2746,7 @@ class Engine:
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False,
                 scheduled_invocation: bool = False) -> dict:
-        with lock_diagnostics.collect(self.config.limits.lock_diagnostics):
+        with self.config.lock_policy(), lock_diagnostics.collect(self.config.limits.lock_diagnostics):
             return self._run(project, role_name, attributes=attributes, retry_busy=retry_busy,
                              enqueue_busy=enqueue_busy, event_trigger=event_trigger,
                              probes_serviced=probes_serviced, scheduled_invocation=scheduled_invocation)
@@ -3783,6 +3783,7 @@ class Engine:
             snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
                                                   run=parent.run_dir.name, outcome="wait", summary="Consultation input")
 
+        @self.config.lock_policy()
         def ask(role_name: str) -> dict:
             run_dir = parent.project.root / "runs" / uuid.uuid4().hex
             workspace = run_dir / "input"
@@ -4875,7 +4876,9 @@ def daemon(config: Config, name: str, role_name: str) -> None:
     watched = [sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)) if sig is not None]
     old = {s: signal.signal(s, stopped) for s in watched}
     try:
-        with lock(config.data / "locks" / f"daemon-{name}-{role_name}.lock", blocking=False):
+        with contextlib.ExitStack() as lock_scope, \
+                lock(config.data / "locks" / f"daemon-{name}-{role_name}.lock", blocking=False):
+            lock_scope.enter_context(config.lock_policy())
             upstream_state: dict = {"last_fetch": None}
             ordinary_after = 0.0
             project = None
@@ -4885,6 +4888,8 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     if updated.data != config.data:
                         raise ConfigError("Changing data_dir requires a daemon restart")
                     config = updated
+                    lock_scope.close()
+                    lock_scope.enter_context(config.lock_policy())
                     from .probes import service_due, next_deadline
                     probe = service_due(config, name, stop)
                     if probe is not None:

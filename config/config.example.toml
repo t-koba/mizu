@@ -189,6 +189,9 @@ drain_yield = true             # Persistent, non-ephemeral units wrap up at a sa
 safe_point_yield_quantum = 0   # Completed Claude queries/Codex turns between optional handoff opportunities; 0 disables preemption.
 missing_finish_followups = 1   # Extra bounded turns after a normal terminal return without mizu_finish (0-3).
 missing_finish_counts_as_failure = true # Exhaustion increments the failure brake by default.
+# Seconds per blocking local/kernel lock-acquisition half (0–86400).
+# 0 probes immediately; Busy/nonblocking semantics are unchanged.
+lock_timeout_seconds = 30
 # Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for
 # scheduled units); no collection or extra output when disabled.
 lock_diagnostics = false

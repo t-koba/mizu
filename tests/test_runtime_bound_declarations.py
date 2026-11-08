@@ -47,13 +47,13 @@ revision, delivered-token and sidecar bounds are fixed mechanism or safety
 contracts; its delivered-token set covers prior progress plus one opening page,
 and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
-The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth,
-lock-wait and spawn-reap bounds are fixed mechanism or safety. The widened
+The `fs.py` and `platform.py` framing, read-page, script-input, JSON-depth
+and spawn-reap bounds are fixed mechanism or safety. Lock waits are configured
+host/load policy owned by `[limits].lock_timeout_seconds` (default 30 s). The widened
 character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
 header-pair count, model-catalog provider-command output ceiling, and runtime
-wrap-up allowance defaults, whose names fall outside the pattern. Lock waits stay
-fixed until the scheduled-contention work proves a replay-safe boundary.
+wrap-up allowance defaults, whose names fall outside the pattern.
 Container cleanup walls remain host-dependent policy pending container-runtime
 measurement; the systemd-analyze verification wall is configured in `[services]`.
 Their output reads are safety.
@@ -297,9 +297,8 @@ DECLARATIONS = {
             '65536', 'mechanism',
             'fs / shared tool-contract and sandbox script input bound'),
         '_LOCAL_BLOCKING_TIMEOUT': (
-            '30.0', 'mechanism',
-            'fs / ADR-026 intra-process lock-wait bound; fixed until scheduled-contention '
-            'work proves a replay-safe boundary'),
+            '_platform.LOCK_TIMEOUT', 'configured policy',
+            'fs / standalone default for [limits].lock_timeout_seconds; Config execution scope owns overrides'),
     },
     'snapshot_manifest.py': {
         '_WINDOWS_EXTENDED_PATH_UNITS': (
@@ -314,9 +313,8 @@ DECLARATIONS = {
     },
     'platform.py': {
         'LOCK_TIMEOUT': (
-            '30.0', 'mechanism',
-            'platform / ADR-026 cross-process lock-wait bound; fixed until '
-            'scheduled-contention work proves a replay-safe boundary'),
+            '30', 'configured policy',
+            'platform / shared default for [limits].lock_timeout_seconds; fs forwards the execution policy'),
         '_SPAWN_REAP_TIMEOUT': (
             '5.0', 'safety',
             'platform / bounded reap of a process that failed secured startup'),
@@ -1179,7 +1177,7 @@ CONFIG_MODULE_BOUNDS = {
     'MAX_CI_WAKE_EXTRA_BRANCHES': (
         '64', 'mechanism', 'config / fixed CI wake branch-set bound'),
     'MAX_WAIT_SECONDS': (
-        '86400', 'format', 'protocol / finish wait_seconds wire bound mirrored by config ranges'),
+        '86400', 'format', 'protocol / finish wait_seconds wire bound; config also reuses it as the lock-wait policy envelope'),
     'MAX_INCLUDE_DEPTH': (
         '8', 'mechanism', 'config include / fixed graph depth'),
     'MAX_INCLUDE_FILES': (
@@ -2145,6 +2143,7 @@ def range_argument_inventory(tree, *, symbolic=False):
 
 
 SYMBOLIC_BOUNDS = {
+    'fs.py': {'_LOCAL_BLOCKING_TIMEOUT': frozenset({'_platform.LOCK_TIMEOUT'})},
     'config.py': {
         'MAX_USAGE_POLICY_COUNT': frozenset({'TOML_INTEGER_MAX', 'sys.maxsize'}),
         'MAX_USAGE_RUNS_SCANNED': frozenset({'MAX_USAGE_POLICY_COUNT'}),
@@ -2661,6 +2660,20 @@ def no_defaults(limit, /, count, *, size):
              'POLL_CALL_TIMEOUT_CAP': defaults['poll_status_timeout_seconds'],
              'POLL_FETCH_TIMEOUT_CAP': defaults['poll_fetch_timeout_seconds']})
         self.assertEqual(wake['DEFAULT_CI_REWAKE_SECONDS'], defaults['ci_rewake_seconds'])
+
+    def test_lock_timeout_is_configured_policy(self):
+        from mizu.config import Limits, MAX_WAIT_SECONDS, _LIMIT_RANGES
+        from mizu import platform
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'lock_timeout_seconds')
+        self.assertEqual(ast.unparse(field.value), 'LOCK_TIMEOUT')
+        self.assertEqual(Limits().lock_timeout_seconds, platform.LOCK_TIMEOUT)
+        self.assertEqual(_LIMIT_RANGES['lock_timeout_seconds'], (0, MAX_WAIT_SECONDS))
+        self.assertEqual(DECLARATIONS['platform.py']['LOCK_TIMEOUT'][1], 'configured policy')
+        self.assertEqual(DECLARATIONS['fs.py']['_LOCAL_BLOCKING_TIMEOUT'][1], 'configured policy')
 
     def test_check_retention_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

@@ -13,7 +13,8 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import ConfigError, Denied
-from .fs import ID, canonical, relative_parts
+from .fs import ID, canonical, relative_parts, lock_policy
+from .platform import LOCK_TIMEOUT
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
@@ -398,6 +399,9 @@ def trusted_command(data: dict, key: str, default: str) -> tuple[str, ...]:
 
 @dataclasses.dataclass(frozen=True)
 class Limits:
+    #: Seconds per blocking local/kernel lock acquire; 0 probes immediately.
+    #: Host/load policy, shared by all projects in one execution (0–86400).
+    lock_timeout_seconds: int = LOCK_TIMEOUT
     lock_diagnostics: bool = False
     # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
     open_work_items: int = 100
@@ -581,7 +585,8 @@ class Limits:
 # here except session_max_cost_usd, which uses the finite-cost validator.
 # daily_requests 0 disables (fail-closed); max_failures 0 disables the
 # auto-pause brake only (budgets/deadlines still bound spend and time).
-_LIMIT_RANGES = {"open_work_items": (0, 1073741824),
+_LIMIT_RANGES = {"lock_timeout_seconds": (0, MAX_WAIT_SECONDS),
+                 "open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
                  "check_retained": (1, MAX_CHECK_RETAINED),
@@ -1316,6 +1321,17 @@ class Config:
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
+
+    def lock_policy(self):
+        """Scope this config's lock deadline; loading/deriving configs has no side effects.
+
+        CLI/Engine and tool/consultation thread boundaries bind this scope.
+        Embedders doing lower-level operations bind it around their execution.
+        """
+        seconds = self.limits.lock_timeout_seconds
+        if type(seconds) is not int or not 0 <= seconds <= MAX_WAIT_SECONDS:
+            raise ConfigError(f"limits.lock_timeout_seconds must be an integer in [0, {MAX_WAIT_SECONDS}]")
+        return lock_policy(seconds)
 
     def _raw_profile(self, profile: str) -> dict:
         try:

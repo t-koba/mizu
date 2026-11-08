@@ -420,6 +420,7 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 
 | Key | Scope and description |
 |---|---|
+| `lock_timeout_seconds` | Integer 0–86,400, default `30`. Operator host/load policy for **each** blocking lock-acquisition half: the in-process guard and POSIX/Windows kernel retries use the same captured value. `0` makes one immediate attempt per half; it does not disable locking. Contention still raises `Busy`; `blocking=false` remains immediate regardless of this setting. |
 | `lock_diagnostics` | Boolean, default `false`. Opt-in run-local record-lock diagnostics on Engine/CLI stderr (journal for scheduled units); no collection or extra output when disabled. See the fixed diagnostic format below. |
 | `daily_requests` | Per-project provider admissions per day in the configured `timezone` (UTC default; 0 disables, max 100,000). Day-files older than `retention_days` are reaped. Pi counts logical model requests, Codex counts turns, Claude counts queries |
 | `shared_daily_requests` | Optional shared total across all projects sharing `data_dir` per day in the configured `timezone` (UTC default; 0 disables the shared cap, max 100,000). Per-project admissions also count toward this total; the tighter bound refuses first |
@@ -495,6 +496,17 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `session_max_age_seconds` | Wall-clock conversation lifetime (stable creation time surviving same-id saves; legacy files fall back to mtime) at which a resumed persistent session restarts (0 disables; 0–31,536,000s; default 0) |
 | `free_disk_mb` | Minimum free disk space required to start a work unit |
 
+Lock timeout policy is execution-local, not a process-global setting changed by loading
+configuration or creating a project. CLI execution, Engine runs, tool-handler threads
+and consultation workers bind their owning configuration; the daemon rebinds after a
+successful reload. Concurrent or nested configurations cannot overwrite one another's
+policy. Each half has its own budget (up to twice the configured value in total, not
+including filesystem operations or the critical section). The validated 86,400-second
+ceiling reuses `MAX_WAIT_SECONDS` as a finite policy envelope, not a kernel limit.
+Embedding callers doing lower-level operations use `with config.lock_policy(): ...`;
+standalone filesystem/platform primitives keep the 30-second default. A new thread
+must explicitly bind its owning configuration; no thread-inheritance behavior is assumed.
+
 When `limits.lock_diagnostics = true`, each Engine run emits one compact JSON
 line on success or error: `{"lock_diagnostics":{"version":1,"observations":[],"omitted":0}}`.
 This is observational, not a retry or replay-safety signal; Busy still maps to
@@ -561,7 +573,7 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `open_work_items`, `decision_receipt_diagnostics`, `queue_observations`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `writer_no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `lock_timeout_seconds`, `open_work_items`, `decision_receipt_diagnostics`, `queue_observations`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `writer_no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 

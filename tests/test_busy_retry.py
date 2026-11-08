@@ -29,6 +29,7 @@ class BusyRetryTests(Fixture):
                 Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
 
     def test_editor_lock_busy_retains_claim_without_retrying_run(self):
+        self._retune(lock_timeout_seconds=0)
         record = {"title": "Idea", "body": "Recover after contention", "base_snapshot": None}
         spool = self.project.root / "spool/editor/pending.json"
         claim = self.project.root / ".ingest/pending.json"
@@ -36,10 +37,9 @@ class BusyRetryTests(Fixture):
         write_json(spool, record)
         driver = ScriptDriver()
         with lock(self.project.root / "locks/insights.lock"):
-            with patch("mizu.fs._LOCAL_BLOCKING_TIMEOUT", 0.01):
-                with self.assertRaises(Busy) as raised:
-                    Engine(self.config, driver=driver).run(
-                        self.project, "worker", retry_busy=True)
+            with self.assertRaises(Busy) as raised:
+                Engine(self.config, driver=driver).run(
+                    self.project, "worker", retry_busy=True)
             self.assertEqual(raised.exception.code, 75)
             self.assertEqual(str(raised.exception), "Already running: insights")
             self.assertEqual(driver.calls, [])

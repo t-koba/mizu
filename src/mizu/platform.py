@@ -146,35 +146,34 @@ def secure_chmod(path: Path, mode: int) -> None:
     os.chmod(path, mode)
 
 
-#: Blocking-lock acquire bound for every platform (fixed liveness bound per
-#: ADR-026, not a knob): mirrors fs._LOCAL_BLOCKING_TIMEOUT so a contended
-#: blocking acquire fails as Busy instead of hanging the daemon thread. The
-#: bound covers the cross-process (kernel) acquire as well as the
-#: intra-process guard, so the two paths cannot disagree about how long a
-#: caller may wait.
-LOCK_TIMEOUT = 30.0
+#: Default operator policy for each blocking lock-acquisition half.
+#: [limits].lock_timeout_seconds owns overrides; standalone primitives use 30 s.
+LOCK_TIMEOUT = 30
 
 
-def lock_fd(fd: int, *, blocking: bool = True) -> bool:
+def lock_fd(fd: int, *, blocking: bool = True,
+            timeout: float | None = None) -> bool:
     """Exclusive advisory lock on an open fd. Returns False on contention.
 
     Uses fcntl.flock on POSIX, msvcrt.locking on Windows. Raises Busy-style
     BlockingIOError on contention so callers map it once.
 
-    Bounds: a blocking acquire waits at most ``LOCK_TIMEOUT`` seconds on
-    every platform, so contention fails as Busy instead of hanging the
+    Bounds: a blocking acquire waits at most ``timeout`` seconds (default 30)
+    on every platform, so contention fails as Busy instead of hanging the
     caller. Non-blocking acquires never wait. Trust: the kernel advisory
     lock, released when the process dies. Retry/cancellation: none; the
     caller decides whether to retry. Evidence: the lock file itself.
     Failure: contention raises BlockingIOError; a platform without an
     advisory locking primitive raises OSError rather than pretending.
     """
+    if timeout is None:
+        timeout = LOCK_TIMEOUT
     if _fcntl is not None:
         if blocking:
             # flock() would block without a bound, so the blocking contract
             # is served by a bounded non-blocking retry loop: the same shape
             # the Windows path uses, and the same bound on both.
-            deadline = time.monotonic() + LOCK_TIMEOUT
+            deadline = time.monotonic() + timeout
             attempted = False
             while True:
                 # Let the first non-blocking attempt succeed immediately, but
@@ -199,7 +198,7 @@ def lock_fd(fd: int, *, blocking: bool = True) -> bool:
         # so the blocking=True contract holds for local development.
         mode = _msvcrt.LK_NBLCK  # type: ignore[attr-defined]
         if blocking:
-            deadline = time.monotonic() + LOCK_TIMEOUT
+            deadline = time.monotonic() + timeout
             attempted = False
             while True:
                 # Match the POSIX retry contract: allow one immediate probe,

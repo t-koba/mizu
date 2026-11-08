@@ -11,21 +11,26 @@ process is a worse failure than a failing one.
 """
 from __future__ import annotations
 
+import dataclasses
 import errno
+import io
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mizu import fs, platform
-from mizu.errors import Busy
+from mizu.errors import Busy, ConfigError
+from mizu.config import load
+from support import Fixture
 
 HOLDER = """
 import sys, time
@@ -42,9 +47,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, {src!r})
 from mizu import fs, platform
-platform.LOCK_TIMEOUT = {bound!r}
 try:
-    with fs.lock(Path({path!r}), blocking={blocking!r}):
+    with fs.lock_policy({bound!r}), fs.lock(Path({path!r}), blocking={blocking!r}):
         print("acquired")
 except Exception as exc:
     print(type(exc).__name__ + ": " + str(exc))
@@ -136,16 +140,175 @@ class LockBoundTests(unittest.TestCase):
                 # late poll after expiry where the fake lock would be free.
                 with patch.object(platform, "_fcntl", fcntl), \
                      patch.object(platform, "_msvcrt", msvcrt), \
-                     patch.object(platform, "LOCK_TIMEOUT", 1.0), \
                      patch.object(platform.time, "monotonic", side_effect=[0.0, 0.1, 2.0]), \
                      patch.object(platform.time, "sleep", return_value=None):
                     with self.assertRaises(BlockingIOError):
-                        platform.lock_fd(7, blocking=True)
+                        platform.lock_fd(7, blocking=True, timeout=1)
                 self.assertEqual(len(attempts), 1)
+
+    def test_kernel_zero_probes_once_and_nonblocking_ignores_timeout(self):
+        for primitive in ("posix", "windows"):
+            for blocking in (True, False):
+                with self.subTest(primitive=primitive, blocking=blocking):
+                    acquire = Mock(side_effect=OSError(errno.EAGAIN, "contended"))
+                    fcntl = (SimpleNamespace(LOCK_EX=1, LOCK_NB=2, flock=acquire)
+                             if primitive == "posix" else None)
+                    msvcrt = (SimpleNamespace(LK_NBLCK=1, locking=acquire)
+                              if primitive == "windows" else None)
+                    with patch.object(platform, "_fcntl", fcntl), \
+                            patch.object(platform, "_msvcrt", msvcrt), \
+                            patch.object(platform.time, "monotonic", return_value=0) as clock, \
+                            patch.object(platform.time, "sleep") as sleep:
+                        with self.assertRaises(BlockingIOError):
+                            platform.lock_fd(7, blocking=blocking, timeout=0 if blocking else 86400)
+                        self.assertEqual(acquire.call_count, 1)
+                        sleep.assert_not_called()
+                        if not blocking:
+                            clock.assert_not_called()
+                    acquire.reset_mock(side_effect=True)
+                    with patch.object(platform, "_fcntl", fcntl), \
+                            patch.object(platform, "_msvcrt", msvcrt):
+                        self.assertTrue(platform.lock_fd(7, blocking=blocking, timeout=0))
 
     def test_both_halves_share_one_bound(self):
         self.assertEqual(platform.LOCK_TIMEOUT, 30.0)
         self.assertEqual(platform.LOCK_TIMEOUT, fs._LOCAL_BLOCKING_TIMEOUT)
+
+
+class LockPolicyTests(Fixture):
+    def configured(self, seconds):
+        return dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, lock_timeout_seconds=seconds))
+
+    def test_default_and_configured_policy_reach_both_halves(self):
+        path = self.root / "policy.lock"
+        for seconds in (30, 0, 7, 86400):
+            with self.subTest(seconds=seconds):
+                guard = Mock()
+                guard.acquire.return_value = True
+                with self.configured(seconds).lock_policy(), \
+                        patch.object(fs, "_LOCAL_LOCKS", {}), \
+                        patch.object(fs.threading, "Lock", return_value=guard), \
+                        patch.object(platform, "lock_fd") as kernel, \
+                        patch.object(platform, "unlock_fd"):
+                    with fs.lock(path):
+                        pass
+                    guard.acquire.assert_called_once_with(True, seconds)
+                    self.assertEqual(kernel.call_args.kwargs, {"blocking": True, "timeout": seconds})
+                    guard.release.assert_called_once_with()
+        self.assertIsNone(fs._lock_timeout.get())
+
+    def test_unvalidated_programmatic_policy_fails_before_binding(self):
+        invalid = self.configured(True)
+        with self.assertRaisesRegex(ConfigError, "limits.lock_timeout_seconds"):
+            with invalid.lock_policy():
+                self.fail("invalid policy must not bind")
+        self.assertIsNone(fs._lock_timeout.get())
+
+    def test_zero_preserves_exclusion_and_nonblocking_does_not_wait(self):
+        with self.configured(0).lock_policy(), fs.lock(self.root / "zero.lock"):
+            with self.assertRaises(Busy):
+                with fs.lock(self.root / "zero.lock"):
+                    self.fail("zero must not bypass locking")
+        guard = Mock()
+        guard.acquire.return_value = False
+        with self.configured(86400).lock_policy(), \
+                patch.object(fs, "_LOCAL_LOCKS", {}), \
+                patch.object(fs.threading, "Lock", return_value=guard), \
+                patch.object(platform, "lock_fd") as kernel:
+            with self.assertRaises(Busy):
+                with fs.lock(self.root / "immediate.lock", blocking=False):
+                    pass
+            guard.acquire.assert_called_once_with(False)
+            kernel.assert_not_called()
+
+    def test_scopes_are_nested_thread_local_and_loading_has_no_side_effects(self):
+        first, second = self.configured(7), self.configured(17)
+        ready = threading.Barrier(2)
+        observed = []
+
+        def peer():
+            with second.lock_policy():
+                ready.wait(timeout=10)
+                observed.append(fs._lock_timeout.get())
+                ready.wait(timeout=10)
+
+        with first.lock_policy():
+            self.assertEqual(load(self.file).limits.lock_timeout_seconds, 30)
+            self.assertEqual(fs._lock_timeout.get(), 7)
+            with self.assertRaisesRegex(ValueError, "scope"):
+                with second.lock_policy():
+                    self.assertEqual(fs._lock_timeout.get(), 17)
+                    raise ValueError("scope")
+            other = threading.Thread(target=peer)
+            other.start()
+            try:
+                ready.wait(timeout=10)
+                self.assertEqual(fs._lock_timeout.get(), 7)
+                ready.wait(timeout=10)
+            finally:
+                other.join(timeout=10)
+            self.assertFalse(other.is_alive())
+            self.assertEqual(observed, [17])
+            self.assertEqual(fs._lock_timeout.get(), 7)
+        self.assertIsNone(fs._lock_timeout.get())
+        self.assertEqual(platform.LOCK_TIMEOUT, 30)
+        self.assertEqual(fs._LOCAL_BLOCKING_TIMEOUT, 30)
+
+    def test_cli_engine_and_tool_thread_bind_the_owning_config(self):
+        from mizu import cli, runtime
+        config = self.configured(7)
+
+        def observed(*args, **kwargs):
+            return fs._lock_timeout.get()
+
+        with patch.object(cli, "load", return_value=config), \
+                patch.object(cli, "_execute", side_effect=observed):
+            self.assertEqual(cli.execute(SimpleNamespace(command="doctor", config=self.file)), 7)
+        engine = runtime.Engine(config)
+        with patch.object(engine, "_run", side_effect=observed):
+            self.assertEqual(engine.run(self.project, "worker"), 7)
+        self.config = config
+        ctx = self.context()
+        seen = []
+
+        def tool(*args):
+            seen.append(fs._lock_timeout.get())
+            raise Busy("stop after policy binding")
+
+        def peer():
+            with self.assertRaises(Busy):
+                ctx.handle("read", {})
+
+        with patch.object(runtime.delegation_gates, "check_access", side_effect=tool):
+            other = threading.Thread(target=peer)
+            other.start()
+            other.join(timeout=10)
+        self.assertFalse(other.is_alive())
+        self.assertEqual(seen, [7])
+        self.assertIsNone(fs._lock_timeout.get())
+
+    def test_daemon_rebinds_after_reload_and_restores_outer_scope(self):
+        from mizu import probes, runtime
+        stop = threading.Event()
+        seen = []
+
+        def service(*args):
+            seen.append(fs._lock_timeout.get())
+            stop.set()
+            raise ConfigError("stop after reload")
+
+        with self.configured(7).lock_policy(), \
+                patch.object(runtime, "load", return_value=self.configured(17)), \
+                patch.object(runtime.threading, "Event", return_value=stop), \
+                patch.object(runtime.signal, "signal"), \
+                patch.object(probes, "service_due", side_effect=service), \
+                patch.object(probes, "next_deadline", return_value=None), \
+                patch("sys.stdout", new_callable=io.StringIO):
+            runtime.daemon(self.config, "sample", "worker")
+            self.assertEqual(seen, [17])
+            self.assertEqual(fs._lock_timeout.get(), 7)
+        self.assertIsNone(fs._lock_timeout.get())
 
 
 if __name__ == "__main__":

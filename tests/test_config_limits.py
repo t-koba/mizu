@@ -33,6 +33,25 @@ class LimitsCoverageTests(unittest.TestCase):
         self.assertEqual({field.name for field in dataclasses.fields(Limits)}, documented)
 
 
+class LockTimeoutConfigTests(Fixture):
+    def test_default_override_and_fail_closed_range(self):
+        self.assertEqual(Limits().lock_timeout_seconds, 30)
+        self.assertEqual(_LIMIT_RANGES["lock_timeout_seconds"], (0, 86400))
+        original = re.sub(r'(?m)^lock_timeout_seconds = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.lock_timeout_seconds, 30)
+        for value in ('0', '1', '30', '86400', '-1', '86401', 'true', 'false',
+                      '1.5', 'nan', 'inf', '"30"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n', f'\n[limits]\nlock_timeout_seconds = {value}\n'))
+                if value in ('0', '1', '30', '86400'):
+                    self.assertEqual(load(self.file).limits.lock_timeout_seconds, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'limits.lock_timeout_seconds'):
+                        load(self.file)
+
+
 class RootOwnerTemplateTests(unittest.TestCase):
     def test_template_names_every_accepted_root_owner(self):
         root = Path(__file__).resolve().parents[1]

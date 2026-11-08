@@ -166,8 +166,8 @@ See `docs/configuration.md` "Limits" and `mizu prune` help.
 The audit moved only the daemon poll bounds into `[vcs]`; the proposed dashboard
 projection remains unshipped. The usage-summary scan and output caps now live in
 `[usage]`, preserving their defaults and allowing only downward adjustments. Spend
-caps, the fault taxonomy, framing/memory bounds, sandbox floors, and other fixed
-liveness bounds stay in code.
+caps, the fault taxonomy, framing/memory bounds and sandbox floors remain fixed;
+blocking lock deadlines were later moved to `[limits].lock_timeout_seconds` by ADR-026.
 
 | Bound / setting | Value | Disposition | Why |
 |---|---|---|---|
@@ -181,12 +181,20 @@ liveness bounds stay in code.
 | Usage summary bounds (`[usage]`) | 5000 runs / 200 recent entries / 200 affinity runs / 200 rows / 20 unknown keys | Moves to policy | Defaults preserve existing scan/sample behavior; settings only reduce work or displayed rows/keys |
 | Usage record JSON read cap | 1 MiB | Stays fixed | Records stay bounded and complete on disk |
 
-## ADR-026 — In-process lock guard with a fixed 30 s liveness bound
+## ADR-026 — In-process lock guard with configured acquisition deadlines
 `fs.lock` serializes lock files within the process with a per-path guard keyed by canonical
-path, and every blocking acquire is bounded at 30 s: the intra-process guard by
-`fs.py` `_LOCAL_BLOCKING_TIMEOUT` and the cross-process (kernel) acquire by `platform.py`
-`LOCK_TIMEOUT`, on POSIX and Windows alike. Contention fails as `Busy` instead of hanging the
-daemon; the bound is not an operator knob.
+path. `[limits].lock_timeout_seconds` owns the host/load-dependent blocking deadline:
+integer 0–86,400, default 30 seconds, applied separately to the in-process guard and
+cross-process kernel retry loop on POSIX and Windows. Zero permits one immediate
+attempt per half, never an unlocked success; contention still fails as `Busy` and
+nonblocking acquires never wait. The finite ceiling reuses `MAX_WAIT_SECONDS` as policy,
+not as an OS restriction.
+
+Configuration loading and project construction never mutate a global timeout. Execution
+boundaries bind a configuration-local context, explicitly including tool/consultation
+threads and daemon reloads, and restore the previous context on exit. A lock captures
+one value for both halves; standalone primitives retain the 30-second default.
+Embedding lower-level operations requires `with config.lock_policy(): ...`.
 
 ## ADR-027 — Composed role policies from ordered Markdown parts
 A role's `policy` accepts one path or an ordered array of paths, composed in order as the

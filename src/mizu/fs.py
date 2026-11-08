@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import datetime as dt
 import errno
 import hashlib
@@ -416,14 +417,22 @@ def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) 
 #: otherwise succeed and break single-writer and budget admission. The
 #: per-path threading lock provides the missing within-process mutual
 #: exclusion; the OS lock still provides cross-process exclusion.
-#: Fixed liveness bound per ADR-026 (not a knob): no operator would
-#: plausibly tune an intra-process deadlock guard.
 _LOCAL_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
-#: Blocking acquire bound so a re-entrant blocking request fails as Busy
-#: instead of hanging the daemon thread forever. Fixed liveness bound
-#: (same 30 s as platform.lock_fd on every platform); see ADR-026.
-_LOCAL_BLOCKING_TIMEOUT = 30.0
+# Execution-local policy, never set by loading a config or constructing a project.
+# New threads must bind their owning Config.lock_policy() explicitly.
+_LOCAL_BLOCKING_TIMEOUT = _platform.LOCK_TIMEOUT
+_lock_timeout = contextvars.ContextVar("lock_timeout_seconds", default=None)
+
+
+@contextlib.contextmanager
+def lock_policy(seconds: float) -> Iterator[None]:
+    """Bind validated configuration for this execution, restoring it on exit."""
+    token = _lock_timeout.set(seconds)
+    try:
+        yield
+    finally:
+        _lock_timeout.reset(token)
 
 
 def _local_key(path: Path) -> str:
@@ -434,11 +443,11 @@ def _local_key(path: Path) -> str:
     return os.path.normcase(os.path.realpath(str(path)))
 
 
-def _acquire_local(key: str, *, blocking: bool) -> threading.Lock:
+def _acquire_local(key: str, *, blocking: bool, timeout: float) -> threading.Lock:
     with _LOCAL_GUARD:
         local = _LOCAL_LOCKS.setdefault(key, threading.Lock())
     if blocking:
-        held = local.acquire(True, _LOCAL_BLOCKING_TIMEOUT)
+        held = local.acquire(True, timeout)
     else:
         held = local.acquire(False)
     if not held:
@@ -450,14 +459,16 @@ def _acquire_local(key: str, *, blocking: bool) -> threading.Lock:
 def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     """Kernel releases the lock on death. Never unlink a lock inode.
 
-    Both halves of the acquire are bounded: the intra-process guard waits
-    at most ``_LOCAL_BLOCKING_TIMEOUT`` and the cross-process (kernel)
-    acquire at most ``platform.LOCK_TIMEOUT``. Contention fails as Busy
-    instead of hanging the caller (ADR-026).
+    Each acquisition half uses the execution's lock policy (default 30 s).
+    Capture it once so the local guard and kernel retries cannot disagree.
+    Contention fails as Busy; nonblocking acquires never wait (ADR-026).
     """
+    timeout = _lock_timeout.get()
+    if timeout is None:
+        timeout = _LOCAL_BLOCKING_TIMEOUT
     observation = lock_diagnostics.begin(path.name)
     try:
-        with _lock(path, blocking=blocking, observation=observation):
+        with _lock(path, blocking=blocking, timeout=timeout, observation=observation):
             yield
     except BaseException as exc:
         if observation is not None and observation.row["outcome"] == "success":
@@ -469,13 +480,13 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _lock(path: Path, *, blocking: bool, observation) -> Iterator[None]:
+def _lock(path: Path, *, blocking: bool, timeout: float, observation) -> Iterator[None]:
     mkdir(path.parent)
     key = _local_key(path)
     if observation is not None:
         observation.advance("local-acquire")
     try:
-        local = _acquire_local(key, blocking=blocking)
+        local = _acquire_local(key, blocking=blocking, timeout=timeout)
     except BlockingIOError:
         if observation is not None:
             observation.stop()
@@ -495,7 +506,7 @@ def _lock(path: Path, *, blocking: bool, observation) -> Iterator[None]:
         if observation is not None:
             observation.advance("kernel-acquire")
         try:
-            _platform.lock_fd(fd, blocking=blocking)
+            _platform.lock_fd(fd, blocking=blocking, timeout=timeout)
         except BlockingIOError:
             if observation is not None:
                 observation.stop()

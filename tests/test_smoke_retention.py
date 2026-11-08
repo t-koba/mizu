@@ -1190,6 +1190,7 @@ class SmokeRetentionTests(unittest.TestCase):
     def test_host_schemas_and_project_free_cli(self):
         from mizu.cli import parser, execute
         from mizu.protocol import DEFINITIONS, validate
+        from contextlib import nullcontext
         from types import SimpleNamespace
         for operation, args in [
             ('attach_evidence', {'id': 'topic', 'rev': 1, 'text': 'Evidence'}),
@@ -1198,7 +1199,8 @@ class SmokeRetentionTests(unittest.TestCase):
             validate({**args, 'smoke_refs': [self.a]}, DEFINITIONS[operation][1])
             with self.assertRaises(Denied):
                 validate({**args, 'smoke_refs': [self.a, self.a]}, DEFINITIONS[operation][1])
-        with patch('mizu.cli.load', return_value=SimpleNamespace(data=self.data)):
+        with patch('mizu.cli.load', return_value=SimpleNamespace(
+                data=self.data, lock_policy=nullcontext)):
             self.assertEqual(execute(parser().parse_args(['smoke-retention']))['days'], 31)
             self.assertEqual(execute(parser().parse_args(['smoke-retention', '--set-days', '0'])), {'days': 0})
         self.assertNotIn('smoke-retention', DEFINITIONS)

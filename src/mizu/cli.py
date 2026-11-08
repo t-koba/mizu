@@ -620,10 +620,16 @@ def execute(args):
         from .scheduler_evidence import summarize
         try:
             config = load(args.config)
-            return summarize(Project(config, args.project, read_only=True))
+            with config.lock_policy():
+                return summarize(Project(config, args.project, read_only=True))
         except (MizuError, OSError, ValueError, TypeError, KeyError, AttributeError):
             raise ConfigError("Cannot read scheduler evidence with private project configuration") from None
     config = load(args.config)
+    with config.lock_policy():
+        return _execute(config, args)
+
+
+def _execute(config, args):
     if args.command == "explain":
         from .project import Project
         from .explain import explain
