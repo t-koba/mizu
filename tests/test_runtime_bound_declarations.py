@@ -144,7 +144,8 @@ exact table classifies all currently symbolic `range` arguments across
 Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `acceptance.py`,
-`ci_acceptance.py`, `usage.py`, `config.py` and `runtime.py`; it is not a
+`ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
+`usage.py`, `config.py`, `runtime.py`, `project.py` and `vcs.py`; it is not a
 global numeric comparison linter.
 """
 import ast
@@ -1688,6 +1689,51 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('runtime.py', '_declared_next', 1, 1): (
         '4096', 'format',
         'writer handoff / actionable Next step follows the documented declaration format bound'),
+    ('project.py', 'Project.backpressure._checked_limit', 2, 0): (
+        '1073741824', 'configured policy',
+        'backpressure / revalidate the shared configured maximum for open_work_items and producer_inputs_per_source'),
+    ('project.py', 'read_goal', 1, 0): (
+        '65536', 'safety',
+        'project goal / reject files above the fixed 64 KiB operator-input ceiling before reading'),
+    ('project.py', 'read_goal', 1, 1): (
+        '65536', 'safety',
+        'project goal / enforce the same fixed 64 KiB ceiling on decoded UTF-8 content'),
+    ('ci_requests.py', 'CiRequests.daily', 2, 0): (
+        '100', 'mechanism',
+        'CI requests / fixed per-page ceiling bounds the validated dispatch projection'),
+    ('ci_requests.py', 'CiRequests.page', 2, 0): (
+        '8', 'mechanism',
+        'CI cost view / public partial subtotal exposes at most eight dispatches per page'),
+    ('ci_requests.py', '_summary', 1, 0): (
+        '64', 'safety',
+        'CI request record / cap timestamp text before ISO-8601 parsing'),
+    ('ci_requests.py', '_summary', 1, 1): (
+        '16', 'format',
+        'CI request record / covered work items follow the public 16-item request schema'),
+    ('ci_requests.py', '_unresolved_summary', 1, 0): (
+        '64', 'safety',
+        'CI dispatch record / cap timestamp text before ISO-8601 parsing'),
+    ('ci_requests.py', '_unresolved_summary', 1, 1): (
+        '16', 'format',
+        'CI dispatch record / covered work items follow the public 16-item request schema'),
+    ('ci_waits.py', '_check_names', 2, 0): (
+        '64', 'format',
+        'CI wait / number of exact check names follows the public maxItems contract'),
+    ('ci_waits.py', '_check_names', 1, 0): (
+        '256', 'format',
+        'CI wait / individual check names follow the public maxLength contract'),
+    ('ci_waits.py', 'readiness_init', 2, 0): (
+        '100', 'mechanism',
+        'CI wait readiness / fixed maximum page size for the bounded shared delivery scan'),
+    ('ci_waits.py', '_shared_page', 2, 0): (
+        '100', 'mechanism',
+        'CI wait delivery / fixed maximum page size for the bounded shared receipt projection'),
+    ('ci_wake.py', '_ci_rewake_seconds', 0, 0): (
+        '60', 'configured policy',
+        'CI wake / [vcs] ci_rewake_seconds validated lower interval bound'),
+    ('ci_wake.py', '_ci_rewake_seconds', 2, 0): (
+        '86400', 'configured policy',
+        'CI wake / [vcs] ci_rewake_seconds validated upper interval bound'),
     ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
         '256', 'safety',
         'acceptance / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -2189,7 +2235,10 @@ class RuntimeBoundDeclarationTests(unittest.TestCase):
             self.assertIn(category, categories)
             self.assertTrue(rationale.strip())
         found = {}
-        for filename in ('acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'usage.py', 'config.py', 'runtime.py', 'vcs.py'):
+        for filename in (
+                'acceptance.py', 'check_jobs.py', 'ci_acceptance.py', 'ci_requests.py',
+                'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
+                'project.py', 'vcs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             for site, expression in comparison_argument_inventory(tree).items():
                 found[(filename, *site)] = expression
