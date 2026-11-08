@@ -178,10 +178,17 @@ class ProposalRecordTests(Fixture):
             vcs.record_proposal_state(self.project, {"id": "x"})
 
     def test_stable_id_ignores_facts(self):
-        self.assertEqual(vcs.proposal_insight_id("forge:owner/repo#1"),
-                         vcs.proposal_insight_id("forge:owner/repo#1"))
-        self.assertNotEqual(vcs.proposal_insight_id("forge:owner/repo#1"),
-                            vcs.proposal_insight_id("forge:owner/repo#2"))
+        stable_id = vcs.proposal_insight_id("forge:owner/repo#1")
+        self.assertEqual(len(stable_id),
+                         len("proposal-") + vcs.MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS)
+        self.assertRegex(stable_id, r"^proposal-[0-9a-f]+$")
+        self.assertEqual(stable_id, vcs.proposal_insight_id("forge:owner/repo#1"))
+        self.assertNotEqual(stable_id, vcs.proposal_insight_id("forge:owner/repo#2"))
+        row = proposal()
+        row["id"] = "x" * 128
+        title, _ = vcs.proposal_facts(vcs.parse_proposals({"proposals": [row]})[0])
+        self.assertLessEqual(len(title), vcs.MAX_PROPOSAL_INSIGHT_TITLE_CHARS)
+        self.assertEqual(title, f"Proposal {'x' * 128} open")
         with self.assertRaises(Denied):
             vcs.proposal_insight_id("")
 

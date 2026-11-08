@@ -193,9 +193,10 @@ def split_ref_path(path: str) -> str | None:
     if not isinstance(path, str):
         return None
     parts = path.split("/")
-    if parts[:3] != list(REF_PREFIX) or len(parts) < 4:
+    prefix_len = len(REF_PREFIX)
+    if parts[:prefix_len] != list(REF_PREFIX) or len(parts) <= prefix_len:
         return None
-    name = "/".join(parts[3:])
+    name = "/".join(parts[prefix_len:])
     try:
         _check_ref_name(name)
     except Denied:
@@ -1186,6 +1187,10 @@ def parse_status_checks(data: dict) -> list:
 
 #: Maximum external proposals per ``proposals`` response.
 MAX_PROPOSALS = 256
+#: Stable proposal Insight IDs use a 32-character lower-case SHA-256 hex suffix.
+MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS = 32
+#: Generated proposal Insight titles respect the public 200-character title format.
+MAX_PROPOSAL_INSIGHT_TITLE_CHARS = 200
 #: Closed-form proposal states; ``draft`` rides alongside ``open``.
 PROPOSAL_STATES = frozenset({"open", "closed", "merged"})
 
@@ -1319,7 +1324,8 @@ def proposal_insight_id(proposal_id: str) -> str:
             or len(proposal_id) > 128):
         raise Denied("Invalid VCS proposal id")
     _reject_terminal_controls(proposal_id, "Invalid VCS proposal id")
-    return "proposal-" + _digest(_canonical({"proposal": proposal_id}))[:32]
+    return ("proposal-" +
+            _digest(_canonical({"proposal": proposal_id}))[:MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS])
 
 
 def proposal_facts(proposal: dict, *, enumeration_complete: bool = False) -> tuple[str, str]:
@@ -1334,8 +1340,8 @@ def proposal_facts(proposal: dict, *, enumeration_complete: bool = False) -> tup
     """
     row = parse_proposals({"proposals": [proposal]})[0]
     title = f"Proposal {row['id']} {row['state']}"
-    if len(title) > 200:
-        title = title[:200]
+    if len(title) > MAX_PROPOSAL_INSIGHT_TITLE_CHARS:
+        title = title[:MAX_PROPOSAL_INSIGHT_TITLE_CHARS]
     lines = [f"id: {row['id']}", f"state: {row['state']}",
              f"draft: {row['draft']}",
              f"mergeable: {row['mergeable'] if row['mergeable'] is not None else 'unknown'}",

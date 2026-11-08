@@ -12,7 +12,9 @@ The editor search byte, match and excerpt defaults are configured policy in
 maximum excerpt, strict settings-file read cap and MAX_FRAME-derived canonical
 response cap remain fixed safety/framing bounds, checked against their uses.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
-ceilings for untrusted content; it owns the shared proposal cursor format bound.
+ceilings for untrusted content; it owns the shared proposal cursor, generated
+proposal-ID suffix, and Insight-title format bounds. Upstream-ref path slicing
+derives its prefix length from `REF_PREFIX`.
 The proposal poll's surfaced diagnostic preview is a fixed safety cap; its
 pagination behavior otherwise follows the VCS schema without a provider guess.
 The `project.py` git-tree import time bounds are configured policy; its
@@ -692,6 +694,12 @@ DECLARATIONS = {
             '(1 << 63) - 1', 'format', 'VCS artifacts / signed-64-bit adapter byte arithmetic'),
         'MAX_CHECKS': ('1024', 'mechanism', 'VCS status / adapter payload already capped'),
         'MAX_PROPOSALS': ('256', 'mechanism', 'VCS proposals / bounded external proposal rows'),
+        'MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS': (
+            '32', 'format',
+            'VCS proposals / fixed lower-case SHA-256 hex suffix in generated Insight identity'),
+        'MAX_PROPOSAL_INSIGHT_TITLE_CHARS': (
+            '200', 'format',
+            'VCS proposals / generated Insight title must fit its public title format'),
         'MAX_REVIEWS': ('64', 'mechanism', 'VCS proposals / bounded independent reviews per row'),
         'MAX_PROPOSAL_CHECK_DETAIL_BYTES': (
             '16 * 1024', 'safety', 'VCS proposals / fixed UTF-8 budget for retained check detail'),
@@ -2328,9 +2336,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('vcs.py', '_check_ref_name', 1, 0): (
         '512', 'safety',
         'VCS refs / local per-name bound before path and response processing'),
-    ('vcs.py', 'split_ref_path', 1, 0): (
-        '4', 'format',
-        'VCS virtual refs / fixed three-component prefix plus at least one ref component'),
     ('vcs.py', 'check_branch', 1, 0): (
         '256', 'format',
         'VCS branch / shared public branch-name character bound'),
@@ -2382,9 +2387,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('vcs.py', 'proposal_insight_id', 1, 0): (
         '128', 'safety',
         'VCS proposal identity / bound external identifier before deterministic mapping'),
-    ('vcs.py', 'proposal_facts', 1, 0): (
-        '200', 'format',
-        'VCS proposal facts / public insight-title character bound'),
     ('vcs.py', '_check_prefix', 1, 0): (
         '256', 'safety',
         'VCS ref selection / bound local prefix text before matching refs'),
