@@ -2246,6 +2246,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('acceptance.py', '_scope', 2, 0): (
         '32', 'format',
         'acceptance / local command scope follows the public 32-command protocol bound'),
+    ('sandbox.py', 'scratch_selection', 1, 0): (
+        '32', 'format',
+        'sandbox / selected scratch directories follow the public 32-entry protocol bound'),
+    ('sandbox.py', 'scratch_selection', 1, 1): (
+        '255', 'format',
+        'sandbox / scratch directory names follow the public 255-character schema bound'),
     ('check_jobs.py', 'cache_input.unbound', 1, 0): (
         '256', 'safety',
         'check jobs / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -3014,7 +3020,7 @@ def sibling():
                 'explain.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
-                'work_items.py', 'persistent_exec.py'):
+                'work_items.py', 'persistent_exec.py', 'sandbox.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
                        else 2 if filename == 'admission.py' else 3)
