@@ -62,11 +62,31 @@ def job_role(job_id):
     The role names the job's own containers, so ordinary role cleanup never
     touches them and one job's cleanup never touches another's.
     """
-    return 'check-' + job_id[:24]
+    return 'check-' + job_id[:MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS]
 
 
 #: A purpose is a short opaque label: it names a demand, never a path.
 PURPOSE_MAX = 64
+#: Preserve the existing check-container role identity suffix format.
+MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS = 24
+#: Bound each public check-job summary projection.
+MAX_CHECK_JOB_PROJECTION_ROWS = 32
+#: Keep each per-job command preview small and useful.
+MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS = 4
+#: Fixed short text excerpt for commands and prior-run identities.
+MAX_CHECK_JOB_SHORT_PREVIEW_CHARS = 128
+#: Fixed check-job diagnostic and execution-result excerpt.
+MAX_CHECK_JOB_TEXT_PREVIEW_CHARS = 512
+#: Bound the encoded shared-check capture error before decoding it for display.
+MAX_CHECK_CAPTURE_ERROR_BYTES = 256
+#: Command-evidence IDs use 32 lower-case hexadecimal characters.
+MAX_COMMAND_EVIDENCE_ID_HEX_CHARS = 32
+#: Bound command-evidence IDs returned by one logs listing.
+MAX_COMMAND_EVIDENCE_LIST_ROWS = 32
+#: Fixed text excerpt for a prior role continuation report.
+MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS = 4000
+_COMMAND_EVIDENCE_ID = re.compile(
+    rf'[a-f0-9]{{{MAX_COMMAND_EVIDENCE_ID_HEX_CHARS}}}\Z')
 #: Bound transient memory while hashing one frozen check input.
 CHECK_INPUT_HASH_CHUNK_BYTES = MEBIBYTE_BYTES
 #: Canonical JSON escapes control characters; allow expansion plus a record envelope.
@@ -510,7 +530,10 @@ def available(context, *, validate=True, discovery=None):
             current = cache_input(context.project)
             candidates = [j for j in candidates if env is not None and j['environment'] == env
                           and cache_matches(context.project, j, current)]
-    return [{**summary(j), 'requires_input_check': not validate} for j in candidates[:32]]
+    return [
+        {**summary(job), 'requires_input_check': not validate}
+        for job in candidates[:MAX_CHECK_JOB_PROJECTION_ROWS]
+    ]
 
 
 def join(context, job_id):
@@ -909,12 +932,25 @@ def summary(job):
                              'supply': ['summary', 'state'],
                              'resumes_on': 'check completion or new input'}}
                     if job.get('status') in ('queued', 'running') else {})
-    return {**continuation, **({'accepted_for_current_source': False} if job.get('kind') == 'verify' and job.get('status') in ('queued', 'running') else {}), **{'command_count': len(job.get('commands', [])),
-               'command_preview': [text_preview(c, 128)[0] for c in job.get('commands', [])[:4]]},
-            **{k: text_preview(job[k], 512)[0] if isinstance(job[k], str) else job[k]
-               for k in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
-                               'created_at', 'finished_at', 'passed', 'error', 'shared_job',
-                               'purpose', 'replaced_by', 'scratch_paths', 'cache_diagnostics') if k in job}}
+    return {
+        **continuation,
+        **({'accepted_for_current_source': False}
+           if job.get('kind') == 'verify' and job.get('status') in ('queued', 'running')
+           else {}),
+        'command_count': len(job.get('commands', [])),
+        'command_preview': [
+            text_preview(command, MAX_CHECK_JOB_SHORT_PREVIEW_CHARS)[0]
+            for command in job.get('commands', [])[:MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS]
+        ],
+        **{
+            key: (text_preview(job[key], MAX_CHECK_JOB_TEXT_PREVIEW_CHARS)[0]
+                  if isinstance(job[key], str) else job[key])
+            for key in ('id', 'role', 'run', 'kind', 'code_digest', 'status',
+                        'created_at', 'finished_at', 'passed', 'error', 'shared_job',
+                        'purpose', 'replaced_by', 'scratch_paths', 'cache_diagnostics')
+            if key in job
+        },
+    }
 
 
 def pending(project, role, *, discovery=None):
@@ -924,9 +960,13 @@ def pending(project, role, *, discovery=None):
     if discovery is None:
         from .acceptance import discover
         discovery = discover(project)
-    return [summary(j) for j in discovery[0].values() if j.get('role') == role
-            and j.get('status') in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed')
-            and not j.get('acknowledged')][:32]
+    return [
+        summary(job) for job in discovery[0].values()
+        if job.get('role') == role
+        and job.get('status') in ('completed', 'interrupted', 'refused', 'cancelled',
+                                  'cleanup_failed')
+        and not job.get('acknowledged')
+    ][:MAX_CHECK_JOB_PROJECTION_ROWS]
 
 
 def list_jobs(project, role, *, include_acknowledged=True, discovery=None, wake_first=False):
@@ -937,8 +977,13 @@ def list_jobs(project, role, *, include_acknowledged=True, discovery=None, wake_
         discovery = discover(project)
     jobs = [j for j in discovery[0].values() if j.get('role') == role
             and (include_acknowledged or not j.get('acknowledged'))]
-    return [summary(j) for j in sorted(jobs, key=lambda j: (
-        wake_first and _automatic_wake_pending(project, j), j.get('created_at', '')), reverse=True)[:32]]
+    ordered = sorted(
+        jobs,
+        key=lambda job: (wake_first and _automatic_wake_pending(project, job),
+                         job.get('created_at', '')),
+        reverse=True,
+    )
+    return [summary(job) for job in ordered[:MAX_CHECK_JOB_PROJECTION_ROWS]]
 
 
 def prompt_projection(context):
@@ -959,7 +1004,8 @@ def prompt_projection(context):
     except _SharedCheckCaptureRefused as exc:
         shared = []
         result['check_discovery']['shared_check_error'] = (
-            str(exc).encode('utf-8', 'replace')[:256].decode('utf-8', 'ignore'))
+            str(exc).encode('utf-8', 'replace')[:MAX_CHECK_CAPTURE_ERROR_BYTES]
+            .decode('utf-8', 'ignore'))
     views = (
         ('check_jobs', list_jobs(context.project, context.role.name,
                                  include_acknowledged=False, discovery=discovery, wake_first=True)),
@@ -1031,13 +1077,16 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
         raise Denied('Check job belongs to another role')
     if evidence_id is None:
         directory = root(context.project) / job.get('shared_job', job_id) / 'commands'
-        candidates = sorted(p.stem for p in directory.glob('*.json')
-                            if re.fullmatch(r'[a-f0-9]{32}', p.stem) and p.is_file() and not p.is_symlink())[:32]
+        candidates = sorted(
+            p.stem for p in directory.glob('*.json')
+            if (_COMMAND_EVIDENCE_ID.fullmatch(p.stem)
+                and p.is_file() and not p.is_symlink())
+        )[:MAX_COMMAND_EVIDENCE_LIST_ROWS]
         return {'trust': 'recorded-local-untrusted', 'status': job['status'],
                 'commands': [{'evidence_id': identifier,
                               'request': {'action': 'logs', 'id': job_id, 'evidence_id': identifier}}
                              for identifier in candidates]}
-    if not isinstance(evidence_id, str) or not re.fullmatch(r'[a-f0-9]{32}', evidence_id):
+    if not isinstance(evidence_id, str) or _COMMAND_EVIDENCE_ID.fullmatch(evidence_id) is None:
         raise Denied('Invalid command evidence ID')
     if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 8192:
         raise Denied('Invalid evidence page')
@@ -1410,9 +1459,9 @@ def _execute(project, job, stop, sandbox_factory, slot):
                   'snapshot_representable': representable, 'unchanged_during_verification': unchanged,
                   'image': project.config.sandbox.image, 'run': job['run'], 'job': job['id'],
                   'created_at': now(), 'commands': [{**{k: r[k] for k in ('id', 'exit_code', 'reason')},
-                      'script': text_preview(r['script'], 512)[0],
-                      'stdout': text_preview(r.get('stdout', ''), 512)[0],
-                      'stderr': text_preview(r.get('stderr', ''), 512)[0],
+                      'script': text_preview(r['script'], MAX_CHECK_JOB_TEXT_PREVIEW_CHARS)[0],
+                      'stdout': text_preview(r.get('stdout', ''), MAX_CHECK_JOB_TEXT_PREVIEW_CHARS)[0],
+                      'stderr': text_preview(r.get('stderr', ''), MAX_CHECK_JOB_TEXT_PREVIEW_CHARS)[0],
                       'evidence': 'check-jobs/' + job['id'] + '/commands/' + r['id'] + '.json'} for r in results]}
         if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
             record['cache_input'] = job['cache_input']
@@ -1420,7 +1469,8 @@ def _execute(project, job, stop, sandbox_factory, slot):
         write_json(directory / 'result.json', record)
         job.update(status='cancelled' if (directory / 'cancel.json').exists() else 'completed', passed=passed and not (directory / 'cancel.json').exists(), finished_at=now())
     except Exception as exc:
-        job.update(status='interrupted', error=str(exc)[:512], finished_at=now())
+        job.update(status='interrupted',
+                   error=str(exc)[:MAX_CHECK_JOB_TEXT_PREVIEW_CHARS], finished_at=now())
         try:
             # The runner holds the exclusion of the slot it occupies, so
             # its own cleanup takes that exclusion and leaves no exclusion
@@ -1430,7 +1480,11 @@ def _execute(project, job, stop, sandbox_factory, slot):
         except Exception as cleanup_exc:
             # The cleanup failed, so the container may still be running:
             # the job is recorded as needing recovery, never as finished.
-            job.update(status='cleanup_failed', error=('Container cleanup requires recovery: ' + str(cleanup_exc))[:512])
+            job.update(
+                status='cleanup_failed',
+                error=('Container cleanup requires recovery: ' + str(cleanup_exc))
+                [:MAX_CHECK_JOB_TEXT_PREVIEW_CHARS],
+            )
     if job['status'] != 'cleanup_failed':
         # Move only configured, snapshot-excluded build trees after sandbox
         # cleanup. They are compiler inputs, never evidence of a passing check.
@@ -1472,8 +1526,11 @@ def _execute(project, job, stop, sandbox_factory, slot):
                     else:
                         child.unlink()
         except OSError as exc:
-            job.update(status='cleanup_failed', passed=False,
-                       error=('Scratch cleanup requires recovery: ' + str(exc))[:512])
+            job.update(
+                status='cleanup_failed', passed=False,
+                error=('Scratch cleanup requires recovery: ' + str(exc))
+                [:MAX_CHECK_JOB_TEXT_PREVIEW_CHARS],
+            )
     # Finalize only after execution/cache cleanup. Until then the producer is
     # running on disk and cannot be collected or evicted. Cancel, artifact
     # commit and terminal publication serialize on check-jobs.lock.
@@ -1497,8 +1554,11 @@ def _execute(project, job, stop, sandbox_factory, slot):
                                 artifact.replace(cache / name)
                         workspace.rmdir()
                     except OSError as exc:
-                        job.update(status='cleanup_failed', passed=False,
-                                   error=('Scratch cleanup requires recovery: ' + str(exc))[:512])
+                        job.update(
+                            status='cleanup_failed', passed=False,
+                            error=('Scratch cleanup requires recovery: ' + str(exc))
+                            [:MAX_CHECK_JOB_TEXT_PREVIEW_CHARS],
+                        )
                 else:
                     discard_scratch = True
             if not discard_scratch:
@@ -1522,8 +1582,11 @@ def _execute(project, job, stop, sandbox_factory, slot):
         try:
             shutil.rmtree(workspace)
         except OSError as exc:
-            job.update(status='cleanup_failed', passed=False,
-                       error=('Scratch cleanup requires recovery: ' + str(exc))[:512])
+            job.update(
+                status='cleanup_failed', passed=False,
+                error=('Scratch cleanup requires recovery: ' + str(exc))
+                [:MAX_CHECK_JOB_TEXT_PREVIEW_CHARS],
+            )
     from .acceptance import recover_job
     recover_job(project, job['id'])
     os.utime(root(project), None)
@@ -1629,12 +1692,12 @@ def continuation(project, role, snapshot, *, discovery=None):
     job = discovery[0].get(record.get('id')) if isinstance(record.get('id'), str) else None
     if job is None or job.get('role') != role:
         return None
-    return {'trust': 'prior-role-report', 'run': text_preview(report['run'], 128)[0],
-            **{k: text_preview(report[k], 128)[0] if isinstance(report.get(k), str) else None
+    return {'trust': 'prior-role-report', 'run': text_preview(report['run'], MAX_CHECK_JOB_SHORT_PREVIEW_CHARS)[0],
+            **{k: text_preview(report[k], MAX_CHECK_JOB_SHORT_PREVIEW_CHARS)[0] if isinstance(report.get(k), str) else None
                for k in ('snapshot', 'code_digest')},
             'same_code': report.get('code_digest') == snapshot.get('code_digest'),
-            'summary': text_preview(str(report.get('summary', '')), 4000)[0],
-            'state': text_preview(str(report.get('state', '')), 4000)[0],
+            'summary': text_preview(str(report.get('summary', '')), MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS)[0],
+            'state': text_preview(str(report.get('state', '')), MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS)[0],
             'check': summary(job)}
 
 
@@ -1732,7 +1795,8 @@ def wake_ready(project, role, *, discovery=None):
 
 
 def quarantine(project, job, slot, error):
-    job.update(status='cleanup_failed', error=error[:512], finished_at=now())
+    job.update(status='cleanup_failed',
+               error=error[:MAX_CHECK_JOB_TEXT_PREVIEW_CHARS], finished_at=now())
     save_execution(project, job)
     write_json(project.config.data / 'check-slots' / f'{slot}.fault.json',
                {'project': project.name, 'id': job['id']})

@@ -31,7 +31,10 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 also trims that sample; runtime re-exports it only as an alias.
 The `acceptance.py` retained-evidence ceiling, CI observation total-row/prompt
 caps and wake-branch ceiling, and `ci_waits.py` diagnostic page caps are fixed
-safety bounds. CI branch/check retention defaults are configured policy owned
+safety bounds. `check_jobs.py` names its check-summary/evidence row caps,
+identity suffix, text-preview widths and shared capture-error excerpt; its
+caller-visible page and command-array limits remain checked against their
+existing schema declarations. CI branch/check retention defaults are configured policy owned
 by `[vcs] ci_cache_max_branches` and `ci_cache_max_checks_per_branch`, within
 the unchanged total-row envelope; `ci_waits.py`'s serialized check-set size is
 a mechanism contract;
@@ -752,6 +755,24 @@ DECLARATIONS = {
         'COMMAND_EVIDENCE_ENVELOPE_BYTES': (
             'MEBIBYTE_BYTES', 'safety',
             'check jobs / bounded script and record-envelope allowance for command evidence'),
+        'MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS': (
+            '24', 'format', 'check jobs / stable container-role identity suffix format'),
+        'MAX_CHECK_JOB_PROJECTION_ROWS': (
+            '32', 'safety', 'check jobs / bounded role-owned summary rows per projection'),
+        'MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS': (
+            '4', 'safety', 'check jobs / bounded commands shown per job summary'),
+        'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS': (
+            '128', 'safety', 'check jobs / bounded short command and prior-run identity excerpts'),
+        'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS': (
+            '512', 'safety', 'check jobs / bounded diagnostic and command-result text excerpts'),
+        'MAX_CHECK_CAPTURE_ERROR_BYTES': (
+            '256', 'safety', 'check jobs / bounded encoded shared-capture error excerpt'),
+        'MAX_COMMAND_EVIDENCE_ID_HEX_CHARS': (
+            '32', 'format', 'check jobs / public command-evidence identifier hex width'),
+        'MAX_COMMAND_EVIDENCE_LIST_ROWS': (
+            '32', 'safety', 'check jobs / bounded command-evidence listing rows'),
+        'MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS': (
+            '4000', 'safety', 'check jobs / bounded prior-role report summary and state excerpts'),
     },
     'delegation_gates.py': {
         'POLICY_MAX_BYTES': (
@@ -3190,6 +3211,50 @@ def no_defaults(limit, /, count, *, size):
         for name in ('CHECK_INPUT_HASH_CHUNK_BYTES', 'COMMAND_EVIDENCE_OUTPUT_MULTIPLIER',
                      'COMMAND_EVIDENCE_ENVELOPE_BYTES'):
             self.assertEqual(DECLARATIONS['check_jobs.py'][name][1], 'safety')
+
+    def test_check_job_slice_and_preview_bounds_use_named_declarations(self):
+        tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
+        numeric_slices = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Slice):
+                continue
+            bounds = (node.lower, node.upper, node.step)
+            if any(isinstance(child, ast.Constant)
+                   and type(child.value) in (int, float)
+                   for bound in bounds if bound is not None
+                   for child in ast.walk(bound)):
+                numeric_slices.append((node.lineno, ast.unparse(node)))
+        self.assertEqual(numeric_slices, [])
+
+        preview_widths = {
+            ast.unparse(call.args[1])
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call) and callee_name(call.func) == 'text_preview'
+            and len(call.args) >= 2
+        }
+        self.assertEqual(preview_widths, {
+            'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS',
+            'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',
+            'MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS',
+        })
+        evidence_id = next(node for node in tree.body if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name)
+                                   and target.id == '_COMMAND_EVIDENCE_ID'
+                                   for target in node.targets))
+        self.assertIn('MAX_COMMAND_EVIDENCE_ID_HEX_CHARS', ast.unparse(evidence_id.value))
+        for name in (
+                'MAX_CHECK_JOB_ROLE_ID_SUFFIX_CHARS',
+                'MAX_CHECK_JOB_PROJECTION_ROWS',
+                'MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS',
+                'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS',
+                'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',
+                'MAX_CHECK_CAPTURE_ERROR_BYTES',
+                'MAX_COMMAND_EVIDENCE_ID_HEX_CHARS',
+                'MAX_COMMAND_EVIDENCE_LIST_ROWS',
+                'MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS'):
+            self.assertIn(name, DECLARATIONS['check_jobs.py'])
+            self.assertIn(name, {node.id for node in ast.walk(tree)
+                                 if isinstance(node, ast.Name)})
 
     def test_bridge_proxy_fallback_and_chunk_bounds_use_shared_declarations(self):
         for filename, function_name in (('bridge.py', 'connect'), ('mcp_proxy.py', 'forward')):
