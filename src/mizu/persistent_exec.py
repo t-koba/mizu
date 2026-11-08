@@ -202,11 +202,13 @@ class ExecSession:
                     match = pattern.search(buffers[key])
                     if match and key not in statuses:
                         status = int(match[1])
+                        # POSIX shell completion statuses are unsigned 8-bit values.
                         if status > 255:
                             reason = "malformed_completion"
                             break
                         statuses[key] = status
                         del buffers[key][match.start():match.end()]
+                    # The trailer is at most three decimal digits plus US.
                     elif prefix in buffers[key] and len(buffers[key].split(prefix, 1)[1]) > 4 and not match:
                         reason = "malformed_completion"
                         break

@@ -163,9 +163,9 @@ Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. A direct-comparison slice records
 operands of magnitude at least 3 in `check_jobs.py`, `codex.py`, `acceptance.py`,
 `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`, `ci_wake.py`,
-`usage.py`, `config.py`, `runtime.py`, `project.py`, `services.py` and
-`vcs.py`; numeric-only arithmetic operands are evaluated without source
-execution. The `services.py` entries pin Windows Task Scheduler's one-minute
+`usage.py`, `config.py`, `runtime.py`, `project.py`, `services.py`,
+`persistent_exec.py` and `vcs.py`; numeric-only arithmetic operands are evaluated
+without source execution. The `services.py` entries pin Windows Task Scheduler's one-minute
 minimum and 31-day maximum repetition interval. The `admission.py` slice uses
 magnitude 2 to include its exact two-lock resource ceiling. This is not a global
 numeric comparison linter.
@@ -1793,6 +1793,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('config.py', 'load', 1, 8): (
         '256', 'format',
         'VCS configuration / protected-ref length follows the shared 256-character branch-name contract'),
+    ('persistent_exec.py', 'ExecSession.execute', 1, 0): (
+        '255', 'format',
+        'persistent exec / POSIX shell completion status fits the 0-255 status range'),
+    ('persistent_exec.py', 'ExecSession.execute', 1, 1): (
+        '4', 'format',
+        'persistent exec / completion trailer is at most three decimal digits plus US'),
     ('runtime.py', 'Context._handle', 1, 0): (
         '65536', 'safety',
         'runtime usage / fixed canonical bridge-frame byte ceiling for one observation'),
@@ -2507,7 +2513,8 @@ def sibling():
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py', 'codex.py',
                 'ci_observation.py', 'ci_requests.py',
                 'ci_waits.py', 'ci_wake.py', 'usage.py', 'config.py', 'runtime.py',
-                'project.py', 'admission.py', 'services.py', 'vcs.py'):
+                'project.py', 'admission.py', 'services.py', 'vcs.py',
+                'persistent_exec.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename == 'bridge.py'
                        else 2 if filename == 'admission.py' else 3)

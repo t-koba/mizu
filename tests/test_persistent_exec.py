@@ -172,6 +172,20 @@ class PersistentExecTests(Fixture):
         self.assertEqual(once.call_count, 2)
         self.assertIsNone(self.ctx.exec_session)
 
+    def test_shell_status_and_status_frame_format_bounds(self):
+        import mizu.persistent_exec as transport
+        original = transport.send_bounded
+        for name, suffix in (("out_of_range_status", b"256\\037"),
+                             ("overlong_status_trailer", b"1234x")):
+            def malformed(proc, frame, *, suffix=suffix, **kwargs):
+                token = re.search(rb'MIZU:([a-f0-9]{32}):', frame)[1]
+                original(proc, b"printf '\\036MIZU:" + token + b":" + suffix + b"'\n", **kwargs)
+            with self.subTest(name=name), patch.object(
+                    transport, 'send_bounded', side_effect=malformed):
+                result = self.call('printf not-sent')
+            self.assertEqual(result['reason'], 'malformed_completion')
+            self.assertTrue(self.ctx.exec_session.closed)
+
     def test_partial_send_and_malformed_frame_remove(self):
         import mizu.persistent_exec as transport
         original = transport.send_bounded
