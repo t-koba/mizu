@@ -1943,6 +1943,13 @@ class CacheInputTests(Fixture):
             with self.assertRaises(Denied):
                 check_jobs.submit(ctx, fresh=True)
 
+    def test_cache_diagnostic_entry_ceiling(self):
+        from mizu.acceptance import valid_cache_diagnostics
+        diagnostics = [{'phase': 'input', 'reason': 'unstable'},
+                       {'phase': 'output', 'reason': 'reset_failed'}]
+        self.assertTrue(valid_cache_diagnostics(diagnostics))
+        self.assertFalse(valid_cache_diagnostics([*diagnostics, diagnostics[0]]))
+
     def test_pending_marker_validation_cancel_and_unbindable(self):
         from mizu import acceptance
         ctx = self.context()

@@ -29,11 +29,11 @@ bounds; its configurable admission and dispatch choices are `Limits` and
 `[dispatch_evidence]` fields, including the run-local queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
-The `acceptance.py` retained-evidence ceiling, half-envelope scope cap and
-public invalid-producer diagnostic sample cap, CI observation total-row/prompt
-caps and wake-branch ceiling, and `ci_waits.py` diagnostic page caps are fixed
-safety bounds. The scope cap reserves half the receipt envelope for proof
-metadata; the complete receipt still uses the full ceiling. The acceptance
+The `acceptance.py` retained-evidence ceiling, half-envelope scope cap,
+cache-diagnostic entry cap and public invalid-producer diagnostic sample cap,
+CI observation total-row/prompt caps and wake-branch ceiling, and `ci_waits.py`
+diagnostic page caps are fixed safety bounds. The scope cap reserves half the receipt
+envelope for proof metadata; the complete receipt still uses the full ceiling. The acceptance
 sample is capped at 32 rows while total/omitted report coverage and the complete
 internal exclusion set remain intact. `check_jobs.py` names its
 check-summary/evidence row caps,
@@ -260,6 +260,9 @@ DECLARATIONS = {
             '32', 'safety',
             'acceptance / fixed public diagnostic sample envelope for untrusted entries; '
             'full internal exclusions and total/omitted coverage are preserved'),
+        'MAX_CACHE_DIAGNOSTIC_ENTRIES': (
+            '2', 'safety',
+            'acceptance / cap retained cache diagnostics to the input/output phase pair'),
     },
     'classification.py': {
         'MAX_CLASSIFICATION_MODEL_LABEL_CHARS': (
@@ -3207,6 +3210,18 @@ def no_defaults(limit, /, count, *, size):
                   if isinstance(operator, ast.Gt)]
         self.assertEqual(bounds, ['MAX_ACCEPTANCE_SCOPE_BYTES',
                                   'MAX_ACCEPTANCE_SCOPE_BYTES'])
+
+    def test_acceptance_cache_diagnostics_use_named_entry_bound(self):
+        tree = ast.parse((ROOT / 'acceptance.py').read_text(encoding='utf-8'))
+        function = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == 'valid_cache_diagnostics')
+        bounds = [ast.unparse(comparator)
+                  for node in ast.walk(function) if isinstance(node, ast.Compare)
+                  for operator, comparator in zip(node.ops, node.comparators)
+                  if isinstance(operator, ast.LtE)
+                  and ast.unparse(node.left) == 'len(diagnostics)']
+        self.assertEqual(bounds, ['MAX_CACHE_DIAGNOSTIC_ENTRIES'])
 
     def test_restore_streaming_uses_declared_chunk_bound(self):
         tree = ast.parse((ROOT / 'storage.py').read_text(encoding='utf-8'))

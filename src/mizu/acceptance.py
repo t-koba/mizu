@@ -19,6 +19,8 @@ MAX_BYTES = 1048576
 # Reserve half the receipt envelope for scope; full receipts still use MAX_BYTES.
 MAX_ACCEPTANCE_SCOPE_BYTES = MAX_BYTES // 2
 MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES = 32
+#: One bounded cache diagnostic for each input/output capture phase.
+MAX_CACHE_DIAGNOSTIC_ENTRIES = 2
 _BASE = 'evidence/acceptance'
 
 
@@ -67,7 +69,7 @@ def valid_cache_diagnostics(diagnostics):
     """Accept only bounded, redacted cache diagnostics from retained jobs/results."""
     reasons = ('unstable', 'entry_limit', 'byte_limit', 'unsafe_entry',
                'unsafe_or_unreadable', 'reset_failed')
-    return (isinstance(diagnostics, list) and len(diagnostics) <= 2
+    return (isinstance(diagnostics, list) and len(diagnostics) <= MAX_CACHE_DIAGNOSTIC_ENTRIES
             and all(isinstance(item, dict) and not set(item) - {'phase', 'reason', 'path'}
                     and item.get('phase') in ('input', 'output')
                     and item.get('reason') in reasons
