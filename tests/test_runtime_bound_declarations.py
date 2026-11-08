@@ -2043,6 +2043,27 @@ COMPARISON_BOUND_ARGUMENTS = {
         '512', 'safety', 'decision acknowledgement / cap the caller-supplied token batch'),
     ('insights.py', 'Insights._archivable', 2, 0): (
         '200', 'format', 'insight archive / title follows the public 1-200 character contract'),
+    ('engine_config.py', 'child_authority_digest', 1, 0): (
+        '64', 'format',
+        'child authority / goal and adapter identity fields are lowercase SHA-256 hex digests'),
+    ('engine_config.py', 'child_authority_digest', 1, 1): (
+        '1048576', 'safety',
+        'child authority / reject an oversized canonical projection before computing its digest'),
+    ('engine_config.py', 'session_record', 2, 0): (
+        '4096', 'safety',
+        'session record / reject oversized persisted session identifiers before resuming'),
+    ('engine_config.py', 'session_record', 1, 0): (
+        '262144', 'safety',
+        'session record / cap canonical persisted data accepted for resume'),
+    ('engine_config.py', 'session_generation', 2, 0): (
+        '2 ** 31', 'format',
+        'session generation / persisted generation.json accepts only a bounded integer counter'),
+    ('engine_config.py', 'save_session', 1, 0): (
+        '4096', 'safety',
+        'session persistence / cap provider-returned identifier text before writing it'),
+    ('engine_config.py', 'connected_servers', 1, 0): (
+        '64', 'safety',
+        'MCP server materialization / retain the explicit-server safety cap at runtime'),
     ('proposal_waits.py', 'normalize', 1, 0): (
         '3', 'format', 'proposal endpoint / repo, ref and SHA must have exactly three components'),
     ('proposal_waits.py', '_validate', 2, 0): (
@@ -2911,7 +2932,7 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py',
-                'insights.py', 'proposal_waits.py', 'selection.py',
+                'engine_config.py', 'insights.py', 'proposal_waits.py', 'selection.py',
                 'cli.py', 'codex.py', 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py'):
