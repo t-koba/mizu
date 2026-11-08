@@ -103,11 +103,13 @@ capacities and caller-default forwarding at those sites fail until declared.
 The module and call inventories remain name- and scope-restricted and therefore
 partial; absence from the tables is not evidence that a value is not a decision.
 Expressions are inventoried without evaluating source. The call detector covers
-local arithmetic only when it appears in a selected bound-bearing keyword; these
-tests still do not lint arbitrary numeric literals, alias-only values, nested
-assignments, symbolic non-`range` loop bounds, positional arguments or call
-keywords outside the listed set. The exact range tables do not infer other loop
-forms. Expand coverage as the behavior-based inventory reaches other owners.
+local arithmetic only when it appears in a selected bound-bearing keyword; the
+separate timed-wait table covers numeric positional arguments to selected
+`wait`/`sleep` calls. These tests still do not lint arbitrary numeric literals,
+alias-only values, nested assignments, symbolic non-`range` loop bounds,
+positional arguments outside that timed-wait set, or call keywords outside the
+listed set. The exact range tables do not infer other loop forms. Expand
+coverage as the behavior-based inventory reaches other owners.
 The configured slice checks Usage, SchedulerEvidence, CiRequestEvidence,
 PublicationPolicy, PublicationEvidence and WorkspaceCache field defaults, VCS
 polling fallback defaults, the retained-check Limits field and ceiling, and
@@ -1559,6 +1561,38 @@ PARAMETER_DEFAULTS = {
 }
 
 
+# (relative file, qualified scope, callee, positional argument, occurrence):
+#     (exact ast.unparse(argument), classification, owner / rationale)
+# These are wait/backoff intervals: no format or user payload is involved.
+TIMED_WAIT_ARGUMENTS = {
+    ('platform.py', 'lock_fd', 'time.sleep', 0, 0): (
+        'min(0.05, remaining)', 'mechanism',
+        'platform / cap the delay between nonblocking kernel-lock probes; clip it to the configured acquisition deadline'),
+    ('platform.py', 'lock_fd', 'time.sleep', 0, 1): (
+        'min(0.05, remaining)', 'mechanism',
+        'platform / cap the delay between nonblocking kernel-lock probes; clip it to the configured acquisition deadline'),
+    ('process.py', '_input_thread.write', 'stop.wait', 0, 0): (
+        '0.01', 'mechanism',
+        'process input / wait after a nonblocking-write stall to avoid spinning while retaining prompt cancellation'),
+    ('process.py', 'run.pump', 'stop.wait', 0, 0): (
+        '0.01', 'mechanism',
+        'process output / wait after a pipe-readiness race to avoid spinning while retaining prompt cancellation'),
+    ('process.py', 'run', 'changed.wait', 0, 0): (
+        '0.05 if deadline is None else min(0.05, max(0, deadline - time.monotonic()))',
+        'mechanism',
+        'process output / bounded change wait, clipped to the command deadline and used only as an event-wait fallback'),
+    ('engine_channel.py', 'Channel._read', 'self.stop.wait', 0, 0): (
+        '0.01', 'mechanism',
+        'engine channel / wait after a pipe-readiness race to avoid spinning while retaining prompt cancellation'),
+    ('persistent_exec.py', 'ExecSession._start.pump', 'self.stop.wait', 0, 0): (
+        '0.01', 'mechanism',
+        'persistent exec / wait after a pipe-readiness race to avoid spinning while retaining prompt cancellation'),
+    ('persistent_exec.py', 'ExecSession.execute', 'self.changed.wait', 0, 0): (
+        '0.02', 'mechanism',
+        'persistent exec / bounded event-change fallback while consuming command output'),
+}
+
+
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 RANGE_ARGUMENTS = {
@@ -2291,6 +2325,44 @@ def call_inventory(tree):
     return found
 
 
+def timed_wait_inventory(tree):
+    """Inventory selected timed-wait positional arguments without evaluation."""
+    found, occurrences = {}, {}
+
+    class TimedWaits(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = []
+
+        def visit_ClassDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {'wait', 'sleep'}:
+                callee = callee_name(node.func)
+                for argument_index, argument in enumerate(node.args):
+                    if not any(isinstance(value, ast.Constant)
+                               and type(value.value) in (int, float)
+                               for value in ast.walk(argument)):
+                        continue
+                    base = ('.'.join(self.scope) or '<module>', callee, argument_index)
+                    occurrence = occurrences.get(base, 0)
+                    occurrences[base] = occurrence + 1
+                    found[(*base, occurrence)] = ast.unparse(argument)
+            self.generic_visit(node)
+
+    TimedWaits().visit(tree)
+    return found
+
+
 def parameter_default_inventory(tree):
     found = {}
 
@@ -2327,6 +2399,43 @@ def parameter_default_inventory(tree):
 
 
 class RuntimeBoundDeclarationTests(unittest.TestCase):
+    def test_timed_wait_argument_inventory(self):
+        categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
+        for expression, category, rationale in TIMED_WAIT_ARGUMENTS.values():
+            self.assertIn(category, categories)
+            self.assertTrue(rationale.strip())
+        found = {}
+        for path in sorted(ROOT.glob('*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for site, expression in timed_wait_inventory(tree).items():
+                found[(path.name, *site)] = expression
+        self.assertEqual(found, {site: entry[0] for site, entry in TIMED_WAIT_ARGUMENTS.items()})
+
+    def test_timed_wait_detector_scope_and_mismatch_detection(self):
+        source = """
+def outer():
+    stop.wait(0.01)
+    stop.wait(timeout=0.2)
+    process.wait(timeout=0.5)
+    time.sleep(min(0.05, remaining))
+    text = '.'.join(parts)
+
+def sibling():
+    waiter.wait(0.02)
+"""
+        expected = {
+            ('outer', 'stop.wait', 0, 0): '0.01',
+            ('outer', 'time.sleep', 0, 0): 'min(0.05, remaining)',
+            ('sibling', 'waiter.wait', 0, 0): '0.02',
+        }
+        self.assertEqual(timed_wait_inventory(ast.parse(source)), expected)
+        for changed in (source + "\ndef extra():\n    stop.wait(0.03)\n",
+                        source.replace('time.sleep(min(0.05, remaining))',
+                                       'time.sleep(min(0.1, remaining))'),
+                        source.replace('stop.wait(0.01)', 'stop.wait(0.005)')):
+            with self.subTest(changed=changed):
+                self.assertNotEqual(timed_wait_inventory(ast.parse(changed)), expected)
+
     def test_parameter_default_inventory(self):
         categories = {'policy', 'configured policy', 'mechanism', 'format', 'safety'}
         for expression, category, rationale in PARAMETER_DEFAULTS.values():
