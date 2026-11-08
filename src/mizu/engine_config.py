@@ -738,7 +738,9 @@ def stop_engine_containers(context):
         if argv is None:
             error = remove_leftover(context.config, name, env)
         else:
-            result = run(argv, timeout=15, maximum=8192, env=env)
+            result = run(
+                argv, timeout=context.config.sandbox.cleanup_timeout_seconds,
+                maximum=8192, env=env)
             error = stop_note(result) or (result.stderr if result.exit_code else None)
         if error:
             errors.append(error)

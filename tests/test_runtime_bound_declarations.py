@@ -58,8 +58,9 @@ character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
 header-pair count, model-catalog provider-command output ceiling, and runtime
 wrap-up allowance defaults, whose names fall outside the pattern.
-Container cleanup walls remain host-dependent policy pending container-runtime
-measurement; the systemd-analyze verification wall is configured in `[services]`.
+MCP and persistent-exec cleanup walls use `[sandbox].cleanup_timeout_seconds`;
+project-wide cleanup uses `[sandbox].bulk_cleanup_timeout_seconds`.
+Systemd-analyze verification uses `[services].systemd_verify_timeout_seconds`.
 Their output reads are safety.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
 not-yet-wired single-child delegation pilot. Its 1024-job history cap is
@@ -1356,9 +1357,6 @@ CALLS = {
             '128', 'mechanism', 'engine channel / fixed parsed-record backpressure queue depth'),
     },
     'engine_config.py': {
-        ('stop_engine_containers', 'run', 'timeout', 0): (
-            '15', 'policy', 'engine config / host-dependent MCP container cleanup wall; '
-            'policy pending measurement'),
         ('stop_engine_containers', 'run', 'maximum', 0): (
             '8192', 'safety', 'engine config / bounded cleanup output read'),
     },
@@ -1370,9 +1368,6 @@ CALLS = {
             'operator records / omitted limit defaults to the shared-record page ceiling'),
     },
     'persistent_exec.py': {
-        ('ExecSession._remove', 'run', 'timeout', 0): (
-            '15', 'policy', 'persistent exec / host-dependent launcher cleanup wall; '
-            'policy pending measurement'),
         ('ExecSession._remove', 'run', 'maximum', 0): (
             '8192', 'safety', 'persistent exec / bounded cleanup output read'),
     },
@@ -2704,7 +2699,7 @@ def no_defaults(limit, /, count, *, size):
         expected = {
             'cleanup_timeout_seconds': (
                 '15', 'configured policy',
-                'sandbox / per-OCI-call listing, exact-name, and post-command cleanup deadline'),
+                'sandbox / OCI listing, exact-name, post-command and MCP-container cleanup deadline'),
             'bulk_cleanup_timeout_seconds': (
                 '30', 'configured policy',
                 'sandbox / per-OCI-call project-wide removal deadline'),
@@ -2714,6 +2709,24 @@ def no_defaults(limit, /, count, *, size):
                 self.assertEqual(fields[name], default)
                 self.assertEqual(category, 'configured policy')
                 self.assertTrue(rationale.strip())
+
+        for filename, function_name, expected_runs, expected_timeout in (
+                ('engine_config.py', 'stop_engine_containers', 1,
+                 'context.config.sandbox.cleanup_timeout_seconds'),
+                ('persistent_exec.py', 'ExecSession._remove', 1,
+                 'sb.config.sandbox.cleanup_timeout_seconds')):
+            with self.subTest(cleanup=filename):
+                cleanup_tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
+                cleanup = next(node for node in ast.walk(cleanup_tree)
+                               if isinstance(node, ast.FunctionDef)
+                               and node.name == function_name.rsplit('.', 1)[-1])
+                runs = [node for node in ast.walk(cleanup)
+                        if isinstance(node, ast.Call) and callee_name(node.func) == 'run']
+                self.assertEqual(len(runs), expected_runs)
+                for call in runs:
+                    timeout = next(keyword.value for keyword in call.keywords
+                                   if keyword.arg == 'timeout')
+                    self.assertEqual(ast.unparse(timeout), expected_timeout)
 
     def test_vcs_artifact_page_budget_is_configured_policy(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

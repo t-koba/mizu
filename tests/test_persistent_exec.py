@@ -312,7 +312,12 @@ class PersistentLifecycleTests(Fixture):
 
     def test_removal_is_bounded_and_incomplete_observation_fails_closed(self):
         from mizu.process import Result
-        session = ExecSession(self.context().sandbox, self.project.workspace, writable=True)
+        ctx = self.context()
+        ctx.config = dataclasses.replace(
+            ctx.config,
+            sandbox=dataclasses.replace(ctx.config.sandbox, cleanup_timeout_seconds=23))
+        ctx.sandbox.config = ctx.config
+        session = ExecSession(ctx.sandbox, self.project.workspace, writable=True)
         with patch('mizu.persistent_exec.run', return_value=Result(0, '', '', 'timeout', 0)):
             with self.assertRaises(Denied):
                 session._remove()
@@ -322,7 +327,7 @@ class PersistentLifecycleTests(Fixture):
                 session._remove()
                 self.assertEqual(run.call_count, 1 if not listed else 2)
                 for call in run.call_args_list:
-                    self.assertEqual(call.kwargs['timeout'], 15)
+                    self.assertEqual(call.kwargs['timeout'], 23)
                     self.assertEqual(call.kwargs['maximum'], 8192)
 
     def test_persistent_launch_reuses_configured_floor_and_shell(self):

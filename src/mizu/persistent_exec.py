@@ -87,7 +87,9 @@ class ExecSession:
         sb = self.sandbox
         for index, argv in enumerate(([*sb.base(), "ps", "--all", "--filter", "name=" + self.name,
                       "--format", "{{.ID}}"], [*sb.base(), "rm", "--force", self.name])):
-            result = run(argv, timeout=15, maximum=8192, env=runtime_env(sb.config))
+            result = run(
+                argv, timeout=sb.config.sandbox.cleanup_timeout_seconds,
+                maximum=8192, env=runtime_env(sb.config))
             if result.reason != "exited" or result.exit_code != 0 or result.survivors:
                 raise Denied(stop_note(result) or result.stderr or "container cleanup " + result.reason)
             if index == 0 and not result.stdout.strip():

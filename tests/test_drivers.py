@@ -1476,6 +1476,9 @@ class CurrentFormatTests(Fixture):
     def test_stdio_mcp_uses_existing_oci_floor(self):
         from mizu.engine_config import connected_servers
         ctx=self.context('consult')
+        ctx.config = dataclasses.replace(
+            ctx.config,
+            sandbox=dataclasses.replace(ctx.config.sandbox, cleanup_timeout_seconds=23))
         settings={'mcp_servers':{'test':{'command':'/usr/bin/test-mcp','args':['literal;not shell']}}}
         server=connected_servers(ctx,settings)['test']
         argv=[server['command'],*server['args']]
@@ -1491,6 +1494,7 @@ class CurrentFormatTests(Fixture):
             stop_engine_containers(ctx)
         self.assertEqual(ctx.engine_containers,[])
         self.assertIn(names[0],remove.call_args.args[0])
+        self.assertEqual(remove.call_args.kwargs['timeout'], 23)
         ctx.engine_containers=names
         with unittest.mock.patch('mizu.process.run',return_value=Result(1,'','mock cleanup failure','exit',.1)):
             with self.assertRaises(Denied):stop_engine_containers(ctx)
