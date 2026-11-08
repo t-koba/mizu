@@ -875,14 +875,15 @@ class StorageReclaimTests(Fixture):
         path = self.project.root / 'snapshots' / (record['id'] + '.json')
         write_json(path, record)
         try:
-            self.assertEqual(audit(self.project)["snapshots"]["skipped"], 0)
-            with mock.patch.object(_platform, 'IS_WINDOWS', True):
-                # Drop the process-local path cache so the Windows view is fresh.
-                self.project.snapshots._path_validation_cache.clear()
-                try:
-                    self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
-                finally:
+            # Exercise POSIX acceptance explicitly on every CI host; Windows
+            # rejects the same case-only names after its casefold policy applies.
+            for is_windows, skipped in ((False, 0), (True, 1)):
+                with mock.patch.object(_platform, 'IS_WINDOWS', is_windows):
                     self.project.snapshots._path_validation_cache.clear()
+                    try:
+                        self.assertEqual(audit(self.project)["snapshots"]["skipped"], skipped)
+                    finally:
+                        self.project.snapshots._path_validation_cache.clear()
         finally:
             if path.exists():
                 path.unlink()
