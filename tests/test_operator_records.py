@@ -195,6 +195,27 @@ class OperatorRecordTests(Fixture):
             records.write(self.project, event_id='other-role', kind='operator.notice', action='withdraw',
                           addressee='worker', target=target)
 
+    def test_exact_historical_subject_ignores_history_output_limit(self):
+        self.project.insights.revise(self.question['id'], source='reviewer', expected_rev=1,
+                                     title='Question revision 2', body='Q: revision two',
+                                     base_snapshot=None)
+        self.project.insights.revise(self.question['id'], source='reviewer', expected_rev=2,
+                                     title='Question revision 3', body='Q: revision three',
+                                     base_snapshot=None)
+        self.project.insights.history_entries = 1
+        self.assertEqual([row['rev'] for row in self.project.insights.history(self.question['id'])], [1])
+
+        historical_subject = {**self.subject, 'rev': 2}
+        answer = records.write(self.project, event_id='bounded-history-answer', kind='answer',
+                               body='Answer for revision two', subject=historical_subject)
+        self.assertEqual(answer['record']['subject'], historical_subject)
+
+        # Delivery validates the exact subject again after the current revision advances.
+        self.project.insights.revise(self.question['id'], source='reviewer', expected_rev=3,
+                                     title='Question revision 4', body='Q: revision four',
+                                     base_snapshot=None)
+        self.assertEqual(self.pending()['events'][0]['subject'], historical_subject)
+
     def test_config_defaults_and_disable_retains_frozen_authority(self):
         expected = records.configuration(self.config.operator_records)
         self.assertEqual(self.config.operator_records, expected)

@@ -4,8 +4,10 @@ Revision contract (operator EDITOR c51c): stable insight identity exposes
 only the improved current content, its current decision/evidence gap and a
 revision identity (``rev``) in ordinary prompts, lists and reads. Obsolete
 claims are replaced, never appended. Prior revisions live under
-``insight-revisions/`` and are returned only by the explicit ``history``
-path, never injected into routine context. Updates are authorized to the
+``insight-revisions/`` and are returned by the explicit, output-capped
+``history`` path, never injected into routine context. Internal exact-subject
+validation may read one addressed revision without enumerating that history.
+Updates are authorized to the
 original submitter (source match) with compare-and-swap on ``expected_rev``;
 decisions bind to the reviewed ``rev`` so a prior approval never authorizes
 changed content, while a meaningful revision becomes pending again and
@@ -737,6 +739,30 @@ replacement insight without implying rejected substance.
                 break
         out.sort(key=lambda r: _rev_of(r))
         return out
+
+    def read_revision(self, insight_id: str, rev: int) -> dict | None:
+        """Read one exact archived revision without using the history listing.
+
+        Bounds: one path-addressed record of at most ``MAX_FRAME`` bytes;
+        the user-facing history output cap does not affect exact references.
+        Trust: local recorded state. Failure: ``None`` for a missing, malformed,
+        unsafe, oversized, or identity-mismatched archive.
+        """
+        identifier(insight_id)
+        if type(rev) is not int or rev < 1:
+            raise Denied("Insight revision must be a positive integer")
+        name = f"insight-revisions/{insight_id}.r{rev}.json"
+        try:
+            raw = safe_read(self.root, name, MAX_FRAME)
+            record = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError("Non-finite JSON value")))
+        except (OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
+            return None
+        if (not isinstance(record, dict) or record.get("id") != insight_id
+                or type(record.get("rev", 1)) is not int
+                or record.get("rev", 1) != rev):
+            return None
+        return record
 
     def attach_evidence(self, insight_id: str, *, source: str, text: str,
                         run: str | None = None,

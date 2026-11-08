@@ -85,12 +85,9 @@ def _question(project, subject):
         raise Denied('Subject must use the full exact insight ID')
     if current.get('rev', 1) == subject['rev']:
         return current
-    matches = [row for row in project.insights.history(subject['id'])
-               if type(row) is dict and row.get('id') == subject['id']
-               and type(row.get('rev', 1)) is int and row.get('rev', 1) == subject['rev']]
-    if len(matches) != 1:
+    item = project.insights.read_revision(subject['id'], subject['rev'])
+    if item is None:
         raise Denied('Question revision is unavailable or ambiguous')
-    item = matches[0]
     # Source is identity, not revision content: reject a historical record whose
     # routing principal disagrees with the current, source-validated insight.
     if item.get('source') != current.get('source'):
