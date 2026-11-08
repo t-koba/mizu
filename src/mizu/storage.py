@@ -33,6 +33,9 @@ from .project import (Project, _check_project_paths, _directory_identity,
                       _discard_project_stage, _project_parents, check_project_settings, read_goal)
 from .snapshot import open_store
 
+#: Fixed archive-member read chunk; restore(max_bytes) separately limits total bytes.
+RESTORE_CHUNK_BYTES = 1048576
+
 #: Project members covered by backup/restore (plus backup.json on restore).
 #: operator-record-index is derived and deliberately rebuilt, not backed up.
 MEMBERS = (
@@ -1553,7 +1556,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                     with stream, target.open("xb") as output:
                         remaining = member.size
                         while remaining:
-                            block = stream.read(min(1048576, remaining))
+                            block = stream.read(min(RESTORE_CHUNK_BYTES, remaining))
                             if not block:
                                 raise Denied("Truncated backup member")
                             output.write(block)

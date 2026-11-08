@@ -77,7 +77,9 @@ defer an operator setting until the pilot integration can actually consume it,
 rather than expose an inert option.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
-safety bounds. The `engine_config.py` reviewed-resource byte and tree-entry ceilings are
+safety bounds. Restore's fixed member-read chunk bounds transient memory while
+its separate `max_bytes` setting limits total restored bytes. The `engine_config.py`
+reviewed-resource byte and tree-entry ceilings are
 fixed safety bounds; the 4096-entry traversal budget also bounds file count.
 The `drivers.py` event-stream default is the configured
 `[limits] event_stream_bytes` policy default; its per-record transport ceiling,
@@ -387,6 +389,10 @@ DECLARATIONS = {
         '_AUDIT_JSON_BYTES': (
             '1048576', 'safety',
             'storage audit / generic reference-JSON cap; snapshot manifests have a separate bound'),
+        'RESTORE_CHUNK_BYTES': (
+            '1048576', 'safety',
+            'storage restore / fixed streamed-member read chunk bounds transient memory; '
+            'max_bytes separately limits total restored bytes'),
         'MAX_SNAPSHOT_GOAL_JSON_EXPANSION': (
             '6', 'format',
             'storage audit / canonical JSON can escape one UTF-8 control byte as six ASCII bytes'),
@@ -2714,6 +2720,17 @@ def no_defaults(limit, /, count, *, size):
                               SYMBOLIC_BOUNDS.get(filename)),
                     {name: entry[0] for name, entry in declarations.items()})
 
+
+    def test_restore_streaming_uses_declared_chunk_bound(self):
+        tree = ast.parse((ROOT / 'storage.py').read_text(encoding='utf-8'))
+        restore = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.FunctionDef) and node.name == 'restore')
+        reads = [node for node in ast.walk(restore)
+                 if isinstance(node, ast.Call) and callee_name(node.func) == 'stream.read']
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(ast.unparse(reads[0].args[0]),
+                         'min(RESTORE_CHUNK_BYTES, remaining)')
+        self.assertEqual(DECLARATIONS['storage.py']['RESTORE_CHUNK_BYTES'][0], '1048576')
 
     def test_bridge_proxy_fallback_and_chunk_bounds_use_shared_declarations(self):
         for filename, function_name in (('bridge.py', 'connect'), ('mcp_proxy.py', 'forward')):
