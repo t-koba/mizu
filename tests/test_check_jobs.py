@@ -2016,7 +2016,8 @@ class CacheInputTests(Fixture):
             job = check_jobs.submit(ctx)
         path = check_jobs.root(self.project) / job['id'] / 'job.json'
         raw = read_json(path)
-        for changes in ({'cache_binding_pending': False}, {'cache_binding_pending': True}, {'cache_binding_pending': 2},
+        for changes in ({'cache_binding_pending': 0}, {'cache_binding_pending': False},
+                        {'cache_binding_pending': True}, {'cache_binding_pending': 2},
                         {'cache_input': None}, {'shared_key': None}, {'kind': 'experiment'},
                         {'status': 'completed'}, {'cache_request': None},
                         {'acceptance_scope': {}}):
