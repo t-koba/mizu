@@ -204,7 +204,7 @@ occurrence. Most slices use magnitude 3 in `check_jobs.py`, `codex.py`,
 `acceptance.py`, `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`,
 `ci_wake.py`, `insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`,
 `config.py`, `runtime.py`, `project.py`, `services.py`, `persistent_exec.py`,
-`cli.py`, `vcs.py`, `model_catalog.py`, `pi_durable.py`, `platform.py`,
+`cli.py`, `vcs.py`, `pi_durable.py`, `platform.py`,
 `work_item_seed.py`, `work_item_retirement.py`, `work_item_waits.py`,
 `work_item_resolution.py` and `work_item_events.py`; numeric-only arithmetic
 operands, including bounded integer powers, are evaluated without source
@@ -214,7 +214,8 @@ explicit: `admission.py` uses magnitude 2 for its two-lock ceiling;
 `pi_durable.py` uses magnitude 1 for attempt identity; selected work-item
 slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
-constructor inputs, persisted shapes and filesystem-safety comparisons.
+constructor inputs, persisted shapes and filesystem-safety comparisons;
+`model_catalog.py` includes its observation-store schema version at magnitude 1.
 This is not a global numeric comparison linter.
 """
 import ast
@@ -1965,6 +1966,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('materialize.py', 'invoke', 1, 0): (
         '64', 'format',
         'materialized content digest / exact SHA-256 hexadecimal text length'),
+    ('model_catalog.py', '_read_observations', 1, 0): (
+        '1', 'format',
+        'model catalog observation store / schema version one selects the checksummed persisted layout'),
     ('model_catalog.py', '_timestamp', 1, 0): (
         '25', 'format',
         'model catalog observation timestamp / exact seconds-precision UTC ISO-8601 text length'),
@@ -3258,7 +3262,8 @@ def sibling():
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py', 'work_item_events.py', 'work_items.py'}
+                'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
+                'model_catalog.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

@@ -191,6 +191,32 @@ class ModelCatalogTests(Fixture):
         self.assertEqual(self.catalog()['last_refresh_error']['code'], 'invalid_catalog_response')
         self.assertEqual(self.catalog()['last_successful_observation'], success['last_successful_observation'])
 
+    def test_observation_schema_version_boundary(self):
+        from mizu.fs import canonical, digest
+
+        self.catalog(refresh=True)
+        path = self.config.data / OBSERVATIONS
+        valid = json.loads(path.read_bytes())
+        self.assertEqual(valid['version'], 1)
+        self.assertEqual(self.catalog()['freshness'], 'observed',
+                         'schema version one is accepted for cache reads')
+        checksum = digest(canonical({'version': 1, 'observations': valid['observations']}))
+
+        for version in (0, 2, True):
+            with self.subTest(version=version):
+                raw = canonical({'version': version, 'observations': valid['observations'],
+                                 'checksum': checksum})
+                path.write_bytes(raw)
+                with patch('mizu.model_catalog.run') as child, \
+                        patch('mizu.model_catalog.credentials') as credentials:
+                    with self.assertRaisesRegex(
+                            ConfigError, '^Invalid or unavailable model catalog observation store$'):
+                        inspect(self.config, 'primary')
+                child.assert_not_called()
+                credentials.assert_not_called()
+                self.assertEqual(path.read_bytes(), raw,
+                                 'unsupported schema versions are refused without repair')
+
     def test_corrupt_metadata_fails_before_provider_and_credentials(self):
         from mizu.fs import canonical, digest
         self.catalog(refresh=True)
