@@ -1091,7 +1091,9 @@ class CiCacheRetentionTests(Fixture):
         expected = {name: rows[:16] for name, rows in list(value.items())[:128]}
         self.assertEqual(_clean_ci_failures(value), expected)
         self.assertEqual(_merge_ci_success_maps({}, value), expected)
-        for branches, checks in ((True, 16), (128, "bad"), (0, 1), (1, 1025), (129, 16)):
+        self.assertEqual(ci_cache_limits(self._config(1, 1)), (1, 1))
+        for branches, checks in (
+                (True, 16), (128, "bad"), (0, 1), (1, 0), (1, 1025), (129, 16)):
             config = self._config(branches, checks)
             self.assertEqual(ci_cache_limits(config), (128, 16))
             self.assertEqual(_clean_ci_failures(value, config), expected)

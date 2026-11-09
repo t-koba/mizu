@@ -1969,6 +1969,12 @@ COMPARISON_BOUND_ARGUMENTS = {
         '2', 'format', 'CI acceptance reuse / schema version two is the retained provider-proof format'),
     ('ci_acceptance.py', 'retain', 0, 0): (
         '1', 'format', 'CI acceptance ingestion / provider attempt selector is positive'),
+    ('ci_observation.py', 'ci_cache_limits', 0, 0): (
+        '1', 'configured policy',
+        'CI cache / branch retention follows the positive [vcs].ci_cache_max_branches range'),
+    ('ci_observation.py', 'ci_cache_limits', 0, 1): (
+        '1', 'configured policy',
+        'CI cache / per-branch checks follow the positive [vcs].ci_cache_max_checks_per_branch range'),
     ('ci_observation.py', '_valid_ci_run', 1, 0): (
         '128', 'safety',
         'CI observation / bound the opaque cached run identity before persistence and projection'),
@@ -3396,7 +3402,7 @@ def sibling():
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
-                'ci_acceptance.py'}
+                'ci_acceptance.py', 'ci_observation.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
