@@ -103,16 +103,21 @@ Do not point it to a generic shell interpreter that evaluates query text.
 `command_evidence_read` and `experiment_evidence_read` are separate, explicit,
 ungranted-by-default read capabilities, not extensions of workspace `read` or
 execution grants. They accept exact full UUID locators only. Scope is the
-current project and same configured role's runs (current or prior), checked against
-harness-owned `started.json` and the record's ID/kind/role. There is no listing,
-cross-role/project mode, caller-supplied path or fallback history search.
+current project (current or prior runs). Independent per-role
+`command_evidence_sources` and `experiment_evidence_sources` each accept `own`
+(default, same-role only) or `any` (cross-role reads from roles configured globally
+and included in this project). Neither setting grants the corresponding operation.
+Harness-owned `started.json` must name a permitted source role, and the record's
+ID/kind/role must match that locator and source. There is no listing, cross-project
+mode, caller-supplied path or fallback history search. These read-only settings
+do not broaden SharedRecords access or any write, routing or acknowledgement authority.
 
 The complete UTF-8 evidence record is capped at `file_bytes`; `started.json`
 authorization metadata is capped at the smaller of `file_bytes` and a fixed
 64 KiB. Both use the existing symlink/hardlink-safe `safe_read` primitive
 (including its documented platform limitations). Each page revalidates identity and the
-complete raw-file digest; nonzero offsets require `content_id`. A current grant authorizes
-reading same-role retained records regardless of which capabilities were present
+complete raw-file digest; nonzero offsets require `content_id`. A current grant and
+source setting authorize reading permitted retained records regardless of which capabilities were present
 when the original run was created; the original command is not reauthorized. Missing,
 changed, corrupt, unsafe or oversized evidence is refused, never recovered by
 scanning or refetching. Start metadata is not returned. These tools do not

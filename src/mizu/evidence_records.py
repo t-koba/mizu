@@ -23,8 +23,8 @@ def read_retained(context, kind: str, args: dict) -> dict:
 
     started.json is capped at min(file_bytes, 64 KiB); the complete evidence
     record uses file_bytes. Identity is harness-owned run metadata plus the
-    configured caller role; record contents remain untrusted. Every page
-    revalidates both files.
+    caller's configured kind-specific source policy; record contents remain
+    untrusted. Every page revalidates both files.
     Unsafe/unavailable/corrupt records fail without a retry or history scan.
     """
     run, evidence_id = args["run"], args["evidence_id"]
@@ -39,14 +39,20 @@ def read_retained(context, kind: str, args: dict) -> dict:
         raise Denied("Invalid evidence content_id")
     prefix = f"runs/{run}/"
     evidence = f"{kind}/{evidence_id}.json"
+    source_mode = (context.role.experiment_evidence_sources if kind == "experiments"
+                   else context.role.command_evidence_sources)
     maximum = context.config.limits.file_bytes
     started_maximum = min(maximum, MAX_STARTED_EVIDENCE_BYTES)
     try:
         started = json.loads(safe_read(context.project.root, prefix + "started.json", started_maximum)
                              .decode("utf-8"), parse_constant=_reject_nonfinite_json)
-        if (not isinstance(started, dict) or started.get("run") != run
-                or started.get("role") != context.role.name):
+        if not isinstance(started, dict) or started.get("run") != run:
             raise Denied("Evidence run identity or role mismatch")
+        source_role = started.get("role")
+        if (not isinstance(source_role, str) or source_role not in context.config.roles
+                or source_role not in context.project.roles
+                or (source_role != context.role.name and source_mode != "any")):
+            raise Denied("Evidence source role mismatch or not authorized")
         data = safe_read(context.project.root, prefix + evidence, maximum)
         text = data.decode("utf-8")
         record = json.loads(text, parse_constant=_reject_nonfinite_json)
@@ -55,7 +61,7 @@ def read_retained(context, kind: str, args: dict) -> dict:
     command = record.get("command") if kind == "experiments" and isinstance(record, dict) else record
     expected_kind = "experiment" if kind == "experiments" else "command"
     if (not isinstance(command, dict) or command.get("id") != evidence_id
-            or command.get("kind") != expected_kind or command.get("role") != context.role.name):
+            or command.get("kind") != expected_kind or command.get("role") != source_role):
         raise Denied("Evidence record identity, kind or role mismatch")
     content_id = digest(data)
     if expected is not None and expected != content_id:

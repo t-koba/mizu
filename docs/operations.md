@@ -202,10 +202,16 @@ mizu cleanup demo
 Explicit `command_evidence_read` and `experiment_evidence_read` role grants
 expose `mizu_command_evidence_read` and `mizu_experiment_evidence_read`.
 Neither is granted by default; each independently gates one kind. They read
-only the caller's current project and the same configured role's runs (current
-or prior). The harness validates the target run's identity and role from
-`started.json` (bounded by min(`file_bytes`, 64 KiB)); it never returns that
-metadata. A current grant authorizes same-role historical records
+only the caller's current project (current or prior runs). The independent role
+settings `command_evidence_sources` and `experiment_evidence_sources` each accept
+only `own` (default, same-role reads) or `any` (cross-role reads from globally
+configured roles included in this project's roles). To review another role's
+cited evidence, explicitly grant the matching read capability and set that
+capability's source setting to `any`; the other kind remains unchanged.
+The harness validates the target run's identity and source role from
+`started.json` (bounded by min(`file_bytes`, 64 KiB)) against the evidence record's
+role on every page; it never returns that metadata. A current grant and source
+setting authorize permitted historical records
 regardless of the original run's capability set; the original command is not
 reauthorized.
 
@@ -245,7 +251,7 @@ claims.
 Continue with the returned `content_id`; nonzero offsets require it, and any
 supplied ID must be a lowercase 64-hex digest. The complete file digest is
 compared on every page, so changes outside the requested page also fail.
-Invalid IDs, absent/expired records or run metadata, cross-role locators,
+Invalid IDs, absent/expired records or run metadata, unauthorized source roles,
 corrupt/mismatched JSON or identities, unsafe links, oversized files and
 changed continuations fail explicitly (byte limits report `LimitExceeded`,
 other read refusals `Denied`). There is no automatic retry, refetch or scan

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu.config import CAPABILITIES, load
-from mizu.errors import Denied, LimitExceeded
+from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import READ_PAGE_CHARS, canonical, digest, safe_read, write_json
 from mizu.protocol import DEFINITIONS, tool_definitions, validate
 
@@ -55,6 +55,108 @@ class RetainedEvidenceTests(Fixture):
                              'capabilities = ["command_evidence_read", "experiment_evidence_read", ', 1))
         configured = load(self.file)
         self.assertTrue(any(set(OPS) <= set(role.capabilities) for role in configured.roles.values()))
+
+    def test_source_configuration_defaults_validation_and_independence(self):
+        fields = ("command_evidence_sources", "experiment_evidence_sources")
+        for role in self.config.roles.values():
+            for field in fields:
+                self.assertEqual(getattr(role, field), "own")
+        original = self.file.read_text()
+        for field in fields:
+            other = next(value for value in fields if value != field)
+            for value in ("own", "any"):
+                with self.subTest(field=field, value=value):
+                    self.file.write_text(original.replace("[roles.worker]",
+                                         f'[roles.worker]\n{field} = "{value}"', 1))
+                    role = load(self.file).roles["worker"]
+                    self.assertEqual(getattr(role, field), value)
+                    self.assertEqual(getattr(role, other), "own")
+                    self.assertEqual(role.capabilities, self.config.roles["worker"].capabilities)
+            for value in ('""', '"all"', '"OWN"', 'true', '1', '[]', '{}'):
+                with self.subTest(field=field, value=value):
+                    self.file.write_text(original.replace("[roles.worker]",
+                                         f"[roles.worker]\n{field} = {value}", 1))
+                    with self.assertRaisesRegex(ConfigError, field):
+                        load(self.file)
+
+    def test_independent_source_modes_and_explicit_grants(self):
+        experiment = self.directory / "experiments" / self.record.name
+        for source in ("worker", "reviewer"):
+            write_json(self.started, {"run": self.run, "role": source})
+            write_json(self.record, {**self.command, "role": source})
+            write_json(experiment, {"command": {**self.command, "role": source, "kind": "experiment"}})
+            for command_mode, experiment_mode in (("own", "own"), ("any", "own"),
+                                                   ("own", "any"), ("any", "any")):
+                self.ctx.role = dataclasses.replace(self.ctx.role,
+                    command_evidence_sources=command_mode, experiment_evidence_sources=experiment_mode)
+                for op, mode in zip(OPS, (command_mode, experiment_mode)):
+                    with self.subTest(source=source, op=op, modes=(command_mode, experiment_mode)):
+                        if source == "worker" or mode == "any":
+                            page = self.ctx.handle(op, self.args)
+                            self.assertEqual(page["content_id"], digest(
+                                (self.record if op == OPS[0] else experiment).read_bytes()))
+                            self.assertNotIn("private_metadata", page["text"])
+                        else:
+                            with self.assertRaisesRegex(Denied, "role"):
+                                self.ctx.handle(op, self.args)
+        self.ctx.role = dataclasses.replace(self.ctx.role, capabilities=("finish",))
+        for op in OPS:
+            with self.assertRaisesRegex(Denied, "no capability"):
+                self.ctx.handle(op, self.args)
+
+    def test_any_source_refuses_unconfigured_and_mismatched_roles(self):
+        self.ctx.role = dataclasses.replace(self.ctx.role,
+            command_evidence_sources="any", experiment_evidence_sources="any")
+        experiment = self.directory / "experiments" / self.record.name
+        for source, record_role in (("unknown", "unknown"), ("reviewer", "worker"),
+                                    ("worker", "reviewer"), ([], [])):
+            write_json(self.started, {"run": self.run, "role": source})
+            write_json(self.record, {**self.command, "role": record_role})
+            write_json(experiment, {"command": {**self.command, "role": record_role, "kind": "experiment"}})
+            for op in OPS:
+                with self.subTest(source=source, record_role=record_role, op=op), self.assertRaises(Denied):
+                    self.ctx.handle(op, self.args)
+        # A globally configured role must also belong to this project.
+        self.project.roles = tuple(role for role in self.project.roles if role != "reviewer")
+        write_json(self.started, {"run": self.run, "role": "reviewer"})
+        write_json(self.record, {**self.command, "role": "reviewer"})
+        write_json(experiment, {"command": {**self.command, "role": "reviewer", "kind": "experiment"}})
+        for op in OPS:
+            with self.assertRaises(Denied):
+                self.ctx.handle(op, self.args)
+        self.project.roles += ("reviewer",)
+        self.ctx.config = dataclasses.replace(self.ctx.config, roles={
+            name: role for name, role in self.config.roles.items() if name != "reviewer"})
+        for op in OPS:
+            with self.assertRaises(Denied):
+                self.ctx.handle(op, self.args)
+
+    def test_cross_role_continuation_revalidates_identity_and_authority(self):
+        self.ctx.role = dataclasses.replace(self.ctx.role,
+            command_evidence_sources="any", experiment_evidence_sources="any")
+        write_json(self.started, {"run": self.run, "role": "reviewer"})
+        for op, path in ((OPS[0], self.record),
+                         (OPS[1], self.directory / "experiments" / self.record.name)):
+            command = {**self.command, "role": "reviewer",
+                       "kind": "command" if op == OPS[0] else "experiment"}
+            record = command if op == OPS[0] else {"command": command}
+            write_json(path, record)
+            first = self.ctx.handle(op, {**self.args, "limit": 20})
+            args = {**self.args, "offset": 20, "limit": 20, "content_id": first["content_id"]}
+            self.assertEqual(self.ctx.handle(op, args)["text"], path.read_bytes().decode("utf-8")[20:40])
+            field = "command_evidence_sources" if op == OPS[0] else "experiment_evidence_sources"
+            self.ctx.role = dataclasses.replace(self.ctx.role, **{field: "own"})
+            with self.assertRaises(Denied):
+                self.ctx.handle(op, args)
+            self.ctx.role = dataclasses.replace(self.ctx.role, **{field: "any"})
+            write_json(self.started, {"run": self.run, "role": "worker"})
+            with self.assertRaisesRegex(Denied, "role mismatch"):
+                self.ctx.handle(op, args)
+            write_json(self.started, {"run": self.run, "role": "reviewer"})
+            # Even changes outside the page invalidate the original continuation.
+            path.write_bytes(path.read_bytes() + b" ")
+            with self.assertRaisesRegex(Denied, "changed"):
+                self.ctx.handle(op, args)
 
     def test_own_role_two_run_pagination_reconstructs_multibyte_record(self):
         self.assertNotEqual(self.ctx.run_dir.name, self.run)

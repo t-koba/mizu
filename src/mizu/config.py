@@ -797,6 +797,9 @@ class Role:
     #: "own" routes by origin submitter, "any" by subscription alone.
     decision_sources: str = "own"
     work_item_sources: str = "own"
+    #: Independent exact retained-evidence read sources; grants remain explicit.
+    command_evidence_sources: str = "own"
+    experiment_evidence_sources: str = "own"
     #: Whether a red operator-selected ``ci_branch`` wakes this role.
     #: Default true for writable roles (the writer keeps its sticky-red wake),
     #: false otherwise, so event-only/read roles never spend runs on CI they
@@ -1707,7 +1710,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1900,6 +1903,12 @@ def load(file: Path) -> Config:
         role_daemon_spacing = role.get("daemon_spacing_seconds")
         if role_daemon_spacing is not None:
             number(role_daemon_spacing, f"roles.{name}.daemon_spacing_seconds", 1, 1073741824)
+        evidence_sources = {}
+        for field in ("command_evidence_sources", "experiment_evidence_sources"):
+            value = string(role.get(field, "own"), f"roles.{name}.{field}")
+            if value not in ("own", "any"):
+                raise ConfigError(f"roles.{name}.{field} must be own or any")
+            evidence_sources[field] = value
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1920,7 +1929,7 @@ def load(file: Path) -> Config:
                            event_batch_seconds=role_event_batch,
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing,
-                           scheduled_inputs=scheduled_inputs)
+                           scheduled_inputs=scheduled_inputs, **evidence_sources)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

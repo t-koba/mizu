@@ -1816,6 +1816,9 @@ this role: default true for writable roles, false otherwise), `held_at_capacity`
 deferral) and `work_item_sources` (terminal routing by origin submitter;
 `own`/`any`, default/migration rules in
 [terminal subscriptions](#terminal-work-item-subscriptions)),
+independent `command_evidence_sources` / `experiment_evidence_sources`
+(`own` or `any`, each defaulting to `own`; exact retained-evidence reads only,
+not capability grants),
 optional per-role no-progress backoff override `no_progress_backoff_seconds`
 (0–86,400; unset inherits `[limits].writer_no_progress_backoff_seconds` for
 writable roles and `[limits].no_progress_backoff_seconds` otherwise; 0 disables
@@ -1973,8 +1976,8 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `files`, `read`, `diff` | Bounded file view and anchored published changes |
 | `exec` | Container command; workspace mode determines source writability |
 | `experiment` | Container command with readonly source and ephemeral work area |
-| `command_evidence_read` | Read an exact retained command record from this project's same configured role's run (current or prior); no listing or path input; ungranted by default |
-| `experiment_evidence_read` | Read an exact retained experiment wrapper from this project's same configured role's run (current or prior); independent of the command grant; ungranted by default |
+| `command_evidence_read` | Read an exact retained command record from this project's runs (current or prior), limited by `command_evidence_sources`; no listing or path input; ungranted by default |
+| `experiment_evidence_read` | Read an exact retained experiment wrapper from this project's runs (current or prior), limited by `experiment_evidence_sources`; independent of the command grant; ungranted by default |
 | `verify` | Execute operator-owned command strings and bind proof to code digest |
 | `check_job` | Submit and inspect asynchronous frozen-input sandbox checks: `verify`, an ordinary `experiment` and a read-only `exec` return a job instead of blocking, and the role continues independent work, finishing with `outcome=wait, wait_for_check=<id>` when nothing else remains. A result is imported only while the source digest, the configured commands and the environment still match, so a source change cannot inherit a passing result. Writable execution stays synchronous. A request may carry an optional `purpose` (1-64 printable characters, no path separators): a later request with the same purpose from the same role replaces that role's earlier unfinished job for that purpose, which leaves the queue and keeps its evidence; a purpose never retires another role's job. See [check jobs](check-jobs.md) |
 | `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
@@ -2006,9 +2009,16 @@ For post-decision withdrawal, add `withdraw_decided` to the same role's TOML `ca
 `withdraw_insight`, never granted by default, and the operator CLI stays deny-by-default.
 Neither `read`, `exec` nor `experiment` implies either retained-evidence grant.
 The two grants are independent and expose only their own record kind. Their
-scope is fixed to the current project and same configured role (current or prior
-runs); there is no cross-role/project setting. A current grant permits reading
-that role's retained records regardless of the original run's capability set;
+scope is confined to the current project (current or prior runs). Independent
+role settings `command_evidence_sources` and `experiment_evidence_sources` each
+accept only `"own"` (default, caller's role only) or `"any"` (any source role
+configured globally and included in this project's roles). Each setting affects
+only the matching read capability; it neither grants that capability nor changes
+SharedRecords, event routing, writes or acknowledgements. For example, a reviewer
+may explicitly hold both read grants with `command_evidence_sources = "any"`
+while leaving `experiment_evidence_sources = "own"`. Run metadata must name the
+same source role as the record on every page. A current grant and source setting
+authorize retained records regardless of the original run's capability set;
 the original command is not reauthorized. See [retained-evidence reads](operations.md#retained-evidence-reads)
 for locators, paging, byte bounds, trust and failure behavior.
 
