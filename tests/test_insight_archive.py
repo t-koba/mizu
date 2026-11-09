@@ -239,6 +239,10 @@ class InsightArchiveTests(Fixture):
             with self.assertRaises(OSError):
                 self.project.insights.revise(item["id"], **revise)
         self.assertEqual(self.project.insights.read(item["id"]), item)
+        # The archive for the still-current rev is only a crash orphan.
+        with patch.object(self.project.insights, "read_revision") as revision:
+            self.assertEqual(self.project.insights.history(item["id"]), [])
+        revision.assert_not_called()
         self.assertEqual(self.project.insights.revise(item["id"], **revise)["rev"], 2)
         self.assertEqual(json.loads(self.rows()[0][2]), item)
         self.assertEqual(len(self.project.insights.history(item["id"])), 1)
@@ -250,7 +254,9 @@ class InsightArchiveTests(Fixture):
         self.assertEqual(self.gc(), 1)
         self.assertEqual([row[1] for row in self.rows()], [1, 2])
         self.assertEqual(self.project.insights.read(item["id"])["body"], "Improved")
-        self.assertEqual(len(self.project.insights.history(item["id"])), 1)
+        write_json(self.project.root / "insight-revisions" / f"{item['id']}.r2.json",
+                   self.project.insights.read(item["id"]))
+        self.assertEqual([row["rev"] for row in self.project.insights.history(item["id"])], [1])
 
     def test_conflicting_crash_leftover_keeps_live_copy(self):
         item = self.proposal()

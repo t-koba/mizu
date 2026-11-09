@@ -69,9 +69,9 @@ MAX_CHECK_RETAINED = 1024
 #: 3.5 MiB of Python allocations on the measured host.
 MAX_HISTORY_TEMPORARIES = 4096
 DEFAULT_HISTORY_TEMPORARIES = 64
-#: Fixed ceiling for explicit prior-insight history rows; the operator may lower it.
+#: Fixed ceiling for exact prior-insight history reads and rows; the operator may lower it.
 MAX_INSIGHT_HISTORY_ENTRIES = 1000
-#: Preserve the historical explicit-history output default.
+#: Default bound on exact prior-insight history reads and output.
 DEFAULT_INSIGHT_HISTORY_ENTRIES = 1000
 #: Absolute in-process ceiling for configured current-decision projection rows.
 #: The page retains full source-bounded envelopes. A synthetic 512-row scan with
@@ -582,7 +582,7 @@ class Limits:
     pending_insights: int = 30
     #: Maximum inbox directory entries inspected to prove a scheduled deferral set empty.
     scheduled_input_scan_items: int = 1000
-    #: Operator-selected prior revisions returned by explicit insight history (1-1000).
+    #: Operator-selected exact revision read/output bound for explicit insight history (1-1000).
     insight_history_entries: int = DEFAULT_INSIGHT_HISTORY_ENTRIES
     #: Absolute lifetime of an explicit insight enumeration cursor (seconds).
     insight_cursor_ttl_seconds: int = 86400

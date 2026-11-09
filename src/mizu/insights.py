@@ -4,7 +4,7 @@ Revision contract (operator EDITOR c51c): stable insight identity exposes
 only the improved current content, its current decision/evidence gap and a
 revision identity (``rev``) in ordinary prompts, lists and reads. Obsolete
 claims are replaced, never appended. Prior revisions live under
-``insight-revisions/`` and are returned by the explicit, output-capped
+``insight-revisions/`` and are returned by the explicit, read/output-capped
 ``history`` path, never injected into routine context. Internal exact-subject
 validation may read one addressed revision without enumerating that history.
 Updates are authorized to the
@@ -716,28 +716,53 @@ replacement insight without implying rejected substance.
         """Explicit audit retrieval for prior revisions; never in routine context.
 
         Schema: list of archived prior records ascending by rev, each with
-        superseded markers. Bounds: at most ``self.history_entries`` returned
-        records (default 1000, operator-adjustable down to 1). This is not a
-        scan bound: sorting the matching glob enumerates and materializes all
-        matching paths before record selection.
-        Trust: local recorded state. Failure: Denied on unknown ID shape;
-        empty list when no revisions exist (current via read()).
+        superseded markers. Bounds: one exact current lookup, then at most
+        ``self.history_entries`` exact revision reads and returned records
+        (default 1000, operator-adjustable down to 1), starting at revision 1.
+        A usable current rev excludes that revision and later crash orphans;
+        legacy current/tombstone records without one use the full read bound.
+        Missing or invalid revisions consume the bound, never trigger scans.
+        Trust: local recorded state. Failure: Denied on unknown ID shape or
+        invalid current state. Missing, corrupt or mismatched revision records
+        are not returned and still consume the read bound; absent current state
+        uses the bounded legacy fallback.
         """
         identifier(insight_id)
-        out = []
-        for path in sorted((self.root / "insight-revisions").glob(f"{insight_id}.r*.json")):
-            if path.is_symlink():
-                continue
+        current_path = self.root / "inbox" / f"{insight_id}.json"
+        try:
+            current_path.lstat()
+        except FileNotFoundError:
+            current = insight_archive.read(self.root, insight_id, include_unavailable=True)
+        else:
             try:
-                record = read_json(path)
-                if not isinstance(record, dict) or record.get("id") != insight_id:
-                    continue
+                raw = safe_read(self.root, f"inbox/{insight_id}.json", MAX_FRAME)
+            except Denied:
+                # Retention may unlink after archiving between lstat/read.
+                # Re-read the exact path state before treating that as absence.
+                try:
+                    current_path.lstat()
+                except FileNotFoundError:
+                    current = insight_archive.read(self.root, insight_id, include_unavailable=True)
+                else:
+                    raise
+            else:
+                current = insight_archive._json(raw)
+        if current is not None:
+            if not isinstance(current, dict) or current.get("id") != insight_id:
+                raise Denied("Corrupt current insight history identity")
+            current_rev = current.get("rev")
+            if "rev" in current and (type(current_rev) is not int or current_rev < 1):
+                raise Denied("Corrupt current insight history revision")
+        else:
+            current_rev = None
+        end = self.history_entries
+        if current_rev is not None:
+            end = min(end, current_rev - 1)
+        out = []
+        for rev in range(1, end + 1):
+            record = self.read_revision(insight_id, rev)
+            if record is not None:
                 out.append(record)
-            except (OSError, ValueError, TypeError, AttributeError, Denied):
-                continue
-            if len(out) >= self.history_entries:
-                break
-        out.sort(key=lambda r: _rev_of(r))
         return out
 
     def read_revision(self, insight_id: str, rev: int) -> dict | None:
