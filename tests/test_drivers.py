@@ -1095,6 +1095,12 @@ class CumulativeUsageTests(unittest.TestCase):
         for invalid in (-1,True,float('inf')):
             with self.assertRaises(ProtocolError): usage.observe({'inputTokens':invalid})
 
+    def test_codex_counter_accepts_signed_64_bit_maximum_only(self):
+        maximum = 2**63 - 1
+        self.assertEqual(TokenUsage.validate({'inputTokens': maximum})['inputTokens'], maximum)
+        with self.assertRaises(ProtocolError):
+            TokenUsage.validate({'inputTokens': maximum + 1})
+
     def test_claude_model_totals_exclude_double_counted_children(self):
         value=model_delta({'main':{'inputTokens':30},'child':{'inputTokens':5}}, {'main':{'inputTokens':20}})
         self.assertEqual(sum(item['inputTokens'] for item in value),15)
