@@ -344,7 +344,7 @@ class SharedRecords:
                                 scan_progress.entries_examined += 1
                             if entry.name.startswith(ATOMIC_WRITE_TEMP_PREFIX):
                                 try:
-                                    info = entry.stat(follow_symlinks=False)
+                                    info = os.stat(entry.path, follow_symlinks=False)
                                 except FileNotFoundError:
                                     # A live atomic publisher may have moved its
                                     # stage after scandir yielded the name.
