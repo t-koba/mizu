@@ -795,6 +795,9 @@ DECLARATIONS = {
             '4', 'safety', 'check jobs / bounded commands shown per job summary'),
         'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS': (
             '128', 'safety', 'check jobs / bounded short command and prior-run identity excerpts'),
+        'MAX_CHECK_JOB_INPUT_FINGERPRINT_CHARS': (
+            '12', 'format',
+            'check jobs / short digest fingerprint display width; never an execution identity'),
         'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS': (
             '512', 'safety', 'check jobs / bounded diagnostic and command-result text excerpts'),
         'MAX_CHECK_CAPTURE_ERROR_BYTES': (
@@ -1377,6 +1380,12 @@ CONFIG_MODULE_BOUNDS = {
     'MAX_CHECK_INPUT_BOUND': (
         '1 << 40', 'safety',
         'config / one shared absolute ceiling for check-input traversal bounds in settings, jobs and receipts'),
+    'MIN_CHECK_RECOVERY_INTERVAL_SECONDS': (
+        '1', 'configured policy',
+        'config / minimum supported interval for Linux unfinished-check recovery'),
+    'MAX_CHECK_RECOVERY_INTERVAL_SECONDS': (
+        '86400', 'configured policy',
+        'config / maximum supported interval for Linux unfinished-check recovery (24 hours)'),
     'MEBIBYTE_BYTES': (
         '1024 * 1024', 'mechanism',
         'config / exact binary unit conversion for byte budgets named in MiB'),
@@ -2619,6 +2628,8 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format', 'work-item transition / revision-one predecessor is the immutable seed'),
     ('work_items.py', 'WorkItems._page_open_impl', 1, 0): (
         '4', 'mechanism', 'work items / cached projection tuple shape includes its proof witness'),
+    ('work_items.py', 'WorkItems._readiness_item', 1, 0): (
+        '4', 'mechanism', 'work items / readiness projection tuple shape includes its source-proof identities'),
     ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
         '4096', 'safety',
         'Pi reselection / bound session-file identity text before retaining it in family state'),
@@ -3832,6 +3843,14 @@ def no_defaults(limit, /, count, *, size):
                    for child in ast.walk(bound)):
                 numeric_slices.append((node.lineno, ast.unparse(node)))
         self.assertEqual(numeric_slices, [])
+        fingerprint = next(node for node in ast.walk(tree)
+                           if isinstance(node, ast.FunctionDef)
+                           and node.name == '_input_fingerprint')
+        fingerprint_slices = [ast.unparse(node) for node in ast.walk(fingerprint)
+                              if isinstance(node, ast.Subscript)
+                              and ast.unparse(node.value) == 'value']
+        self.assertEqual(fingerprint_slices,
+                         ['value[:MAX_CHECK_JOB_INPUT_FINGERPRINT_CHARS]'])
 
         preview_widths = {
             ast.unparse(call.args[1])
@@ -4020,6 +4039,9 @@ def no_defaults(limit, /, count, *, size):
             'systemd_verify_timeout_seconds': (
                 '60', 'configured policy',
                 'services / systemd-analyze verification wall-time default'),
+            'check_recovery_interval_seconds': (
+                '30', 'configured policy',
+                'services / unfinished Linux check-recovery fallback interval; path trigger remains primary'),
         }
         self.assertEqual(set(fields), set(expected))
         for name, (default, category, rationale) in expected.items():

@@ -75,6 +75,8 @@ MAX_CHECK_JOB_PROJECTION_ROWS = 32
 MAX_CHECK_JOB_COMMAND_PREVIEW_ITEMS = 4
 #: Fixed short text excerpt for commands and prior-run identities.
 MAX_CHECK_JOB_SHORT_PREVIEW_CHARS = 128
+#: Short digest fingerprint shown only in safe input-refusal diagnostics.
+MAX_CHECK_JOB_INPUT_FINGERPRINT_CHARS = 12
 #: Fixed check-job diagnostic and execution-result excerpt.
 MAX_CHECK_JOB_TEXT_PREVIEW_CHARS = 512
 #: Bound the encoded shared-check capture error before decoding it for display.
@@ -1358,7 +1360,7 @@ def _input_fingerprint(value):
     if value is None:
         return 'unbound'
     value = value if isinstance(value, str) and DIGEST.fullmatch(value) else digest(canonical(value))
-    return value[:12]
+    return value[:MAX_CHECK_JOB_INPUT_FINGERPRINT_CHARS]
 
 
 def _input_refusal(job, changes):
