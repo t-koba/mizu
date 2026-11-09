@@ -215,7 +215,8 @@ explicit: `admission.py` uses magnitude 2 for its two-lock ceiling;
 slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
-`model_catalog.py` includes its observation-store schema version at magnitude 1.
+`model_catalog.py` includes its observation-store schema version at magnitude 1;
+`operator_records.py` inventories positive insight-subject revisions at magnitude 1.
 This is not a global numeric comparison linter.
 """
 import ast
@@ -1966,6 +1967,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('materialize.py', 'invoke', 1, 0): (
         '64', 'format',
         'materialized content digest / exact SHA-256 hexadecimal text length'),
+    ('operator_records.py', '_subject', 1, 0): (
+        '1', 'format',
+        'operator record subject / referenced insight revision is a positive exact history revision'),
     ('model_catalog.py', '_read_observations', 1, 0): (
         '1', 'format',
         'model catalog observation store / schema version one selects the checksummed persisted layout'),
@@ -3263,7 +3267,7 @@ def sibling():
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
-                'model_catalog.py'}
+                'model_catalog.py', 'operator_records.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

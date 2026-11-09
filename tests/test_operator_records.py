@@ -87,6 +87,8 @@ class OperatorRecordTests(Fixture):
             records.write(self.project, event_id='bad', kind='answer', body='No',
                           subject={**self.subject, 'rev': 2})
         original = self.answer()
+        self.assertEqual(original['record']['subject']['rev'], 1,
+                         'the lowest positive subject revision is accepted')
         self.project.insights.revise(self.question['id'], source='reviewer', expected_rev=1,
                                      title='Question revised', body='Q: new', base_snapshot=None)
         self.assertEqual(self.answer(), original)  # exact revision remains answerable
