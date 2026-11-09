@@ -1728,6 +1728,29 @@ class CacheInputTests(Fixture):
             self.project.config = previous
         self.assertEqual(check_jobs.submit(ctx)['id'], first['id'])
 
+    def test_retained_environment_bounds_accept_one_and_reject_zero(self):
+        from mizu import acceptance
+        sandbox = dataclasses.replace(self.config.sandbox, check_input_files=1, check_input_bytes=1)
+        self.config = dataclasses.replace(self.config, sandbox=sandbox)
+        self.project.config = self.config
+        ctx = self.context()
+        with check_jobs.cache_guard(self.project):
+            job = check_jobs.submit(ctx)
+            path = check_jobs.root(self.project) / job['id'] / 'job.json'
+            original = read_json(path)
+            self.assertEqual(original['environment_bounds'], {'files': 1, 'bytes': 1})
+            self.assertEqual(acceptance.read_job(self.project, job['id'])['environment_bounds'],
+                             {'files': 1, 'bytes': 1})
+            for field in ('files', 'bytes'):
+                for invalid in (0, -1):
+                    bounds = dict(original['environment_bounds'])
+                    bounds[field] = invalid
+                    with self.subTest(field=field, invalid=invalid):
+                        write_json(path, {**original, 'environment_bounds': bounds})
+                        with self.assertRaises(acceptance.InvalidProducer):
+                            acceptance.read_job(self.project, job['id'])
+            write_json(path, original)
+
     def test_lookup_refuses_corrupt_request_identity_fields(self):
         from mizu import acceptance
         ctx = self.context()

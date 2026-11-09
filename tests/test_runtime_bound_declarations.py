@@ -2520,14 +2520,35 @@ COMPARISON_BOUND_ARGUMENTS = {
         '32', 'format',
         'acceptance / retained job command lists follow the public 32-command protocol bound'),
     ('acceptance.py', 'read_job', 1, 1): (
+        '1', 'format',
+        'acceptance / cache-binding-pending marker uses supported schema version one'),
+    ('acceptance.py', 'read_job', 0, 0): (
+        '1', 'configured policy',
+        'acceptance / retained dependency traversal bounds follow the configured 1-to-MAX_CHECK_INPUT_BOUND range'),
+    ('acceptance.py', 'read_job', 1, 2): (
         '32', 'format',
         'acceptance / retained scratch-path manifests follow the 32-entry protocol bound'),
-    ('acceptance.py', 'read_job', 1, 2): (
+    ('acceptance.py', 'read_job', 1, 3): (
         '255', 'format',
         'acceptance / scratch path component length follows the public 255-character schema bound'),
+    ('acceptance.py', '_scope', 0, 0): (
+        '1', 'format',
+        'acceptance scope / at least one command must participate in the bound receipt'),
     ('acceptance.py', '_scope', 2, 0): (
         '32', 'format',
         'acceptance / local command scope follows the public 32-command protocol bound'),
+    ('acceptance.py', '_validate', 1, 0): (
+        '2', 'format',
+        'acceptance receipt / schema version two selects the current CI receipt layout'),
+    ('acceptance.py', '_validate', 1, 1): (
+        '1', 'format',
+        'acceptance receipt / schema version one selects the supported local receipt layout'),
+    ('acceptance.py', 'get', 1, 0): (
+        '2', 'format',
+        'acceptance receipt / exact stored schema version two triggers CI publication validation'),
+    ('acceptance.py', '_selected', 1, 0): (
+        '1', 'format',
+        'acceptance index / schema version one selects the supported receipt pointer layout'),
     ('sandbox.py', 'scratch_selection', 1, 0): (
         '32', 'format',
         'sandbox / selected scratch directories follow the public 32-entry protocol bound'),
@@ -3326,7 +3347,7 @@ def sibling():
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
-                'work_order.py', 'selection.py', 'probes.py'}
+                'work_order.py', 'selection.py', 'probes.py', 'acceptance.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
