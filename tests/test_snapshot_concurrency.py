@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -84,6 +85,28 @@ class SnapshotConcurrencyTests(unittest.TestCase):
     def publication_bytes(self):
         return {p.relative_to(self.store.root).as_posix(): p.read_bytes()
                 for p in [self.store.root / "current.json", *sorted((self.store.root / "histories").glob("*.json"))]}
+
+    def test_capture_skips_hardlinks_in_both_traversal_backends(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        original = workspace / "linked.txt"
+        original.write_text("shared", encoding="utf-8")
+        try:
+            os.link(original, workspace / "alias.txt")
+        except (AttributeError, NotImplementedError, OSError) as exc:
+            self.skipTest(f"hardlinks unavailable: {exc}")
+        (workspace / "single.txt").write_text("included", encoding="utf-8")
+
+        backends = [False]
+        if snapshot_module._platform.HAS_OPENAT and snapshot_module._platform.HAS_DIR_FD:
+            backends.append(True)
+        for use_openat in backends:
+            with self.subTest(openat=use_openat), \
+                    patch.object(snapshot_module._platform, "HAS_OPENAT", use_openat), \
+                    patch.object(snapshot_module._platform, "HAS_DIR_FD", use_openat):
+                captured = self.store.capture_files(workspace, persist=False)
+                self.assertEqual(set(captured["files"]), {"single.txt"})
+                self.assertEqual(set(captured["skipped"]), {"alias.txt", "linked.txt"})
 
     def test_strict_negative_ancestry_is_distinct_from_unknown_evidence(self):
         base, child, sibling = self.branches({'a': 'base'}, {'a': 'child'}, {'a': 'sibling'})

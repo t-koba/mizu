@@ -1958,6 +1958,31 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('role_state.py', 'RoleStateStore.read', 1, 0): (
         '1', 'format',
         'role-state envelope / persisted generations are positive exact revision numbers'),
+    ('snapshot.py', 'validate_wait_resolution_high_water', 1, 0): (
+        '256', 'format',
+        'snapshot progress / wait-resolution token revisions share the 256-revision work-item chain ceiling'),
+    ('snapshot.py', 'validate_progress', 1, 0): (
+        '6', 'format', 'snapshot progress / schema 6 adds the bounded wait-conversion diagnostic'),
+    ('snapshot.py', 'validate_progress', 1, 1): (
+        '2', 'format', 'snapshot progress / wait-conversion diagnostics require a schema-2-or-newer base'),
+    ('snapshot.py', 'validate_progress', 1, 2): (
+        '256', 'format',
+        'snapshot progress / delivered wait-resolution token revisions share the 256-revision work-item chain ceiling'),
+    ('snapshot.py', 'validate_progress', 1, 3): (
+        '6', 'format', 'snapshot progress / selected signals are bounded by the six recognized signal names'),
+    ('snapshot.py', 'validate_progress', 1, 4): (
+        '64', 'safety', 'snapshot progress / cap persisted timestamp text before parsing'),
+    ('snapshot.py', 'validate_progress', 0, 0): (
+        '1', 'format', 'snapshot progress / a converted wait records a positive backoff duration'),
+    ('snapshot.py', 'validate_progress', 2, 0): (
+        '101', 'mechanism',
+        'snapshot progress / saturate the no-progress streak one above the maximum configured allowance of 100'),
+    ('snapshot.py', 'Snapshots._capture_openat', 1, 0): (
+        '1', 'safety', 'snapshot capture / regular file handle must report exactly one hardlink'),
+    ('snapshot.py', 'Snapshots._capture_portable', 1, 0): (
+        '1', 'safety', 'portable snapshot capture / skip a reported link count other than one'),
+    ('snapshot.py', 'Snapshots.merge', 1, 0): (
+        '1', 'safety', 'snapshot merge / at least two paths are required for a host case-collision'),
     ('budget.py', 'Budget.peek', 1, 0): (
         '1', 'safety',
         'budget peek / trust only a singly linked regular daily ledger file'),
@@ -3500,7 +3525,7 @@ def sibling():
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
-                'budget.py', 'fs.py', '_legacy_refs.py', 'role_state.py'):
+                'budget.py', 'fs.py', '_legacy_refs.py', 'role_state.py', 'snapshot.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
@@ -3509,7 +3534,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', '_legacy_refs.py', 'role_state.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', '_legacy_refs.py', 'role_state.py', 'snapshot.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

@@ -213,6 +213,25 @@ class IdleWithOpenWorkTests(Fixture):
             _progress_record({}, 'worker', (), {name: False for name in PROGRESS_SIGNALS},
                              'wait', wait_resolution_high_water=boundary)
 
+    def test_progress_counter_signal_and_timestamp_boundaries(self):
+        progress = self.park("continue", has_progress=False, ready_work="legacy")["progress"]
+
+        selected = list(PROGRESS_SIGNALS)
+        self.assertEqual(validate_progress({**progress, "selected": selected})["selected"], selected)
+        with self.assertRaises(Denied):
+            validate_progress({**progress, "selected": selected + ["tool"]})
+
+        self.assertEqual(validate_progress({**progress, "no_progress_count": 101})["no_progress_count"], 101)
+        with self.assertRaises(Denied):
+            validate_progress({**progress, "no_progress_count": 102})
+
+        at_timestamp_limit = "2026-01-01T00:00:00." + "1" * 38 + "+00:00"
+        self.assertEqual(len(at_timestamp_limit), 64)
+        self.assertEqual(validate_progress({**progress, "recorded_at": at_timestamp_limit})["recorded_at"],
+                         at_timestamp_limit)
+        with self.assertRaises(Denied):
+            validate_progress({**progress, "recorded_at": at_timestamp_limit + "1"})
+
     def test_writer_wait_conversion_schema_is_bounded_and_projected(self):
         conversion = {"status": "converted",
                       "reason": "ready_work_with_pending_structured_wait",
@@ -223,9 +242,17 @@ class IdleWithOpenWorkTests(Fixture):
         self.assertEqual(progress["schema"], 6)
         validate_progress(progress)
         self.assertEqual(progress_projection(progress)["wait_conversion"], conversion)
+        for backoff in (1, 86400):
+            validate_progress({**progress, "wait_conversion": {**conversion, "backoff_seconds": backoff}})
+        legacy = self.park("wait", has_progress=False, ready_work="legacy")["progress"]
+        with self.assertRaises(Denied):
+            validate_progress({**legacy, "schema": 6, "wait_conversion": conversion})
+        with self.assertRaises(Denied):
+            validate_progress({**progress, "schema": 7})
         for bad in (
                 None, {}, {**conversion, "wait_kind": "unsupported"},
                 {**conversion, "backoff_seconds": True},
+                {**conversion, "backoff_seconds": 0},
                 {**conversion, "backoff_seconds": 86401},
                 {**conversion, "extra": 1}):
             with self.subTest(bad=bad), self.assertRaises(Denied):

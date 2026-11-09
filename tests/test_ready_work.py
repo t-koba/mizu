@@ -730,7 +730,7 @@ class ReadySetChangeTests(Fixture):
         self.assertEqual(progress_projection(progress)['ready_work_signature'], self.signature())
         self.assertEqual(progress_projection(progress)['wait_resolution_tokens'], [])
         for tokens in (['bad'], ['wi_' + 'a' * 32 + ':0'],
-                       ['wi_' + 'a' * 32 + ':1'] * 2,
+                       ['wi_' + 'a' * 32 + ':257'], ['wi_' + 'a' * 32 + ':1'] * 2,
                        [f'wi_{index:032x}:1' for index in range(201)]):
             with self.subTest(tokens=len(tokens)), self.assertRaises(Denied):
                 validate_progress({**progress, 'wait_resolution_tokens': tokens})
