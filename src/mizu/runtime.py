@@ -4373,7 +4373,7 @@ def _writer_wait_conversion(config, role, finished, ready_work_present, *,
 
 def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
                               *, project=None) -> bool:
-    """Back off for ready work, or a proven self-wait with no external source.
+    """Back off for finish-authorized ready work or a proven self-wait.
 
     Progress-driven Next handoffs and event subscriptions remain independent.
     """
@@ -4394,17 +4394,15 @@ def _writer_progress_fallback(record, config, role, ready_work_present, current_
                 if getattr(config.limits, "writer_wait_with_ready_work", True) is True:
                     conversion = progress.get("wait_conversion")
                     if (isinstance(conversion, dict)
-                            and conversion["reason"] == "ready_work_without_proven_structured_wait"
                             and conversion["backoff_seconds"] == backoff):
+                        # Complete finish-time ready evidence remains sufficient
+                        # even if its held-wait witness changes before the timer.
                         return True
-                    live, _, held_wait_kind = _writer_wait_sources(
+                    live, _, _ = _writer_wait_sources(
                         project, role, include_structured_wait=True)
                     if live is False:
                         return True
-                    return (live is True and held_wait_kind is not None
-                            and isinstance(conversion, dict)
-                            and conversion.get("wait_kind") == held_wait_kind
-                            and conversion.get("backoff_seconds") == backoff)
+                    return False
                 return _writer_wait_liveness(project, role) is False
             live, self_resolvable, _ = _writer_wait_sources(project, role)
             return live is False and self_resolvable

@@ -575,22 +575,29 @@ class WriterCiWaitTests(CiWaitFixture):
         due = stamp + conversion["backoff_seconds"]
         self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
         self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
-        for update in ({"wait_kind": "deadline"}, {"backoff_seconds": 299}):
-            altered = dict(snapshot)
-            altered["progress"] = dict(snapshot["progress"])
-            altered["progress"]["wait_conversion"] = {**conversion, **update}
-            with self.subTest(update=update):
-                self.assertFalse(_writer_progress_fallback(
-                    altered, self.config, self.config.roles["worker"], True,
-                    due, project=self.project))
+        # The finish-time wait kind is diagnostic; the policy-matched backoff
+        # and fresh eligible ready-work observation control re-admission.
+        altered = dict(snapshot)
+        altered["progress"] = dict(snapshot["progress"])
+        altered["progress"]["wait_conversion"] = {**conversion, "wait_kind": "deadline"}
+        self.assertTrue(_writer_progress_fallback(
+            altered, self.config, self.config.roles["worker"], True,
+            due, project=self.project))
+        altered["progress"]["wait_conversion"] = {**conversion, "backoff_seconds": 299}
+        self.assertFalse(_writer_progress_fallback(
+            altered, self.config, self.config.roles["worker"], True,
+            due, project=self.project))
 
-        # Legacy schema-6 evidence cannot use the new no-held-wait path.
-        for sources in ((True, False, None), (None, False, "ci")):
+        # Complete finish-time ready evidence remains sufficient if the
+        # previously held wait disappears, changes kind, or becomes unknown.
+        for sources in ((True, False, None), (None, False, "ci"), (True, False, "deadline")):
             with self.subTest(sources=sources), patch(
                     "mizu.runtime._writer_wait_sources", return_value=sources):
-                self.assertFalse(_writer_progress_fallback(
+                self.assertTrue(_writer_progress_fallback(
                     snapshot, self.config, self.config.roles["worker"], True,
                     due, project=self.project))
+                self.assertTrue(should_run(
+                    self.project, snapshot, role_name="worker", current_time=due))
 
     def test_future_deadline_item_wait_can_be_converted_without_ci_dispatch(self):
         item = self.store.create(actor="worker", idempotency_key="deadline-held",

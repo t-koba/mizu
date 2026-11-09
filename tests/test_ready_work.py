@@ -596,19 +596,26 @@ class ReadySetChangeTests(Fixture):
         self.project.snapshots.publish(base)
         return self.project.snapshots.get()
 
-    def test_wait_with_unchanged_ready_work_parks_both_dispatch_paths(self):
+    def test_wait_with_unchanged_ready_work_reenters_after_backoff(self):
         self.item('persistent')
         engine = self.engine()
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
         snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 5)
+        self.assertEqual(snapshot['progress']['schema'], 7)
         self.assertEqual(snapshot['progress']['ready_work_signature'], self.signature())
+        self.assertEqual(snapshot['progress']['wait_conversion']['reason'],
+                         'ready_work_without_proven_structured_wait')
         self.assertTrue(self.project.status()['idle_with_open_work']['ready_work'])
-        for _ in range(3):
-            self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
-            self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
-            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
-        # Independent run wait expiry is not suppressed by stable ready work.
+        stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
+        due = stamp + snapshot['progress']['wait_conversion']['backoff_seconds']
+        with patch('mizu.runtime.time.time', return_value=due - 1):
+            for _ in range(3):
+                self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
+                self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
+                self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        # The finish-time ready observation authorizes the normal backoff path.
+        self.assertTrue(should_run(self.project, snapshot, current_time=due, role_name='worker'))
+        # Independent run wait expiry remains a separate admission cause.
         expired = {**snapshot, 'wake_at': 1}
         self.assertTrue(should_run(self.project, expired, current_time=2, role_name='worker'))
         self.project.set_control(wake_generation='new-operator-input')
@@ -717,7 +724,9 @@ class ReadySetChangeTests(Fixture):
         engine = self.engine()
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 5)
+        self.assertEqual(snapshot['progress']['schema'], 7)
+        self.assertEqual(snapshot['progress']['wait_conversion']['reason'],
+                         'ready_work_without_proven_structured_wait')
         self.assertFalse(_ready_work_changed(self.project, snapshot, role))
         # Invalid evidence closes, never reinterpreted as permissive legacy.
         for bad in ({}, {**snapshot['progress'], 'ready_work_signature': 'bad'}):
