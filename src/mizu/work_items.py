@@ -507,6 +507,9 @@ class WorkItems:
 
         try:
             wait = record.get("wait") or {}
+            delivery = record.get("delivery")
+            if delivery is not None:
+                snapshot(delivery["snapshot_id"])
             if wait.get("kind") == "publication_ci":
                 snapshot(wait["snapshot_id"])
             elif wait.get("kind") in ("ci", "proposal_merged"):
@@ -2078,6 +2081,43 @@ class WorkItems:
                                   verify_snapshots=verify_snapshots,
                                   verify_current_delivery=verify_current_delivery, derive_blocked=False)[0]
 
+    def _projection_key(self, seed, history_key, validation_mode):
+        """Bind cached projections to source identity and every snapshot policy input."""
+        return (digest(canonical(seed)), history_key, validation_mode, self.snapshots.root,
+                self.snapshots.max_file, self.snapshots.max_bytes, self.snapshots.max_files,
+                tuple(self.snapshots.excludes), self.snapshots.history_index, IS_WINDOWS)
+
+    def _readiness_item(self, seed, event, history_revisions, history_key):
+        """Reconstruct readiness state once per unchanged immutable source proof.
+
+        Unlike prompt projections, readiness retains strict validation of every
+        historical delivery. Its proof is separate from the status-only cache;
+        external CI/proposal evidence and time-dependent eligibility are still
+        read by their route accumulators on each poll. Unsupported identities
+        retain the exact live replay.
+        """
+        item_id = seed["id"]
+        if IS_WINDOWS or history_key is None or history_revisions is None:
+            return self._get(item_id, seed_event=event,
+                             history_revisions=history_revisions)
+        self._seed(item_id, event, history_revisions=history_revisions)
+        key = self._projection_key(seed, history_key, "readiness-full-history")
+        cached = self._projection_cache.get(item_id)
+        if cached is not None and cached[0] == key:
+            if len(cached) == 4 and self._proof_unchanged(cached[3]):
+                return cached[1]
+        self._projection_cache.pop(item_id, None)
+        proof_sources = []
+        item, since = self._current_hold(
+            item_id, seed_event=event, history_revisions=history_revisions,
+            verify_snapshots=True, derive_blocked=False, proof_sources=proof_sources)
+        if (item["status"] in OPEN_STATUS_ORDER
+                and self._history_identity(item_id) == history_key):
+            proof_sources = tuple(dict.fromkeys(proof_sources))
+            if self._proof_unchanged(proof_sources):
+                self._projection_cache[item_id] = (key, item, since, proof_sources)
+        return item
+
     def _current_hold(self, item_id: str, *, seed_event=None,
                       history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
                       verify_current_delivery: bool = False, blocked_waiter=None, derive_blocked=True,
@@ -2772,9 +2812,7 @@ class WorkItems:
             # and immutable seed binding remain mandatory on every live poll.
             reuse_projection = cacheable and (readonly or not (
                 self.root / "work-items" / seed["id"] / "retirement.json").exists())
-            cache_key = (digest(canonical(seed)), history_key, "current-delivery",
-                         self.snapshots.root, self.snapshots.max_file, tuple(self.snapshots.excludes),
-                         self.snapshots.history_index)
+            cache_key = self._projection_key(seed, history_key, "current-delivery")
             cached = (self._projection_cache.get(seed["id"])
                       if cacheable and history_key is not None else None)
             if cacheable and history_key is not None:

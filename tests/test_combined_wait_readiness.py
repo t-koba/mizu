@@ -2,7 +2,7 @@
 import dataclasses
 from unittest.mock import Mock, patch
 
-from support import Fixture
+from support import Fixture, bind_delivery
 from mizu import ci_waits, proposal_waits, vcs
 from mizu.distribution import public_source_identity
 from mizu.errors import Denied
@@ -90,6 +90,66 @@ class CombinedFixture(Fixture):
 
 
 class CombinedWaitReadinessTests(CombinedFixture):
+    def _delivered_ci_wait(self, key):
+        snapshot = self.project.snapshots.get()
+        seed = self.seed(key)
+        bind_delivery(self.project, seed["id"], snapshot["id"])
+        return self.store.transition(
+            seed["id"], expected_rev=3, status="blocked", actor="worker",
+            wait=self.ci_wait)
+
+    def test_unchanged_readiness_reuses_full_chain_proof_and_invalidates_on_change(self):
+        self._delivered_ci_wait("warm-proof")
+        self.store._projection_cache.clear()
+        with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay, \
+             patch.object(self.project.snapshots, "validate_manifest",
+                          wraps=self.project.snapshots.validate_manifest) as manifest:
+            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+            self.assertEqual(replay.call_count, 1)
+            self.assertGreater(manifest.call_count, 0)
+            replay.reset_mock()
+            manifest.reset_mock()
+            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+            self.assertEqual(replay.call_count, 0)
+            self.assertEqual(manifest.call_count, 0)
+
+            self._delivered_ci_wait("changed-proof")
+            replay.reset_mock()
+            manifest.reset_mock()
+            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+            # Adding one item replays only its chain; the unchanged item keeps
+            # its exact snapshot and history proof.
+            self.assertEqual(replay.call_count, 1)
+            self.assertGreater(manifest.call_count, 0)
+
+            manifest_path = (self.project.root / "snapshots" /
+                             f"{self.project.snapshots.get()['id']}.json")
+            manifest_path.write_text("{corrupt\n")
+            replay.reset_mock()
+            with self.assertRaises((Denied, ValueError)):
+                _receipt_wait_due(self.store, "worker", limit=1)
+            self.assertEqual(replay.call_count, 1)
+
+    def test_readiness_cache_is_bound_to_snapshot_policy(self):
+        self._delivered_ci_wait("policy-proof")
+        self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+        original = self.project.snapshots.max_files
+        with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay:
+            self.project.snapshots.max_files = original + 1
+            try:
+                self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+            finally:
+                self.project.snapshots.max_files = original
+            self.assertEqual(replay.call_count, 1)
+
+    def test_readiness_cache_replays_corrupt_transition_history(self):
+        item = self._delivered_ci_wait("corrupt-history")
+        self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+        history = self.project.root / "work-items" / item["id"] / "3.json"
+        history.write_text("{}")
+        with self.assertRaises((Denied, ValueError)):
+            _receipt_wait_due(self.store, "worker", limit=1)
+
     def test_ci_positive_plus_proposal_corruption_returns_true(self):
         ci_item = self.block_ci("ci-good")
         self.assertEqual(self.ci_poll()["observed"], 1)
@@ -175,17 +235,17 @@ class CombinedWaitReadinessTests(CombinedFixture):
     def test_late_inventory_failure_after_candidate_still_raises(self):
         item = self.block_ci("late-good")
         self.assertEqual(self.ci_poll()["observed"], 1)
-        original = self.store._iter_item_events
+        original = self.store._iter_item_events_with_revisions
 
-        def fail_late(*, recover):
+        def fail_late(*, recover, cache=False, with_identity=False):
             yielded = False
-            for row in original(recover=recover):
+            for row in original(recover=recover, cache=cache, with_identity=with_identity):
                 yield row
                 if not yielded:
                     yielded = True
                     raise Denied("late inventory failure")
 
-        with patch.object(self.store, "_iter_item_events",
+        with patch.object(self.store, "_iter_item_events_with_revisions",
                           side_effect=fail_late):
             with self.assertRaises(Denied):
                 _receipt_wait_due(self.store, "worker", limit=1)
@@ -286,14 +346,14 @@ class CombinedWaitReadinessTests(CombinedFixture):
         self.assertEqual(self.ci_poll()["observed"], 1)
         ready_before = self.store.page_ready(limit=1)
         self.assertGreaterEqual(ready_before["total"], 0)
-        original = self.store._iter_item_events
+        original = self.store._iter_item_events_with_revisions
         calls = {"n": 0}
 
-        def counting(*, recover):
+        def counting(*, recover, cache=False, with_identity=False):
             calls["n"] += 1
-            yield from original(recover=recover)
+            yield from original(recover=recover, cache=cache, with_identity=with_identity)
 
-        with patch.object(self.store, "_iter_item_events",
+        with patch.object(self.store, "_iter_item_events_with_revisions",
                           side_effect=counting):
             with patch.object(self.store, "page_ready",
                               side_effect=AssertionError("ready-work separate")):

@@ -4596,10 +4596,13 @@ def _decision_delivery_state(project, role_name, role):
 def _receipt_wait_due(store, role, *, limit=1) -> bool:
     """Share one authoritative work-item traversal for CI/proposal readiness.
 
-    Holds ``insights.lock`` once, reconstructs each item exactly like the
-    route-owned scans (``recover=False``/``readonly=True``, full-chain
-    replay) and dispatches it to the route-owned read-only accumulators.
-    Retains only O(limit) candidates plus the first deferred proposal
+    Holds ``insights.lock`` once and reconstructs each item from the
+    ``recover=False``/``readonly=True`` scan. A strict full-chain proof is
+    reused only while its exact history identity, snapshot policy, and every
+    referenced evidence-file identity remain unchanged; misses replay fully.
+    CI/proposal evidence and time-dependent readiness are still reevaluated
+    by the route-owned read-only accumulators each poll. Retains only O(limit)
+    candidates plus the first deferred proposal
     failure; iterator, seed and full-chain failures abort even after an
     earlier candidate. Finalizes CI first: a CI event returns True and
     discards the deferred proposal failure, otherwise the deferred failure
@@ -4609,13 +4612,14 @@ def _receipt_wait_due(store, role, *, limit=1) -> bool:
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
     proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
     with lock(store.root / "locks" / "insights.lock"):
-        for event_id, event in store._iter_item_events(recover=False):
+        for event_id, event, history_revisions, history_key in store._iter_item_events_with_revisions(
+                recover=False, cache=True, with_identity=True):
             kind, seed = store._seed_for_event(event_id, event, readonly=True)
             if kind != "seed":
                 continue
-            item = store._get(seed["id"], seed_event=event,
-                              history_revisions=store._history_revisions(
-                                  seed["id"], recover=False))
+            if history_revisions is None:
+                history_revisions, history_key = store._history_revisions_readonly(seed["id"])
+            item = store._readiness_item(seed, event, history_revisions, history_key)
             ci_waits.readiness_feed(ci_state, store, item)
             proposal_waits.readiness_feed(proposal_state, store, item)
         if ci_waits.readiness_events(ci_state):
