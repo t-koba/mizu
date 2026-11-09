@@ -217,7 +217,7 @@ slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
 `model_catalog.py` includes its observation-store schema version at magnitude 1;
-`operator_records.py` inventories positive insight-subject revisions at magnitude 1;
+`operator_records.py` inventories positive insight-subject revisions and question-list bounds at magnitude 1;
 `operator_record_index.py` records single-link scratch and exact body-marker/schema shapes at
 magnitude 1.
 This is not a global numeric comparison linter.
@@ -2103,6 +2103,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('operator_records.py', '_subject', 1, 0): (
         '1', 'format',
         'operator record subject / referenced insight revision is a positive exact history revision'),
+    ('operator_records.py', 'questions', 1, 0): (
+        '1', 'format',
+        'operator question listing / per-invocation row limit must be a positive integer'),
+    ('operator_records.py', 'questions', 1, 1): (
+        '1', 'format',
+        'operator question listing / per-invocation directory scan limit must be a positive integer'),
     ('work_order.py', '_validate_items', 0, 0): (
         '1', 'format',
         'work order / a plan requires at least one actionable item ID'),
