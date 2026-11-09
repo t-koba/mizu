@@ -107,9 +107,11 @@ def require_host():
     # cgroup v2 is checked from the kernel's controllers file above. Keep the
     # Podman query to HostInfo fields present in supported versions; some
     # Podman releases do not expose Host.CgroupVersion in their template.
+    # Rootless Podman startup can exceed the generic 10-second command bound
+    # on a loaded CI host; keep a larger per-query bound inside the workflow cap.
     info = command('podman', 'info', '--format',
                    '{{.Host.Security.Rootless}} {{.Host.CgroupManager}}',
-                   diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
+                   seconds=30, diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
     if info.stdout.strip() != 'true systemd':
         raise RuntimeError('requires rootless Podman with systemd/cgroup v2')
 
@@ -469,7 +471,7 @@ class RecoveryReservationTests(unittest.TestCase):
         invoke.assert_called_once_with(
             'podman', 'info', '--format',
             '{{.Host.Security.Rootless}} {{.Host.CgroupManager}}',
-            diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
+            seconds=30, diagnostic_bytes=COMMAND_DIAGNOSTIC_BYTES_MAX)
 
     def test_host_preflight_diagnostic_is_bounded_and_redacts_user_path(self):
         if str(ROOT / 'src') not in sys.path:
