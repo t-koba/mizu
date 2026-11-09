@@ -1,4 +1,5 @@
 """M9: per-project request budget with an optional shared total. Offline only."""
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -60,6 +61,20 @@ class PerProjectBudgetTests(unittest.TestCase):
         path.write_text("not json")
         self.assertEqual(budget.peek("alpha")["status"], "unavailable")
         self.assertNotIn("used", budget.peek("alpha"))
+
+    def test_peek_refuses_hardlinked_day_file_before_reading(self):
+        budget = Budget(self.root, 5)
+        budget.take("one", project="alpha")
+        path = self.root / f"{budget._today()}.json"
+        alias = self.root / "day-alias.json"
+        try:
+            os.link(path, alias)
+        except OSError as exc:
+            self.skipTest(f"hard links are unavailable: {exc}")
+        self.assertEqual(path.stat().st_nlink, 2)
+        with patch("mizu.budget.safe_read", side_effect=AssertionError("hard link read")):
+            self.assertEqual(budget.peek("alpha"),
+                             {"status": "unavailable", "project": "alpha"})
 
     def test_custom_day_file_bound_controls_write_and_peek_only(self):
         default = Budget(self.root, 5)

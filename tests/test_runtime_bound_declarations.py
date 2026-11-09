@@ -1946,6 +1946,9 @@ SYMBOLIC_RANGE_ARGUMENTS = {
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
+    ('budget.py', 'Budget.peek', 1, 0): (
+        '1', 'safety',
+        'budget peek / trust only a singly linked regular daily ledger file'),
     ('ci_observation.py', '_valid_ci_run', 1, 0): (
         '128', 'safety',
         'CI observation / bound the opaque cached run identity before persistence and projection'),
@@ -3364,14 +3367,15 @@ def sibling():
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
-                'operator_records.py', 'operator_record_index.py', 'work_order.py'):
+                'operator_records.py', 'operator_record_index.py', 'work_order.py',
+                'budget.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
-                'work_order.py', 'selection.py', 'probes.py', 'acceptance.py'}
+                'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
