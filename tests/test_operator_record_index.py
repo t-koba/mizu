@@ -86,6 +86,7 @@ class OperatorRecordIndexTests(Fixture):
             lambda r: r['envelope']['payload'].update(body='Not a projection'),
             lambda r: r['envelope'].update(id='operator/sample/different'),
             lambda r: r['envelope'].update(schema=True),
+            lambda r: r['envelope'].update(schema=2),
             lambda r: r['envelope']['payload'].update(target={'id': 'operator/sample/other',
                                                            'digest': '0' * 64})]
         for mutate in mutations:
@@ -104,6 +105,55 @@ class OperatorRecordIndexTests(Fixture):
                 self.pending()
         path.write_bytes(good)
         self.assertEqual(self.pending()['pending_count'], 1)
+
+    def test_unpublished_scratch_must_have_one_link(self):
+        import os
+        row = self.notice()
+        _, ref = self.paths(row)
+        scratch = ref.with_name('.new-abcdefgh')
+        try:
+            os.link(ref, scratch)
+        except (OSError, NotImplementedError):
+            self.skipTest('Hard links unavailable')
+        try:
+            with self.assertRaises(Denied):
+                self.pending()
+        finally:
+            scratch.unlink(missing_ok=True)
+
+    def test_body_elision_requires_one_canonical_marker(self):
+        row = self.notice()
+        envelope = copy.deepcopy(row['record'])
+        envelope['payload']['body'] = ''
+        head, tail = index._parts(envelope)
+        self.assertTrue(head.endswith(b'"body":'))
+        self.assertTrue(tail)
+
+        envelope['payload']['extra'] = {'body': ''}
+        with self.assertRaises(Denied):
+            index._parts(envelope)
+
+    def test_source_projection_requires_schema_version_one(self):
+        row = self.notice()
+        path, ref = self.paths(row)
+        original = path.read_bytes()
+        self.assertEqual(self.pending()['pending_count'], 1)
+        ref.unlink()
+
+        for schema in (2, True):
+            with self.subTest(schema=schema):
+                changed = loads_finite(original)
+                changed['schema'] = schema
+                raw = canonical(changed)
+                path.write_bytes(raw)
+                with self.assertRaises(Denied):
+                    self.pending()
+                self.assertEqual(path.read_bytes(), raw)
+                self.assertFalse(ref.exists(), 'invalid source envelopes are never indexed')
+
+        path.write_bytes(original)
+        self.assertEqual(self.pending()['pending_count'], 1,
+                         'schema version one is accepted and its missing ref is rebuilt')
 
     def test_dangling_duplicate_and_unsafe_refs(self):
         row = self.notice()

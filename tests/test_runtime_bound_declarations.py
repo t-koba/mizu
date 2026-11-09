@@ -216,7 +216,9 @@ slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
 `model_catalog.py` includes its observation-store schema version at magnitude 1;
-`operator_records.py` inventories positive insight-subject revisions at magnitude 1.
+`operator_records.py` inventories positive insight-subject revisions at magnitude 1;
+`operator_record_index.py` records single-link scratch and exact body-marker/schema shapes at
+magnitude 1.
 This is not a global numeric comparison linter.
 """
 import ast
@@ -1967,6 +1969,18 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('materialize.py', 'invoke', 1, 0): (
         '64', 'format',
         'materialized content digest / exact SHA-256 hexadecimal text length'),
+    ('operator_record_index.py', '_files', 1, 0): (
+        '1', 'safety',
+        'operator record index / ignore only single-link unpublished atomic-write scratch'),
+    ('operator_record_index.py', '_parts', 1, 0): (
+        '1', 'format',
+        'operator record index framing / exactly one empty-body marker anchors body elision'),
+    ('operator_record_index.py', '_projection', 1, 0): (
+        '1', 'format',
+        'shared record projection / schema version one selects the persisted envelope layout'),
+    ('operator_record_index.py', '_check', 1, 0): (
+        '1', 'format',
+        'operator record index reference / schema version one selects the compact projection layout'),
     ('operator_records.py', '_subject', 1, 0): (
         '1', 'format',
         'operator record subject / referenced insight revision is a positive exact history revision'),
@@ -3261,13 +3275,13 @@ def sibling():
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
-                'operator_records.py'):
+                'operator_records.py', 'operator_record_index.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
-                'model_catalog.py', 'operator_records.py'}
+                'model_catalog.py', 'operator_records.py', 'operator_record_index.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
