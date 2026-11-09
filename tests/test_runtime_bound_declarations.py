@@ -1997,6 +1997,9 @@ COMPARISON_BOUND_ARGUMENTS = {
         '100', 'format', 'Claude SDK error evidence / HTTP status codes begin at 100'),
     ('claude.py', 'validated_api_error_status', 2, 0): (
         '599', 'format', 'Claude SDK error evidence / HTTP status codes end at 599'),
+    ('claude.py', '_verify_staged_skill', 1, 0): (
+        '1', 'safety',
+        'Claude staged file skill / require exactly one reviewed SKILL.md entry; extras are untrusted'),
     ('continuations.py', '_aware_time', 1, 0): (
         '32', 'safety',
         'continuation state / bound persisted timestamp text before ISO-8601 parsing'),
@@ -3448,7 +3451,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
