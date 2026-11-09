@@ -2555,6 +2555,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('sandbox.py', 'scratch_selection', 1, 1): (
         '255', 'format',
         'sandbox / scratch directory names follow the public 255-character schema bound'),
+    ('check_jobs.py', 'purpose_label', 0, 0): (
+        '1', 'format',
+        'check jobs / a supplied purpose label follows the public nonempty 1-64-character contract'),
     ('check_jobs.py', 'cache_input.unbound', 1, 0): (
         '256', 'safety',
         'check jobs / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -3352,6 +3355,14 @@ def sibling():
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
                 found[(filename, *site)] = expression
+        # Audit this selected check_jobs comparison at magnitude one without
+        # broadening the threshold for the module's unrelated comparisons.
+        tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
+        purpose_label = next(node for node in tree.body
+                             if isinstance(node, ast.FunctionDef) and node.name == 'purpose_label')
+        scoped = ast.Module(body=[purpose_label], type_ignores=[])
+        for site, expression in comparison_argument_inventory(scoped, minimum_magnitude=1).items():
+            found[('check_jobs.py', *site)] = expression
         self.assertEqual(found, {
             site: entry[0] for site, entry in COMPARISON_BOUND_ARGUMENTS.items()})
 

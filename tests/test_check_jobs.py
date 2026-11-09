@@ -806,6 +806,8 @@ class PurposeTests(JobTests):
             check_jobs.submit(self.context())
 
     def test_invalid_purpose_is_refused(self):
+        self.assertEqual(check_jobs.purpose_label('x'), 'x')
+        self.assertIsNone(check_jobs.purpose_label(None))
         ctx = self.context()
         for value in ('', '   ', 'a/b', 'a\\b', 'x' * 65, 'two\nlines', 7):
             with self.assertRaises(Denied):
