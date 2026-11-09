@@ -395,14 +395,16 @@ unobserved code change where subscribed; generic snapshot wakes and
 progress-only continuation remain outside the event probe. See
 [scheduling](scheduling.md) for the complete ordering.
 
-Readiness reuses a fully validated work-item projection and its referenced
-snapshot proof on an unchanged history, but validates the no-follow metadata
-identity of every retained history entry and distinct evidence path on each
-poll. This keeps chain replay and manifest parsing off the unchanged path while
+On local POSIX, readiness reuses a fully validated work-item projection and
+its referenced snapshot proof on unchanged history, but rechecks the no-follow
+metadata identity of every retained history entry and distinct evidence path
+on each poll. This keeps chain replay and manifest parsing off that path while
 leaving identity-probe I/O proportional to retained paths, not only changed
-state. Those checks preserve detection of per-file metadata changes in the
-current untrusted local-record model; removing them without a trusted
-change-tracking or immutability mechanism would weaken fail-closed behavior.
+state. Windows deliberately bypasses this cache and revalidates the full chain
+and proofs each poll. The per-path checks on cache-enabled systems preserve
+detection of per-file metadata changes in the untrusted local-record model;
+removing them without trusted change-tracking or immutability would weaken
+fail-closed behavior.
 Legacy snapshots without progress keep their previous admission behavior.
 Schema 1 records the six observed booleans,
 the selected signal names, role ID, aggregate progress boolean, saturated
