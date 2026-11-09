@@ -1908,6 +1908,12 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('decision_delivery.py', 'pending', 0, 0): (
         'len(delivered) - 1', 'mechanism',
         'decision delivery / reverse scan of the bounded page trims optional attention rows'),
+    ('insights.py', 'Insights.history', 0, 0): (
+        'after_rev + 1', 'mechanism',
+        'insight history / begin at the first revision after the exclusive cursor'),
+    ('insights.py', 'Insights.history', 1, 0): (
+        'end + 1', 'configured policy',
+        'insight history / scan through the page end bounded by the configured read budget'),
     ('scheduler_evidence.py', 'summarize', 1, 0): (
         'len(sequence)', 'mechanism',
         'scheduler evidence / overlap scan walks the already-bounded sorted sequence'),
