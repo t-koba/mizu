@@ -9,7 +9,8 @@ import uuid
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.ci_requests import CiRequests, request_id
+from mizu.ci_requests import (CiRequests, _summary, _unresolved_summary,
+                              request_id)
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import mkdir, read_json
 from mizu.protocol import tool_definitions
@@ -335,6 +336,56 @@ class CiRequestTests(Fixture):
         # record does not count it twice.
         self.request_covered(ctx, [covered])
         self.assertEqual(ctx.ci_request_summary()["total"], 1)
+
+    def test_daily_and_cost_pages_accept_one_and_reject_zero(self):
+        store = CiRequests(self.project.root)
+        publication_id = self.receipt["publication_id"]
+        identities = []
+        for sha, instant in ((SHA, "2026-10-20T23:59:00+00:00"),
+                             (OTHER_SHA, "2026-10-21T00:01:00+00:00")):
+            identity = request_id(publication_id, sha, ["ci"])
+            identities.append(identity)
+            store.mark_dispatch(identity, {
+                "request_id": identity, "publication_id": publication_id,
+                "sha": sha, "workflows": ["ci"], "dispatched_at": instant,
+            })
+
+        daily = store.daily(limit=1)
+        self.assertEqual(daily["total"], 2)
+        self.assertTrue(daily["truncated"])
+        self.assertEqual(daily["days"][0]["requests"], 1)
+        self.assertEqual(daily["days"][0]["items"][0]["request_id"], identities[0])
+        page = store.page(limit=1, offset=0)
+        self.assertEqual(page["items"][0]["request_id"], identities[0])
+        self.assertEqual(page["next_offset"], 1)
+        for read in (lambda: store.daily(limit=0), lambda: store.page(limit=0)):
+            with self.subTest(read=read), self.assertRaises(Denied):
+                read()
+
+    def test_persisted_covered_revisions_require_positive_integer(self):
+        publication_id = self.receipt["publication_id"]
+        timestamp = "2026-10-20T23:59:00+00:00"
+        for revision, accepted in ((1, True), (0, False)):
+            with self.subTest(revision=revision):
+                identity = request_id(publication_id, SHA, ["ci"])
+                covered = [{"id": "wi_" + "1" * 32, "rev": revision}]
+                outcome = {
+                    "request_id": identity, "publication_id": publication_id,
+                    "sha": SHA, "workflows": ["ci"], "requested_at": timestamp,
+                    "runs": runs()["runs"], "covered": covered,
+                }
+                marker = {"date": "2026-10-20", "publication_id": publication_id,
+                          "sha": SHA, "workflows": ["ci"]}
+                summary = _summary(outcome, identity, marker)
+                self.assertEqual(summary is not None, accepted)
+
+                dispatch = {
+                    "request_id": identity, "publication_id": publication_id,
+                    "sha": SHA, "workflows": ["ci"], "dispatched_at": timestamp,
+                    "covered": covered,
+                }
+                unresolved = _unresolved_summary(dispatch, identity)
+                self.assertEqual(unresolved is not None, accepted)
 
     def test_the_daily_listing_groups_the_recorded_requests(self):
         ctx = self.context(runs(), poll_enabled=True)

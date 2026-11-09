@@ -2257,9 +2257,15 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('project.py', 'Project.backpressure._checked_limit', 2, 0): (
         '1073741824', 'configured policy',
         'backpressure / revalidate the shared configured maximum for open_work_items and producer_inputs_per_source'),
+    ('ci_requests.py', 'CiRequests.daily', 0, 0): (
+        '1', 'mechanism',
+        'CI requests / listing pages require a positive page size under the public 1..100 contract'),
     ('ci_requests.py', 'CiRequests.daily', 2, 0): (
         '100', 'mechanism',
         'CI requests / fixed per-page ceiling bounds the validated dispatch projection'),
+    ('ci_requests.py', 'CiRequests.page', 0, 0): (
+        '1', 'mechanism',
+        'CI cost view / positional pages require a positive page size under the public 1..8 contract'),
     ('ci_requests.py', 'CiRequests.page', 2, 0): (
         '8', 'mechanism',
         'CI cost view / public partial subtotal exposes at most eight dispatches per page'),
@@ -2269,12 +2275,18 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_requests.py', '_summary', 1, 1): (
         '16', 'format',
         'CI request record / covered work items follow the public 16-item request schema'),
+    ('ci_requests.py', '_summary', 1, 2): (
+        '1', 'format',
+        'CI request record / covered work-item revisions use positive persisted revision numbers'),
     ('ci_requests.py', '_unresolved_summary', 1, 0): (
         '64', 'safety',
         'CI dispatch record / cap timestamp text before ISO-8601 parsing'),
     ('ci_requests.py', '_unresolved_summary', 1, 1): (
         '16', 'format',
         'CI dispatch record / covered work items follow the public 16-item request schema'),
+    ('ci_requests.py', '_unresolved_summary', 1, 2): (
+        '1', 'format',
+        'CI dispatch record / covered work-item revisions use positive persisted revision numbers'),
     ('ci_waits.py', '_check_names', 2, 0): (
         '64', 'format',
         'CI wait / number of exact check names follows the public maxItems contract'),
@@ -3414,7 +3426,7 @@ def sibling():
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
-                'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py'}
+                'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
