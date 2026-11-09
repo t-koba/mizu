@@ -1730,6 +1730,21 @@ class CacheInputTests(Fixture):
             self.project.config = previous
         self.assertEqual(check_jobs.submit(ctx)['id'], first['id'])
 
+    def test_mount_fingerprint_accepts_one_and_rejects_zero_before_lock(self):
+        source = self.root / 'single-byte-input'
+        source.write_bytes(b'x')
+        sandbox = dataclasses.replace(
+            self.config.sandbox, mounts=({'source': str(source), 'target': '/input'},))
+        self.config = dataclasses.replace(self.config, sandbox=sandbox)
+        self.project.config = self.config
+        bounds = {'files': 1, 'bytes': 1}
+        self.assertIsNotNone(check_jobs._mount_fingerprint(self.project, bounds))
+        for field in ('files', 'bytes'):
+            invalid = dict(bounds, **{field: 0})
+            with self.subTest(field=field):
+                with patch('mizu.check_jobs.lock', side_effect=AssertionError('invalid bounds must stop before scan')):
+                    self.assertIsNone(check_jobs._mount_fingerprint(self.project, invalid))
+
     def test_retained_environment_bounds_accept_one_and_reject_zero(self):
         from mizu import acceptance
         sandbox = dataclasses.replace(self.config.sandbox, check_input_files=1, check_input_bytes=1)
