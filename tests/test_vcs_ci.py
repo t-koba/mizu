@@ -549,6 +549,12 @@ class CiRewakeTests(Fixture):
         import dataclasses
         from mizu.runtime import _ci_rewake_seconds
         self.assertEqual(_ci_rewake_seconds(self.config), 1800)
+        for value, expected in ((60, 60.0), (86400, 86400.0),
+                                (59, 1800.0), (86401, 1800.0)):
+            with self.subTest(value=value):
+                configured = dataclasses.replace(
+                    self.config, vcs={**self.config.vcs, "ci_rewake_seconds": value})
+                self.assertEqual(_ci_rewake_seconds(configured), expected)
         garbage = dataclasses.replace(
             self.config, vcs={**self.config.vcs, "ci_rewake_seconds": "bad"})
         self.assertEqual(_ci_rewake_seconds(garbage), 1800)
