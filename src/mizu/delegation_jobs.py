@@ -2,7 +2,7 @@
 
 This is not a scheduler, tool API, runner, or check-job authority. The
 trusted host supplies a dedicated project-state root (never the live tree),
-uses ``workspace_start`` (or retains its existing admission workspace lock)
+uses ``workspace_start`` (or Engine's private admitted-lease handoff)
 while preparing and starting, and must fence tree access while
 ``reservation()`` is non-null. All callers must share this store. Only trusted
 supervisor code may use ``reservation`` or ``runner_*``: the stored random token
@@ -37,12 +37,12 @@ results to 32 KiB UTF-8, and the ledger to 1 MiB plus 14 bytes per job for the
 explicit intent field plus one maximum active
 binding/intent inventory. At most one job is active, so the allowance does not
 accumulate across history. Only the latest terminal result is retained; old
-jobs retain small identity/status/result-digest tombstones indefinitely. The 1024-job history cap is shared project-state capacity policy: exhaustion
-refuses new starts rather than forgetting a key. This private store has no
-in-repository consumer or configuration path yet, so defer an operator setting
-until the async-delegation pilot is integrated instead of exposing an inert
-option. The byte ceilings and schema are private format/safety limits, not
-scheduling policy.
+jobs retain small identity/status/result-digest tombstones indefinitely. The
+1024-job history cap is shared project-state capacity policy: exhaustion refuses
+new starts rather than forgetting a key. The private Engine reservation handoff
+has no runner or model-visible configuration path, so defer an operator setting
+until async delegation is integrated instead of exposing an inert option. The
+byte ceilings and schema are private format/safety limits, not scheduling policy.
 
 Every mutation uses a dedicated file lock and one fsynced atomic replacement.
 Start commits identity AND reservation before returning; an interrupted write
@@ -70,10 +70,11 @@ import contextlib
 import re
 import secrets
 import stat
+import threading
 from pathlib import Path
 
 from .errors import Denied, LimitExceeded
-from .fs import (DIGEST, canonical, digest, identifier, loads_finite, lock,
+from .fs import (DIGEST, canonical, digest, held, identifier, loads_finite, lock,
                  safe_read, safe_write, sync_dir, write_json)
 
 MAX_JOBS = 1024
@@ -232,6 +233,60 @@ def _regular(path):
         raise Denied('Unsafe delegation state file')
 
 
+class _WorkspaceLease:
+    """Host-only proof minted by Engine.run under its admitted write exclusion.
+
+    The run ExitStack revokes this object *before* releasing admission. Its
+    mutex keeps revocation from racing a commit. It is not a bearer/model grant:
+    both the minting Engine and exact parent Context must match. No lock is
+    acquired here; held() is only an additional sanity check, not mint authority.
+    """
+
+    def __init__(self, engine, parent, stack):
+        self.root = parent.project.root.resolve(strict=True)
+        self.owner = parent.role.name
+        self.engine, self.parent = engine, parent
+        self.mutex = threading.RLock()
+        self.active = True
+        self.attempt = None
+        if parent.role.workspace != 'write' or not held(self.root / 'locks' / 'workspace.lock'):
+            raise Denied('Workspace lease requires admitted write exclusion')
+        stack.callback(self.close)
+
+    def close(self):
+        with self.mutex:
+            self.active = False
+
+    @contextlib.contextmanager
+    def start_scope(self, project_root, owner, engine, parent, key, request):
+        """Private reservation handoff, not launch authority or a model API.
+
+        Only Engine's admission-minted live lease can use the already held
+        workspace lock. Burn it before I/O; only an exact retry may follow an
+        uncertain acknowledgement. Never clear a reservation on failure.
+        The caller commits and refreshes its Context gate inside this scope,
+        including on uncertain acknowledgement. Revocation waits for both;
+        lock order is Context then lease, matching Context shutdown.
+        """
+        with parent.mutex, self.mutex:
+            if (not self.active or self.engine is not engine or self.parent is not parent
+                    or parent.closed or parent.finished is not None or not parent._slot_lease
+                    or self.root != Path(project_root).resolve(strict=True)
+                    or self.owner != owner or parent.role.name != owner
+                    or parent.role.workspace != 'write'
+                    or not held(self.root / 'locks' / 'workspace.lock')):
+                raise Denied('Stale or mismatched admitted workspace lease')
+            _identity(owner, key)
+            request = loads_finite(canonical(request))
+            attempt = digest(canonical([key, _request(request)]))
+            if request['source_snapshot'] != parent.snapshot['id']:
+                raise Denied('Delegation source differs from parent snapshot')
+            if self.attempt is not None and self.attempt != attempt:
+                raise Denied('Workspace lease already used for another start')
+            self.attempt = attempt
+            yield request
+
+
 class DelegationJobs:
     """One project's durable reservation. Construction/recovery never starts work.
 
@@ -273,8 +328,8 @@ class DelegationJobs:
         inside this scope; no tree access or launch authority escapes with it.
 
         An already admitted writer must retain its original workspace lock,
-        not release/reacquire it with this API (locks are not reentrant). This
-        component does not transfer that lease or refresh Context gates. On ANY
+        not release/reacquire it with this API (locks are not reentrant). Use the
+        private Engine._reserve_delegation handoff for that lease instead. On ANY
         exception, release only the process lock, never clear durable state:
         commit acknowledgement may be uncertain, and only reconciliation plus
         proven quiescence can release a committed reservation. Inspect owner status;
@@ -285,6 +340,15 @@ class DelegationJobs:
         with lock(project_root / 'locks' / 'workspace.lock', blocking=False):
             cls.guard(project_root)
             yield cls(project_root)
+
+    @classmethod
+    def reservation_projection(cls, project_root):
+        """Minimal trusted Context gate view; never return runner/task authority."""
+        reservation = cls.existing_reservation(project_root)
+        if reservation is None:
+            return None
+        return {key: reservation[key] for key in ('id', 'owner', 'status')} | {
+            'request': {'source_snapshot': reservation['request']['source_snapshot']}}
 
     @classmethod
     def existing_reservation(cls, project_root: Path):

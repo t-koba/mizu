@@ -19,7 +19,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .delegation_jobs import DelegationJobs
+from .delegation_jobs import DelegationJobs, _WorkspaceLease
 from . import decision_delivery, delegation_gates, lineage, operator_records
 from . import platform as _platform
 from . import run_activity as _run_activity
@@ -54,7 +54,7 @@ from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceed
                       ConfigError, Denied, InfraExceeded, LimitExceeded, RunDeadlineExceeded,
                       DeadlineWrapUp, DrainYieldExceeded, MissingFinish, MizuError, ModelFailure,
                       ProtocolError)
-from .fs import (canonical, digest, lock, mkdir, now, read_json, relative_parts,
+from .fs import (canonical, digest, loads_finite, lock, mkdir, now, read_json, relative_parts,
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST, ID)
 from .project import Project
@@ -438,6 +438,7 @@ class Context:
         # Trusted host injection only; never populated from model arguments.
         self._lock_diagnostics = lock_diagnostics.capture()
         self._reservation_view = reservation_view
+        self._workspace_lease = None
         self.config, self.project, self.role = config, project, role
         self.run_dir, self.snapshot, self.workspace = run_dir, snapshot, workspace
         self.goal = (project.goal if role.workspace == "write" else snapshot["goal"]) if goal is None else goal
@@ -1148,12 +1149,14 @@ class Context:
                 self.operation_active.clear()
 
     def dispatch(self, op: str, args: dict) -> dict:
-        delegation_gates.check_access(self._reservation_view, self.role.name,
-                                      self.snapshot, op, args)
-        handler = self._DISPATCH.get(op)
-        if handler is None:
-            raise Denied("Unknown operation")
-        return handler(self, args)
+        # Direct host dispatch shares the handoff boundary with handle().
+        with self.mutex:
+            delegation_gates.check_access(self._reservation_view, self.role.name,
+                                          self.snapshot, op, args)
+            handler = self._DISPATCH.get(op)
+            if handler is None:
+                raise Denied("Unknown operation")
+            return handler(self, args)
 
     def _op_diff(self, args: dict) -> dict:
         return workspace_reads.op_diff(self, args)
@@ -2583,6 +2586,26 @@ class Engine:
             safe_point.guard(project.snapshots, role_name)
         return elapsed
 
+    def _reserve_delegation(self, parent: Context, key: str, request: dict):
+        """Trusted admitted-parent reservation groundwork only; never launch.
+
+        Hold the dispatch mutex through start AND store refresh. A failed read
+        leaves an unknown (deny-all) gate, not an inferred absence. The original
+        run ExitStack retains its admission lock through the durable commit.
+        """
+        with parent.mutex:
+            lease = parent._workspace_lease
+            if type(lease) is not _WorkspaceLease:
+                raise Denied("Missing admitted workspace lease")
+            with lease.start_scope(parent.project.root, parent.role.name,
+                                   self, parent, key, request) as pinned_request:
+                parent._reservation_view = {}  # Fail closed on uncertain I/O.
+                try:
+                    DelegationJobs(parent.project.root).start(parent.role.name, key, pinned_request)
+                finally:
+                    parent._reservation_view = DelegationJobs.reservation_projection(parent.project.root)
+                return loads_finite(canonical(parent._reservation_view))
+
     def _selection_retry_wait(self, context: Context, project: Project, stack: contextlib.ExitStack,
                               selection_role: Role, role_name: str, wait_seconds: float) -> None:
         """Bounded retry wait holding no execution slot and spending nothing.
@@ -2613,6 +2636,8 @@ class Engine:
         self._admit(project, role_name, selection_role, stack, wait=False,
                     observation_sink=getattr(context, "_admission_observation_sink", None))
         context._slot_lease = True
+        if context.role.workspace == "write":
+            context._workspace_lease = _WorkspaceLease(self, context, stack)
 
     def _dispatch_state(self, project, role_name, role, *, event_trigger, continuation=False,
                         prior_wait_resolution_pending=False, reconcile_waits=True):
@@ -3171,6 +3196,8 @@ class Engine:
                         project.snapshots.materialize(snapshot, workspace)
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult, delegate=self.delegate)
+                if role.workspace == "write":
+                    context._workspace_lease = _WorkspaceLease(self, context, stack)
                 context.admission = admission
                 context.opening_task = (dispatch_state["next_task"]
                                         if _dispatch.admission == "next_task" else None)
@@ -3796,8 +3823,14 @@ class Engine:
                     with contextlib.suppress(MizuError, OSError, ValueError):
                         continuations.settle(project.snapshots, continuation)
                 if context is not None:
-                    context._slot_lease = False
-                    context.closed = True
+                    # Serialize shutdown with reservation commit/gate refresh.
+                    # Revoke before dropping Context authority, not merely in
+                    # the later ExitStack callback that releases admission.
+                    with context.mutex:
+                        if context._workspace_lease is not None:
+                            context._workspace_lease.close()
+                        context._slot_lease = False
+                        context.closed = True
                     context.close_exec()
                 with contextlib.suppress(OSError):
                     active.unlink(missing_ok=True)

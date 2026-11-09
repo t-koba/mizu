@@ -5,7 +5,8 @@
 # View schema: {id: SHA256, owner: role, status: reserved_statuses entry,
 # request: {source_snapshot: SHA256}}; extra trusted store fields are ignored.
 # None preserves ordinary access; every malformed/unknown or non-owner view
-# denies all operations. This fixed view supplies no atomic reservation lookup.
+# denies all operations. The private admitted-parent handoff refreshes this
+# view under the Context dispatch mutex; ordinary calls do not read the store.
 # Only this explicit bridge-protocol set is permitted; other callbacks deny.
 version = 1
 status = "pre-integration-gates"
@@ -111,13 +112,14 @@ quiescence_release_rule = "Keep the reservation through cancellation, supervisor
 
 # Inventory gaps that must be closed before runner integration or a pilot.
 not_yet_proven = [
-  "DelegationJobs has a supervisor-only directory/resource binding, but runtime does not bind Engine.run or its authority to it.",
+  "Engine.run binds a scoped parent reservation gate; effective child authority and runner binding to DelegationJobs supervisor-only directory/resources remain absent.",
   "Driver quiescence only observes the direct process and reader threads; descendant/container recovery after supervisor death is absent.",
   "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
-  "workspace_start serializes trusted source preparation/start against writable admission; admitted-parent lease handoff and atomic Context reservation refresh/tool gating remain unintegrated.",
+  "Admitted-parent lease handoff commits and refreshes the Context gate, but has no model entrypoint, exact-job wait, child launch or runner integration.",
 ]
 
 [child_authority]
+reservation_handoff = "Groundwork only: Engine.run mints a project/role/Engine/Context-scoped lease under write admission, revokes it via the run ExitStack before lock release, and reuses that lock for one exact start or retry. Engine._reserve_delegation refreshes the minimum trusted store projection under the parent dispatch mutex even on uncertain acknowledgement; unreadable refresh denies all calls. This binds the parent gate, not effective child authority, and launches nothing."
 required_bindings = [
   "exact source snapshot",
   "effective role grants and tool limits",

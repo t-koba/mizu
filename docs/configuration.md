@@ -2070,13 +2070,32 @@ an uncertain start acknowledgement, inspect the existing job or retry the exact
 low-level start under the host's workspace exclusion; do not repeat preparation
 against a held reservation or delete the ledger. Terminal execution alone does
 not release it. An admitted writer must retain its original admission lock,
-not release and reacquire it through this non-reentrant API. Parent lease
-handoff, atomic Context-gate refresh, exact-job wait, effective child-authority
-binding, concurrent model-slot/shared-spend accounting, and durable descendant/
-container quiescence are still integration blockers. The closed runtime policy
-in [the access contract](async-delegation-gates.toml) remains in force. Focused
-in-process tests cover this critical section and failure before/after durable
-replacement; they do not demonstrate async runner or production quiescence.
+not release and reacquire it through this non-reentrant API.
+
+For an already-admitted writable `Engine.run`, the private host-only
+`Engine._reserve_delegation(parent, key, request)` boundary reuses the original
+admission-held lock. Engine mints an opaque lease for the exact project root,
+role, Engine and parent Context; the owning run ExitStack revokes it before
+releasing admission. A missing, foreign, stale or unheld lease is denied. One
+lease permits only one exact key/request (including the parent's source
+snapshot); an exact retry is stable, including after uncertain acknowledgement.
+The store commits the queued reservation while that lock is still held. The
+parent dispatch mutex covers both start and a fresh store projection bound to
+its existing access gate, even on failure. The projection contains only
+`{id, owner, status, request: {source_snapshot}}`, never runner tokens or task
+text. If refresh cannot read the state, the gate remains unknown and denies
+all calls. Neither exceptions nor lease expiry delete a durable reservation.
+
+This is reservation-handoff groundwork only, not child-authority binding or
+runner integration. There is no model-visible entrypoint, child launch or
+background runner. Exact-job wait, effective child-authority binding,
+concurrent model-slot accounting, and durable descendant/container quiescence
+remain integration blockers. The closed runtime policy in
+[the access contract](async-delegation-gates.toml) stays in force: reserved
+parents deny live-tree operations (including ordinary finish), while declared
+control-plane access remains available. Focused fake-driver tests cover lease
+refusal, gate refresh, exact retry, uncertain commits and admission/maintenance
+exclusion; they do not demonstrate async execution or production quiescence.
 
 ## Pi extensions
 

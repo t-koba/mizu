@@ -3,8 +3,9 @@
 The host may inject a private reservation projection: id, owner, status and
 request.source_snapshot. Additional trusted store fields are ignored. None
 means no gate; every other value must validate or all calls are refused. The
-view is never accepted from tool arguments. This is a fixed per-Context view,
-not a durable reservation lookup or an atomic workspace exclusion mechanism.
+view is never accepted from tool arguments. The private admitted-parent
+handoff refreshes it under the Context dispatch mutex; ordinary access checks
+do not look up durable state. This gate alone is not workspace exclusion.
 """
 from pathlib import Path
 import tomllib
