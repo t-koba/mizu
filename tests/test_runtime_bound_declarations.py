@@ -1969,6 +1969,18 @@ COMPARISON_BOUND_ARGUMENTS = {
         '2', 'format', 'CI acceptance reuse / schema version two is the retained provider-proof format'),
     ('ci_acceptance.py', 'retain', 0, 0): (
         '1', 'format', 'CI acceptance ingestion / provider attempt selector is positive'),
+    ('ci_costs.py', 'observed_costs', 1, 0): (
+        '1', 'safety',
+        'CI cost attribution / more than one repository attestation is ambiguous'),
+    ('ci_costs.py', 'observed_costs', 1, 1): (
+        '1', 'safety',
+        'CI cost attribution / an execution observed on multiple dispatch days is ambiguous'),
+    ('ci_costs.py', 'observed_costs', 1, 2): (
+        '1', 'safety',
+        'CI cost attribution / incompatible durations for one execution are not summed'),
+    ('ci_costs.py', 'observed_costs', 1, 3): (
+        '1', 'safety',
+        'CI cost projection / expose a repository only when exactly one is attested'),
     ('ci_observation.py', 'ci_cache_limits', 0, 0): (
         '1', 'configured policy',
         'CI cache / branch retention follows the positive [vcs].ci_cache_max_branches range'),
@@ -3381,7 +3393,7 @@ def sibling():
         found = {}
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
-                'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
+                'ci_costs.py', 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
                 'mcp_loop.py',
                 'mcp_proxy.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
@@ -3402,7 +3414,7 @@ def sibling():
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
-                'ci_acceptance.py', 'ci_observation.py'}
+                'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

@@ -80,6 +80,9 @@ class ProjectionTests(unittest.TestCase):
         read.assert_called_once_with(PUB)
         self.assertEqual(out["observed_wall_seconds"], 180)
         self.assertEqual(out["days"][0]["timed_executions"], 3)
+        self.assertEqual(out["conflicting_execution_day_observations"], 0)
+        self.assertFalse(out["repository_conflict"])
+        self.assertEqual(out["repository"], "owner/project")
         self.assertEqual(out["days"][0]["date"], DAY)  # completion is next day
         self.assertEqual(out["coverage"], "partial")
         self.assertEqual(out["days"][0]["requests"][0]["status_evidence"]["evidence_id"], "observation")
@@ -109,6 +112,7 @@ class ProjectionTests(unittest.TestCase):
     def test_conflicting_repository_namespace_cannot_join(self):
         out = observed_costs(page(request()), lambda _: status(check(), check(repository="other/project")))
         self.assertTrue(out["repository_conflict"])
+        self.assertIsNone(out["repository"])
         self.assertIsNone(out["observed_wall_seconds"])
         self.assertEqual(out["days"][0]["requests"][0]["unmatched_rows"], 2)
 
@@ -132,12 +136,17 @@ class ProjectionTests(unittest.TestCase):
         for observation in (status(), status({"check": "legacy", "state": "success", "sha": SHA})):
             out = observed_costs(page(request()), lambda _: observation)
             self.assertIsNone(out["observed_wall_seconds"])
+            self.assertFalse(out["repository_conflict"])
+            self.assertIsNone(out["repository"])
         read = Mock(side_effect=Denied("unavailable"))
         out = observed_costs(page(request(), request(request_id="d" * 64)), read)
         read.assert_called_once_with(PUB)
         self.assertIsNone(out["observed_wall_seconds"])
         self.assertEqual(out["days"][0]["requests"][0]["status"], "unavailable")
-        self.assertIsNone(observed_costs(page(), read)["observed_wall_seconds"])
+        empty = observed_costs(page(), read)
+        self.assertIsNone(empty["observed_wall_seconds"])
+        self.assertFalse(empty["repository_conflict"])
+        self.assertIsNone(empty["repository"])
         zero = check(completed_at=check()["started_at"])
         self.assertEqual(observed_costs(page(request()), lambda _: status(zero))["observed_wall_seconds"], 0)
 
@@ -154,11 +163,12 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(report["state_timing_conflicts"], 1)
 
     def test_conflicting_duration_or_day_is_not_arbitrarily_selected(self):
-        for requests, rows in (([request()], [check(), check(completed_at="2026-07-21T00:02:00Z")]),
-                               ([request(), request(date="2026-07-21")], [check()])):
+        for requests, rows, expected_conflicts in (
+                ([request()], [check(), check(completed_at="2026-07-21T00:02:00Z")], 1),
+                ([request(), request(date="2026-07-21")], [check()], 2)):
             out = observed_costs(page(*requests), lambda _: status(*rows))
             self.assertIsNone(out["observed_wall_seconds"])
-            self.assertGreater(out["conflicting_execution_day_observations"], 0)
+            self.assertEqual(out["conflicting_execution_day_observations"], expected_conflicts)
 
 
 class CostReadTests(Fixture):
