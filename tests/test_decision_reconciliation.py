@@ -186,6 +186,18 @@ class DecisionReconciliationTests(unittest.TestCase):
             self.apply(plan)
         self.assertEqual(self.shared_receipts(), {})
 
+    def test_plan_requires_exact_integer_schema_version_one(self):
+        plan = self.preflight()
+        self.assertEqual(plan['schema'], 1)
+        self.assertEqual(self.apply(plan)['roles'], plan['roles'])
+        for schema in (0, 2, True):
+            bad = copy.deepcopy(plan)
+            bad['schema'] = schema
+            with self.subTest(schema=schema), self.assertRaisesRegex(
+                    Denied, 'Invalid decision reconciliation plan'):
+                self.apply(bad)
+        self.assertFalse((self.root / 'shared-records').exists())
+
     def test_action_route_source_route_role_set_and_plan_digest_movement_refuses(self):
         self.decide()
         self.ack("reviewer", self.rows())
