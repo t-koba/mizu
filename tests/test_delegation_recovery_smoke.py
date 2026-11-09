@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 from mizu.delegation_jobs import DelegationJobs
+from mizu.delegation_scope import _scope_empty
 from mizu.errors import Denied
 from mizu.fs import canonical, loads_finite
 CGROOT = Path('/sys/fs/cgroup')
@@ -122,15 +123,10 @@ def unit_state(record):
     return fields
 
 
-def cgroup_empty(record):
-    path = CGROOT / record['cgroup'].lstrip('/')
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return True  # cgroupfs exact-path ENOENT, not a failed CLI/read
-    # populated covers descendants, unlike cgroup.procs alone.
-    events = dict(line.split() for line in (path / 'cgroup.events').read_text().splitlines())
-    return events.get('populated') == '0' and not (path / 'cgroup.procs').read_text().strip()
+def scope_empty(binding):
+    return _scope_empty(binding, maximum=8192, query=lambda unit: command(
+        'sudo', '-n', 'systemctl', 'show', unit,
+        '--property=LoadState,ActiveState,ControlGroup', codes=(0, 1)))
 
 
 def container_exists(identity):
@@ -159,7 +155,7 @@ def clean_container(container):
 
 def fixture_container(reservation, image):
     """Expected inspection projection, persisted before create, not learned after."""
-    name, marker = 'mizu-recovery-' + reservation['run_id'], reservation['run_id']
+    name, marker = 'mizu-delegation-' + reservation['run_id'], reservation['run_id']
     argv = ['podman', 'create', '--pull=never', '--name', name, '--label', MARKER + '=' + marker,
             '--network=none', '--read-only', '--read-only-tmpfs=false', '--cap-drop=ALL',
             '--security-opt=no-new-privileges', '--user=65534:65534', '--pids-limit=16',
@@ -287,8 +283,7 @@ def recover(path):
                     '--signal=SIGKILL', scope['unit'], codes=(0, 1))
             command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
             command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
-        fields = unit_state(scope)
-        cgroup_clean = fields['ActiveState'] == 'inactive' and cgroup_empty(scope)
+        cgroup_clean = scope_empty(binding)
     finally:
         # Failure in one scope must not prevent cleanup attempts for every
         # other bound resource. Never seal after an exception/unknown result.
@@ -362,7 +357,7 @@ def live(path):
     # integration.
     store, reservation, directory = create_job(path, key='smoke-prepared')
     credentials = reservation['id'], reservation['token']
-    name = 'mizu-recovery-' + reservation['run_id']
+    name = 'mizu-delegation-' + reservation['run_id']
     scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
     image = command('podman', 'image', 'inspect', '--format', '{{.Id}}', IMAGE).stdout.strip()
     container = fixture_container(reservation, image.removeprefix('sha256:'))
@@ -386,7 +381,7 @@ def live(path):
     # Phase 2: existing systemd/descendant/bound-OCI recovery with its own key.
     store, reservation, directory = create_job(path, key='smoke-bound')
     credentials = reservation['id'], reservation['token']
-    name = 'mizu-recovery-' + reservation['run_id']
+    name = 'mizu-delegation-' + reservation['run_id']
     scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
     try:
         cid = provision(store, reservation, directory, scope)
@@ -422,7 +417,7 @@ def live(path):
             time.sleep(.05)
         if (Path(f"/proc/{ready['supervisor']}").exists()
                 or not process_in_scope(ready['descendant'], scope)
-                or cgroup_empty(scope) or not container_exists(cid)
+                or scope_empty(store.runner_binding(*credentials)) or not container_exists(cid)
                 or ledger(path).reservation()['binding']['containers'][0]['id'] != cid):
             raise RuntimeError('supervisor-death/held-reservation evidence missing')
         # All launches have settled and the execution supervisor is dead, but
@@ -478,7 +473,8 @@ class RecoveryReservationTests(unittest.TestCase):
     def fixture(self, path, terminal=True, containers=1):
         store, reservation, directory = create_job(path)
         credentials = reservation['id'], reservation['token']
-        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        unit = 'mizu-delegation-' + reservation['run_id'] + '.service'
+        scope = {'unit': unit, 'cgroup': '/system.slice/' + unit}
         saved = [{'name': 'fixture-' + str(i), 'id': str(i + 1) * 64, 'uid': os.getuid()}
                  for i in range(containers)]
         store.runner_bind(*credentials, str(directory), scope, saved, authority_digest='b' * 64)
@@ -506,7 +502,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 with (mock.patch.object(module, 'require_host'),
                       mock.patch.object(module, 'unit_state', return_value={
                           'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
-                      mock.patch.object(module, 'cgroup_empty', side_effect=lambda _: probe(group)),
+                      mock.patch.object(module, 'scope_empty', side_effect=lambda _: probe(group)),
                       mock.patch.object(module, 'clean_container', side_effect=lambda _: probe(container)) as cleanup):
                     if group is True and container is True and terminal:
                         recover(path)
@@ -599,12 +595,51 @@ class RecoveryReservationTests(unittest.TestCase):
             with (mock.patch.object(module, 'require_host'),
                   mock.patch.object(module, 'unit_state', return_value={
                       'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}) as scope,
-                  mock.patch.object(module, 'cgroup_empty', return_value=True),
+                  mock.patch.object(module, 'scope_empty', return_value=True) as proof,
                   mock.patch.object(module, 'clean_container', return_value=True) as cleanup):
                 recover(path)
                 scope.assert_called_with(binding['scope'])
+                proof.assert_called_once_with(binding)
                 cleanup.assert_called_once_with(binding['containers'][0])
             self.assertIsNone(store.reservation())
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux read-only scope proof')
+    def test_supervisor_exit_recovery_uses_product_scope_proof(self):
+        module = sys.modules[__name__]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'state.json'
+            store = self.fixture(path)  # terminal supervisor, reservation still held
+            binding = store.runner_binding(store.reservation()['id'], store.reservation()['token'])
+            root = path.parent / 'cgroup'
+            group = root / binding['scope']['cgroup'].lstrip('/')
+            group.mkdir(parents=True)
+            (root / 'cgroup.controllers').write_text('cpu memory pids\n')
+            events = group / 'cgroup.events'
+            events.write_text('populated 1\n')  # surviving descendant, no direct process
+            (group / 'cgroup.procs').write_text('')
+            observed = mock.Mock(reason='exited', exit_code=0, survivors=(), stdout=(
+                'LoadState=loaded\nActiveState=inactive\nControlGroup=' + binding['scope']['cgroup'] + '\n'))
+            product_proof = _scope_empty
+            def proof(saved, **kwargs):
+                return product_proof(saved, **kwargs, cgroup_root=root)
+            with (mock.patch.object(module, 'require_host'),
+                  mock.patch.object(module, 'unit_state', return_value={'LoadState': 'not-found'}),
+                  mock.patch.object(module, 'command', return_value=observed) as query,
+                  mock.patch.object(module, '_scope_empty', side_effect=proof),
+                  mock.patch.object(module, 'clean_container', return_value=True)):
+                with self.assertRaises(Denied):
+                    recover(path)
+                self.assertIsNotNone(store.reservation())
+                events.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    recover(path)
+                self.assertIsNotNone(store.reservation())
+                events.write_text('populated 0\n')
+                recover(path)
+                self.assertIsNone(store.reservation())
+                self.assertEqual(query.call_count, 3)
+                for call in query.call_args_list:
+                    self.assertEqual(call.args[:5], ('sudo', '-n', 'systemctl', 'show', binding['scope']['unit']))
 
     def prepared_fixture(self, path, uid_offset=0, prepared=True):
         store, reservation, directory = create_job(path)
