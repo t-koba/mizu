@@ -2567,6 +2567,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('check_jobs.py', 'cache_input', 1, 1): (
         '1', 'safety',
         'check jobs / multiply-linked cache files require accounting for every name before reuse'),
+    ('check_jobs.py', 'submit', 0, 0): (
+        '1', 'format',
+        'check jobs / a supplied custom command array follows the public nonempty 1-32-command contract'),
+    ('check_jobs.py', 'submit.request_slot', 1, 0): (
+        '1', 'safety',
+        'check jobs / ambiguous multiple retained matches cannot be coalesced as one request'),
     ('check_jobs.py', 'cache_input.unbound', 1, 0): (
         '256', 'safety',
         'check jobs / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -3367,7 +3373,7 @@ def sibling():
         # Audit these selected check_jobs comparisons at magnitude one without
         # broadening the threshold for the module's unrelated comparisons.
         tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
-        for scope_name in ('purpose_label', '_mount_fingerprint', 'cache_input'):
+        for scope_name in ('purpose_label', '_mount_fingerprint', 'cache_input', 'submit'):
             function = next(node for node in tree.body
                             if isinstance(node, ast.FunctionDef) and node.name == scope_name)
             scoped = ast.Module(body=[function], type_ignores=[])

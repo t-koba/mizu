@@ -44,6 +44,18 @@ class JobTests(Fixture):
         result = check_jobs.result(ctx, job['id'])
         self.assertFalse(result['accepted_for_current_source'])
         self.assertIsNone(ctx.verification)
+    def test_supplied_command_array_requires_one_and_accepts_one(self):
+        empty_context = self.context()
+        with self.assertRaisesRegex(Denied, 'commands must list 1-32 commands'):
+            check_jobs.submit(empty_context, commands=[])
+        self.assertFalse(list(check_jobs.root(self.project).glob('*/job.json')))
+
+        single_context = self.context()
+        job = check_jobs.submit(single_context, commands=['echo one'])
+        self.assertEqual(job['status'], 'queued')
+        self.assertEqual(check_jobs.read(self.project, job['id'])['commands'], ['echo one'])
+        self.assertFalse(FakeSandbox.calls)
+
     def test_matching_completion_is_imported_in_later_unit(self):
         ctx, job = self.submit()
         self.run_job()
