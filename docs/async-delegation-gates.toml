@@ -112,14 +112,14 @@ quiescence_release_rule = "Keep the reservation through cancellation, supervisor
 
 # Inventory gaps that must be closed before runner integration or a pilot.
 not_yet_proven = [
-  "Engine.run binds a scoped parent reservation gate; effective child authority and runner binding to DelegationJobs supervisor-only directory/resources remain absent.",
+  "Engine.run binds a scoped parent gate and the admitted handoff binds resolved child configuration in the immutable queued request; actual runner integration with supervisor-only directory/resources remains absent.",
   "Driver quiescence only observes the direct process and reader threads; descendant/container recovery after supervisor death is absent.",
   "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
   "Admitted-parent lease handoff commits and refreshes the Context gate, but has no model entrypoint, exact-job wait, child launch or runner integration.",
 ]
 
 [child_authority]
-reservation_handoff = "Groundwork only: Engine.run mints a project/role/Engine/Context-scoped lease under write admission, revokes it via the run ExitStack before lock release, and reuses that lock for one exact start or retry. Engine._reserve_delegation refreshes the minimum trusted store projection under the parent dispatch mutex even on uncertain acknowledgement; unreadable refresh denies all calls. This binds the parent gate, not effective child authority, and launches nothing."
+reservation_handoff = "Groundwork only: Engine.run mints a project/role/Engine/Context-scoped lease under write admission, revokes it via the run ExitStack before lock release, and reuses that lock for one exact start or retry. Engine._reserve_delegation refreshes the minimum trusted store projection under the parent dispatch mutex even on uncertain acknowledgement; unreadable refresh denies all calls. The shared synchronous role/profile resolver plus full effective settings/resources, composed policy, pinned goal/workspace, adapter/local-settings digests and caller shared-spend authority feed child_authority_digest. The resolved profile and hash are atomic immutable request fields; retries re-resolve and conflict on drift. The parent gate omits task/token/digest. This binds configuration only and launches nothing."
 required_bindings = [
   "exact source snapshot",
   "effective role grants and tool limits",
@@ -127,7 +127,14 @@ required_bindings = [
   "relevant policy/configuration inputs",
   "child run identity and writable container identities",
 ]
-mismatch_action = "Refuse launch or retain the existing reservation; never infer equivalence from role/profile names."
+mismatch_action = "Refuse launch: runner_bind and runner_started require an explicitly supplied freshly resolved matching authority_digest, not a copied saved hash. Missing/mismatched authority refuses without clearing reservations; never infer equivalence from role/profile names."
+legacy_requests = "Schema v4 preserves old four-field requests and tombstones for inspection/exact retry/recovery, without reset or upgrade; unbound old jobs cannot gain launch bindings or claims. Existing resource identities/intents remain recovery evidence. Earlier schema versions remain refused without modification."
+remaining_authority_gaps = [
+  "Mutable executable/PATH, installed SDK/runtime and ambient environment/home configuration.",
+  "Agent-directory content beyond local models.json; credentials and remote provider/MCP grants.",
+  "Container image/mount/seccomp content and atomic use of resolved inputs at launch.",
+  "Concurrent model-slot admission, exact-job wait and durable process/container descendant quiescence.",
+]
 
 [observed_lifecycle]
 workspace_start = "DelegationJobs.workspace_start takes workspace.lock nonblocking before checking existing state and yielding a store for trusted capture/start. It retains the lock through durable start and releases only the process lock on exceptions; uncertain commits stay reserved. This is a host critical section, not an admitted-parent lease transfer, runtime runner or quiescence proof."
@@ -143,7 +150,14 @@ DelegationJobs schema v4 adds a single-container provisioning intent beside the
 supervisor-only directory/resource binding. Both share the 8 KiB
 active-inventory allowance plus 14 bytes per job for the explicit intent field
 and clear atomically on terminal handback; older
-ledgers are refused, not migrated or reset. The module documents the contract.
+ledger versions are refused, not migrated or reset. Within v4, the optional
+request authority_digest participates in the exact immutable request fingerprint;
+old requests remain readable/retryable/recoverable but cannot bind/claim a runner.
+New bindings/claims require an explicit matching resolved digest. The ledger
+ceiling adds exactly 86 canonical UTF-8 bytes for authority_digest in the single
+active request (comma + quoted key + colon + quoted 64-hex value); terminal
+handback clears requests, so no per-tombstone allowance is added. All other caps
+are unchanged. The module documents the contract.
 The synthetic fixture persists a bounded safe name, UID, run-id marker,
 immutable image ID and expected inspection config before Podman create; only the
 persisted intent is recovery authority and the marker alone pins run_id. The

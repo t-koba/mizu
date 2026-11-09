@@ -22,7 +22,7 @@ class ReservationGateTests(Fixture):
         store = DelegationJobs(self.project.root)
         with lock(self.project.root / 'locks/workspace.lock'):
             store.start('worker', 'first', {
-                'role': 'helper', 'task': 'Focused test', 'profile': None,
+                'role': 'helper', 'task': 'Focused test', 'profile': 'fixture', 'authority_digest': 'b' * 64,
                 'source_snapshot': 'a' * 64})
         bind_delegation_fixture(store)
         return store
@@ -104,7 +104,7 @@ class ReservationGateTests(Fixture):
         for phase in ('queued', 'running', 'cancel-requested', 'finished', 'corrupt'):
             with self.subTest(phase=phase):
                 if phase == 'running':
-                    store.runner_started(*binding)
+                    store.runner_started(*binding, authority_digest='b' * 64)
                 elif phase == 'cancel-requested':
                     store.cancel('worker', binding[0])
                 elif phase == 'finished':
@@ -156,7 +156,7 @@ class ReservationGateTests(Fixture):
                 future = pool.submit(attempt)
                 self.assertTrue(entered.wait(5), 'Admission did not begin')
                 store.start('worker', 'race', {
-                    'role': 'helper', 'task': 'Lock-order test', 'profile': None,
+                    'role': 'helper', 'task': 'Lock-order test', 'profile': 'fixture', 'authority_digest': 'b' * 64,
                     'source_snapshot': 'a' * 64})
                 self.assertFalse(future.done())
             with self.assertRaises(Denied):

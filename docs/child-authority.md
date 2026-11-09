@@ -1,14 +1,53 @@
-# Child authority configuration digest (not integrated)
+# Child authority configuration binding (no runner)
 
-`engine_config.child_authority_digest` is a pure, unwired configuration-binding
-helper. It returns only a SHA-256 string (64 lowercase hex characters). It does
-not authorize execution, create a job, persist configuration, or change the
-synchronous delegation path. Async runner integration remains disabled.
+`engine_config.child_authority_digest` is a pure configuration-binding helper
+returning only a SHA-256 string (64 lowercase hex characters). The private
+admitted-parent reservation now retains that digest in the immutable queued job;
+there is still no runner, model-visible async API or execution authorization.
+Synchronous delegation uses the same role/profile resolver and remains synchronous.
+
+## Reservation and retry contract
+
+Under the parent's dispatch mutex and original admission-held workspace lease,
+`Engine._reserve_delegation` resolves the child's own role, inherits the caller's
+workspace mode, ensures `finish` and removes `check_job`. The existing forbidden
+delegation-grant configuration gate still refuses over-broad roles. Selectors use
+the same trusted config-only preview as synchronous delegation, without consuming
+routing; waiting, unknown profiles or unreadable effective inputs fail closed.
+An optional requested profile is an assertion, not an override: it must match the
+resolved role/selector. The pinned parent goal and actual child workspace are
+used, along with the caller's shared-spend authority and the inputs below.
+
+The private schema-v4 request is `{role, task, profile, source_snapshot,
+authority_digest}`. The resolved profile and digest are part of the exact request
+fingerprint committed atomically with the queued reservation. Only the digest,
+not its configuration projection, is retained. The 128 KiB request bound is
+unchanged. The ledger ceiling adds exactly 86 canonical UTF-8 bytes for the
+single active request (comma, quoted `authority_digest` key, colon, quoted
+64-hex value), preserving prior active-ledger capacity. Terminal handback clears
+the request, so this allowance does not accumulate in tombstones. No other
+caps change. The parent gate remains only
+`{id, owner, status, request: {source_snapshot}}`: no task, token or authority
+digest. Re-resolution occurs on each admitted retry; only the same resolved
+request/key is accepted, including after an uncertain commit acknowledgement.
+Changed or unavailable authority never clears a durable reservation. Inspect or
+retry the exact retained request under workspace exclusion; never reset the store.
+
+Existing v4 requests without the field and terminal tombstones are preserved,
+readable and exactly retryable, not rewritten or upgraded. `runner_bind` and
+`runner_started` refuse missing or mismatched authority, including legacy requests
+and retries of existing resource bindings. A future trusted host must supply a
+freshly resolved matching `authority_digest`, **not copy the saved hash**; the
+store itself does no resolution or launch. Legacy saved resource identities and
+provisioning intents remain available for inspection/recovery; unbound legacy
+jobs cannot acquire new launch bindings, and uncertain cleanup retains the hold.
+Earlier ledger versions remain refused without modification, as before. Neither
+a matching digest nor a synthetic fixture's bind/claim closes the gaps below.
 
 ## Input contract
 
-The trusted caller supplies already resolved inputs; resolution is deliberately
-outside the pure helper. Never pass the session/conversation identity projection:
+The trusted caller supplies already resolved inputs; the admitted-parent
+handoff resolves these outside the pure helper. Never pass the session/conversation identity projection:
 Pi and pi-durable intentionally omit live authority from those identities.
 
 | Input | Source and binding |
@@ -39,9 +78,9 @@ credential encryption or proof of a remote authorization scope.
 
 ## Remaining launch-binding gaps
 
-This helper binds configuration, not every mutable dependency or external grant.
-Before any runner integration, the caller must establish the exact resolved
-inputs used at launch and close these gaps, or refuse launch:
+The queued digest binds configuration, not every mutable dependency or external
+grant. Before any runner integration, the caller must establish the exact
+resolved inputs used at launch and close these gaps, or refuse launch:
 
 - Command argv and the adapter source digest do not pin the executable selected
   by `PATH`, installed SDK/runtime dependencies, or inherited environment/home
@@ -60,8 +99,9 @@ inputs used at launch and close these gaps, or refuse launch:
   behavior can change without a configured declaration changing.
 - Resolution is not atomic with launch: policy/resource/native-content/local
   model files and configuration must not be re-read as different inputs after
-  comparison. Shared budget admission and workspace ownership require their own
-  atomic mechanisms; a matching digest proves neither.
+  comparison. The shared spend ledger and admitted lease handoff are prerequisites, not
+  concurrent model-slot admission or launch ownership; a matching digest proves
+  neither. Durable process/container descendant quiescence remains unintegrated.
 
 These are explicit integration prerequisites, not claims of complete effective
 runtime authority, process/container quiescence, or pilot readiness. The focused

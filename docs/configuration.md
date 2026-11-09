@@ -2059,8 +2059,9 @@ reservation-preparation critical section, not a runner or model tool. It takes
 `locks/workspace.lock` nonblocking, then checks the durable reservation before
 initializing a store or yielding it. Inside that scope the coordinator can
 capture the source and call `store.start(owner, key, request)`; it must not defer
-capture or start until after scope exit. The request/schema and bounded,
-owner-keyed idempotency contract are unchanged. Lock order is workspace then
+capture or start until after scope exit. Requests remain bounded and owner-keyed;
+the optional private authority binding and legacy behavior are described below.
+Lock order is workspace then
 store; writable Engine admission uses that same workspace lock and rechecks
 the reservation before live-tree work. Contention returns `Busy`; active,
 corrupt, unreadable or interrupted reservation state denies preparation.
@@ -2077,24 +2078,50 @@ For an already-admitted writable `Engine.run`, the private host-only
 admission-held lock. Engine mints an opaque lease for the exact project root,
 role, Engine and parent Context; the owning run ExitStack revokes it before
 releasing admission. A missing, foreign, stale or unheld lease is denied. One
-lease permits only one exact key/request (including the parent's source
-snapshot); an exact retry is stable, including after uncertain acknowledgement.
+lease permits only one exact key/resolved request (including the parent's source
+snapshot). The shared synchronous-delegation resolver inherits caller workspace,
+ensures `finish`, removes `check_job` and retains the forbidden-grant gate.
+Selectors use trusted config-only preview, never a guessed profile. The optional
+requested profile must match the resolved selection. Full effective settings and
+resources, composed policy, pinned goal, actual workspace, adapter/local-settings
+digests and caller shared-spend authority feed `child_authority_digest`.
+The resolved profile and final 64-hex `authority_digest` join the immutable job
+request before atomic reservation commit; no configuration projection is stored.
+Each retry re-resolves authority: an exact retry is stable, including after
+uncertain acknowledgement; changed/missing inputs refuse without clearing holds.
 The store commits the queued reservation while that lock is still held. The
 parent dispatch mutex covers both start and a fresh store projection bound to
 its existing access gate, even on failure. The projection contains only
-`{id, owner, status, request: {source_snapshot}}`, never runner tokens or task
-text. If refresh cannot read the state, the gate remains unknown and denies
-all calls. Neither exceptions nor lease expiry delete a durable reservation.
+`{id, owner, status, request: {source_snapshot}}`, never runner tokens, task
+text or the authority digest. If refresh cannot read the state, the gate remains
+unknown and denies all calls. Neither exceptions nor lease expiry delete a durable reservation.
 
-This is reservation-handoff groundwork only, not child-authority binding or
-runner integration. There is no model-visible entrypoint, child launch or
-background runner. Exact-job wait, effective child-authority binding,
-concurrent model-slot accounting, and durable descendant/container quiescence
-remain integration blockers. The closed runtime policy in
-[the access contract](async-delegation-gates.toml) stays in force: reserved
+Schema v4 accepts both the new digest-bearing request (resolved profile required)
+and legacy `{role, task, profile, source_snapshot}` requests. Existing v4 records
+and tombstones remain inspectable and exactly retryable, without migration,
+reset or upgrade. The request bound remains 128 KiB. The ledger ceiling is
+1 MiB + 8 KiB active binding/intent inventory + 14 bytes per job for the explicit
+intent field + exactly 86 bytes for the single active request's authority digest
+(comma + quoted key + colon + quoted 64-hex value, canonical UTF-8). This preserves
+prior active-ledger capacity; terminal handback clears requests, so the new
+allowance does not accumulate in tombstones. No other caps change. Older schema
+versions remain refused without modification. `runner_bind` and `runner_started`
+require a trusted host's freshly resolved matching `authority_digest`, never a
+copied saved hash; legacy requests cannot launch or acquire new launch bindings.
+Saved resource identities and provisioning intents remain recovery evidence, not
+permission to replay. Uncertain cleanup retains the reservation.
+
+This binds queued configuration, not full runtime authority or runner integration.
+There is no model-visible entrypoint, child launch or background runner. Mutable
+executables/SDKs, agent-directory content, ambient environment/credentials, image
+and mount bytes, remote grants, atomic launch-input use, exact-job wait,
+concurrent model-slot accounting and durable descendant/container quiescence
+remain integration blockers; see [the binding contract](child-authority.md).
+The closed runtime policy in [the access contract](async-delegation-gates.toml) stays in force: reserved
 parents deny live-tree operations (including ordinary finish), while declared
 control-plane access remains available. Focused fake-driver tests cover lease
-refusal, gate refresh, exact retry, uncertain commits and admission/maintenance
+refusal, role/profile resolution, authority drift, legacy preservation, no digest
+leak, gate refresh, exact retry, uncertain commits and admission/maintenance
 exclusion; they do not demonstrate async execution or production quiescence.
 
 ## Pi extensions

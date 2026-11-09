@@ -332,13 +332,13 @@ class DelegationGateContractTests(Fixture):
 
     def test_job_store_view_keeps_gate_until_proven_quiescence(self):
         store = delegation_jobs.DelegationJobs(self.project.root)
-        request = {"role": "helper", "task": "test reservation gating", "profile": None,
+        request = {"role": "helper", "task": "test reservation gating", "profile": "fixture", "authority_digest": "b" * 64,
                    "source_snapshot": self.ctx.snapshot["id"]}
         job_id = store.start("worker", "key", request)["id"]
         self.ctx._reservation_view = store.reservation()
         token = self.ctx._reservation_view["token"]
         cleanup = bind_delegation_fixture(store)
-        for transition in (lambda: None, lambda: store.runner_started(job_id, token),
+        for transition in (lambda: None, lambda: store.runner_started(job_id, token, authority_digest='b' * 64),
                            lambda: store.cancel("worker", job_id),
                            lambda: store.runner_finished(job_id, token, "cancelled")):
             transition()

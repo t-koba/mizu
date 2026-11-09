@@ -27,16 +27,24 @@ Recovery fences bind/claim/finish before inspection and persists a validated ID
 before removal. Independent unstarted-scope and name/ID/marker absence proofs
 are required. A durable claim bit survives cancellation: uncertain binds can be
 recovered, but claimed runners never take this prelaunch path. Neither record
-is launch authority. Older ledgers are refused, never migrated or reset.
-A request is exactly
-{role, task, profile, source_snapshot}; profile may be null, and snapshot is an
-immutable SHA256 snapshot ID. The host must pin the rest of the invocation
-authority before using this primitive; these fields grant no execution rights.
+is launch authority. Older ledger versions are refused, never migrated or reset.
+V4 requests are {role, task, profile, source_snapshot}, optionally extended with
+an authority_digest (64 lowercase hex). Bound requests require a resolved profile;
+legacy requests may retain null. Engine's admitted-parent handoff resolves the
+child and includes child_authority_digest in the immutable request fingerprint.
+Snapshot is an immutable SHA256 snapshot ID. Existing v4 requests and tombstones
+remain readable/retryable without rewriting; an unbound legacy request cannot
+be upgraded by retry. runner_bind/runner_started require an explicitly supplied
+matching resolved authority digest, even for an already saved resource binding.
+Legacy jobs remain reserved for inspection/recovery, never launch. The host must
+resolve the same effective inputs before comparison; copying a stored digest is
+not validation. Matching configuration still grants no execution rights.
 Requests are bounded to 128 KiB canonical UTF-8 (task <= 65536 UTF-8 bytes),
 results to 32 KiB UTF-8, and the ledger to 1 MiB plus 14 bytes per job for the
-explicit intent field plus one maximum active
-binding/intent inventory. At most one job is active, so the allowance does not
-accumulate across history. Only the latest terminal result is retained; old
+explicit intent field plus one maximum active binding/intent inventory and
+86 bytes for the active request authority_digest. Terminal handback clears the
+request. At most one job is active, so these active allowances do not accumulate
+across history. Only the latest terminal result is retained; old
 jobs retain small identity/status/result-digest tombstones indefinitely. The
 1024-job history cap is shared project-state capacity policy: exhaustion refuses
 new starts rather than forgetting a key. The private Engine reservation handoff
@@ -84,7 +92,11 @@ MAX_BINDING_BYTES = 8192
 # `"intent":null`) even in terminal tombstones, so the 1024-tombstone ceiling
 # preserves the prior capacity above the 1 MiB base.
 _INTENT_NULL_OVERHEAD = 14
-MAX_STATE_BYTES = 1024 * 1024 + MAX_BINDING_BYTES + _INTENT_NULL_OVERHEAD * MAX_JOBS
+# Only the single active request carries this field: comma + quoted key +
+# colon + quoted 64-hex digest. Terminal handback clears the request.
+_AUTHORITY_DIGEST_OVERHEAD = 86
+MAX_STATE_BYTES = (1024 * 1024 + MAX_BINDING_BYTES + _INTENT_NULL_OVERHEAD * MAX_JOBS
+                   + _AUTHORITY_DIGEST_OVERHEAD)
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 32768
 MAX_TASK_BYTES = 65536
@@ -114,8 +126,13 @@ def _text(value, maximum):
 
 
 def _request(value):
-    if type(value) is not dict or set(value) != {'role', 'task', 'profile', 'source_snapshot'}:
+    if type(value) is not dict or set(value) not in (
+            {'role', 'task', 'profile', 'source_snapshot'},
+            {'role', 'task', 'profile', 'source_snapshot', 'authority_digest'}):
         raise Denied('Invalid delegation request schema')
+    if 'authority_digest' in value and (not _sha(value['authority_digest'])
+                                       or value['profile'] is None):
+        raise Denied('Invalid resolved delegation authority')
     identifier(value['role'])
     if value['profile'] is not None:
         identifier(value['profile'])
@@ -278,9 +295,11 @@ class _WorkspaceLease:
                 raise Denied('Stale or mismatched admitted workspace lease')
             _identity(owner, key)
             request = loads_finite(canonical(request))
-            attempt = digest(canonical([key, _request(request)]))
+            _request(request)
             if request['source_snapshot'] != parent.snapshot['id']:
                 raise Denied('Delegation source differs from parent snapshot')
+            request = engine._delegation_request(parent, request)
+            attempt = digest(canonical([key, _request(request)]))
             if self.attempt is not None and self.attempt != attempt:
                 raise Denied('Workspace lease already used for another start')
             self.attempt = attempt
@@ -644,7 +663,7 @@ class DelegationJobs:
             self._terminal(state, job, result, 'failed')
             self._save(state)
 
-    def runner_bind(self, job_id, token, run_directory, scope, containers):
+    def runner_bind(self, job_id, token, run_directory, scope, containers, *, authority_digest=None):
         """Persist exact execution identities before launch; never launch or discover.
 
         Only the trusted supervisor may supply the complete resource inventory.
@@ -653,11 +672,14 @@ class DelegationJobs:
         only when none can exist). Directory identity is captured without links.
         The binding and any intent share an 8 KiB inventory allowance above
         the 1 MiB base plus per-record intent overhead. While reserved, exact retries return the original; conflicting or
-        late binds refuse. Failed/uncertain writes require inspection, not another launch.
+        late binds refuse. authority_digest must be freshly resolved by the trusted
+        host, not copied from the ledger; missing/mismatched/legacy authority denies
+        before mutation. Failed/uncertain writes require inspection, not another launch.
         """
         with self._locked():
             state = self._load()
             job = self._runner(state, job_id, token)
+            self._authority(job, authority_digest)
             if job['intent'] is not None and job['intent']['recovering']:
                 raise Denied('Delegation provisioning recovery is fenced')
             binding = loads_finite(canonical({
@@ -684,17 +706,25 @@ class DelegationJobs:
         with self._locked():
             return _bound(self._runner(self._load(), job_id, token))
 
-    def runner_started(self, job_id, token):
+    @staticmethod
+    def _authority(job, authority_digest):
+        saved = (job['request'] or {}).get('authority_digest')
+        if not _sha(authority_digest) or saved != authority_digest:
+            raise Denied('Missing or mismatched delegation authority; do not launch')
+
+    def runner_started(self, job_id, token, *, authority_digest=None):
         """Consume the queued claim once BEFORE launch; uncertain claim never replays.
 
         A failed acknowledgement requires reconciliation, not a second launch.
-        The complete binding must precede the claim. A queued cancellation cannot
+        The complete binding and freshly resolved matching authority_digest must
+        precede the claim; legacy requests cannot be claimed. A queued cancellation cannot
         be claimed; supervisor reports no-execution cancellation then quiescence
         instead. An unbound cancellation remains held for reconciliation.
         """
         with self._locked():
             state = self._load()
             job = self._runner(state, job_id, token)
+            self._authority(job, authority_digest)
             if job['status'] != 'queued' or job['binding'] is None:
                 raise Denied('Delegation is unbound or not queued; do not replay execution')
             _bound(job)

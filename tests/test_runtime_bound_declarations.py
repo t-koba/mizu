@@ -352,6 +352,9 @@ DECLARATIONS = {
         '_INTENT_NULL_OVERHEAD': (
             '14', 'format',
             'async delegation / canonical JSON byte overhead for the explicit intent:null member'),
+        '_AUTHORITY_DIGEST_OVERHEAD': (
+            '86', 'format',
+            'async delegation / one active canonical request authority_digest member'),
         'MAX_JOBS': (
             '1024', 'policy',
             'async delegation / shared project-state tombstone capacity; the private store has no '
@@ -360,9 +363,9 @@ DECLARATIONS = {
             '8192', 'safety',
             'async delegation / bounded active binding and provisioning-intent inventory'),
         'MAX_STATE_BYTES': (
-            '1024 * 1024 + MAX_BINDING_BYTES + _INTENT_NULL_OVERHEAD * MAX_JOBS', 'safety',
-            'async delegation / bounded ledger read including one active inventory and the '
-            'per-job serialized intent slot; oversized state is refused, never reset'),
+            '1024 * 1024 + MAX_BINDING_BYTES + _INTENT_NULL_OVERHEAD * MAX_JOBS + _AUTHORITY_DIGEST_OVERHEAD', 'safety',
+            'async delegation / bounded ledger read including one active inventory, per-job '
+            'intent slots and the single active authority digest; oversized state is refused, never reset'),
         'MAX_REQUEST_BYTES': (
             '128 * 1024', 'safety',
             'async delegation / bounded canonical request record'),
@@ -3199,7 +3202,8 @@ SYMBOLIC_BOUNDS = {
         '_SIDECAR_MAX_BYTES': frozenset({'PREVIEW_BYTES'}),
     },
     'delegation_jobs.py': {
-        'MAX_STATE_BYTES': frozenset({'MAX_BINDING_BYTES', '_INTENT_NULL_OVERHEAD', 'MAX_JOBS'}),
+        'MAX_STATE_BYTES': frozenset({'MAX_BINDING_BYTES', '_INTENT_NULL_OVERHEAD',
+                                      '_AUTHORITY_DIGEST_OVERHEAD', 'MAX_JOBS'}),
     },
 }
 

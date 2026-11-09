@@ -66,7 +66,7 @@ def bind_delegation_fixture(store):
     directory = (store.root.parent / reservation['run_id']).resolve()
     directory.mkdir(exist_ok=True)
     binding = store.runner_bind(reservation['id'], reservation['token'], str(directory),
-                                {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [])
+                                {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [], authority_digest='b' * 64)
     return {'binding': binding, 'scope_clean': True, 'containers_absent': []}
 
 

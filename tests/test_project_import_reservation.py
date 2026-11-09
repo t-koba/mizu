@@ -266,7 +266,8 @@ class ProjectImportReservationTests(Fixture):
         # Trusted start lock order, not a child runner or runtime integration.
         with lock(self.project.root / 'locks/workspace.lock'):
             return store.start('worker', 'first', {
-                'role': 'helper', 'task': 'Import fence test', 'profile': None,
+                'role': 'helper', 'task': 'Import fence test', 'profile': 'fixture',
+                'authority_digest': 'b' * 64,
                 'source_snapshot': 'a' * 64})
 
     def assert_unpublished(self):
@@ -298,7 +299,7 @@ class ProjectImportReservationTests(Fixture):
         for phase in ('queued', 'running', 'cancel-requested', 'finished'):
             with self.subTest(phase=phase):
                 if phase == 'running':
-                    store.runner_started(*binding)
+                    store.runner_started(*binding, authority_digest='b' * 64)
                 elif phase == 'cancel-requested':
                     store.cancel('worker', binding[0])
                 elif phase == 'finished':

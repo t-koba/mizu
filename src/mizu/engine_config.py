@@ -135,7 +135,8 @@ def child_authority_digest(config, role, *, spend_role, settings, policy,
     Bounds: at most 1 MiB canonical input; output is always 64 hex characters.
     Failure: ConfigError without input values for incomplete/unserializable
     inputs, unknown effective-setting fields, or mismatched engine tools.
-    No retry/cancellation or durable state: this helper is deliberately unwired.
+    This helper has no durable state; the admitted-parent handoff retains only
+    its result in the immutable request, not the input projection.
     """
     from .config import (ENGINES, role_requests_per_run, role_tools_per_run,
                          role_wrap_up_requests, role_wrap_up_tools, role_run_seconds)

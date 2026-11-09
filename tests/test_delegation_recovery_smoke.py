@@ -87,7 +87,7 @@ def ledger(path):
 def create_job(path, key='smoke'):
     store = DelegationJobs(path.parent)
     store.start('worker', key, {'role': 'helper', 'task': 'Synthetic recovery fixture',
-                                  'profile': None, 'source_snapshot': 'a' * 64})
+                                  'profile': 'fixture', 'source_snapshot': 'a' * 64, 'authority_digest': 'b' * 64})
     reservation = store.reservation()
     directory = path.parent / reservation['run_id']
     directory.mkdir(mode=0o700)
@@ -346,7 +346,7 @@ def provision(store, reservation, directory, scope):
         raise RuntimeError('provisioning container identity mismatch')
     inspect_prepared(container, cid)
     store.runner_bind(*credentials, str(directory), scope,
-                      [{'name': container['name'], 'id': cid, 'uid': container['uid']}])
+                      [{'name': container['name'], 'id': cid, 'uid': container['uid']}], authority_digest='b' * 64)
     return cid
 
 
@@ -390,7 +390,7 @@ def live(path):
     scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
     try:
         cid = provision(store, reservation, directory, scope)
-        store.runner_started(*credentials)  # durable identities AND claim precede execution
+        store.runner_started(*credentials, authority_digest='b' * 64)  # durable identities AND claim precede execution
         command('sudo', '-n', 'systemd-run', '--unit=' + scope['unit'],
                 '--slice=system.slice', '--service-type=exec',
                 '--property=User=' + str(os.getuid()), '--property=WorkingDirectory=/',
@@ -481,8 +481,8 @@ class RecoveryReservationTests(unittest.TestCase):
         scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
         saved = [{'name': 'fixture-' + str(i), 'id': str(i + 1) * 64, 'uid': os.getuid()}
                  for i in range(containers)]
-        store.runner_bind(*credentials, str(directory), scope, saved)
-        store.runner_started(*credentials)
+        store.runner_bind(*credentials, str(directory), scope, saved, authority_digest='b' * 64)
+        store.runner_started(*credentials, authority_digest='b' * 64)
         if terminal:
             store.runner_finished(*credentials, 'failed')
         return store
@@ -673,7 +673,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 for stage in ('unbound', 'bound', 'recovering'):
                     if stage == 'bound':
                         store.runner_bind(*credentials, intent['directory']['path'], intent['scope'],
-                            [{'name': intent['container']['name'], 'id': 'b' * 64, 'uid': os.getuid()}])
+                            [{'name': intent['container']['name'], 'id': 'b' * 64, 'uid': os.getuid()}], authority_digest='b' * 64)
                     elif stage == 'recovering':
                         store.runner_recover_prepared(*credentials)
                     with self.assertRaisesRegex(RuntimeError, 'durable runner claim'):

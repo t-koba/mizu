@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from mizu import delegation_jobs as jobs
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import canonical, loads_finite
+from mizu.fs import canonical, digest, loads_finite
 
 
 class DelegationJobTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class DelegationJobTests(unittest.TestCase):
         self.store = jobs.DelegationJobs(self.root)
         self.path = self.root / 'delegation-jobs' / 'state.json'
         self.request = {'role': 'helper', 'task': 'Implement the focused slice',
-                        'profile': None, 'source_snapshot': 'a' * 64}
+                        'profile': 'fixture', 'source_snapshot': 'a' * 64, 'authority_digest': 'b' * 64}
 
     def start(self, key='first', owner='worker'):
         return self.store.start(owner, key, self.request)['id']
@@ -35,7 +35,7 @@ class DelegationJobTests(unittest.TestCase):
             directory = self.root / reservation['run_id']
             directory.mkdir(exist_ok=True)
             self.store.runner_bind(reservation['id'], reservation['token'], str(directory),
-                                   {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [])
+                                   {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [], authority_digest='b' * 64)
         return reservation['id'], reservation['token']
 
     def cleanup(self):
@@ -48,14 +48,15 @@ class DelegationJobTests(unittest.TestCase):
         # bounded idempotency and execution-outcome tombstone.
         self.assertIsNone(tombstone['binding'])
         self.assertIsNone(tombstone['intent'])
+        self.assertIsNone(tombstone['request'])
         self.assertLess(len(canonical(tombstone)), 600)
         self.assertEqual(jobs._INTENT_NULL_OVERHEAD, 14)
         self.assertEqual(jobs.MAX_STATE_BYTES,
-                         1024 * 1024 + jobs.MAX_BINDING_BYTES + 14 * jobs.MAX_JOBS)
+                         1024 * 1024 + jobs.MAX_BINDING_BYTES + 14 * jobs.MAX_JOBS + 86)
 
     def complete(self, text='Retained child evidence'):
         job_id, token = self.runner()
-        self.store.runner_started(job_id, token)
+        self.store.runner_started(job_id, token, authority_digest='b' * 64)
         self.store.runner_finished(job_id, token, 'succeeded')
         self.store.runner_quiescent(job_id, token, text, cleanup=self.cleanup())
 
@@ -65,7 +66,7 @@ class DelegationJobTests(unittest.TestCase):
         for transition in ('queued', 'running', 'cancel-requested', 'finished', 'terminal'):
             with self.subTest(transition=transition):
                 if transition == 'running':
-                    self.store.runner_started(*self.runner())
+                    self.store.runner_started(*self.runner(), authority_digest='b' * 64)
                 elif transition == 'cancel-requested':
                     self.store.cancel('worker', job_id)
                 elif transition == 'finished':
@@ -74,7 +75,8 @@ class DelegationJobTests(unittest.TestCase):
                     self.store.runner_quiescent(*self.runner(), 'Stopped and cleaned', cleanup=self.cleanup())
                 self.assertEqual(self.start(), job_id)
                 for field, value in [('role', 'other'), ('task', 'Different task'),
-                                     ('profile', 'fast'), ('source_snapshot', 'b' * 64)]:
+                                     ('profile', 'fast'), ('source_snapshot', 'b' * 64),
+                                     ('authority_digest', 'c' * 64)]:
                     with self.subTest(field=field), self.assertRaises(Denied):
                         self.store.start('worker', 'first', {**self.request, field: value})
         self.assertEqual(self.store.result('worker', job_id)['result'], 'Stopped and cleaned')
@@ -82,6 +84,74 @@ class DelegationJobTests(unittest.TestCase):
         self.assertNotIn('token', self.store.status('worker', job_id))
         self.assertNotIn('request', self.store.start('worker', 'first', self.request))
         self.assertEqual(original['request'], self.request)
+
+    def test_bind_and_claim_require_current_matching_authority(self):
+        self.start()
+        reservation = self.store.reservation()
+        credentials = reservation['id'], reservation['token']
+        directory = self.root / reservation['run_id']
+        directory.mkdir()
+        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        for bound in (False, True):
+            if bound:
+                self.store.runner_bind(*credentials, str(directory), scope, [], authority_digest='b' * 64)
+            before = self.path.read_bytes()
+            for value in (None, '', 'c' * 64):
+                for method, args in ((self.store.runner_bind, (str(directory), scope, [])),
+                                     (self.store.runner_started, ())):
+                    with self.subTest(bound=bound, value=value), self.assertRaises(Denied):
+                        method(*credentials, *args, authority_digest=value)
+                    self.assertEqual(before, self.path.read_bytes())
+        self.store.runner_started(*credentials, authority_digest='b' * 64)
+
+    def test_legacy_unbound_record_stays_held_and_cannot_gain_launch_binding(self):
+        request = {key: value for key, value in self.request.items() if key != 'authority_digest'}
+        request['profile'] = None
+        self.store.start('worker', 'legacy', request)
+        before = self.path.read_bytes()
+        store = jobs.DelegationJobs(self.root)
+        saved = store.reservation()
+        self.assertEqual(saved['request'], request)
+        with self.assertRaises(Denied):
+            store.runner_bind(saved['id'], saved['token'], str(self.root),
+                              {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [],
+                              authority_digest='b' * 64)
+        with self.assertRaises(Denied):
+            jobs.DelegationJobs.guard(self.root)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_legacy_bound_record_is_preserved_recoverable_but_cannot_launch(self):
+        self.start()
+        credentials = self.runner()
+        cleanup = self.cleanup()
+        # Exact pre-binding-format v4 record, including already saved resource
+        # identities. Reading never rewrites it or turns it into launch authority.
+        state = loads_finite(self.path.read_bytes())
+        job = state['jobs'][credentials[0]]
+        del job['request']['authority_digest']
+        job['request']['profile'] = None
+        legacy_request = copy.deepcopy(job['request'])
+        job['request_digest'] = digest(canonical(legacy_request))
+        self.path.write_bytes(canonical(state))
+        before = self.path.read_bytes()
+        store = jobs.DelegationJobs(self.root)
+        self.assertEqual(store.reservation()['request'], legacy_request)
+        self.assertEqual(store.start('worker', 'first', legacy_request)['id'], credentials[0])
+        binding = cleanup['binding']
+        for value in (None, 'b' * 64):
+            with self.assertRaises(Denied):
+                store.runner_bind(*credentials, binding['directory']['path'], binding['scope'], [],
+                                  authority_digest=value)
+            with self.assertRaises(Denied):
+                store.runner_started(*credentials, authority_digest=value)
+        self.assertEqual(before, self.path.read_bytes())
+        with self.assertRaises(Denied):
+            store.start('worker', 'first', self.request)
+        store.cancel('worker', credentials[0])
+        store.runner_finished(*credentials, 'cancelled')
+        store.runner_quiescent(*credentials, 'Legacy resources independently cleaned', cleanup=cleanup)
+        self.assertIsNone(store.reservation())
+        self.assertEqual(store.start('worker', 'first', legacy_request)['status'], 'terminal')
 
     def test_one_active_job_for_entire_project_and_independent_owner_keys(self):
         first = self.start()
@@ -114,7 +184,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assertEqual(self.store.cancel('worker', job_id)['status'], 'cancel-requested')
         self.assertEqual(self.store.cancel('worker', job_id)['status'], 'cancel-requested')
         with self.assertRaises(Denied):
-            self.store.runner_started(*binding)
+            self.store.runner_started(*binding, authority_digest='b' * 64)
         with self.assertRaises(Denied):
             self.store.runner_quiescent(*binding, 'Not terminal yet', cleanup=self.cleanup())
         self.store.runner_finished(*binding, 'cancelled')
@@ -130,13 +200,13 @@ class DelegationJobTests(unittest.TestCase):
     def test_runner_failure_requires_explicit_quiescence_and_cannot_replay(self):
         job_id = self.start()
         binding = self.runner()
-        self.store.runner_started(*binding)
+        self.store.runner_started(*binding, authority_digest='b' * 64)
         for _ in range(2):
             self.store = jobs.DelegationJobs(self.root)
             self.assertEqual(self.store.reservation()['status'], 'running')
             self.assertEqual(self.start(), job_id)
             with self.assertRaises(Denied):
-                self.store.runner_started(*binding)
+                self.store.runner_started(*binding, authority_digest='b' * 64)
             with self.assertRaises(Denied):
                 self.start('second')
         self.store.runner_finished(*binding, 'failed')
@@ -154,7 +224,7 @@ class DelegationJobTests(unittest.TestCase):
         # A lost completion acknowledgement is resolved by inspection, not replay.
         self.assertEqual(self.store.result('worker', job_id)['execution'], 'failed')
         with self.assertRaises(Denied):
-            self.store.runner_started(*binding)
+            self.store.runner_started(*binding, authority_digest='b' * 64)
 
     def test_runner_binding_checks_and_queued_failure(self):
         self.start()
@@ -171,7 +241,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_finished(job_id, token, 'succeeded')
         with self.assertRaises(Denied):
             self.store.runner_bind(job_id, '0' * 64, str(self.root),
-                                   {'unit': 'other.service', 'cgroup': '/system.slice/other.service'}, [])
+                                   {'unit': 'other.service', 'cgroup': '/system.slice/other.service'}, [], authority_digest='b' * 64)
         self.assertEqual(before, self.path.read_bytes())
         self.store.runner_finished(job_id, token, 'failed')
         self.assertIsNotNone(self.store.reservation())
@@ -180,7 +250,7 @@ class DelegationJobTests(unittest.TestCase):
     def test_result_bound_and_eviction_leave_idempotency_tombstones(self):
         first = self.start()
         binding = self.runner()
-        self.store.runner_started(*binding)
+        self.store.runner_started(*binding, authority_digest='b' * 64)
         self.store.runner_finished(*binding, 'succeeded')
         with self.assertRaises(Denied):
             self.store.runner_quiescent(*binding, 'é' * (jobs.MAX_RESULT_BYTES // 2 + 1), cleanup=self.cleanup())
@@ -250,11 +320,11 @@ class DelegationJobTests(unittest.TestCase):
             raise OSError('Injected lost claim acknowledgement')
         with patch.object(jobs, 'safe_write', side_effect=interrupted):
             with self.assertRaises(OSError):
-                self.store.runner_started(*binding)
+                self.store.runner_started(*binding, authority_digest='b' * 64)
         self.store = jobs.DelegationJobs(self.root)
         self.assertEqual(self.store.status('worker', job_id)['status'], 'running')
         with self.assertRaises(Denied):
-            self.store.runner_started(*binding)
+            self.store.runner_started(*binding, authority_digest='b' * 64)
         self.assertIsNotNone(self.store.reservation())
 
     def test_interrupted_initialization_and_missing_state_fail_closed(self):
@@ -297,6 +367,9 @@ class DelegationJobTests(unittest.TestCase):
         invalid = [None, {}, {**self.request, 'extra': True},
                    {**self.request, 'role': '../escape'},
                    {**self.request, 'source_snapshot': 'live'},
+                   {**self.request, 'authority_digest': None},
+                   {**self.request, 'authority_digest': 'B' * 64},
+                   {**self.request, 'profile': None},
                    {**self.request, 'profile': []}, {**self.request, 'task': '  '},
                    {**self.request, 'task': '\ud800'},
                    {**self.request, 'task': 'é' * (jobs.MAX_TASK_BYTES // 2 + 1)},
@@ -368,7 +441,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assertIsInstance(run_id, str)
         self.assertRegex(run_id, r'\A[0-9a-f]{32}\Z')
         # Exact retry at every transition returns the same binding.
-        self.store.runner_started(*self.runner())
+        self.store.runner_started(*self.runner(), authority_digest='b' * 64)
         self.store.runner_finished(*self.runner(), 'failed')
         for _ in range(2):
             self.assertEqual(self.start(), job_id)
@@ -479,10 +552,10 @@ class DelegationJobTests(unittest.TestCase):
                 raise OSError('Lost binding acknowledgement')
             with patch.object(jobs, 'safe_write', side_effect=interrupted):
                 with self.assertRaises(OSError):
-                    self.store.runner_bind(*credentials, str(directory), scope, containers)
+                    self.store.runner_bind(*credentials, str(directory), scope, containers, authority_digest='b' * 64)
             self.store = jobs.DelegationJobs(self.root)
             self.assertEqual(self.store.reservation()['binding'] is not None, committed)
-        original = self.store.runner_bind(*credentials, str(directory), scope, containers)
+        original = self.store.runner_bind(*credentials, str(directory), scope, containers, authority_digest='b' * 64)
         self.assertEqual(original['run_id'], reservation['run_id'])
         self.assertEqual(original['directory']['path'], str(directory))
         self.assertEqual(original['directory']['inode'], directory.stat().st_ino)
@@ -492,17 +565,17 @@ class DelegationJobTests(unittest.TestCase):
                 (scope, [{**containers[0], 'id': 'd' * 64}]),
                 (scope, [{**containers[0], 'uid': 1001}]), (scope, [])]:
             with self.assertRaises(Denied):
-                self.store.runner_bind(*credentials, str(directory), other_scope, other_containers)
+                self.store.runner_bind(*credentials, str(directory), other_scope, other_containers, authority_digest='b' * 64)
             self.assertEqual(self.path.read_bytes(), before)
         original['containers'].clear()
         containers[0]['name'] = 'changed'
         self.assertEqual(self.store.reservation()['binding']['containers'][0]['name'], 'fixture')
-        self.store.runner_started(*credentials)
+        self.store.runner_started(*credentials, authority_digest='b' * 64)
         saved = self.store.reservation()['binding']
         self.assertEqual(self.store.runner_bind(*credentials, str(directory), scope,
-                                               saved['containers']), saved)
+                                               saved['containers'], authority_digest='b' * 64), saved)
         with self.assertRaises(Denied):
-            self.store.runner_started(*credentials)
+            self.store.runner_started(*credentials, authority_digest='b' * 64)
 
     def test_cancel_before_binding_can_reconcile_no_launch_without_replay(self):
         job_id = self.start()
@@ -512,9 +585,9 @@ class DelegationJobTests(unittest.TestCase):
         directory = self.root / reservation['run_id']
         directory.mkdir()
         scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
-        binding = self.store.runner_bind(*credentials, str(directory), scope, [])
+        binding = self.store.runner_bind(*credentials, str(directory), scope, [], authority_digest='b' * 64)
         with self.assertRaises(Denied):
-            self.store.runner_started(*credentials)
+            self.store.runner_started(*credentials, authority_digest='b' * 64)
         self.store.runner_finished(*credentials, 'cancelled')
         cleanup = {'binding': binding, 'scope_clean': True, 'containers_absent': []}
         self.store.runner_quiescent(*credentials, 'Cancelled before launch; no OCI resources',
@@ -527,7 +600,7 @@ class DelegationJobTests(unittest.TestCase):
         reservation = self.store.reservation()
         credentials = reservation['id'], reservation['token']
         with self.assertRaises(Denied):
-            self.store.runner_started(*credentials)
+            self.store.runner_started(*credentials, authority_digest='b' * 64)
         with self.assertRaises(Denied):
             self.store.runner_quiescent(*credentials, 'Unbound', cleanup={})
         directory = self.root / 'child'
@@ -535,7 +608,7 @@ class DelegationJobTests(unittest.TestCase):
         scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
         containers = [{'name': 'one', 'id': 'c' * 64, 'uid': 1000},
                       {'name': 'two', 'id': 'd' * 64, 'uid': 1000}]
-        self.store.runner_bind(*credentials, str(directory), scope, containers)
+        self.store.runner_bind(*credentials, str(directory), scope, containers, authority_digest='b' * 64)
         with self.assertRaises(Denied):
             self.store.runner_quiescent(*credentials, 'Not terminal', cleanup=self.cleanup())
         self.store.runner_finished(*credentials, 'failed')
@@ -567,7 +640,7 @@ class DelegationJobTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.runner_quiescent(*credentials, 'No binding', cleanup=proof)
         with self.assertRaises(Denied):
-            self.store.runner_bind(*credentials, str(directory), scope, containers)
+            self.store.runner_bind(*credentials, str(directory), scope, containers, authority_digest='b' * 64)
         self.assertIsNotNone(self.store.reservation())
 
     def test_binding_directory_missing_replaced_renamed_or_unobservable_keeps_hold(self):
@@ -635,7 +708,7 @@ class DelegationJobTests(unittest.TestCase):
         except OSError:
             return  # Symlink creation is unavailable on some Windows workers.
         with self.assertRaises(Denied):
-            self.store.runner_bind(*credentials, str(alias), binding['scope'], [])
+            self.store.runner_bind(*credentials, str(alias), binding['scope'], [], authority_digest='b' * 64)
 
     def test_unsafe_state_paths_are_refused(self):
         original = self.path.read_bytes()
@@ -711,7 +784,7 @@ class DelegationJobTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(Denied):
                 retry({**intent['container'], key: value})
         with self.assertRaises(Denied):
-            self.store.runner_started(*credentials)
+            self.store.runner_started(*credentials, authority_digest='b' * 64)
         # A schema-v3 ledger is not silently upgraded or reset.
         raw = self.path.read_bytes()
         self.path.write_bytes(raw.replace(b'"version":4', b'"version":3'))
@@ -724,12 +797,12 @@ class DelegationJobTests(unittest.TestCase):
         container = intent['container']
         saved = [{'name': container['name'], 'id': 'd' * 64, 'uid': container['uid']}]
         def bind():
-            return self.store.runner_bind(*credentials, intent['directory']['path'], intent['scope'], saved)
+            return self.store.runner_bind(*credentials, intent['directory']['path'], intent['scope'], saved, authority_digest='b' * 64)
         fenced = self.store.runner_recover_prepared(*credentials)
         self.assertTrue(fenced['recovering'])
         self.assertFalse(fenced['claimed'])
         self.assertEqual(self.store.runner_recover_prepared(*credentials), fenced)
-        for operation in (bind, lambda: self.store.runner_started(*credentials),
+        for operation in (bind, lambda: self.store.runner_started(*credentials, authority_digest='b' * 64),
                           lambda: self.store.runner_finished(*credentials, 'failed'),
                           lambda: self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup={})):
             with self.assertRaises(Denied):
@@ -785,6 +858,21 @@ class DelegationJobTests(unittest.TestCase):
                     reservation['id'], reservation['token'], str(directory), scope,
                     {**base, 'name': 'valid-name', 'marker': 'c' * 32})
 
+    def test_authority_digest_overhead_preserves_active_ledger_capacity(self):
+        self.start()
+        bound = loads_finite(self.path.read_text())
+        unbound = copy.deepcopy(bound)
+        del unbound['jobs'][unbound['active']]['request']['authority_digest']
+        delta = len(canonical(bound)) - len(canonical(unbound))
+        self.assertEqual(delta, 86)
+        self.assertEqual(jobs._AUTHORITY_DIGEST_OVERHEAD, delta)
+        # Exactly one active allowance, not one per retained tombstone.
+        self.assertEqual(jobs.MAX_STATE_BYTES,
+                         1024 * 1024 + jobs.MAX_BINDING_BYTES
+                         + jobs._INTENT_NULL_OVERHEAD * jobs.MAX_JOBS + delta)
+        self.complete()
+        self.assert_tombstone(loads_finite(self.path.read_text())['jobs'][bound['active']])
+
     def test_intent_null_overhead_preserves_tombstone_capacity(self):
         # Schema v4 adds one explicit intent field to every job. Terminal
         # tombstones carry `"intent":null` (14 bytes: comma + `"intent":null`),
@@ -792,7 +880,7 @@ class DelegationJobTests(unittest.TestCase):
         # the prior 1024-tombstone capacity.
         self.assertEqual(jobs._INTENT_NULL_OVERHEAD, len(b',\"intent\":null'))
         self.assertEqual(jobs.MAX_STATE_BYTES,
-                         1024 * 1024 + jobs.MAX_BINDING_BYTES + 14 * jobs.MAX_JOBS)
+                         1024 * 1024 + jobs.MAX_BINDING_BYTES + 14 * jobs.MAX_JOBS + 86)
         base = {'owner': 'w', 'key': 'k', 'request_digest': 'a' * 64, 'status': 'terminal',
                 'token': None, 'run_id': 'b' * 32, 'execution': 'failed', 'request': None,
                 'result': None, 'result_digest': 'c' * 64, 'binding': None}
@@ -810,8 +898,8 @@ class DelegationJobTests(unittest.TestCase):
         credentials, intent = self.prepare()
         container = intent['container']
         saved = [{'name': container['name'], 'id': 'd' * 64, 'uid': container['uid']}]
-        self.store.runner_bind(*credentials, intent['directory']['path'], intent['scope'], saved)
-        self.store.runner_started(*credentials)
+        self.store.runner_bind(*credentials, intent['directory']['path'], intent['scope'], saved, authority_digest='b' * 64)
+        self.store.runner_started(*credentials, authority_digest='b' * 64)
         self.store.cancel('worker', credentials[0])
         self.assertTrue(self.store.reservation()['intent']['claimed'])
         with self.assertRaises(Denied):

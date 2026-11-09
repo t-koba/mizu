@@ -2586,6 +2586,55 @@ class Engine:
             safe_point.guard(project.snapshots, role_name)
         return elapsed
 
+    def _delegate_role(self, parent, role_name):
+        """Shared post-delegation role: caller tree, child grants, no owned jobs."""
+        role_name = role_name or getattr(self.config, "delegate_role", "")
+        if not role_name:
+            raise Denied("Delegation needs an explicit role or a configured delegate_role")
+        if role_name == parent.role.name:
+            raise Denied("A role cannot delegate to itself")
+        if role_name not in self.config.roles:
+            raise ConfigError(f"Delegation role is not configured: {role_name}")
+        role = self.config.roles[role_name]
+        check_delegate_role(role_name, role)
+        return dataclasses.replace(
+            role, workspace=parent.role.workspace,
+            capabilities=tuple(c for c in dict.fromkeys([*role.capabilities, "finish"])
+                               if c not in DELEGATE_FORBIDDEN and c != "check_job"))
+
+    def _delegate_profile(self, parent, role):
+        if role.selector:
+            # Same trusted, config-only preview as synchronous delegation;
+            # never consume routing or guess a profile when selection waits.
+            from .classification import prepare
+            decision = prepare(self, parent.project, role,
+                               parent.project.snapshots.get(), None, preview=True)
+            profile = decision.get("profile") or ""
+            if not profile:
+                raise Denied("Delegation selector has no selectable profile: "
+                             + str(decision.get("reason") or "waiting"))
+            role = dataclasses.replace(role, profile=profile, selector="")
+        return role
+
+    def _delegation_request(self, parent, request):
+        """Resolve under the admitted lease; retain only the final digest."""
+        from .config import role_policy_text
+        from .engine_config import (adapter_digest, child_authority_digest,
+                                    effective, local_settings_digest)
+        if set(request) != {"role", "task", "profile", "source_snapshot"}:
+            raise Denied("Expected an unresolved delegation request")
+        role = self._delegate_profile(parent, self._delegate_role(parent, request["role"]))
+        if request["profile"] is not None and request["profile"] != role.profile:
+            raise Denied("Delegation profile differs from resolved role")
+        settings = effective(self.config, role, role.profile)
+        authority = child_authority_digest(
+            self.config, role, spend_role=parent.spend_role or parent.role,
+            settings=settings, policy=role_policy_text(role), goal_digest=parent.goal_digest,
+            workspace=parent.workspace, adapter_identity=adapter_digest(settings["engine"]),
+            local_settings=local_settings_digest(self.config, settings["engine"]))
+        return {**request, "role": role.name, "profile": role.profile,
+                "authority_digest": authority}
+
     def _reserve_delegation(self, parent: Context, key: str, request: dict):
         """Trusted admitted-parent reservation groundwork only; never launch.
 
@@ -3970,33 +4019,14 @@ class Engine:
         # to the caller. Spend counts against the caller's unit through the
         # shared counters; nested delegation and consultation stay disabled
         # so no spend escapes the unit.
-        role_name = args.get("role") or getattr(self.config, "delegate_role", "")
-        if not role_name:
-            raise Denied("Delegation needs an explicit role or a configured delegate_role")
-        if role_name == parent.role.name:
-            raise Denied("A role cannot delegate to itself")
-        if role_name not in self.config.roles:
-            raise ConfigError(f"Delegation role is not configured: {role_name}")
-        check_delegate_role(role_name, self.config.roles[role_name])
+        role = self._delegate_role(parent, args.get("role"))
+        role_name = role.name
         task = args.get("task") or ""
         if not task.strip():
             raise Denied("Delegation needs a self-contained task")
         if not parent._slot_lease or parent.closed:
             raise Busy("Delegation requires a live admitted caller execution slot")
         delegation_gates.refuse_live_tree(parent._reservation_view, "Delegation capture")
-        role = self.config.roles[role_name]
-        # The child works the caller's tree, so it inherits the caller's
-        # workspace value: live listing and writable execution for a writer
-        # caller, a consistent read view otherwise. The child unit needs a
-        # terminal seal, ensured here by the mechanism (idempotent when the
-        # configured role already carries finish for its own top-level runs).
-        role = dataclasses.replace(
-            role, workspace=parent.role.workspace,
-            # Async check jobs belong to a top-level role invocation. A
-            # delegated child is owned by its caller and cannot leave a
-            # role-owned job (or standalone wake) behind after it returns.
-            capabilities=tuple(c for c in dict.fromkeys([*role.capabilities, "finish"])
-                               if c != "check_job"))
         parent.close_exec()
         capture = parent.project.snapshots.capture_files(parent.workspace)
         snap = parent.project.snapshots.create(capture, goal=parent.goal, state=parent.snapshot["state"],
@@ -4017,21 +4047,8 @@ class Engine:
             raise Denied("The delegate role is active; delegation needs the role free") from exc
         try:
             mkdir(run_dir)
-            if role.selector:
-                # Config-only gate like consultation: the child is
-                # ephemeral (caller slot), so any configured role
-                # qualifies; resolve without consuming routing.
-                from .classification import prepare as _prepare_selection
-                decision = _prepare_selection(
-                    self, parent.project, role,
-                    parent.project.snapshots.get(), None, preview=True)
-                profile = decision.get("profile") or ""
-                if not profile:
-                    raise Denied("Delegation selector has no selectable profile: "
-                                 + str(decision.get("reason") or "waiting"))
-                role = dataclasses.replace(role, profile=profile, selector="")
-            else:
-                profile = role.profile
+            role = self._delegate_profile(parent, role)
+            profile = role.profile
             write_json(run_dir / "started.json", {"run": run_dir.name,
                        "parent_run": parent.run_dir.name, "delegation": True,
                        "role": role.name, "profile": profile, "snapshot": snap["id"],

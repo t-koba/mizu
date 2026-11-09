@@ -1,5 +1,6 @@
 """Admitted reservation handoff only: no child, runner, or quiescence claim."""
 import concurrent.futures
+import copy
 import contextlib
 import dataclasses
 import threading
@@ -7,7 +8,9 @@ from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver
 from mizu import delegation_jobs as jobs
-from mizu.errors import Busy, Denied
+from mizu.config import role_policy_text
+from mizu.engine_config import adapter_digest, child_authority_digest, effective, local_settings_digest
+from mizu.errors import Busy, ConfigError, Denied
 from mizu.fs import held, lock, read_json
 from mizu.runtime import Context, Engine
 from mizu.storage import quiescent
@@ -20,6 +23,9 @@ class EndParent(Exception):
 class DelegationHandoffTests(Fixture):
     def setUp(self):
         super().setUp()
+        helper = dataclasses.replace(self.config.roles['searcher'], name='helper',
+                                     capabilities=('files', 'read', 'check_job'))
+        self.config = dataclasses.replace(self.config, roles={**self.config.roles, 'helper': helper})
         self.engine = Engine(self.config)
         self.workspace_lock = self.project.root / 'locks' / 'workspace.lock'
         self.request = {'role': 'helper', 'task': 'Implement the focused slice',
@@ -76,6 +82,102 @@ class DelegationHandoffTests(Fixture):
             self.assertEqual(ctx._reservation_view['request']['source_snapshot'], ctx.snapshot['id'])
         self.run_parent(work)
         self.contenders(Denied)
+
+    def test_resolved_authority_is_exact_private_and_does_not_launch(self):
+        def work(ctx):
+            role = dataclasses.replace(self.config.roles['helper'], workspace='write',
+                                       capabilities=('files', 'read', 'finish'))
+            settings = effective(self.config, role, role.profile)
+            expected = child_authority_digest(
+                self.config, role, spend_role=ctx.role, settings=settings,
+                policy=role_policy_text(role), goal_digest=ctx.goal_digest, workspace=ctx.workspace,
+                adapter_identity=adapter_digest(settings['engine']),
+                local_settings=local_settings_digest(self.config, settings['engine']))
+            with patch.object(self.engine, 'resolve') as driver, \
+                 patch.object(self.engine, 'delegate') as delegate, \
+                 patch.object(jobs.DelegationJobs, 'runner_bind') as bind, \
+                 patch.object(jobs.DelegationJobs, 'runner_started') as claim:
+                view = self.reserve(ctx)
+                driver.assert_not_called()
+                delegate.assert_not_called()
+                bind.assert_not_called()
+                claim.assert_not_called()
+            store = jobs.DelegationJobs(self.project.root)
+            saved = store.reservation()
+            self.assertEqual(saved['request'], {**self.request, 'profile': role.profile,
+                                               'authority_digest': expected})
+            for public in (view, ctx._reservation_view, store.status('worker', saved['id'])):
+                self.assertNotIn(expected, str(public))
+                self.assertNotIn(self.request['task'], str(public))
+                self.assertNotIn(saved['token'], str(public))
+        self.run_parent(work)
+
+    def test_authority_drift_refuses_exact_lease_retry_without_changing_hold(self):
+        def work(ctx):
+            view = self.reserve(ctx)
+            path = self.project.root / 'delegation-jobs/state.json'
+            before = path.read_bytes()
+            base = self.config
+            helper = base.roles['helper']
+            profile = copy.deepcopy(base.profiles[helper.profile])
+            profile['model'] = 'changed-model'
+            for index, changed in enumerate((
+                    dataclasses.replace(base, roles={**base.roles, 'helper': dataclasses.replace(
+                        helper, capabilities=(*helper.capabilities, 'search'))}),
+                    dataclasses.replace(base, roles={**base.roles, 'helper': dataclasses.replace(
+                        helper, profile='primary')}),
+                    dataclasses.replace(base, profiles={**base.profiles, helper.profile: profile}),
+                    dataclasses.replace(base, limits=dataclasses.replace(
+                        base.limits, tools_per_run=base.limits.tools_per_run + 1)))):
+                with self.subTest(change=index), patch.object(self.engine, 'config', changed):
+                    with self.assertRaises(Denied):
+                        self.reserve(ctx)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(ctx._reservation_view, view)
+            # Pinned goal/workspace and actual shared-spend authority participate.
+            for field, changed in (('goal_digest', 'f' * 64),
+                                   ('workspace', self.root / 'other-workspace'),
+                                   ('spend_role', base.roles['reporter'])):
+                with self.subTest(field=field), patch.object(ctx, field, changed), self.assertRaises(Denied):
+                    self.reserve(ctx)
+                self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(self.reserve(ctx), view)
+        self.run_parent(work)
+
+    def test_selector_uses_trusted_preview_and_unresolved_inputs_never_start(self):
+        helper = dataclasses.replace(self.config.roles['helper'], profile='', selector='dynamic')
+        self.config = dataclasses.replace(self.config, roles={**self.config.roles, 'helper': helper})
+        self.engine.config = self.config
+        def work(ctx):
+            for decision in ({'reason': 'waiting'}, {'profile': 'missing-profile'}):
+                with patch('mizu.classification.prepare', return_value=decision) as preview, \
+                     self.assertRaises((Denied, ConfigError)):
+                    self.reserve(ctx)
+                self.assertTrue(preview.call_args.kwargs['preview'])
+                self.assertIsNone(ctx._workspace_lease.attempt)
+                self.assertIsNone(jobs.DelegationJobs.existing_reservation(self.project.root))
+            with patch('mizu.classification.prepare', return_value={'profile': 'alternate'}) as preview:
+                view = self.reserve(ctx)
+                self.assertTrue(preview.call_args.kwargs['preview'])
+                self.assertEqual(jobs.DelegationJobs(self.project.root).reservation()['request']['profile'],
+                                 'alternate')
+            before = (self.project.root / 'delegation-jobs/state.json').read_bytes()
+            for decision in ({'profile': 'primary'}, {'reason': 'waiting'}):
+                with patch('mizu.classification.prepare', return_value=decision), self.assertRaises(Denied):
+                    self.reserve(ctx)
+                self.assertEqual((self.project.root / 'delegation-jobs/state.json').read_bytes(), before)
+                self.assertEqual(ctx._reservation_view, view)
+        self.run_parent(work)
+
+    def test_invalid_roles_profiles_and_injected_digest_refuse_before_persistence(self):
+        def work(ctx):
+            for overrides in ({'role': 'worker'}, {'role': 'missing'}, {'profile': 'primary'},
+                              {'authority_digest': 'b' * 64}):
+                with self.subTest(overrides=overrides), self.assertRaises((Denied, ConfigError)):
+                    self.reserve(ctx, request={**self.request, **overrides})
+                self.assertIsNone(ctx._workspace_lease.attempt)
+            self.assertIsNone(jobs.DelegationJobs.existing_reservation(self.project.root))
+        self.run_parent(work)
 
     def test_missing_foreign_role_project_context_engine_and_unheld_leases_refuse(self):
         def work(ctx):
