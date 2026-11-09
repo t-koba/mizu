@@ -2287,15 +2287,36 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_requests.py', '_unresolved_summary', 1, 2): (
         '1', 'format',
         'CI dispatch record / covered work-item revisions use positive persisted revision numbers'),
+    ('ci_waits.py', 'terminal', 1, 0): (
+        '1', 'safety',
+        'CI terminal observation / each declared check name must match exactly one result'),
+    ('ci_waits.py', 'diagnose', 1, 0): (
+        '1', 'safety',
+        'CI wait diagnostics / one exact-name row is required to avoid duplicate attribution'),
+    ('ci_waits.py', '_resolved', 1, 0): (
+        '1', 'safety',
+        'publication CI wait / exactly one complete receipt must match the pinned branch and digest'),
+    ('ci_waits.py', '_resolved', 1, 1): (
+        '1', 'safety',
+        'publication CI wait / exactly one complete receipt row must support the unique-match total'),
+    ('ci_waits.py', '_check_names', 0, 0): (
+        '1', 'format',
+        'CI wait / each wait names at least one exact check under the public schema'),
     ('ci_waits.py', '_check_names', 2, 0): (
         '64', 'format',
         'CI wait / number of exact check names follows the public maxItems contract'),
     ('ci_waits.py', '_check_names', 1, 0): (
         '256', 'format',
         'CI wait / individual check names follow the public maxLength contract'),
+    ('ci_waits.py', 'readiness_init', 0, 0): (
+        '1', 'mechanism',
+        'CI wait readiness / page size is positive for bounded shared delivery scans'),
     ('ci_waits.py', 'readiness_init', 2, 0): (
         '100', 'mechanism',
         'CI wait readiness / fixed maximum page size for the bounded shared delivery scan'),
+    ('ci_waits.py', '_shared_page', 0, 0): (
+        '1', 'mechanism',
+        'CI wait delivery / page size is positive for bounded shared receipt projection'),
     ('ci_waits.py', '_shared_page', 2, 0): (
         '100', 'mechanism',
         'CI wait delivery / fixed maximum page size for the bounded shared receipt projection'),
@@ -3426,7 +3447,7 @@ def sibling():
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
-                'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py'}
+                'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py', 'ci_waits.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

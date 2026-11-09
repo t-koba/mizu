@@ -264,6 +264,22 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual((view["total"], view["overflow_count"], view["truncated"]), (5, 2, True))
         self.assertTrue(view["coverage_complete"])
 
+    def test_ci_wait_page_size_one_is_valid_and_zero_is_refused(self):
+        self.block("first")
+        self.block("second")
+        self.poll(self.rows(state="failure"))
+
+        state = ci_waits.readiness_init(self.store, "worker", limit=1)
+        self.assertEqual(state["limit"], 1)
+        events, _manifest = ci_waits.delivery(self.store, "worker", limit=1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(ci_waits.pending(self.store, "worker", limit=1)), 1)
+        for read in (lambda: ci_waits.readiness_init(self.store, "worker", limit=0),
+                     lambda: ci_waits.delivery(self.store, "worker", limit=0),
+                     lambda: ci_waits.pending(self.store, "worker", limit=0)):
+            with self.subTest(read=read), self.assertRaises(Denied):
+                read()
+
     def test_diagnosis_is_exact_current_bounded_and_pure(self):
         name = "Offline checks / core (windows-latest, 3.13)"
         wait = self.block(wait={**self.wait, "checks": [name]})["wait"]
@@ -905,6 +921,10 @@ class PublicationCiWaitTests(CiWaitFixture):
             with self.assertRaisesRegex(Denied, "retained published"):
                 self.block("unpublished")
         item = self.block("valid")
+        single_check = ci_waits.normalize_publication(
+            {**self.wait, "checks": ["unit"]}, snapshots=self.project.snapshots,
+            branch="published")
+        self.assertEqual(single_check["checks"], ["unit"])
         for key, value in (("code_digest", "c" * 64), ("snapshot_id", "f" * 64)):
             with self.assertRaises(Denied):
                 self.store._stored_wait({**item["wait"], key: value})
