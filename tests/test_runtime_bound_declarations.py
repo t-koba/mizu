@@ -1955,6 +1955,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('_legacy_refs.py', '_descend', 1, 0): (
         '1', 'mechanism',
         'legacy ref cleanup / one remaining component marks the leaf directory to clean'),
+    ('role_state.py', 'RoleStateStore.read', 1, 0): (
+        '1', 'format',
+        'role-state envelope / persisted generations are positive exact revision numbers'),
     ('budget.py', 'Budget.peek', 1, 0): (
         '1', 'safety',
         'budget peek / trust only a singly linked regular daily ledger file'),
@@ -3497,7 +3500,7 @@ def sibling():
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
-                'budget.py', 'fs.py', '_legacy_refs.py'):
+                'budget.py', 'fs.py', '_legacy_refs.py', 'role_state.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
@@ -3506,7 +3509,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', '_legacy_refs.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', '_legacy_refs.py', 'role_state.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
