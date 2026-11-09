@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 
 from support import Fixture
-from mizu.config import (MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS, ServiceSettings,
+from mizu.config import (MAX_CHECK_RECOVERY_INTERVAL_SECONDS,
+                         MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS,
+                         MIN_CHECK_RECOVERY_INTERVAL_SECONDS, ServiceSettings,
                          TOML_INTEGER_MAX, load)
 from mizu.errors import ConfigError
 
@@ -16,22 +18,29 @@ class ServiceSettingsTests(Fixture):
             "systemd_restart_delay_seconds": 15,
             "systemd_stop_timeout_seconds": 45,
             "systemd_verify_timeout_seconds": 60,
+            "check_recovery_interval_seconds": 30,
         }
         self.assertEqual(dataclasses.asdict(self.config.services), expected)
         self.assertEqual(dataclasses.asdict(ServiceSettings()), expected)
 
         original = self.file.read_text()
         for name in expected:
-            maximum = (MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS
+            minimum = (MIN_CHECK_RECOVERY_INTERVAL_SECONDS
+                       if name == "check_recovery_interval_seconds" else 1)
+            maximum = (MAX_CHECK_RECOVERY_INTERVAL_SECONDS
+                       if name == "check_recovery_interval_seconds" else
+                       MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS
                        if name == "systemd_verify_timeout_seconds" else TOML_INTEGER_MAX)
-            for value in (1, expected[name], maximum):
+            for value in (minimum, expected[name], maximum):
                 with self.subTest(name=name, value=value):
                     self.file.write_text(original + f"\n[services]\n{name} = {value}\n")
                     configured = getattr(load(self.file).services, name)
                     self.assertEqual(configured, value)
-            invalid_values = [0, -1, "true", "false", "1.5", '"1"', "[]", "{}"]
+            invalid_values = [minimum - 1, 0, -1, "true", "false", "1.5", '"1"', "[]", "{}"]
+            if name in ("systemd_verify_timeout_seconds", "check_recovery_interval_seconds"):
+                invalid_values.append(maximum + 1)
             if name == "systemd_verify_timeout_seconds":
-                invalid_values.extend((maximum + 1, TOML_INTEGER_MAX))
+                invalid_values.append(TOML_INTEGER_MAX)
             for value in invalid_values:
                 with self.subTest(name=name, invalid=value):
                     self.file.write_text(original + f"\n[services]\n{name} = {value}\n")
@@ -63,6 +72,7 @@ class ServiceSettingsTests(Fixture):
         self.assertIn("# systemd_restart_delay_seconds = 15", text)
         self.assertIn("# systemd_stop_timeout_seconds = 45", text)
         self.assertIn("# systemd_verify_timeout_seconds = 60", text)
+        self.assertIn("# check_recovery_interval_seconds = 30", text)
 
 
 if __name__ == "__main__":

@@ -195,10 +195,14 @@ can still supply its automatic wake).
 
 `mizu check-jobs PROJECT` drains up to `limits.check_pending` terminal jobs per invocation without a model, releasing admission between jobs. It returns immediately on idle, compute contention, cancellation, pause or cleanup failure; it never sleeps between queued jobs. Each result remains in its own bounded check-job cache record. The CLI response adds `processed`, the number of terminal jobs handled. On
 Linux, service generation creates a dedicated checks service, path notification
-and a 30-second recovery timer when a project enables the capability. Install
-and enable those units before enabling model use of the capability. Other
-platforms can invoke the same bounded command from an operator-managed runner;
-they do not yet have generated check-runner services.
+and a recovery timer when a project enables the capability. The path trigger is
+primary; `[services].check_recovery_interval_seconds` (default 30, range
+30–86,400) bounds recovery rechecks after a lost notification. Changing this
+service policy does not change daemon readiness or claim lower idle cost; the
+default preserves the existing cadence. Install and enable those units before
+enabling model use of the capability. Other platforms can invoke the same
+bounded command from an operator-managed runner; they do not yet have generated
+check-runner services.
 
 `mizu doctor` reports a `check-job runner` row for this runner. With no
 initialized project granting `check_job` the row is `not_run`. On Linux the

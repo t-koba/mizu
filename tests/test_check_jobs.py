@@ -257,6 +257,26 @@ class JobTests(Fixture):
         job = ctx._op_exec_experiment('experiment', {'script': 'test -f /workspace/app.py', 'mode': 'async'})
         self.assertEqual(job['status'], 'queued')
         self.assertEqual(self.run_job()['status'], 'completed')
+    def test_check_runner_recovery_timer_uses_configured_service_cadence(self):
+        from mizu.services import render
+        from pathlib import Path
+        base = 'mizu-6-sample-checks'
+        default = render(self.config, self.project, Path('/usr/bin/mizu'), system='linux')
+        timer = default[base + '.timer']
+        self.assertIn('OnBootSec=30s', timer)
+        self.assertIn('OnUnitInactiveSec=30s', timer)
+
+        configured = dataclasses.replace(
+            self.config,
+            services=dataclasses.replace(self.config.services,
+                                         check_recovery_interval_seconds=120))
+        units = render(configured, self.project, Path('/usr/bin/mizu'), system='linux')
+        timer = units[base + '.timer']
+        self.assertIn('OnBootSec=120s', timer)
+        self.assertIn('OnUnitInactiveSec=120s', timer)
+        self.assertEqual(units[base + '.path'], default[base + '.path'])
+        self.assertEqual(units[base + '.service'], default[base + '.service'])
+
     def test_event_only_role_admits_owned_completion_and_preserves_explicit_wait(self):
         from mizu.services import render
         from pathlib import Path

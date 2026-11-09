@@ -230,9 +230,10 @@ def _render_systemd(config: Config, project: Project, executable: Path) -> dict[
             "[Unit]", f"Description=Mizu {project.name} check queue notification", "", "[Path]",
             f"PathChanged={project.root / 'check-jobs'}", f"Unit={base}.service", "",
             "[Install]", "WantedBy=default.target", ""])
+        interval = config.services.check_recovery_interval_seconds
         result[base + ".timer"] = "\n".join([
             "[Unit]", f"Description=Mizu {project.name} unfinished check recovery", "", "[Timer]",
-            "OnBootSec=30s", "OnUnitInactiveSec=30s", f"Unit={base}.service", "",
+            f"OnBootSec={interval}s", f"OnUnitInactiveSec={interval}s", f"Unit={base}.service", "",
             "[Install]", "WantedBy=timers.target", ""])
     # One event-trigger path for every watched role (scheduled or event-only):
     # a trigger with nothing due exits cheaply via --event, so sharing the

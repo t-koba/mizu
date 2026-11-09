@@ -314,6 +314,7 @@ mode = "rootless"                 # rootless on every OS, or single on Linux hos
 # systemd_restart_delay_seconds = 15
 # systemd_stop_timeout_seconds = 45
 # systemd_verify_timeout_seconds = 60 # maximum 2147483 (subprocess wait representation)
+# check_recovery_interval_seconds = 30 # 30-86400; Linux check-runner recovery timer
 
 # Host-command wall bounds for `mizu doctor` probes. Integer seconds 1-86400;
 # defaults shown. A probe that does not answer within its bound reports the
