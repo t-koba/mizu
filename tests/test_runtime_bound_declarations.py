@@ -114,10 +114,11 @@ operator-facing text and protocol limits are classified too, including the
 publication reference format and the probe header/media bounds.
 The `doctor.py` probe wall deadlines are configured policy owned by `[doctor]`;
 its probe output reads remain fixed safety. The `work_order.py`, `selection.py`,
-`continuations.py`, `startup.py`,
-`smoke.py` and `probes.py` inventories are fixed mechanism or safety bounds:
-the work-order page/rationale/record caps, selection list/state/reservation/
-retry caps, continuation chain and pointer/run reads, ADR-042 host-relative
+`continuations.py`, `startup.py`, `smoke.py` and `probes.py` inventories are fixed
+format, mechanism or safety bounds: work-order nonempty-item and rationale-
+presence requirements, positive 1-based revisions and schema-version markers,
+plus page/rationale/record caps; selection list/state/reservation/retry caps,
+continuation chain and pointer/run reads, ADR-042 host-relative
 startup floor/multiplier/ceiling and probe/record caps, the ADR-006/ADR-013
 paid smoke wall cap, and the recovery-probe execution ceilings are fixed
 mechanism or safety bounds. Recovery-probe executable hashing has a separate
@@ -1939,7 +1940,8 @@ SYMBOLIC_RANGE_ARGUMENTS = {
         'work items / replay every validated revision within MAX_REVISIONS'),
 }
 
-# Direct numeric comparison operands with magnitude >= 3 in selected modules.
+# Direct numeric comparison operands at each selected file's threshold.
+# Most use magnitude >= 3; focused behavior-based audits select >= 1.
 # Numeric-only basic arithmetic is evaluated; no source is executed.
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
@@ -1984,6 +1986,18 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('operator_records.py', '_subject', 1, 0): (
         '1', 'format',
         'operator record subject / referenced insight revision is a positive exact history revision'),
+    ('work_order.py', '_validate_items', 0, 0): (
+        '1', 'format',
+        'work order / a plan requires at least one actionable item ID'),
+    ('work_order.py', '_validate_rationale', 0, 0): (
+        '1', 'format',
+        'work order / rationale text is required; blank-only text is rejected separately'),
+    ('work_order.py', '_read_record', 1, 0): (
+        '1', 'format',
+        'work-order record / persisted revisions are positive 1-based history positions'),
+    ('work_order.py', '_read_record', 1, 1): (
+        '1', 'format',
+        'work-order record / schema version one selects the legacy persisted field layout'),
     ('model_catalog.py', '_read_observations', 1, 0): (
         '1', 'format',
         'model catalog observation store / schema version one selects the checksummed persisted layout'),
@@ -3275,13 +3289,14 @@ def sibling():
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
-                'operator_records.py', 'operator_record_index.py'):
+                'operator_records.py', 'operator_record_index.py', 'work_order.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
-                'model_catalog.py', 'operator_records.py', 'operator_record_index.py'}
+                'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
+                'work_order.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

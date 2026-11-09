@@ -972,6 +972,28 @@ class WorkOrderTests(Fixture):
                   "expected_rev": 257, "expected_generation": "0" * 64},
                  DEFINITIONS["work_order"][1])
 
+    def test_nonempty_order_and_rationale_minima(self):
+        item = self.project.work_items.create(
+            idempotency_key="minimum-order", title="A", actor="worker")["record"]["work_item"]
+        ctx = self.context("worker")
+        generation = plan._frozen_generation(ctx)
+        for args in (
+                {"items": [], "rationale": "x", "expected_rev": 0,
+                 "expected_generation": generation},
+                {"items": [item["id"]], "rationale": "", "expected_rev": 0,
+                 "expected_generation": generation}):
+            with self.subTest(args=args), self.assertRaises(Denied):
+                ctx.handle("work_order", args)
+            self.assertEqual(plan._read_stored(self.project.root)["status"], "absent")
+
+        result = ctx.handle("work_order", {
+            "items": [item["id"]], "rationale": "x", "expected_rev": 0,
+            "expected_generation": generation})
+        record = plan._read_stored(self.project.root)["record"]
+        self.assertEqual(result["rev"], 1)
+        self.assertEqual(record["items"], [item["id"]])
+        self.assertEqual(record["rationale"], "x")
+
     def _order_args(self, ctx, items, rev=0, rationale="reviewed"):
         return {"items": items, "rationale": rationale, "expected_rev": rev,
                 "expected_generation": plan._frozen_generation(ctx)}
