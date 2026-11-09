@@ -282,13 +282,6 @@ def recover(path):
     # Validate terminal execution before any host query or cleanup action.
     if reservation['execution'] is None:
         raise Denied('Delegation execution is not terminal')
-    require_host()
-    fields = unit_state(scope)
-    if fields['LoadState'] == 'loaded':
-        command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
-                '--signal=SIGKILL', scope['unit'], codes=(0, 1))
-        command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
-        command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
     def attest_launch_fence(saved):
         # Host one-shot fence is held for this exact binding; a fence attested
         # for any other binding is stale and must not release this reservation.
@@ -301,10 +294,26 @@ def recover(path):
             raise Denied('stale supervisor attestation')
         return True
 
+    def query(unit):
+        # All systemd preflight/settle failures are scope-proof failures: the
+        # coordinator's try/finally still attempts every saved OCI cleanup, but
+        # no runner_quiescent occurs without passing scope proof. Host commands
+        # stay in this fixture query; Mizu itself never executes host commands.
+        require_host()
+        if unit != scope['unit']:
+            raise RuntimeError('systemd unit mismatch')
+        fields = unit_state(scope)
+        if fields['LoadState'] == 'loaded':
+            command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
+                    '--signal=SIGKILL', scope['unit'], codes=(0, 1))
+            command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
+            command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
+        return scope_query(unit)
+
     _recover_quiescent(store, *credentials, 'Synthetic descendant and OCI cleanup verified',
                        binding=binding, attest_launch_fence=attest_launch_fence,
                        attest_supervisor_settled=attest_supervisor_settled,
-                       query=scope_query, reconcile_container=clean_container, maximum=8192)
+                       query=query, reconcile_container=clean_container, maximum=8192)
 
 
 def process_in_scope(pid, record):
@@ -528,13 +537,20 @@ class RecoveryReservationTests(unittest.TestCase):
             with self.subTest(bound=bound), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp).resolve() / 'state.json'
                 if bound:
-                    self.fixture(path)
+                    store = self.fixture(path)
+                    expected = len(store.reservation()['binding']['containers'])
                 else:
                     create_job(path)
-                with mock.patch.object(module, 'require_host', side_effect=RuntimeError('unsupported host')):
+                    expected = 0
+                with (mock.patch.object(module, 'require_host', side_effect=RuntimeError('unsupported host')),
+                      mock.patch.object(module, 'clean_container', return_value=True) as cleanup):
                     with self.assertRaises((RuntimeError, Denied)):
                         recover(path)
                 self.assertIsNotNone(ledger(path).reservation())
+                # Settling preflight is a scope-proof failure inside the coordinator's
+                # try/finally: every saved OCI cleanup is still attempted, but no
+                # quiescent occurs without passing scope proof.
+                self.assertEqual(cleanup.call_count, expected)
 
     @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
     def test_recovery_rejects_unsafe_incomplete_or_changed_directory_before_commands(self):
@@ -599,15 +615,31 @@ class RecoveryReservationTests(unittest.TestCase):
             binding = store.reservation()['binding']
             # A misleading old fixture file is not recovery authority.
             atomic_json(path, {'name': 'wrong', 'container_id': 'b' * 64})
-            with (mock.patch.object(module, 'require_host'),
+            with (mock.patch.object(module, 'require_host') as preflight,
                   mock.patch.object(module, 'unit_state', return_value={
                       'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}) as scope,
+                  mock.patch.object(module, 'scope_query',
+                                    return_value=mock.Mock(reason='exited', exit_code=1, survivors=(),
+                                                           stdout=('LoadState=not-found\nActiveState=inactive\n'
+                                                                   'ControlGroup=\n'))) as queried,
                   mock.patch.object(delegation_recovery, '_scope_empty', return_value=True) as proof,
                   mock.patch.object(module, 'clean_container', return_value=True) as cleanup):
                 recover(path)
-                scope.assert_called_with(binding['scope'])
                 self.assertEqual(proof.call_args.args, (binding,))
                 cleanup.assert_called_once_with(binding['containers'][0])
+                # The settling query is only exercised via the coordinator's scope
+                # proof; a mocked proof bypasses it, so invoke the captured query
+                # to prove it uses the saved scope, not the misleading file.
+                query = proof.call_args.kwargs['query']
+                scope.assert_not_called()
+                queried.assert_not_called()
+                preflight.assert_not_called()
+                query(binding['scope']['unit'])
+                preflight.assert_called_once_with()
+                scope.assert_called_once_with(binding['scope'])
+                queried.assert_called_once_with(binding['scope']['unit'])
+                with self.assertRaises(RuntimeError):
+                    query('mizu-delegation-' + '0' * 32 + '.service')
             self.assertIsNone(store.reservation())
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux read-only scope proof')
@@ -832,6 +864,81 @@ class RecoveryReservationTests(unittest.TestCase):
                     self.assertIsNone(ledger(path).reservation())
                     self.assertFalse(remaining)
                     self.assertEqual(cleanup.call_count, 2 if boundary == 'after-commit' else 4)
+
+    @unittest.skipUnless(os.name == 'posix', 'systemd/rootless OCI recovery fixture')
+    def test_settling_preflight_failure_still_attempts_all_container_cleanup_and_retries(self):
+        # Regression for the reviewer finding: recover() must not skip saved OCI
+        # cleanup when systemd preflight/settle fails. The settling query runs
+        # inside the coordinator's try/finally, so every saved container is
+        # still attempted, but no runner_quiescent occurs without scope proof.
+        module = sys.modules[__name__]
+        for failure in ('require_host', 'unit_state', 'settle_kill', 'settle_stop',
+                        'settle_reset', 'scope_show'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store = self.fixture(path, containers=2)
+                binding = copy.deepcopy(store.reservation()['binding'])
+                seen = []
+                def tracking_cleanup(container):
+                    seen.append(copy.deepcopy(container))
+                    return True
+                observed_show = mock.Mock(reason='exited', exit_code=1, survivors=(),
+                                          stdout=('LoadState=not-found\nActiveState=inactive\n'
+                                                  'ControlGroup=\n'))
+                def settling_command(*argv, **kwargs):
+                    sub = argv[3] if len(argv) > 3 else ''
+                    if failure == 'settle_kill' and sub == 'kill':
+                        raise RuntimeError('systemctl kill failed')
+                    if failure == 'settle_stop' and sub == 'stop':
+                        raise RuntimeError('systemctl stop failed')
+                    if failure == 'settle_reset' and sub == 'reset-failed':
+                        raise RuntimeError('systemctl reset-failed failed')
+                    if failure == 'scope_show' and sub == 'show':
+                        raise RuntimeError('systemctl show failed')
+                    if sub == 'show':
+                        return observed_show
+                    return mock.Mock(reason='exited', exit_code=0, survivors=(), stdout='')
+                require_patch = (mock.patch.object(module, 'require_host',
+                                                   side_effect=RuntimeError('unsupported host'))
+                                 if failure == 'require_host'
+                                 else mock.patch.object(module, 'require_host'))
+                if failure == 'unit_state':
+                    unit_patch = mock.patch.object(module, 'unit_state',
+                                                   side_effect=RuntimeError('unknown systemd identity'))
+                elif failure.startswith('settle'):
+                    unit_patch = mock.patch.object(module, 'unit_state', return_value={
+                        'LoadState': 'loaded', 'ActiveState': 'active',
+                        'ControlGroup': binding['scope']['cgroup']})
+                else:
+                    unit_patch = mock.patch.object(module, 'unit_state', return_value={
+                        'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''})
+                with (require_patch as preflight,
+                      unit_patch as scope_state,
+                      mock.patch.object(module, 'command', side_effect=settling_command) as settled,
+                      mock.patch.object(module, 'clean_container', side_effect=tracking_cleanup) as cleanup):
+                    # Real scope proof invokes the settling query; preflight/settle
+                    # failures surface as scope-proof failures after cleanup.
+                    with self.assertRaises((RuntimeError, Denied, OSError)):
+                        recover(path)
+                    # Exact per-container attempts in saved order, reservation held.
+                    self.assertEqual(cleanup.call_count, 2)
+                    self.assertEqual(seen, binding['containers'])
+                    self.assertIsNotNone(store.reservation())
+                    if failure == 'require_host':
+                        scope_state.assert_not_called()
+                        settled.assert_not_called()
+                    elif failure == 'unit_state':
+                        settled.assert_not_called()
+                # Safe retry with passing scope proof releases the reservation and
+                # reuses no persisted partial proof.
+                with (mock.patch.object(module, 'require_host'),
+                      mock.patch.object(module, 'unit_state', return_value={
+                          'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
+                      mock.patch.object(delegation_recovery, '_scope_empty', return_value=True),
+                      mock.patch.object(module, 'clean_container', return_value=True) as retry_cleanup):
+                    recover(path)
+                    self.assertIsNone(store.reservation())
+                    self.assertEqual(retry_cleanup.call_count, 2)
 
     def prepared_fixture(self, path, uid_offset=0, prepared=True):
         store, reservation, directory = create_job(path)
