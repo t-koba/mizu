@@ -22,7 +22,8 @@ def _policy():
     try:
         raw = safe_read(POLICY_PATH.parent, POLICY_PATH.name, POLICY_MAX_BYTES)
         policy = tomllib.loads(raw.decode("utf-8"))
-        if (policy["version"] != 1 or policy["status"] != "pre-integration-gates"
+        if (type(policy["version"]) is not int or policy["version"] != 1
+                or policy["status"] != "pre-integration-gates"
                 or policy["runner_integration_allowed"] is not False):
             raise ValueError
         for key in ("reserved_statuses", "parent_control_plane", "parent_transport", "parent_snapshot_only"):

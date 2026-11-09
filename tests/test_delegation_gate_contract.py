@@ -314,7 +314,8 @@ class DelegationGateContractTests(Fixture):
         for change in ({"parent_control_plane": "files"}, {"parent_control_plane": [None]},
                        {"parameterized": {}}, {"reserved_statuses": []},
                        {"parent_transport": []},
-                       {"runner_integration_allowed": True}, {"version": 2}):
+                       {"runner_integration_allowed": True}, {"version": 0},
+                       {"version": 2}, {"version": True}, {"version": 1.0}):
             with patch("mizu.delegation_gates.tomllib.loads", return_value={**MATRIX, **change}):
                 self.assert_refused_without_effects("work_items_read", {})
 

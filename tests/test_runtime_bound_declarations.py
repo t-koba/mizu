@@ -2009,6 +2009,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('decision_reconciliation.py', '_validate_plan', 1, 0): (
         '1', 'format',
         'decision reconciliation plan / exact schema version one selects the persisted plan contract'),
+    ('delegation_gates.py', '_policy', 1, 0): (
+        '1', 'format',
+        'delegation-gate policy / exact integer version one selects the trusted TOML contract'),
     ('continuations.py', '_aware_time', 1, 0): (
         '32', 'safety',
         'continuation state / bound persisted timestamp text before ISO-8601 parsing'),
@@ -3448,7 +3451,7 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_costs.py', 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
-                'decision_delivery.py', 'decision_reconciliation.py',
+                'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py',
                 'mcp_loop.py',
                 'mcp_proxy.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
@@ -3470,7 +3473,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
