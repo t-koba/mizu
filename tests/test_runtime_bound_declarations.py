@@ -3460,7 +3460,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'mcp_proxy.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
