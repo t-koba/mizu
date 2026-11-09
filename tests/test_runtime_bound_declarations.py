@@ -37,8 +37,11 @@ envelope for proof metadata; the complete receipt still uses the full ceiling. T
 sample is capped at 32 rows while total/omitted report coverage and the complete
 internal exclusion set remain intact. `check_jobs.py` names its
 check-summary/evidence row caps,
-identity suffix, text-preview widths and shared capture-error excerpt; its
-caller-visible page and command-array limits remain checked against their
+identity suffix, diagnostic text-preview widths and shared capture-error excerpt.
+Prior-role continuation previews use `[limits].prior_role_report_preview_bytes`
+(default 4000 UTF-8 bytes) as configured context-budget policy; the independent
+128000-byte ceiling derives from the finish.state protocol character bound. The
+module's caller-visible page and command-array limits remain checked against their
 existing schema declarations. CI branch/check retention defaults are configured policy owned
 by `[vcs] ci_cache_max_branches` and `ci_cache_max_checks_per_branch`, within
 the unchanged total-row envelope; `ci_waits.py`'s serialized check-set size is
@@ -806,8 +809,6 @@ DECLARATIONS = {
             '32', 'format', 'check jobs / public command-evidence identifier hex width'),
         'MAX_COMMAND_EVIDENCE_LIST_ROWS': (
             '32', 'safety', 'check jobs / bounded command-evidence listing rows'),
-        'MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS': (
-            '4000', 'safety', 'check jobs / bounded prior-role report summary and state excerpts'),
     },
     'delegation_gates.py': {
         'POLICY_MAX_BYTES': (
@@ -1239,6 +1240,13 @@ CHECK_RETENTION = {
 }
 
 
+PRIOR_ROLE_REPORT_PREVIEW = {
+    'prior_role_report_preview_bytes': (
+        '4000', 'configured policy',
+        'Limits / UTF-8 byte budget per prior-role continuation summary/state preview'),
+}
+
+
 PROJECT_GOAL_LIMIT = {
     'project_goal_bytes': (
         '65536', 'configured policy',
@@ -1377,6 +1385,9 @@ CONFIG_MODULE_BOUNDS = {
     'MAX_PROJECT_GOAL_BYTES': (
         '1073741824', 'safety',
         'config / absolute project-goal input ceiling; snapshot audit uses it for older configurations'),
+    'MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES': (
+        '32000 * 4', 'format',
+        'config / finish.state allows 32000 Unicode characters, at most four UTF-8 bytes each'),
     'MAX_CHECK_INPUT_BOUND': (
         '1 << 40', 'safety',
         'config / one shared absolute ceiling for check-input traversal bounds in settings, jobs and receipts'),
@@ -3861,7 +3872,7 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(preview_widths, {
             'MAX_CHECK_JOB_SHORT_PREVIEW_CHARS',
             'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',
-            'MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS',
+            'preview_bytes',
         })
         evidence_id = next(node for node in tree.body if isinstance(node, ast.Assign)
                            and any(isinstance(target, ast.Name)
@@ -3876,8 +3887,7 @@ def no_defaults(limit, /, count, *, size):
                 'MAX_CHECK_JOB_TEXT_PREVIEW_CHARS',
                 'MAX_CHECK_CAPTURE_ERROR_BYTES',
                 'MAX_COMMAND_EVIDENCE_ID_HEX_CHARS',
-                'MAX_COMMAND_EVIDENCE_LIST_ROWS',
-                'MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS'):
+                'MAX_COMMAND_EVIDENCE_LIST_ROWS'):
             self.assertIn(name, DECLARATIONS['check_jobs.py'])
             self.assertIn(name, {node.id for node in ast.walk(tree)
                                  if isinstance(node, ast.Name)})
@@ -3982,8 +3992,9 @@ def no_defaults(limit, /, count, *, size):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
         found = inventory(tree, symbolic_bounds=SYMBOLIC_BOUNDS.get('config.py'))
         declared = set(CONFIG_MODULE_BOUNDS)
-        for special in (CHECK_RETENTION, HISTORY_TEMPORARIES, DECISION_PROJECTION,
-                        DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION, SMOKE_RETENTION_SCAN):
+        for special in (CHECK_RETENTION, PRIOR_ROLE_REPORT_PREVIEW, HISTORY_TEMPORARIES,
+                        DECISION_PROJECTION, DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION,
+                        SMOKE_RETENTION_SCAN):
             declared.update(name for name in special if name in found)
         self.assertEqual(set(found), declared)
         categories = {'mechanism', 'format', 'safety', 'configured policy'}
@@ -4232,6 +4243,35 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(inventory(tree)['MAX_CHECK_RETAINED'], CHECK_RETENTION['MAX_CHECK_RETAINED'][0])
         self.assertEqual([entry[1] for entry in CHECK_RETENTION.values()], ['configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in CHECK_RETENTION.values()))
+
+    def test_prior_role_report_preview_policy_and_protocol_ceiling(self):
+        from mizu.config import MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES, _LIMIT_RANGES
+        from mizu.protocol import DEFINITIONS
+        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        field = next(node for node in limits.body if isinstance(node, ast.AnnAssign)
+                     and node.target.id == 'prior_role_report_preview_bytes')
+        self.assertEqual(ast.unparse(field.value), PRIOR_ROLE_REPORT_PREVIEW[field.target.id][0])
+        self.assertEqual(PRIOR_ROLE_REPORT_PREVIEW[field.target.id][1], 'configured policy')
+        self.assertTrue(PRIOR_ROLE_REPORT_PREVIEW[field.target.id][2].strip())
+        schema = DEFINITIONS['finish'][1]['properties']
+        self.assertEqual(MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES, schema['state']['maxLength'] * 4)
+        self.assertLess(schema['summary']['maxLength'], schema['state']['maxLength'])
+        self.assertEqual(_LIMIT_RANGES[field.target.id], (0, MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES))
+        check_tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
+        continuation = next(node for node in check_tree.body
+                            if isinstance(node, ast.FunctionDef) and node.name == 'continuation')
+        preview_assignment = next(node for node in continuation.body
+                                  if isinstance(node, ast.Assign)
+                                  and any(isinstance(target, ast.Name) and target.id == 'preview_bytes'
+                                          for target in node.targets))
+        self.assertEqual(ast.unparse(preview_assignment.value),
+                         'project.config.limits.prior_role_report_preview_bytes')
+        budgets = [ast.unparse(node.args[1]) for node in ast.walk(continuation)
+                   if isinstance(node, ast.Call) and callee_name(node.func) == 'text_preview'
+                   and isinstance(node.args[0], ast.Call) and callee_name(node.args[0].func) == 'str']
+        self.assertEqual(budgets, ['preview_bytes'] * 2)
 
     def test_project_goal_limit_is_configured_policy(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))

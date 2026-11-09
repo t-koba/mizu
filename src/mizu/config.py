@@ -44,6 +44,9 @@ DEFAULT_PROBE_EXECUTABLE_BYTES = 256 * 1024 * 1024
 MAX_PROJECT_GOAL_BYTES = 1073741824
 #: Shared absolute ceiling for configured check-input traversal bounds (1 TiB).
 MAX_CHECK_INPUT_BOUND = 1 << 40
+#: finish.state permits 32,000 Unicode characters, at most four UTF-8 bytes each.
+#: This protocol-derived ceiling is independent of the configured preview budget.
+MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES = 32000 * 4
 
 
 #: Aggregate entry ceiling for per-project run-reference scans.
@@ -475,6 +478,8 @@ class Limits:
     check_pending: int = 32
     #: Retained records including subscriptions; only safe acknowledged jobs evict.
     check_retained: int = 1024
+    #: UTF-8 bytes per prior-role continuation summary/state preview; 0 disables text.
+    prior_role_report_preview_bytes: int = 4000
     #: Crash-leftover decision-history temporary scan budget; default 64.
     history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES
     decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS
@@ -643,6 +648,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
                  "check_retained": (1, MAX_CHECK_RETAINED),
+                 "prior_role_report_preview_bytes": (0, MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES),
                  "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
                  "decision_projection_records": (1, MAX_DECISION_PROJECTION_RECORDS),
                  "decision_receipt_diagnostics": (0, MAX_DECISION_RECEIPT_DIAGNOSTICS),

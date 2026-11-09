@@ -85,8 +85,6 @@ MAX_CHECK_CAPTURE_ERROR_BYTES = 256
 MAX_COMMAND_EVIDENCE_ID_HEX_CHARS = 32
 #: Bound command-evidence IDs returned by one logs listing.
 MAX_COMMAND_EVIDENCE_LIST_ROWS = 32
-#: Fixed text excerpt for a prior role continuation report.
-MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS = 4000
 _COMMAND_EVIDENCE_ID = re.compile(
     rf'[a-f0-9]{{{MAX_COMMAND_EVIDENCE_ID_HEX_CHARS}}}\Z')
 #: Bound transient memory while hashing one frozen check input.
@@ -1735,12 +1733,13 @@ def continuation(project, role, snapshot, *, discovery=None):
     job = discovery[0].get(record.get('id')) if isinstance(record.get('id'), str) else None
     if job is None or job.get('role') != role:
         return None
+    preview_bytes = project.config.limits.prior_role_report_preview_bytes
     return {'trust': 'prior-role-report', 'run': text_preview(report['run'], MAX_CHECK_JOB_SHORT_PREVIEW_CHARS)[0],
             **{k: text_preview(report[k], MAX_CHECK_JOB_SHORT_PREVIEW_CHARS)[0] if isinstance(report.get(k), str) else None
                for k in ('snapshot', 'code_digest')},
             'same_code': report.get('code_digest') == snapshot.get('code_digest'),
-            'summary': text_preview(str(report.get('summary', '')), MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS)[0],
-            'state': text_preview(str(report.get('state', '')), MAX_PRIOR_ROLE_REPORT_PREVIEW_CHARS)[0],
+            'summary': text_preview(str(report.get('summary', '')), preview_bytes)[0],
+            'state': text_preview(str(report.get('state', '')), preview_bytes)[0],
             'check': summary(job)}
 
 

@@ -502,18 +502,48 @@ class DiscoveryTests(Fixture):
             self.assertIsNone(json.loads(text)['check_continuation'])
         self.assertIn('prior report', (check_jobs.root(self.project) / 'worker.wait.json').read_text())
 
+    def test_continuation_text_previews_follow_utf8_byte_policy(self):
+        ctx, job = self.queue()
+        report = {'run': ctx.run_dir.name, 'snapshot': ctx.snapshot['id'],
+                  'code_digest': ctx.snapshot['code_digest'],
+                  'summary': 'é😀' * 1000, 'state': 'a😀é' * 1000}
+        check_jobs.set_wait(self.project, 'worker', job['id'], continuation=report)
+        default = check_jobs.continuation(self.project, 'worker', ctx.snapshot)
+        self.assertEqual(default, {
+            'trust': 'prior-role-report', 'run': report['run'],
+            'snapshot': report['snapshot'], 'code_digest': report['code_digest'],
+            'same_code': True, 'summary': report['summary'].encode()[:4000].decode('utf-8', 'ignore'),
+            'state': report['state'].encode()[:4000].decode('utf-8', 'ignore'),
+            'check': check_jobs.summary(check_jobs.read(self.project, job['id']))})
+        for budget in (4000, 7, 5000, 128000, 0):
+            with self.subTest(budget=budget):
+                self.project.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+                    self.config.limits, prior_role_report_preview_bytes=budget))
+                expected = {**default, **{key: report[key].encode()[:budget].decode('utf-8', 'ignore')
+                                         for key in ('summary', 'state')}}
+                self.assertEqual(check_jobs.continuation(self.project, 'worker', ctx.snapshot), expected)
+                for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+                    self.assertEqual(json.loads(text)['check_continuation'], expected)
+        # Missing text stays empty; neither the policy nor 0 changes field shape.
+        check_jobs.set_wait(self.project, 'worker', job['id'], continuation={'run': report['run']})
+        missing = check_jobs.continuation(self.project, 'worker', ctx.snapshot)
+        self.assertEqual((missing['summary'], missing['state']), ('', ''))
+
     def test_escaped_continuation_cannot_exceed_aggregate_prompt_budget(self):
         ctx, job = self.queue()
         check_jobs.set_wait(self.project, 'worker', job['id'], continuation={
             'run': ctx.run_dir.name, 'snapshot': ctx.snapshot['id'],
-            'code_digest': ctx.snapshot['code_digest'], 'summary': '\0' * 4000, 'state': '\0' * 4000})
+            'code_digest': ctx.snapshot['code_digest'], 'summary': '\0' * 12000, 'state': '\0' * 32000})
         self.edit(job, **{k: '\0' * 900 for k in ('run', 'purpose', 'created_at', 'finished_at', 'error')},
                   commands=['\0' * 900] * 4)
         before = self.cache_bytes()
-        for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
-            prompt = json.loads(text)
-            view = {k: prompt[k] for k in ('check_jobs', 'shared_checks', 'check_continuation', 'check_discovery')}
-            self.assertLessEqual(len(json.dumps(view, ensure_ascii=False).encode()), 65536)
-            self.assertIsNone(prompt['check_continuation'])
-            self.assertTrue(prompt['check_discovery']['continuation_omitted'])
+        for budget in (4000, 128000):
+            self.project.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+                self.config.limits, prior_role_report_preview_bytes=budget))
+            for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+                prompt = json.loads(text)
+                view = {k: prompt[k] for k in ('check_jobs', 'shared_checks', 'check_continuation', 'check_discovery')}
+                self.assertLessEqual(len(json.dumps(view, ensure_ascii=False).encode()), 65536)
+                self.assertIsNone(prompt['check_continuation'])
+                self.assertTrue(prompt['check_discovery']['continuation_omitted'])
         self.assertEqual(self.cache_bytes(), before)

@@ -37,6 +37,26 @@ class CheckInputBoundConfigTests(Fixture):
                     load(self.file)
 
 
+class PriorRoleReportPreviewConfigTests(Fixture):
+    def test_default_range_and_refusals(self):
+        key = 'prior_role_report_preview_bytes'
+        base = re.sub(rf'(?m)^{key} = .*\n', '', self.file.read_text())
+        self.file.write_text(base)
+        self.assertEqual(getattr(load(self.file).limits, key), 4000)
+        self.assertEqual(getattr(Limits(), key), 4000)
+        self.assertEqual(_LIMIT_RANGES[key], (0, 128000))
+        for value in ('0', '1', '4000', '5000', '128000', '-1', '128001',
+                      'true', '1.5', '"4000"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(base.replace(
+                    '\n[limits]\n', f'\n[limits]\n{key} = {value}\n'))
+                if value in ('0', '1', '4000', '5000', '128000'):
+                    self.assertEqual(getattr(load(self.file).limits, key), int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, f'limits.{key}'):
+                        load(self.file)
+
+
 class SelectionIntervalLimitConfigTests(Fixture):
     def test_default_range_and_refusals(self):
         base = re.sub(r'(?m)^selection_max_interval_seconds = .*\n', '', self.file.read_text())

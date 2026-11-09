@@ -502,8 +502,16 @@ When a unit finishes while waiting for a check, already-read terminal results
 are acknowledged even if another check remains outstanding. The next prompt
 carries `check_continuation`: the prior role's summary/state, source identity,
 `same_code`, and the awaited check's current status. This is bounded prior-role
-report data (4000 characters per text field), not validation evidence. A changed
-source is explicit and never inherits acceptance. A normal finish clears this
+report data, not validation evidence. `[limits].prior_role_report_preview_bytes`
+sets the operator context/token budget for each summary/state preview: default
+4000 UTF-8 bytes, integer range 0–128000; 0 leaves both text fields empty.
+Truncation discards an incomplete trailing UTF-8 sequence. The independent
+`MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES` ceiling is 32,000 × 4 = 128,000 bytes:
+`mizu_finish.state` permits 32,000 Unicode characters, each at most four UTF-8
+bytes (summary has a smaller protocol maximum). This ceiling is not the default
+budget and does not enlarge the overall check-job prompt envelope; a continuation
+that exceeds that envelope is still omitted. A changed source is explicit and
+never inherits acceptance. A normal finish clears this
 continuation; bounded or failed units do not acknowledge unfinished delivery.
 Acknowledged historical results remain available through `check_job list` but
 are omitted from the default prompt's outstanding-check projection.

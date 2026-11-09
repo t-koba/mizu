@@ -180,6 +180,7 @@ parallel_consults = 2
 parallel_checks = 2            # Shared compute slots for asynchronous sandbox checks, independent of model admission (1-64).
 check_pending = 32             # Unfinished check jobs retained per project (1-1024); a submission beyond it is refused.
 check_retained = 1024          # Total retained check records including subscriptions (1-1024); safe acknowledged-only eviction.
+prior_role_report_preview_bytes = 4000 # UTF-8 bytes per continuation summary/state; 0 disables text (0-128000).
 history_temporaries = 64       # Decision-history crash-leftover recovery budget (1-4096); excess fails closed without cleanup.
 decision_projection_records = 512 # Combined page retention rows (1-512); explicit projection overflow refuses.
 decision_receipt_diagnostics = 10 # Malformed-receipt diagnostics per decision page (0-100); 0 hides the sample, not decisions.
