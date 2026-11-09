@@ -16,7 +16,7 @@ from mizu.budget import Budget
 from mizu.cli import execute, parser
 from mizu.drivers import admit_invocation
 from mizu.errors import Cancelled, ConfigError, Denied, ModelFailure, ProtocolError
-from mizu.fs import canonical, lock, read_json, write_json
+from mizu.fs import canonical, digest, lock, read_json, write_json
 from mizu.probes import _exact_result, next_deadline, service_due, sponsor_binding, target_binding
 from mizu.runtime import Engine, daemon
 from mizu.selection import State, active, project_status, validate_selectors
@@ -115,6 +115,64 @@ class RecoveryProbeTests(SelectionFixture):
         self.store.result(self.first, run='completed', at=1001)
         self.assertEqual(read_json(self.store.path)['version'], 2)
         self.assertEqual(self.store.read()['blocks'], legacy['blocks'])
+
+    def test_selection_state_rejects_unknown_schema_versions(self):
+        self.setup_selection()
+        store = State(self.config)
+        current = store.read()
+        write_json(store.path, current)
+        self.assertEqual(store.read()['version'], 2)
+        current['version'] = 3
+        write_json(store.path, current)
+        with self.assertRaisesRegex(ConfigError, 'Unreadable or corrupt selection state'):
+            store.read()
+
+    def test_contribution_and_event_revisions_are_positive(self):
+        from mizu.probes import _event
+        from mizu.selection import validate_contribution, validate_event
+        action = self.setup_probe()
+        identity = action['contribution']
+        contribution = self.contribution(action)
+        self.assertEqual(contribution['revision'], 1)
+        validate_contribution(identity, contribution)
+        invalid_contribution = copy.deepcopy(contribution)
+        invalid_contribution['revision'] = 0
+        with self.assertRaisesRegex(ConfigError, 'contribution revision/status'):
+            validate_contribution(identity, invalid_contribution)
+
+        claim = digest(canonical({'revision-edge': identity}))
+        event = _event(identity, contribution, contribution['created_at'])
+        self.assertEqual(event['revision'], 1)
+        validate_event(claim, event)
+        invalid_event = copy.deepcopy(event)
+        invalid_event['revision'] = 0
+        with self.assertRaisesRegex(ConfigError, 'probe event revision'):
+            validate_event(claim, invalid_event)
+
+    def test_zero_request_success_evidence_cannot_recover(self):
+        from mizu.probes import _event
+        action = self.setup_probe()
+        identity = action['contribution']
+        state = self.store.read()
+        contribution = state['contributions'][identity]
+        claim = digest(canonical({'zero-request-claim': identity}))
+        contribution['claim'] = claim
+        contribution['revision'] += 1
+        intent = _event(identity, contribution, contribution['next_probe_at'])
+        state['events'][claim] = intent
+        self.store.save(state)
+
+        terminal = {key: value for key, value in intent.items() if key != 'reserve'}
+        # Keep the separate verdict checks true so this isolates the request-count floor.
+        terminal.update(finished_at=contribution['next_probe_at'] + 1, status='success',
+                        admitted=True, settled=True, challenge_ok=True, requests=0)
+        self.assertTrue(self.store.probe_update(
+            identity, revision=contribution['revision'], claim=claim,
+            event=terminal, at=contribution['next_probe_at'] + 1))
+        self.assertFalse(self.store.probe_update(
+            identity, revision=contribution['revision'], claim=claim,
+            recover=True, at=contribution['next_probe_at'] + 1))
+        self.assertEqual(self.store.read()['contributions'][identity]['status'], 'active')
 
     def test_fail_fast_probe_skips_a_resource_blocked_caller(self):
         action = self.setup_probe()
@@ -1083,6 +1141,8 @@ class RecoveryProbeTests(SelectionFixture):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.assertEqual(retention_policy(self.config.data),
                          (MAX_TERMINAL_CONTRIBUTIONS, MAX_PROBE_EVENTS))
+        write_json(path, {'version': 1, 'terminal_contributions': 1, 'probe_events': 1})
+        self.assertEqual(retention_policy(self.config.data), (1, 1))
         write_json(path, {'version': 1, 'terminal_contributions': 2, 'probe_events': 2})
         store = State(self.config)
         self.assertEqual((store.terminal_limit, store.event_limit), (2, 2))
@@ -1104,6 +1164,7 @@ class RecoveryProbeTests(SelectionFixture):
             len([event for event in state['events'].values()
                  if event['contribution'] == identity]), 2)
         for value in ({'version': 1, 'terminal_contributions': 0, 'probe_events': 8},
+                      {'version': 1, 'terminal_contributions': 256, 'probe_events': 0},
                       {'version': 1, 'terminal_contributions': 256, 'probe_events': 8193},
                       {'version': 2, 'terminal_contributions': 256, 'probe_events': 8},
                       {'version': 1, 'terminal_contributions': 256, 'probe_events': 8,

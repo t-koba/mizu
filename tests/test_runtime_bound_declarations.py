@@ -2467,8 +2467,35 @@ COMPARISON_BOUND_ARGUMENTS = {
         '256', 'safety', 'classifier inputs / require a minimally useful text budget'),
     ('selection.py', 'validate_selectors', 2, 0): (
         '65536', 'safety', 'classifier inputs / cap per-classifier text collection at 64 KiB'),
+    ('selection.py', 'retention_policy', 1, 0): (
+        '1', 'format',
+        'selection retention policy / version one selects the exact persisted policy layout'),
+    ('selection.py', 'retention_policy', 0, 0): (
+        '1', 'configured policy',
+        'selection retention policy / both operator-set counts must retain at least one entry'),
+    ('selection.py', 'seconds', 0, 0): (
+        '1', 'format',
+        'selection timers / on-error and retry intervals are positive seconds; optional reselection has a separate zero form'),
+    ('selection.py', 'validate_selectors', 0, 1): (
+        '1', 'format',
+        'classifier schema / at least one declared attribute is required for a classifier'),
     ('selection.py', 'State.read', 1, 0): (
+        '1', 'format',
+        'selection state / version one selects the supported legacy read-and-migrate layout'),
+    ('selection.py', 'State.read', 1, 1): (
+        '2', 'format',
+        'selection state / version two is the current persisted ledger schema'),
+    ('selection.py', 'State.read', 1, 2): (
         '128', 'format', 'selection state / run identity follows the bounded run-id format'),
+    ('selection.py', 'State.result', 0, 0): (
+        '1', 'format', 'selection attempt identity / run IDs are nonempty'),
+    ('selection.py', 'State.probe_update', 1, 0): (
+        '1', 'safety',
+        'selection recovery / a successful probe must have at least one admitted request before unblocking'),
+    ('selection.py', 'validate_contribution', 1, 0): (
+        '1', 'format', 'probe contribution / persisted contribution revisions are positive'),
+    ('selection.py', 'validate_event', 1, 0): (
+        '1', 'format', 'probe event / persisted event revisions are positive'),
     ('selection.py', 'State.result', 2, 0): (
         '128', 'format', 'selection state / run identity follows the bounded run-id format'),
     ('selection.py', 'State.result', 2, 1): (
@@ -3296,7 +3323,7 @@ def sibling():
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
-                'work_order.py'}
+                'work_order.py', 'selection.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

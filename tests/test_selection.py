@@ -75,6 +75,15 @@ class SelectionFixture(Fixture):
 
 
 class SelectionTests(SelectionFixture):
+    def test_attempt_run_id_requires_one_character(self):
+        role, _ = self.setup_selection()
+        decision = self.decision(role)
+        store = State(self.config)
+        with self.assertRaisesRegex(ConfigError, 'Invalid selection attempt identity'):
+            store.result(decision, run='', at=1000)
+        self.assertIsNone(store.result(decision, run='r', at=1000))
+        self.assertEqual(store.read()['history'][decision['profile']]['run'], 'r')
+
     def test_saved_probe_intervals_survive_lowered_configuration_cap(self):
         raised = 31536001
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
@@ -1171,6 +1180,13 @@ class ClassificationTests(SelectionFixture):
         spec['classifier'] = {'profile': 'alternate', 'policy': str(policy), 'on_failure': on_failure,
             'retry_seconds': 60, 'attributes': {'difficulty': {'type': 'string', 'values': ['hard', 'easy']}}}
         return self.setup_selection(spec)
+
+    def test_classifier_requires_at_least_one_declared_attribute(self):
+        _, spec = self.classifier()
+        self.assertEqual(len(spec['classifier']['attributes']), 1)
+        spec['classifier']['attributes'] = {}
+        with self.assertRaisesRegex(ConfigError, 'Classifier requires 1..64'):
+            validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
 
     def classifying_calls(self, driver):
         return [call for call in driver.calls if call[0].role.workspace == 'none']
