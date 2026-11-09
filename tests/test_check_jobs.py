@@ -269,11 +269,11 @@ class JobTests(Fixture):
         configured = dataclasses.replace(
             self.config,
             services=dataclasses.replace(self.config.services,
-                                         check_recovery_interval_seconds=120))
+                                         check_recovery_interval_seconds=5))
         units = render(configured, self.project, Path('/usr/bin/mizu'), system='linux')
         timer = units[base + '.timer']
-        self.assertIn('OnBootSec=120s', timer)
-        self.assertIn('OnUnitInactiveSec=120s', timer)
+        self.assertIn('OnBootSec=5s', timer)
+        self.assertIn('OnUnitInactiveSec=5s', timer)
         self.assertEqual(units[base + '.path'], default[base + '.path'])
         self.assertEqual(units[base + '.service'], default[base + '.service'])
 

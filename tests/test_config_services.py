@@ -72,7 +72,7 @@ class ServiceSettingsTests(Fixture):
         self.assertIn("# systemd_restart_delay_seconds = 15", text)
         self.assertIn("# systemd_stop_timeout_seconds = 45", text)
         self.assertIn("# systemd_verify_timeout_seconds = 60", text)
-        self.assertIn("# check_recovery_interval_seconds = 30", text)
+        self.assertIn("# check_recovery_interval_seconds = 30 # 1-86400", text)
 
 
 if __name__ == "__main__":

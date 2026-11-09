@@ -197,9 +197,12 @@ can still supply its automatic wake).
 Linux, service generation creates a dedicated checks service, path notification
 and a recovery timer when a project enables the capability. The path trigger is
 primary; `[services].check_recovery_interval_seconds` (default 30, range
-30–86,400) bounds recovery rechecks after a lost notification. Changing this
-service policy does not change daemon readiness or claim lower idle cost; the
-default preserves the existing cadence. Install and enable those units before
+1–86,400 seconds) sets the fallback cadence after a lost notification. The
+one-day maximum caps the configured fallback cadence; a runner that is still
+active can extend the effective recovery time. Operators may choose a faster
+whole-second interval when appropriate. Changing this service policy does not change daemon
+readiness or claim lower idle cost; the default preserves the existing cadence.
+Install and enable those units before
 enabling model use of the capability. Other platforms can invoke the same
 bounded command from an operator-managed runner; they do not yet have generated
 check-runner services.

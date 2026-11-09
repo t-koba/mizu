@@ -57,10 +57,9 @@ MAX_EDITOR_SEARCH_MATCH_CHARS = READ_PAGE_CHARS
 #: subprocess selector waits use signed 32-bit milliseconds; retain the largest
 #: whole-second value that fits, regardless of the host parsing this config.
 MAX_SYSTEMD_VERIFY_TIMEOUT_SECONDS = 2_147_483
-# The check-runner recovery timer is a fallback after its path trigger. Keep
-# its policy no faster than the existing 30-second cadence and ensure a lost
-# path event is reconsidered within one day.
-MIN_CHECK_RECOVERY_INTERVAL_SECONDS = 30
+# Whole-second deployment policy for the check-runner fallback timer. Faster
+# values remain available; one day caps the configured fallback cadence.
+MIN_CHECK_RECOVERY_INTERVAL_SECONDS = 1
 MAX_CHECK_RECOVERY_INTERVAL_SECONDS = 86400
 #: Report/diagnostic counts flow through Python collection indexes. Usage scans
 #: reserve one index for the extra candidate that detects a truncated window.

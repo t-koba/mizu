@@ -1197,12 +1197,13 @@ The optional `[services]` table controls systemd deployment and validation
 policy only. `systemd_restart_delay_seconds` (default 15) sets `RestartSec` for
 daemon units; `systemd_stop_timeout_seconds` (default 45) sets `TimeoutStopSec`
 for role, event-dispatch, and check-runner units. `check_recovery_interval_seconds`
-(default 30, range 30–86,400) sets the generated Linux check-runner timer's
+(default 30, range 1–86,400) sets the generated Linux check-runner timer's
 `OnBootSec` and `OnUnitInactiveSec`. The check-queue path trigger remains the
-primary notification; this timer only rechecks after lost/interrupted delivery.
-The 30-second minimum prevents configuring this fallback to poll more often
-than its existing cadence, and the one-day maximum bounds recovery after a lost
-path event. It does not change daemon readiness or other schedules.
+primary notification; this timer rechecks after lost/interrupted delivery.
+Whole-second values allow faster recovery when an operator selects that tradeoff;
+the one-day maximum caps the configured fallback cadence after a lost path event.
+An active check-runner can extend the effective recovery time. This setting does
+not change daemon readiness or other schedules.
 `systemd_verify_timeout_seconds` (default 60) bounds the optional
 `systemd-analyze verify` command during `mizu service install`; the install
 fails closed if verification times out. It accepts 1 through 2,147,483 seconds:
