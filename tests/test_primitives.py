@@ -451,6 +451,81 @@ class FileTests(unittest.TestCase):
         with self.assertRaises(Denied):
             safe_read(self.root, "two", 100)
 
+    def test_hardlink_boundary_for_safe_read_backends_and_managed_state(self):
+        from types import SimpleNamespace
+        from mizu import fs
+
+        source = self.root / "single"
+        source.write_bytes(b"data")
+        self.assertEqual(safe_read(self.root, "single", 100), b"data")
+        os.link(source, self.root / "alias")
+
+        # Exercise both the normal pinned path and the portable implementation,
+        # independent of which backend this host selects by default.
+        with self.assertRaises(Denied):
+            safe_read(self.root, "alias", 100)
+        with patch.object(fs._platform, "HAS_OPENAT", False), \
+                patch.object(fs._platform, "HAS_DIR_FD", False):
+            with self.assertRaises(Denied):
+                safe_read(self.root, "alias", 100)
+            with self.assertRaises(Denied):
+                fs.safe_read_managed(self.root, "alias", 100)
+
+        # The portable reader checks both path metadata and the opened handle.
+        # Keep the path singly linked while presenting a two-link handle to hit
+        # the second check directly.
+        real_fstat = os.fstat
+        def linked_handle(fd):
+            info = real_fstat(fd)
+            return SimpleNamespace(st_mode=info.st_mode, st_nlink=2,
+                                   st_size=info.st_size, st_dev=info.st_dev,
+                                   st_ino=info.st_ino, st_mtime_ns=info.st_mtime_ns,
+                                   st_ctime_ns=info.st_ctime_ns)
+        with patch.object(fs._platform, "HAS_OPENAT", False), \
+                patch.object(fs._platform, "HAS_DIR_FD", False), \
+                patch.object(fs.os, "fstat", side_effect=linked_handle):
+            with self.assertRaises(Denied):
+                safe_read(self.root, "single", 100)
+            with self.assertRaises(Denied):
+                fs.safe_read_managed(self.root, "single", 100)
+
+    def test_safe_write_single_link_boundary_for_backends(self):
+        from mizu import fs
+
+        for openat in (True, False):
+            if openat and not (fs._platform.HAS_OPENAT and fs._platform.HAS_DIR_FD):
+                continue
+            with self.subTest(openat=openat), \
+                    patch.object(fs._platform, "HAS_OPENAT", openat), \
+                    patch.object(fs._platform, "HAS_DIR_FD", openat):
+                target = self.root / ("pinned" if openat else "portable")
+                target.write_bytes(b"original")
+                safe_write(self.root, target.name, b"updated")
+                self.assertEqual(target.read_bytes(), b"updated")
+                alias = self.root / (target.name + "-alias")
+                os.link(target, alias)
+                with self.assertRaises(Denied):
+                    safe_write(self.root, target.name, b"refused")
+                self.assertEqual(target.read_bytes(), b"updated")
+                self.assertEqual(alias.read_bytes(), b"updated")
+                self.assertFalse(list(self.root.glob(".new-*")))
+
+    def test_safe_write_refuses_a_multi_link_temporary(self):
+        from types import SimpleNamespace
+        from mizu import fs
+
+        if not (fs._platform.HAS_OPENAT and fs._platform.HAS_DIR_FD):
+            self.skipTest("openat writer is unavailable")
+        real_fstat = os.fstat
+        def linked_temporary(fd):
+            info = real_fstat(fd)
+            return SimpleNamespace(st_mode=info.st_mode, st_nlink=2)
+        with patch.object(fs.os, "fstat", side_effect=linked_temporary):
+            with self.assertRaises(Denied):
+                safe_write(self.root, "new-file", b"data")
+        self.assertFalse((self.root / "new-file").exists())
+        self.assertFalse(list(self.root.glob(".new-*")))
+
     def test_cross_api_identity_tolerates_handle_sourcing(self):
         # Path stat and handle stat source device/index/creation fields
         # differently on Windows; only mode/nlink/size/mtime bind across APIs.

@@ -2030,6 +2030,27 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('distribution.py', 'is_public_source_path', 1, 0): (
         '1', 'format',
         'public-source path / the relative path must not be empty'),
+    ('fs.py', '_safe_read_openat', 1, 0): (
+        '1', 'safety',
+        'filesystem read / accept only a regular file with exactly one link'),
+    ('fs.py', '_safe_read_portable', 1, 0): (
+        '1', 'safety',
+        'portable filesystem read / path metadata must show exactly one link'),
+    ('fs.py', '_safe_read_portable', 1, 1): (
+        '1', 'safety',
+        'portable filesystem read / opened handle must still have exactly one link'),
+    ('fs.py', 'safe_read_managed', 1, 0): (
+        '1', 'safety',
+        'managed-state read / initial opened generation must have exactly one link'),
+    ('fs.py', '_safe_write_openat', 1, 0): (
+        '1', 'safety',
+        'pinned filesystem write / existing destination must be a singly linked regular file'),
+    ('fs.py', '_safe_write_openat', 1, 1): (
+        '1', 'safety',
+        'pinned filesystem write / staged temporary must remain a singly linked regular file'),
+    ('fs.py', '_safe_write_portable', 1, 0): (
+        '1', 'safety',
+        'portable filesystem write / existing destination must be a singly linked regular file'),
     ('operator_record_index.py', '_files', 1, 0): (
         '1', 'safety',
         'operator record index / ignore only single-link unpublished atomic-write scratch'),
@@ -3467,16 +3488,16 @@ def sibling():
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
-                'budget.py'):
+                'budget.py', 'fs.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
-                'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
+                'work_item_resolution.py', 'work_item_events.py', 'work_items.py', 'fs.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
