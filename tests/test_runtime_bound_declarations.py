@@ -2492,6 +2492,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('selection.py', 'State.probe_update', 1, 0): (
         '1', 'safety',
         'selection recovery / a successful probe must have at least one admitted request before unblocking'),
+    ('probes.py', '_service', 1, 1): (
+        '1', 'safety',
+        'recovery probes / require an admitted request before recording successful recovery evidence'),
     ('selection.py', 'validate_contribution', 1, 0): (
         '1', 'format', 'probe contribution / persisted contribution revisions are positive'),
     ('selection.py', 'validate_event', 1, 0): (
@@ -3323,7 +3326,7 @@ def sibling():
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
-                'work_order.py', 'selection.py'}
+                'work_order.py', 'selection.py', 'probes.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

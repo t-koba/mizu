@@ -257,6 +257,7 @@ class RecoveryProbeTests(SelectionFixture):
         self.assertEqual(context.role.engine_tools, ())
         self.assertNotIn('Preserve correctness', prompt)
         event = self.store.read()['events'][result['id']]
+        self.assertEqual(event['requests'], 1)
         self.assertTrue(event['admitted'] and event['settled'] and event['challenge_ok'])
         self.assertEqual(event['model']['tokens']['input_tokens'], 3)
         self.assertEqual(Budget(self.config.data / 'budget', 100).usage('sample')['used'], 1)
@@ -357,6 +358,13 @@ class RecoveryProbeTests(SelectionFixture):
                                         ProbeDriver(lambda c: (_ for _ in ()).throw(ProtocolError('uncertain'))))):
             result, _ = self.service(driver, at=1010 + index * 10)
             self.assertNotEqual(result['status'], 'success')
+            if index == 0:
+                self.assertEqual(result['status'], 'failure')
+                self.assertEqual(result['reason'], 'admission_unconfirmed')
+                self.assertEqual(result['requests'], 0)
+                event = self.store.read()['events'][result['id']]
+                self.assertEqual(event['requests'], 0)
+                self.assertFalse(event['admitted'])
             self.assertTrue(active(self.contribution(action), 1010 + index * 10))
         self.assertEqual(len(self.store.read()['events']), 7)
 
