@@ -57,12 +57,15 @@ class ProjectionInventoryTests(unittest.TestCase):
                 self.assertTrue(is_public_source_path(path))
 
     def test_path_and_suffix_edges_match_distribution_inventory(self):
-        paths = ("README.md", "notes.txt", "config/config.example.toml", "config/other.toml",
+        paths = ("README.md", "notes.txt", "src/mizu/distribution.py",
+                 "config/config.example.toml", "config/other.toml",
                  "src/.pyc", "src/.pyo", "src/a.pyc", "src/a.pyo", "src/upper.PYC",
                  "src/a.pyc.py", "src/dir.pyc/child.py", "src/dir.pyo/child.py",
                  "src/.env.local", "src/credentials.env", "src/.env.dir/child.py",
                  "src/build/child.py", "docs/__pycache__/child.md", "tests/.DS_Store",
                  ".github/workflows/ci.yml", "src/.hidden", "src/..pyc")
+        # README.md/notes.txt exercise the one-component metadata branch;
+        # src/mizu/distribution.py exercises the nested directory whitelist.
         with tempfile.TemporaryDirectory(prefix="mizu-inventory-") as directory:
             root = Path(directory)
             for relative in paths:

@@ -471,9 +471,9 @@ class FileTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 fs.safe_read_managed(self.root, "alias", 100)
 
-        # The portable reader checks both path metadata and the opened handle.
-        # Keep the path singly linked while presenting a two-link handle to hit
-        # the second check directly.
+        # Remove the alias so path stat passes; the mocked opened handle alone
+        # supplies nlink=2 and must trigger the handle-level refusal.
+        (self.root / "alias").unlink()
         real_fstat = os.fstat
         def linked_handle(fd):
             info = real_fstat(fd)
@@ -483,11 +483,16 @@ class FileTests(unittest.TestCase):
                                    st_ctime_ns=info.st_ctime_ns)
         with patch.object(fs._platform, "HAS_OPENAT", False), \
                 patch.object(fs._platform, "HAS_DIR_FD", False), \
-                patch.object(fs.os, "fstat", side_effect=linked_handle):
+                patch.object(fs.os, "fstat", side_effect=linked_handle) as handle_stat:
             with self.assertRaises(Denied):
                 safe_read(self.root, "single", 100)
+            handle_stat.assert_called_once()
+        with patch.object(fs._platform, "HAS_OPENAT", False), \
+                patch.object(fs._platform, "HAS_DIR_FD", False), \
+                patch.object(fs.os, "fstat", side_effect=linked_handle) as handle_stat:
             with self.assertRaises(Denied):
                 fs.safe_read_managed(self.root, "single", 100)
+            handle_stat.assert_called_once()
 
     def test_safe_write_single_link_boundary_for_backends(self):
         from mizu import fs

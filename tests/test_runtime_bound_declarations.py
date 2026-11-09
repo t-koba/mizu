@@ -2041,7 +2041,7 @@ COMPARISON_BOUND_ARGUMENTS = {
         'materialized content digest / exact SHA-256 hexadecimal text length'),
     ('distribution.py', 'is_public_source_path', 1, 0): (
         '1', 'format',
-        'public-source path / the relative path must not be empty'),
+        'public-source path / one-component paths are root-level entries checked against METADATA'),
     ('fs.py', '_safe_read_openat', 1, 0): (
         '1', 'safety',
         'filesystem read / accept only a regular file with exactly one link'),
