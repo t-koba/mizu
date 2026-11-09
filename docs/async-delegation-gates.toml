@@ -178,26 +178,21 @@ bound supervisor-death path. The fixture provisioner must be stopped and externa
 create commands settled before recovery; this is not a fence against unrelated
 Podman clients. Normal execution does not import the binding into Engine.run;
 Engine/CLI/adapter launch integration remains disabled.
-Recorded Ubuntu 24.04 CI evidence on SHA
-7e21faa08a53138b5daf408499ac344a4da2aa43: Offline checks /
-delegation-recovery-smoke passed its real bounded --prepare, --live and
-independent --recover phases (vcs-read/a3b20907f2c349c18ac8ce5c5e82740f).
 That synthetic smoke uses real systemd/cgroup v2 and rootless Podman, including
-a setsid descendant surviving supervisor death. Bound recovery now calls the
-private delegation_recovery coordinator: before callbacks it requires the active
-token, exact immutable binding, terminal execution report and host attestations
-of a one-shot launch fence and settled supervisor. It calls delegation_scope for
+a setsid descendant surviving supervisor death. Bound recovery calls the private
+`delegation_recovery` coordinator: before callbacks it requires the active token,
+exact immutable binding, terminal execution report and host attestations of a
+one-shot launch fence and settled supervisor. It calls `delegation_scope` for
 the inactive/absent unit and empty/consistently absent cgroup, then requires each
 exact saved name/ID/UID positively absent through a host-owned OCI reconciliation
-callback before submitting runner_quiescent with the original full inventory.
+callback before submitting `runner_quiescent` with the original full inventory.
 Host callbacks own bounded queries, cleanup, the existing rootless namespace and
 retry safety; Mizu executes no host commands. Unknown proof or interrupted cleanup
 retains the reservation; retries reinspect all resources, and an uncertain final
 commit is resolved from ledger status. Test-only host commands still own cleanup.
-This coordinator needs its own exact-revision CI evidence; the recorded pass
-predates it. There is no Windows/macOS scope proof, product container reaper,
-runner/launch path or production-host/adapter integration.
-This is synthetic fixture recovery only, not real-adapter, production-quiescence,
-authority, handoff or pilot proof.
+The bounded synthetic smoke exercises this coordinator but does not establish
+Windows/macOS scope proof, a product container reaper, runner/launch or production
+host/adapter integration, production quiescence, authority, handoff or pilot
+readiness.
 """
 process_group_experiment = "A bounded Linux sandbox reproduction observed a setsid descendant survive SIGTERM to its parent's process group; a direct signal then stopped it. This is not a systemd/cgroup, OCI, or Windows recovery smoke."
