@@ -213,6 +213,12 @@ class DelegationJobTests(unittest.TestCase):
         self.store.runner_finished(*binding, 'failed')  # report replay is harmless
         with self.assertRaises(Denied):
             self.store.runner_finished(*binding, 'succeeded')
+        # Terminal execution is not release: neither the same job nor a new
+        # job may acquire launch authority while scope reconciliation is pending.
+        with self.assertRaises(Denied):
+            self.store.runner_started(*binding, authority_digest='b' * 64)
+        with self.assertRaises(Denied):
+            self.start('second')
         self.store.cancel('worker', job_id)
         self.store = jobs.DelegationJobs(self.root)
         self.assertEqual(self.store.reservation()['execution'], 'failed')
@@ -225,6 +231,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assertEqual(self.store.result('worker', job_id)['execution'], 'failed')
         with self.assertRaises(Denied):
             self.store.runner_started(*binding, authority_digest='b' * 64)
+        self.start('second')  # the next run becomes eligible only after proof commits
 
     def test_runner_binding_checks_and_queued_failure(self):
         self.start()
