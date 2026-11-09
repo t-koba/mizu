@@ -2709,6 +2709,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
         '256', 'safety',
         'acceptance / only expose untrusted relative cache paths within a bounded diagnostic field'),
+    ('acceptance.py', 'job_paths', 1, 0): (
+        '1', 'safety',
+        'acceptance / reuse cached job identity only for a singly linked regular job file'),
     ('acceptance.py', 'read_job', 1, 0): (
         '32', 'format',
         'acceptance / retained job command lists follow the public 32-command protocol bound'),
