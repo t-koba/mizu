@@ -414,10 +414,10 @@ class DiscoveryTests(Fixture):
                 acceptance.discover(self.project)
             with self.assertRaises(OSError):
                 self.run_job()
-        with patch('mizu.acceptance.safe_read', side_effect=OSError('simulated read failure')):
+        with patch('mizu.acceptance.safe_read_info', side_effect=OSError('simulated read failure')):
             with self.assertRaises(OSError):
                 acceptance.discover(self.project)
-        with patch('mizu.acceptance.safe_read', side_effect=Denied('unsafe shared path')):
+        with patch('mizu.acceptance.safe_read_info', side_effect=Denied('unsafe shared path')):
             with self.assertRaisesRegex(Denied, 'unsafe shared path'):
                 acceptance.discover(self.project)
 

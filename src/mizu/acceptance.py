@@ -12,9 +12,10 @@ import re
 import stat
 from pathlib import Path
 
+from . import platform as _platform
 from .config import MAX_CHECK_INPUT_BOUND
 from .errors import Denied, LimitExceeded
-from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
+from .fs import DIGEST, _file_identity, atomic_write, canonical, digest, lock, safe_read, safe_read_info
 
 MAX_BYTES = 1048576
 # Reserve half the receipt envelope for scope; full receipts still use MAX_BYTES.
@@ -56,10 +57,12 @@ def producer_diagnostics(invalid):
                                   'coverage_complete': False}}
 
 
-def _producer_read(project, job_id, name):
+def _producer_read(project, job_id, name, identity=None):
     # safe_read failures are NOT content failures. In particular, never catch
     # Denied here: it includes unsafe links, changing files and shared paths.
-    raw = safe_read(project.root, f'check-jobs/{job_id}/{name}.json', project.config.limits.file_bytes)
+    raw, info = safe_read_info(project.root, f'check-jobs/{job_id}/{name}.json', project.config.limits.file_bytes)
+    if identity is not None:
+        identity.append(_file_identity(info))
     try:
         return json.loads(raw)
     except (ValueError, UnicodeError, RecursionError) as exc:
@@ -81,10 +84,10 @@ def valid_cache_diagnostics(diagnostics):
                     for item in diagnostics))
 
 
-def read_job(project, job_id):
+def read_job(project, job_id, *, identity=None):
     if not _digest(job_id):
         raise Denied('Invalid acceptance job ID')
-    job = _producer_read(project, job_id, 'job')
+    job = _producer_read(project, job_id, 'job', identity)
     # Validate every field consumed by sorting, filtering, summaries and the
     # one-hop subscription overlay. Missing legacy fields retain their defaults.
     strings = ('role', 'run', 'kind', 'status', 'created_at', 'finished_at', 'error',
@@ -145,13 +148,25 @@ def read_job(project, job_id):
     return job
 
 
-def job_paths(project, invalid=None):
+def job_candidate(job):
+    """Retain only ordering/eligibility fields, never execution payloads."""
+    return {key: job.get(key, '') for key in ('created_at', 'shared_job', 'status')}
+
+
+def _job_read_reuse():
+    return (_platform.IS_POSIX and not _platform.IS_WINDOWS
+            and _platform.HAS_OPENAT and _platform.HAS_DIR_FD)
+
+
+def job_paths(project, invalid=None, *, identities=None):
     """Enumerate under check-jobs.lock; unsafe paths and I/O always refuse.
 
     A non-producer name is classified only after safely opening its ordinary
     job leaf. The digest is domain-separated and never a usable job identity.
-    Callers without a diagnostic sink retain strict refusal.
+    Callers without a diagnostic sink retain strict refusal. Optional POSIX
+    identities reuse the path checks, with stable parents, for one runner pass.
     """
+    reuse = identities is not None and _job_read_reuse()
     base = project.root / 'check-jobs'
     if not _present(project.root, 'check-jobs'):
         return []
@@ -164,10 +179,13 @@ def job_paths(project, invalid=None):
             raise Denied('Unsafe acceptance producer directory')
         if stat.S_ISDIR(info.st_mode):
             relative = f'check-jobs/{child.name}/job.json'
-            if not _present(project.root, relative):
+            info = _present(project.root, relative, stable=reuse)
+            if not info:
                 continue
             if _digest(child.name):
                 paths.append(child / 'job.json')
+                if reuse and stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    identities[child.name] = _file_identity(info)
             else:
                 # Even oversized leaves must first pass safe_read's path/link
                 # checks. Only its size disposition is content-only.
@@ -268,7 +286,11 @@ def _directory(root, relative):
     return path
 
 
-def _present(root, relative):
+def _present(root, relative, *, stable=False):
+    # Identity-only reuse requires unchanged, non-aliased parents around lstat.
+    parents = [(root, root.lstat())] if stable else []
+    if stable and not stat.S_ISDIR(parents[0][1].st_mode):
+        raise Denied('Unsafe acceptance evidence path')
     path = root
     parts = Path(relative).parts
     for index, part in enumerate(parts):
@@ -279,7 +301,12 @@ def _present(root, relative):
             return False
         if stat.S_ISLNK(info.st_mode) or (index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode)):
             raise Denied('Unsafe acceptance evidence path')
-    return True
+        if stable and index < len(parts) - 1:
+            parents.append((path, info))
+    for parent, before in reversed(parents):
+        if _file_identity(before) != _file_identity(parent.lstat()):
+            raise Denied('Acceptance evidence path changed while inspecting')
+    return info
 
 
 def _read(root, relative, maximum=MAX_BYTES):
@@ -628,7 +655,7 @@ def recover_run(project, run_id):
     return None
 
 
-def recover_job(project, job_id):
+def recover_job(project, job_id, *, jobs=None):
     # Snapshot the producer under its own lock, then release BEFORE retaining.
     if not _digest(job_id):
         raise Denied('Invalid acceptance job ID')
@@ -636,7 +663,8 @@ def recover_job(project, job_id):
         if not _present(project.root, f'check-jobs/{job_id}/job.json'):
             return None  # Cache eviction is not loss of durable proof.
         try:
-            job = read_job(project, job_id)
+            identity = [] if jobs is not None and _job_read_reuse() else None
+            job = read_job(project, job_id, identity=identity)
         except LimitExceeded:
             return None
         try:
@@ -652,6 +680,8 @@ def recover_job(project, job_id):
             write_json(project.root / f'check-jobs/{job_id}/job.json', job)
             return None
         if existing is not None or value is None:
+            if identity is not None:
+                jobs[job_id] = (identity[0], job_candidate(job))
             return existing
     receipt_id = _retain(project.root, value)
     # Separate acquisitions: never acceptance.lock -> check-jobs.lock while
@@ -667,7 +697,7 @@ def recover_job(project, job_id):
     return receipt_id
 
 
-def recover_producers(project, *, include_runs=False):
+def recover_producers(project, *, include_runs=False, jobs=None):
     """Recovery trigger for runner/backup; terminal producers are idempotent.
 
     Old/unbound results have no scope marker and cannot acquire one in recovery.
@@ -676,7 +706,10 @@ def recover_producers(project, *, include_runs=False):
     Runner recovery scans only the bounded job cache. Backup maintenance can
     also retry retained run records and unindexed objects. Durable acceptance
     projection stays indexed; discover() separately inspects the cache without
-    retaining results or scanning historical runs.
+    retaining results or scanning historical runs. The optional runner cache
+    holds only scheduling projections of validated, safely-opened jobs that
+    recovery did not rewrite; consumers must match a fresh job_paths identity.
+    Selected jobs must be re-read under the owner/runner locks before use.
     """
     if include_runs:
         recover(project.root)
@@ -685,7 +718,7 @@ def recover_producers(project, *, include_runs=False):
         paths = job_paths(project, invalid)
     for path in paths:
         try:
-            recover_job(project, path.parent.name)
+            recover_job(project, path.parent.name, jobs=jobs)
         except InvalidProducer as exc:
             invalid[exc.job_id] = exc.code
     if include_runs:

@@ -1247,7 +1247,8 @@ def _run_one(project, stop, sandbox_factory, invalid):
     from . import acceptance
     # Never while holding check-jobs.lock. Keep ALL invalid IDs out of the
     # scheduler's reads/sort, even when only 32 diagnostics can be displayed.
-    invalid.update(acceptance.recover_producers(project))
+    jobs = {}  # One invocation only; recovery writes deliberately stay uncached.
+    invalid.update(acceptance.recover_producers(project, jobs=jobs))
     from .workspace_cache import maintain
     maintain(project)  # No owner/cache/slot exclusion has been acquired yet.
     control = project.control()
@@ -1258,11 +1259,14 @@ def _run_one(project, stop, sandbox_factory, invalid):
     blocked = False
     candidates = []
     with lock(project.root / 'locks/check-jobs.lock'):
-        for path in acceptance.job_paths(project, invalid):
+        identities = {}
+        for path in acceptance.job_paths(project, invalid, identities=identities):
             if path.parent.name in invalid:
                 continue
             try:
-                job = acceptance.read_job(project, path.parent.name)
+                cached = jobs.get(path.parent.name)
+                job = (cached[1] if cached is not None and cached[0] == identities.get(path.parent.name)
+                       else acceptance.job_candidate(acceptance.read_job(project, path.parent.name)))
             except acceptance.InvalidProducer as exc:
                 invalid[exc.job_id] = exc.code
                 continue
@@ -1275,9 +1279,6 @@ def _run_one(project, stop, sandbox_factory, invalid):
         with contextlib.ExitStack() as stack:
             try:
                 stack.enter_context(lock(path.parent / 'owner.lock', blocking=False))
-                if ((job.get('kind') == 'verify' and project.config.sandbox.check_cache_paths)
-                        or job.get('scratch_paths')):
-                    stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
             except Busy:
                 blocked = True
                 continue
@@ -1290,6 +1291,13 @@ def _run_one(project, stop, sandbox_factory, invalid):
                 invalid[exc.job_id] = exc.code
                 continue
             if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
+                continue
+            try:
+                if ((job.get('kind') == 'verify' and project.config.sandbox.check_cache_paths)
+                        or job.get('scratch_paths')):
+                    stack.enter_context(lock(project.root / 'locks/check-cache.lock', blocking=False))
+            except Busy:
+                blocked = True
                 continue
             for slot in range(project.config.limits.parallel_checks):
                 fault = project.config.data / 'check-slots' / f'{slot}.fault.json'

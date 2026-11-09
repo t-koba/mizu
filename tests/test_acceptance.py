@@ -281,7 +281,9 @@ class AcceptanceTests(Fixture):
         value['acceptance_scope'] = acceptance.scope(self.project)
         value['acknowledged'] = True
         write_json(path / 'job.json', value)  # Earlier finalizer's pending producer.
-        self.assertIsNone(acceptance.recover_job(self.project, job['id']))
+        jobs = {}
+        self.assertIsNone(acceptance.recover_job(self.project, job['id'], jobs=jobs))
+        self.assertNotIn(job['id'], jobs)  # Recovery rewrote the refusal.
         self.assert_size_refusal(job)
         self.assertEqual((path / 'result.json').read_bytes(), raw)
         disposed = (path / 'job.json').read_bytes()
@@ -352,7 +354,9 @@ class AcceptanceTests(Fixture):
         self.assertEqual(len(observed), 1)
         # Recover directly from producer, then remove only the index to model
         # the durable-object/index crash boundary and recover from the object.
-        receipt_id = acceptance.recover_job(self.project, job['id'])
+        jobs = {}
+        receipt_id = acceptance.recover_job(self.project, job['id'], jobs=jobs)
+        self.assertNotIn(job['id'], jobs)  # Proof acknowledgement rewrote the job.
         index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
         index.unlink()
         acceptance.recover(self.project.root)
@@ -871,17 +875,154 @@ class AcceptanceTests(Fixture):
         self.project.set_control(paused=True)
         self.assertEqual(self.run_job(), {'status': 'deferred', 'invalid_producers': result['invalid_producers']})
 
+    def terminal_experiment(self):
+        job = {'id': 'e' * 64, 'kind': 'experiment', 'status': 'completed'}
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        write_json(path, job)
+        return job, path
+
+    def test_recovery_cache_retains_only_scheduling_fields_and_identity(self):
+        job, path = self.terminal_experiment()
+        for fields in ({}, {'created_at': '2026-01-01T00:00:00+00:00',
+                            'shared_job': 'a' * 64}):
+            with self.subTest(fields=fields):
+                value = {**job, **fields, 'commands': ['x' * 8192],
+                         'environment': 'b' * 64, 'outputs': ['y' * 8192],
+                         'arbitrary': {'nested': 'z' * 8192}}
+                write_json(path, value)
+                expected = {'created_at': fields.get('created_at', ''),
+                            'shared_job': fields.get('shared_job', ''),
+                            'status': 'completed'}
+                self.assertEqual(acceptance.job_candidate(value), expected)
+                jobs = {}
+                self.assertEqual(acceptance.recover_producers(self.project, jobs=jobs), {})
+                if acceptance._job_read_reuse():
+                    identities = {}
+                    with lock(self.project.root / 'locks/check-jobs.lock'):
+                        acceptance.job_paths(self.project, identities=identities)
+                    self.assertEqual(jobs, {job['id']: (identities[job['id']], expected)})
+                else:
+                    self.assertEqual(jobs, {})
+
+    def test_runner_reuses_only_this_invocations_validated_terminal_read(self):
+        self.terminal_experiment()
+        reads_per_pass = 1 if acceptance._job_read_reuse() else 2
+        with patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as parsed, \
+                patch('mizu.acceptance.safe_read_info', wraps=acceptance.safe_read_info) as read:
+            for invocation in (1, 2):
+                self.assertEqual(self.run_job(), {'status': 'idle'})
+                self.assertEqual(parsed.call_count, invocation * reads_per_pass)
+                self.assertEqual(read.call_count, invocation * reads_per_pass)
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_rereads_changed_status_after_recovery(self):
+        job, path = self.terminal_experiment()
+        def change(project):
+            write_json(path, {**job, 'status': 'running'})
+        with patch('mizu.workspace_cache.maintain', side_effect=change), \
+                patch('mizu.check_jobs.cleanup') as cleanup, \
+                patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+            self.assertEqual(self.run_job()['status'], 'interrupted')
+        self.assertEqual(read.call_count, 3)  # Recovery, enumeration, owner-locked read.
+        cleanup.assert_called_once()
+        self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'interrupted')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_does_not_reuse_corruption_with_restored_size_and_mtime(self):
+        job, path = self.terminal_experiment()
+        before = path.stat()
+        def corrupt(project):
+            path.write_bytes(b'x' * before.st_size)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with patch('mizu.workspace_cache.maintain', side_effect=corrupt), \
+                patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+            result = self.run_job()
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(result['invalid_producers']['entries'],
+                         [{'job_id': job['id'], 'code': 'job_json'}])
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_bypasses_reuse_without_pinned_posix_reads(self):
+        self.terminal_experiment()
+        for capability, value in (('IS_POSIX', False), ('IS_WINDOWS', True),
+                                  ('HAS_OPENAT', False), ('HAS_DIR_FD', False)):
+            with self.subTest(capability=capability), \
+                    patch.object(acceptance._platform, capability, value), \
+                    patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+                self.assertEqual(self.run_job(), {'status': 'idle'})
+                self.assertEqual(read.call_count, 2)
+
+    def test_runner_second_scan_discovers_new_deleted_and_nonproducer_paths(self):
+        job, path = self.terminal_experiment()
+        def change(project):
+            path.unlink()
+            write_json(path.parent.with_name('f' * 64) / 'job.json', {**job, 'id': 'f' * 64})
+            write_json(path.parent.with_name('unexpected') / 'job.json', {})
+        with patch('mizu.workspace_cache.maintain', side_effect=change), \
+                patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+            result = self.run_job()
+        self.assertEqual([call.args[1] for call in read.call_args_list], [job['id'], 'f' * 64])
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(result['invalid_producers']['entries'][0]['code'], 'non_producer_entry')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_second_scan_refuses_unsafe_replacements(self):
+        if not acceptance._job_read_reuse():
+            self.skipTest('POSIX identity reuse only')
+        for replacement in ('symlink', 'hardlink', 'fifo', 'directory'):
+            with self.subTest(replacement=replacement):
+                job, path = self.terminal_experiment()
+                other = self.root / 'original-job.json'
+                def change(project):
+                    path.rename(other)
+                    if replacement == 'symlink':
+                        path.symlink_to(other)
+                    elif replacement == 'hardlink':
+                        os.link(other, path)
+                    elif replacement == 'fifo':
+                        os.mkfifo(path)
+                    else:
+                        path.mkdir()
+                with patch('mizu.workspace_cache.maintain', side_effect=change):
+                    with self.assertRaises(Denied):
+                        self.run_job()
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    path.unlink()
+                other.unlink()
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_job_paths_identity_refuses_parent_swap_even_when_restored(self):
+        from pathlib import Path
+        if not acceptance._job_read_reuse():
+            self.skipTest('POSIX identity reuse only')
+        _, path = self.terminal_experiment()
+        original = Path.lstat
+        def swap_during_leaf_stat(leaf):
+            info = original(leaf)
+            if leaf == path:
+                moved = path.parent.with_name('moved')
+                path.parent.rename(moved)
+                moved.rename(path.parent)
+            return info
+        with lock(self.project.root / 'locks/check-jobs.lock'), \
+                patch.object(Path, 'lstat', swap_during_leaf_stat):
+            with self.assertRaisesRegex(Denied, 'path changed'):
+                acceptance.job_paths(self.project, identities={})
+
     def test_post_finalization_content_failure_is_reported_without_mutation(self):
         ctx = self.context()
         job = check_jobs.submit(ctx)
         original = acceptance.recover_job
         before = {}
-        def corrupt_then_recover(project, job_id):
+        def corrupt_then_recover(project, job_id, **kwargs):
             path = check_jobs.root(project) / job_id
             if (path / 'result.json').exists():
                 (path / 'result.json').write_bytes(b'not json')
                 before.update({name: (path / name).read_bytes() for name in ('job.json', 'result.json')})
-            return original(project, job_id)
+            return original(project, job_id, **kwargs)
         with patch('mizu.acceptance.recover_job', side_effect=corrupt_then_recover):
             result = self.run_job()
         self.assertEqual(result['id'], job['id'])
@@ -941,7 +1082,7 @@ class AcceptanceTests(Fixture):
         for error in (Denied('unsafe read'), OSError('systemic read failure'),
                       RecursionError('read failure outside JSON parsing')):
             with self.subTest(error=type(error).__name__):
-                with patch('mizu.acceptance.safe_read', side_effect=error):
+                with patch('mizu.acceptance.safe_read_info', side_effect=error):
                     with self.assertRaises(type(error)) as caught:
                         self.run_job()
                     self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
