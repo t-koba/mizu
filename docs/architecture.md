@@ -957,10 +957,19 @@ at one exact published commit instead. The target is a completed publication
 receipt, never a branch head, and the product verifies that every run the
 provider reports names that commit, so a run at another commit is refused
 rather than accepted as close enough. The request and the returned run
-identities are recorded durably, a dispatch marker is written before the
-provider is called, and an unresolved dispatch is never retried blindly: a
-second request would spend a second run for the same commit, so the caller
-re-observes the CI status instead. A request may cover work items: each
+identities are recorded durably, and a dispatch marker is written before the
+provider is called. The adapter request carries only the SHA and workflow
+set; returned run IDs are stored under the durable request locally but are not
+provider-attested as its outcome. An exact-SHA status row may prove a check
+result but cannot resolve an uncertain dispatch, identify which request created
+a run, or prove that no late run can appear. An
+unresolved marker remains non-retriable, and an empty status observation is
+not evidence of ``not-dispatched``. Any future reconciliation must use a
+provider-independent adapter contract that binds run identity to the exact
+request and provides authoritative terminal no-dispatch evidence after a
+documented bounded condition that rules out late creation; adapters unable
+to provide those guarantees cannot offer reconciliation. A request may cover
+work items: each
 covered item names the revision it is covered at and the checks whose result
 settles it, and the product registers a receipt-pinned CI wait on it, so the
 item waits for the request's result and its holder keeps the completion

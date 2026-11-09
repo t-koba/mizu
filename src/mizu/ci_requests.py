@@ -2,10 +2,17 @@
 
 A CI request asks the provider for one run per workflow at an exact
 published commit. The record is create-only: a dispatch marker is written
-before the provider is called and the outcome follows it. An unresolved
-dispatch is never retried blindly, because a second request would spend a
-second run for the same commit; the caller re-observes the CI status
-instead.
+before the provider is called and the outcome follows it. A timed-out
+dispatch remains unresolved and is never retried blindly. The adapter
+request carries only the SHA and workflow set; returned run IDs are stored
+under the durable request locally but are not provider-attested as its outcome.
+An exact-SHA status row may prove a check result but cannot resolve
+the marker, and an empty status observation does not prove that dispatch
+never occurred or that no late run can appear. Future reconciliation requires
+a provider-independent adapter contract binding run identity to the exact
+request and authoritative terminal no-dispatch evidence after a documented
+bounded condition that rules out late creation. Until an adapter can provide
+those guarantees, unresolved dispatches remain unresolved.
 
 Records live in the project's evidence tree, outside the workspace.
 """

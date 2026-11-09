@@ -1890,10 +1890,18 @@ def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: Fals
     external-untrusted. Evidence: the returned runs name workflow, run id,
     head sha and url. Failure: ``Denied`` without the configured grant, on
     a bad sha or workflow list, on a malformed response, or when a
-    reported run names another commit. A refused call implies nothing
-    about the remote queue: reconcile by re-observing the CI status, never
-    by assuming a run started.
-    Optional ``before_invoke`` has the validation/dispatch contract of ``invoke``.
+    reported run names another commit. A timed-out call after the durable
+    dispatch marker remains unresolved. This adapter request carries only
+    the SHA and workflow set; its returned run IDs are not attested as the
+    outcome of this exact durable request. A status row on a SHA may prove a
+    check result, but cannot reconcile request identity or prove that no late
+    run can appear. The marker is not retried and no
+    ``not-dispatched`` result is inferred. Future reconciliation requires a
+    provider-independent adapter contract that binds run identity to the
+    exact request and can provide authoritative terminal no-dispatch evidence
+    after a documented bounded condition that rules out late creation; an
+    adapter unable to provide those guarantees cannot reconcile. Optional
+    ``before_invoke`` has the validation/dispatch contract of ``invoke``.
     """
     if not isinstance(settings, dict) or settings.get("request_grant") is not True:
         raise Denied("CI requests are not granted in VCS configuration")
