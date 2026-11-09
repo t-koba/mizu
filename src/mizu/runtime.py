@@ -2586,29 +2586,28 @@ class Engine:
             safe_point.guard(project.snapshots, role_name)
         return elapsed
 
-    def _delegate_role(self, parent, role_name):
+    def _delegate_role(self, parent_role, role_name):
         """Shared post-delegation role: caller tree, child grants, no owned jobs."""
         role_name = role_name or getattr(self.config, "delegate_role", "")
         if not role_name:
             raise Denied("Delegation needs an explicit role or a configured delegate_role")
-        if role_name == parent.role.name:
+        if role_name == parent_role.name:
             raise Denied("A role cannot delegate to itself")
         if role_name not in self.config.roles:
             raise ConfigError(f"Delegation role is not configured: {role_name}")
         role = self.config.roles[role_name]
         check_delegate_role(role_name, role)
         return dataclasses.replace(
-            role, workspace=parent.role.workspace,
+            role, workspace=parent_role.workspace,
             capabilities=tuple(c for c in dict.fromkeys([*role.capabilities, "finish"])
                                if c not in DELEGATE_FORBIDDEN and c != "check_job"))
 
-    def _delegate_profile(self, parent, role):
+    def _delegate_profile(self, project, role, snapshot):
         if role.selector:
             # Same trusted, config-only preview as synchronous delegation;
             # never consume routing or guess a profile when selection waits.
             from .classification import prepare
-            decision = prepare(self, parent.project, role,
-                               parent.project.snapshots.get(), None, preview=True)
+            decision = prepare(self, project, role, snapshot, None, preview=True)
             profile = decision.get("profile") or ""
             if not profile:
                 raise Denied("Delegation selector has no selectable profile: "
@@ -2617,23 +2616,58 @@ class Engine:
         return role
 
     def _delegation_request(self, parent, request):
-        """Resolve under the admitted lease; retain only the final digest."""
+        return self._resolve_delegation_request(
+            parent.project, parent.role.name, request, parent=parent)
+
+    def _resolve_delegation_request(self, project, owner, request, *, parent=None):
+        """Read-only authority resolution, not permission to claim or launch.
+
+        Recovery supplies the trusted job owner and immutable resolved request;
+        legacy/unbound requests refuse. Admission supplies its live parent and
+        an unresolved request, and must reproduce the same accounting authority.
+        No Context, lease, current snapshot pointer or saved hash is recovery
+        authority. Only the final recomputed request leaves this resolver.
+        """
         from .config import role_policy_text
+        from .delegation_jobs import _request
         from .engine_config import (adapter_digest, child_authority_digest,
                                     effective, local_settings_digest)
-        if set(request) != {"role", "task", "profile", "source_snapshot"}:
-            raise Denied("Expected an unresolved delegation request")
-        role = self._delegate_profile(parent, self._delegate_role(parent, request["role"]))
+        _request(request)
+        bound = "authority_digest" in request
+        if bound != (parent is None):
+            raise Denied("Expected a resolved recovery or unresolved admission request")
+        if owner not in project.roles or owner not in self.config.roles:
+            raise Denied("Delegation owner is not enabled")
+        spend_role = self.config.roles[owner]
+        if spend_role.workspace != "write":
+            raise Denied("Delegation owner requires the project workspace")
+        if "delegate" not in spend_role.capabilities:
+            raise Denied("Delegation owner lacks the delegation grant")
+        snapshot = project.snapshots.get(request["source_snapshot"])
+        role = self._delegate_profile(
+            project, self._delegate_role(spend_role, request["role"]), snapshot)
         if request["profile"] is not None and request["profile"] != role.profile:
             raise Denied("Delegation profile differs from resolved role")
         settings = effective(self.config, role, role.profile)
-        authority = child_authority_digest(
-            self.config, role, spend_role=parent.spend_role or parent.role,
-            settings=settings, policy=role_policy_text(role), goal_digest=parent.goal_digest,
-            workspace=parent.workspace, adapter_identity=adapter_digest(settings["engine"]),
-            local_settings=local_settings_digest(self.config, settings["engine"]))
-        return {**request, "role": role.name, "profile": role.profile,
-                "authority_digest": authority}
+        policy = role_policy_text(role)
+        adapter = adapter_digest(settings["engine"])
+        local = local_settings_digest(self.config, settings["engine"])
+
+        def authority(spend, goal, workspace):
+            return child_authority_digest(
+                self.config, role, spend_role=spend, settings=settings, policy=policy,
+                goal_digest=goal, workspace=workspace, adapter_identity=adapter,
+                local_settings=local)
+
+        resolved = {**request, "role": role.name, "profile": role.profile,
+                    "authority_digest": authority(spend_role, snapshot["goal_digest"], project.workspace)}
+        if parent is not None:
+            if resolved["authority_digest"] != authority(
+                    parent.spend_role or parent.role, parent.goal_digest, parent.workspace):
+                raise Denied("Parent authority cannot be reconstructed from owner and source")
+        elif resolved != request:
+            raise Denied("Delegation authority changed")
+        return resolved
 
     def _reserve_delegation(self, parent: Context, key: str, request: dict):
         """Trusted admitted-parent reservation groundwork only; never launch.
@@ -4019,7 +4053,7 @@ class Engine:
         # to the caller. Spend counts against the caller's unit through the
         # shared counters; nested delegation and consultation stay disabled
         # so no spend escapes the unit.
-        role = self._delegate_role(parent, args.get("role"))
+        role = self._delegate_role(parent.role, args.get("role"))
         role_name = role.name
         task = args.get("task") or ""
         if not task.strip():
@@ -4047,7 +4081,10 @@ class Engine:
             raise Denied("The delegate role is active; delegation needs the role free") from exc
         try:
             mkdir(run_dir)
-            role = self._delegate_profile(parent, role)
+            # Synchronous routing still uses the published current snapshot,
+            # exactly as before the queued-reservation path existed; the new
+            # unpublished capture stays the child's input snapshot only.
+            role = self._delegate_profile(parent.project, role, parent.project.snapshots.get())
             profile = role.profile
             write_json(run_dir / "started.json", {"run": run_dir.name,
                        "parent_run": parent.run_dir.name, "delegation": True,

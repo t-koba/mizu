@@ -119,7 +119,7 @@ not_yet_proven = [
 ]
 
 [child_authority]
-reservation_handoff = "Groundwork only: Engine.run mints a project/role/Engine/Context-scoped lease under write admission, revokes it via the run ExitStack before lock release, and reuses that lock for one exact start or retry. Engine._reserve_delegation refreshes the minimum trusted store projection under the parent dispatch mutex even on uncertain acknowledgement; unreadable refresh denies all calls. The shared synchronous role/profile resolver plus full effective settings/resources, composed policy, pinned goal/workspace, adapter/local-settings digests and caller shared-spend authority feed child_authority_digest. The resolved profile and hash are atomic immutable request fields; retries re-resolve and conflict on drift. The parent gate omits task/token/digest. This binds configuration only and launches nothing."
+reservation_handoff = "Groundwork only: Engine.run mints a project/role/Engine/Context-scoped lease under write admission, revokes it via the run ExitStack before lock release, and reuses that lock for one exact start or retry. Engine._reserve_delegation refreshes the minimum trusted store projection under the parent dispatch mutex even on uncertain acknowledgement; unreadable refresh denies all calls. The shared read-only resolver binds the resolved profile and child_authority_digest atomically with full effective settings/resources, composed policy, pinned goal/workspace, adapter/local-settings digests and caller shared-spend authority. Queued admission and recovery use the exact retained source manifest; recovery needs only trusted owner plus immutable digest-bearing request, re-resolves current authority, and refuses legacy/drift without store mutation. The owner must retain its delegate grant. Synchronous delegation keeps its prior published-current selector input. The parent gate omits task/token/digest. This binds configuration only and launches nothing."
 required_bindings = [
   "exact source snapshot",
   "effective role grants and tool limits",
@@ -127,8 +127,8 @@ required_bindings = [
   "relevant policy/configuration inputs",
   "child run identity and writable container identities",
 ]
-mismatch_action = "Refuse launch: runner_bind and runner_started require an explicitly supplied freshly resolved matching authority_digest, not a copied saved hash. Missing/mismatched authority refuses without clearing reservations; never infer equivalence from role/profile names."
-legacy_requests = "Schema v4 preserves old four-field requests and tombstones for inspection/exact retry/recovery, without reset or upgrade; unbound old jobs cannot gain launch bindings or claims. Existing resource identities/intents remain recovery evidence. Earlier schema versions remain refused without modification."
+mismatch_action = "Refuse launch: the owner must retain its delegate grant and runner_bind/runner_started require an explicitly supplied freshly resolved matching authority_digest, not a copied saved hash. Missing/mismatched authority refuses without clearing reservations; never infer equivalence from role/profile names."
+legacy_requests = "Schema v4 preserves old four-field requests and tombstones for inspection/exact retry and cleanup recovery, without reset or upgrade; legacy requests cannot be authority-resolved or gain launch bindings/claims. Existing resource identities/intents remain cleanup-recovery evidence. Earlier schema versions remain refused without modification."
 remaining_authority_gaps = [
   "Mutable executable/PATH, installed SDK/runtime and ambient environment/home configuration.",
   "Agent-directory content beyond local models.json; credentials and remote provider/MCP grants.",

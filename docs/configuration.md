@@ -2081,12 +2081,22 @@ releasing admission. A missing, foreign, stale or unheld lease is denied. One
 lease permits only one exact key/resolved request (including the parent's source
 snapshot). The shared synchronous-delegation resolver inherits caller workspace,
 ensures `finish`, removes `check_job` and retains the forbidden-grant gate.
-Selectors use trusted config-only preview, never a guessed profile. The optional
-requested profile must match the resolved selection. Full effective settings and
+Selectors use trusted config-only preview with the exact pinned source manifest
+for the queued path (synchronous delegation keeps its prior published-current
+input), never a guessed profile. The optional requested profile
+must match the resolved selection. Full effective settings and
 resources, composed policy, pinned goal, actual workspace, adapter/local-settings
 digests and caller shared-spend authority feed `child_authority_digest`.
 The resolved profile and final 64-hex `authority_digest` join the immutable job
 request before atomic reservation commit; no configuration projection is stored.
+The private read-only `Engine._resolve_delegation_request` also works after parent
+exit: trusted current config, job owner and immutable digest-bearing request,
+exact retained source manifest, and project workspace reconstruct the authority.
+It compares the whole recomputed request; missing/legacy/changed inputs refuse
+without store mutation or launch. The owner must retain the `delegate` grant;
+a missing or revoked grant refuses before any store mutation, for both initial
+reservation and recovery. Admission uses the same path and refuses if its
+actual goal/workspace/accounting authority cannot be reconstructed this way.
 Each retry re-resolves authority: an exact retry is stable, including after
 uncertain acknowledgement; changed/missing inputs refuse without clearing holds.
 The store commits the queued reservation while that lock is still held. The

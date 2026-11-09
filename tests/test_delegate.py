@@ -733,6 +733,65 @@ class DelegateTests(Fixture):
         self.assertEqual(result["status"], "completed")
         self.assertIn("via primary", result["finish"]["summary"])
 
+    def test_synchronous_delegate_routes_from_current_snapshot_not_capture(self):
+        from mizu.selection import validate_selectors
+        config = _configured(self)
+        spec = {"retry_seconds": 30, "rules": [
+            {"when": {"path": "recommendation.profile", "op": "eq", "value": "alternate"},
+             "candidates": [{"profile": "alternate"}]},
+            {"candidates": [{"profile": "primary"}]}]}
+        validate_selectors({"dynamic": spec}, config.profiles, self.file.parent)
+        roles = dict(config.roles)
+        helper = roles["helper"]
+        roles["helper"] = dataclasses.replace(helper, profile="", selector="dynamic")
+        config = dataclasses.replace(config, roles=roles, selectors={"dynamic": spec})
+        # Bind a recommendation to the published current snapshot. The
+        # unpublished delegate capture gets a fresh ID, so only the current
+        # pointer still matches; the capture reads as stale.
+        from mizu import routing as _routing
+        from mizu.fs import digest as _digest
+        current_before = self.project.snapshots.get()
+        goal_digest = _digest(self.project.goal.encode())
+        _routing.record(self.project, "helper", {"next_profile": "alternate"},
+                        current_before, goal_digest, "test-routing-run")
+        from mizu.classification import prepare as real_prepare
+        seen = {}
+
+        def callback(ctx, prompt, profile):
+            if ctx.role.name == "worker":
+                current = self.project.snapshots.get()
+                self.assertEqual(current["id"], current_before["id"])
+                with patch("mizu.classification.prepare", wraps=real_prepare) as preview:
+                    response = ctx.handle("delegate", {"role": "helper", "task": "t"})
+                    # Synchronous routing uses the published current snapshot.
+                    self.assertEqual(preview.call_args.args[3], current)
+                    self.assertTrue(preview.call_args.kwargs["preview"])
+                    seen["preview_id"] = preview.call_args.args[3]["id"]
+                # The capture ID is stale for routing, so only the current
+                # pointer can still resolve the alternate recommendation.
+                self.assertEqual(response["profile"], "alternate")
+                seen["response"] = response
+                # The child still runs on the unpublished capture, not the current pointer.
+                self.assertNotEqual(response["snapshot"], current["id"])
+                capture = self.project.snapshots.get(response["snapshot"])
+                self.assertEqual(capture.get("state"), ctx.snapshot.get("state"))
+                ctx.handle("finish", {"outcome": "continue", "summary": "via " + response["profile"],
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+            else:
+                # The child executes on the capture even though routing saw current.
+                seen["child_snapshot"] = ctx.snapshot["id"]
+                seen["child_profile"] = ctx.role.profile
+                self.assertEqual(ctx.role.profile, "alternate")
+                ctx.handle("finish", {"outcome": "continue", "summary": "selected child",
+                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+
+        result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("via alternate", result["finish"]["summary"])
+        self.assertEqual(seen["response"]["snapshot"], seen["child_snapshot"])
+        self.assertEqual(seen["preview_id"], current_before["id"])
+        self.assertNotEqual(seen["child_snapshot"], current_before["id"])
+
     def test_config_loads_delegate_capability_and_role(self):
         from mizu.config import load
         from mizu.errors import ConfigError

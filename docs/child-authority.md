@@ -12,11 +12,31 @@ Under the parent's dispatch mutex and original admission-held workspace lease,
 `Engine._reserve_delegation` resolves the child's own role, inherits the caller's
 workspace mode, ensures `finish` and removes `check_job`. The existing forbidden
 delegation-grant configuration gate still refuses over-broad roles. Selectors use
-the same trusted config-only preview as synchronous delegation, without consuming
-routing; waiting, unknown profiles or unreadable effective inputs fail closed.
+the same trusted config-only preview mechanism as synchronous delegation,
+without consuming routing; waiting, unknown profiles or
+unreadable effective inputs fail closed. The queued path resolves against
+the exact pinned source manifest, while synchronous delegation keeps its
+prior input, the published current snapshot; the unpublished capture stays
+the child's input snapshot only.
 An optional requested profile is an assertion, not an override: it must match the
-resolved role/selector. The pinned parent goal and actual child workspace are
-used, along with the caller's shared-spend authority and the inputs below.
+resolved role/selector. Admission and recovery share the private, read-only
+`Engine._resolve_delegation_request(project, owner, request)` path. Recovery takes
+the trusted job owner and immutable **digest-bearing resolved** request, not a
+Context or lease. It loads and validates the exact `source_snapshot` manifest,
+resolves the child role/profile and current effective inputs, and compares the
+complete recomputed request with the saved one. It never uses the current
+snapshot pointer or treats the saved hash as proof. Legacy requests, missing or
+changed inputs refuse without modifying the store or starting a driver/runner.
+Selector state or config drift that changes resolution also refuses.
+
+The goal comes from that manifest, workspace from the project, and accounting
+role from the owner's current trusted configuration. The owner must retain the
+`delegate` grant; a missing or revoked grant refuses before any store mutation,
+for both initial reservation and recovery. Admission additionally
+checks that its actual parent goal/workspace/shared-spend authority reproduces
+this binding; an unreconstructible invocation refuses before reservation. No raw
+projection or extra schema field is retained. Dynamic spend counters are not
+recovery authority and are not reconstructed by this configuration resolver.
 
 The private schema-v4 request is `{role, task, profile, source_snapshot,
 authority_digest}`. The resolved profile and digest are part of the exact request
@@ -36,9 +56,10 @@ retry the exact retained request under workspace exclusion; never reset the stor
 Existing v4 requests without the field and terminal tombstones are preserved,
 readable and exactly retryable, not rewritten or upgraded. `runner_bind` and
 `runner_started` refuse missing or mismatched authority, including legacy requests
-and retries of existing resource bindings. A future trusted host must supply a
-freshly resolved matching `authority_digest`, **not copy the saved hash**; the
-store itself does no resolution or launch. Legacy saved resource identities and
+and retries of existing resource bindings. A future runner integration must use
+the shared resolver to supply a freshly resolved matching `authority_digest`,
+**not copy the saved hash**; the store itself does no resolution or launch.
+Legacy saved resource identities and
 provisioning intents remain available for inspection/recovery; unbound legacy
 jobs cannot acquire new launch bindings, and uncertain cleanup retains the hold.
 Earlier ledger versions remain refused without modification, as before. Neither

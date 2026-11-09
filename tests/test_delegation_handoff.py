@@ -23,9 +23,12 @@ class EndParent(Exception):
 class DelegationHandoffTests(Fixture):
     def setUp(self):
         super().setUp()
+        worker = dataclasses.replace(self.config.roles['worker'],
+                                     capabilities=(*self.config.roles['worker'].capabilities, 'delegate'))
         helper = dataclasses.replace(self.config.roles['searcher'], name='helper',
                                      capabilities=('files', 'read', 'check_job'))
-        self.config = dataclasses.replace(self.config, roles={**self.config.roles, 'helper': helper})
+        self.config = dataclasses.replace(
+            self.config, roles={**self.config.roles, 'worker': worker, 'helper': helper})
         self.engine = Engine(self.config)
         self.workspace_lock = self.project.root / 'locks' / 'workspace.lock'
         self.request = {'role': 'helper', 'task': 'Implement the focused slice',
@@ -111,6 +114,138 @@ class DelegationHandoffTests(Fixture):
                 self.assertNotIn(self.request['task'], str(public))
                 self.assertNotIn(saved['token'], str(public))
         self.run_parent(work)
+
+    def recover(self, engine, saved):
+        # Recovery must be read-only, including when called by a fresh host.
+        before = {p.relative_to(self.project.root): p.read_bytes()
+                  for p in self.project.root.rglob('*') if p.is_file()}
+        with contextlib.ExitStack() as stack:
+            for target, method in ((engine, 'resolve'), (engine, 'delegate'), (engine, '_execute'),
+                                   (jobs.DelegationJobs, 'start'), (jobs.DelegationJobs, 'runner_bind'),
+                                   (jobs.DelegationJobs, 'runner_started')):
+                stack.enter_context(patch.object(target, method, side_effect=AssertionError('launch/write')))
+            try:
+                return engine._resolve_delegation_request(self.project, saved['owner'], saved['request'])
+            finally:
+                self.assertEqual(before, {p.relative_to(self.project.root): p.read_bytes()
+                                          for p in self.project.root.rglob('*') if p.is_file()})
+
+    def test_recovery_after_parent_exit_uses_exact_pinned_selector_snapshot(self):
+        from mizu.classification import prepare
+        from mizu.selection import validate_selectors
+        spec = {'retry_seconds': 30, 'rules': [
+            {'when': {'path': 'task.state', 'op': 'contains', 'value': 'pinned marker'},
+             'candidates': [{'profile': 'alternate'}]},
+            {'candidates': [{'profile': 'primary'}]}]}
+        validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
+        helper = dataclasses.replace(self.config.roles['helper'], profile='', selector='dynamic')
+        self.config = dataclasses.replace(self.config, roles={**self.config.roles, 'helper': helper},
+                                          selectors={'dynamic': spec})
+        self.engine.config = self.config
+        snapshots = self.project.snapshots
+        def publish(state):
+            snap = snapshots.create(snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+                                    state=state, run=None, outcome='wait', summary='Selector fixture')
+            snapshots.publish(snap)
+            return snap
+        pinned = publish('pinned marker')
+        self.request['source_snapshot'] = pinned['id']
+        def work(ctx):
+            newer = publish('different current state')
+            self.assertNotEqual(newer['id'], ctx.snapshot['id'])
+            with patch('mizu.classification.prepare', wraps=prepare) as preview:
+                self.reserve(ctx)
+                self.assertEqual(preview.call_args.args[3], pinned)
+        self.run_parent(work)
+        del self.parent  # No parent Context or active admission lease is needed.
+        saved = jobs.DelegationJobs(self.project.root).reservation()
+        self.assertEqual(saved['request']['profile'], 'alternate')
+        recovery = Engine(self.config)
+        with patch('mizu.classification.prepare', wraps=prepare) as preview:
+            self.assertEqual(self.recover(recovery, saved), saved['request'])
+            self.assertEqual(preview.call_args.args[3], pinned)
+            self.assertTrue(preview.call_args.kwargs['preview'])
+        drift = copy.deepcopy(spec)
+        drift['rules'][0]['candidates'] = [{'profile': 'primary'}]
+        changed = dataclasses.replace(self.config, selectors={'dynamic': drift})
+        with self.assertRaises(Denied):
+            self.recover(Engine(changed), saved)
+
+    def test_recovery_refuses_legacy_missing_or_changed_inputs_without_writes(self):
+        self.run_parent(self.reserve)
+        saved = jobs.DelegationJobs(self.project.root).reservation()
+        self.assertEqual(self.recover(Engine(self.config), saved), saved['request'])
+        legacy = {k: v for k, v in saved['request'].items() if k != 'authority_digest'}
+        for request in (legacy, {**saved['request'], 'authority_digest': 'f' * 64},
+                        {**saved['request'], 'source_snapshot': 'f' * 64},
+                        {**saved['request'], 'profile': 'primary'}):
+            with self.subTest(request=request), self.assertRaises(Denied):
+                self.recover(Engine(self.config), {**saved, 'request': request})
+        base = self.config
+        helper = base.roles['helper']
+        profile = {**base.profiles[helper.profile], 'model': 'changed-model'}
+        for changed in (
+                dataclasses.replace(base, profiles={**base.profiles, helper.profile: profile}),
+                dataclasses.replace(base, roles={**base.roles, 'worker': dataclasses.replace(
+                    base.roles['worker'], tools_per_run=base.limits.tools_per_run + 1)}),
+                dataclasses.replace(base, roles={k: v for k, v in base.roles.items() if k != 'helper'}),
+                dataclasses.replace(base, roles={**base.roles, 'helper': dataclasses.replace(
+                    helper, capabilities=(*helper.capabilities, 'search'))}),
+                dataclasses.replace(base, roles={**base.roles, 'helper': dataclasses.replace(
+                    helper, policy=(self.root / 'missing-policy.md',))}),
+                dataclasses.replace(base, limits=dataclasses.replace(
+                    base.limits, tools_per_run=base.limits.tools_per_run + 1))):
+            with self.assertRaises((Denied, ConfigError, OSError)):
+                self.recover(Engine(changed), saved)
+        manifest = self.project.root / 'snapshots' / (self.request['source_snapshot'] + '.json')
+        original = manifest.read_bytes()
+        try:
+            for content in (None, original.replace(b'"goal":', b'"changed_goal":', 1)):
+                if content is None:
+                    manifest.unlink()
+                else:
+                    manifest.write_bytes(content)
+                with self.assertRaises(Denied):
+                    self.recover(Engine(self.config), saved)
+        finally:
+            manifest.write_bytes(original)
+        self.assertEqual(self.recover(Engine(self.config), saved), saved['request'])
+
+    def test_unreconstructible_admission_refuses_before_first_write(self):
+        def work(ctx):
+            for field, changed in (('goal_digest', 'f' * 64),
+                                   ('workspace', self.root / 'other-workspace'),
+                                   ('spend_role', self.config.roles['reporter'])):
+                with self.subTest(field=field), patch.object(ctx, field, changed), self.assertRaises(Denied):
+                    self.reserve(ctx)
+                self.assertIsNone(ctx._workspace_lease.attempt)
+                self.assertFalse((self.project.root / 'delegation-jobs').exists())
+            self.reserve(ctx)
+        self.run_parent(work)
+
+    def test_owner_without_delegate_grant_refuses_before_store_mutation(self):
+        def work(ctx):
+            stripped = dataclasses.replace(
+                self.config.roles['worker'],
+                capabilities=tuple(c for c in self.config.roles['worker'].capabilities if c != 'delegate'))
+            changed = dataclasses.replace(self.config, roles={**self.config.roles, 'worker': stripped})
+            with patch.object(self.engine, 'config', changed), self.assertRaises(Denied):
+                self.reserve(ctx)
+            self.assertIsNone(ctx._workspace_lease.attempt)
+            self.assertFalse((self.project.root / 'delegation-jobs').exists())
+            self.reserve(ctx)
+        self.run_parent(work)
+        saved = jobs.DelegationJobs(self.project.root).reservation()
+        before = (self.project.root / 'delegation-jobs/state.json').read_bytes()
+        base = self.config
+        stripped = dataclasses.replace(
+            base.roles['worker'],
+            capabilities=tuple(c for c in base.roles['worker'].capabilities if c != 'delegate'))
+        revoked = dataclasses.replace(base, roles={**base.roles, 'worker': stripped})
+        with self.assertRaises(Denied):
+            self.recover(Engine(revoked), saved)
+        self.assertEqual((self.project.root / 'delegation-jobs/state.json').read_bytes(), before)
+        self.assertEqual(self.recover(Engine(self.config), saved), saved['request'])
 
     def test_authority_drift_refuses_exact_lease_retry_without_changing_hold(self):
         def work(ctx):
