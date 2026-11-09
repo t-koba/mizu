@@ -19,6 +19,7 @@ from mizu.unit_prompts import _row_detail_projection
 class RowProjectionTests(Fixture):
     def test_complete_rows_age_only_changes_and_full_override(self):
         ctx = self.context('worker')
+        ctx.role = dataclasses.replace(ctx.role, capabilities=(*ctx.role.capabilities, 'check_job'))
         work = {'items': [{'id': 'wi_' + 'a' * 32, 'title': 'Work', 'status': 'blocked',
                           'rev': 3, 'wait': {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'},
                           'description_preview': 'Long scope ' * 100, 'description_truncated': False,
@@ -32,7 +33,10 @@ class RowProjectionTests(Fixture):
                   'check_discovery': {'coverage_complete': False, 'summaries_omitted': 2}}
         original = copy.deepcopy((work, checks))
         full = _row_detail_projection(ctx, work, checks)
-        self.assertEqual(full, original)
+        self.assertEqual((work, checks), original)
+        self.assertIn('details_reference', full[0]['items'][0])
+        self.assertIn('details_reference', full[1]['check_jobs'][0])
+        self.assertNotIn('details_unchanged', full[0]['items'][0])
         prior = ctx.prompt_row_fingerprints
         work['items'][0].update(age_seconds=6, doing_age_seconds=11, blocked_age_seconds=21)
         small_work, small_checks = _row_detail_projection(ctx, work, checks, prior)
@@ -60,32 +64,41 @@ class RowProjectionTests(Fixture):
                              ('description_preview', 'Different'), ('wait', None)):
             changed = copy.deepcopy(work)
             changed['items'][0][field] = value
-            self.assertEqual(_row_detail_projection(ctx, changed, checks, prior)[0], changed)
+            row = _row_detail_projection(ctx, changed, checks, prior)[0]['items'][0]
+            if field != 'description_preview':
+                self.assertEqual(row[field], value)
+            self.assertIn('details_reference', row)
+            self.assertNotIn('details_unchanged', row)
         changed_checks = copy.deepcopy(checks)
         changed_checks['check_jobs'][0]['status'] = 'running'
         changed_checks['shared_checks'].append({**job, 'id': 'd' * 32})
         _, projected = _row_detail_projection(ctx, work, changed_checks, prior)
-        self.assertEqual(projected['check_jobs'], changed_checks['check_jobs'])
+        self.assertEqual(projected['check_jobs'][0]['status'], 'running')
+        self.assertNotIn('details_unchanged', projected['check_jobs'][0])
         self.assertEqual(projected['shared_checks'], changed_checks['shared_checks'])
         ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
             ctx.config.limits, session_delta_details='full'))
         self.assertEqual(_row_detail_projection(ctx, work, checks, prior), (work, checks))
         self.assertEqual(checks, original[1])  # projection never mutates discovery.
 
-    def test_work_item_details_stay_full_without_exact_read_capability(self):
+    def test_only_exact_read_capabilities_allow_compaction(self):
         ctx = self.context('worker')
-        ctx.role = dataclasses.replace(
-            ctx.role, capabilities=tuple(cap for cap in ctx.role.capabilities
-                                         if cap != 'work_items_read'))
-        work = {'items': [{'id': 'wi_' + 'a' * 32, 'title': 'Work', 'status': 'open', 'rev': 1,
-                           'description_preview': 'Full details'}], 'total': 1,
-                'truncated': False, 'overflow_count': 0, 'coverage_complete': True}
-        checks = {'check_jobs': [], 'shared_checks': []}
-        _row_detail_projection(ctx, work, checks)
-        prior = ctx.prompt_row_fingerprints
-        projected, _ = _row_detail_projection(ctx, work, checks, prior)
-        self.assertIn('description_preview', projected['items'][0])
-        self.assertNotIn('details_unchanged', projected['items'][0])
+        caps = set(ctx.role.capabilities) - {'work_items_read', 'check_job'}
+        work = {'items': [{'id': 'wi_' + 'a' * 32, 'description_preview': 'Details'}]}
+        checks = {'check_jobs': [{'id': 'b' * 32, 'command_preview': ['echo details'],
+                                 'error': 'Failure details'}], 'shared_checks': []}
+        for reads in ((), ('work_items_read',), ('check_job',), ('work_items_read', 'check_job')):
+            ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(caps | set(reads)))
+            _row_detail_projection(ctx, work, checks)
+            for prior in (None, ctx.prompt_row_fingerprints):
+                projected, jobs = _row_detail_projection(ctx, work, checks, prior)
+                for row, preview, cap in ((projected['items'][0], 'description_preview', 'work_items_read'),
+                                           (jobs['check_jobs'][0], 'command_preview', 'check_job')):
+                    with self.subTest(reads=reads, prior=prior is not None, cap=cap):
+                        self.assertEqual(preview in row, cap not in reads)
+                        self.assertEqual('details_reference' in row, cap in reads)
+                        self.assertEqual('details_unchanged' in row, cap in reads and prior is not None)
+                self.assertEqual('error' in jobs['check_jobs'][0], 'check_job' not in reads)
 
 
 class SessionRowDetailsTests(Fixture):
@@ -127,13 +140,21 @@ class SessionRowDetailsTests(Fixture):
         prompt, mode, *_ = session_prompt(ctx, ctx.role, ctx.run_dir)
         return ctx, json.loads(prompt), mode
 
+    def assert_fresh_references(self, prompt):
+        for row, key in ((prompt['open_work_items']['items'][0], 'description_preview'),
+                         (prompt['check_jobs'][0], 'command_preview')):
+            self.assertNotIn(key, row)
+            self.assertIn('details_reference', row)
+            self.assertNotIn('details_unchanged', row)
+
     def assert_full_details(self, prompt):
         self.assertIn('description_preview', prompt['open_work_items']['items'][0])
         self.assertIn('command_preview', prompt['check_jobs'][0])
         self.assertNotIn('details_unchanged', prompt['open_work_items']['items'][0])
 
     def test_settled_cursor_repetition_changed_new_and_exact_recovery(self):
-        self.assert_full_details(self.run_observed())
+        initial = self.run_observed()
+        self.assert_fresh_references(initial)
         cursor = read_prompt_state(self.path.parent)
         self.assertIn('row_details', cursor)
         self.assertIn('broker_grant', cursor)
@@ -142,19 +163,21 @@ class SessionRowDetailsTests(Fixture):
         row = prompt['open_work_items']['items'][0]
         self.assertTrue(row['details_unchanged'])
         self.assertEqual(row['id'], self.item['id'])
-        ref = row['details_reference']
-        detail = ctx.handle(ref['tool'].removeprefix('mizu_'), ref['arguments'])
-        self.assertIn(self.item['description'], json.dumps(detail))
-        ref = prompt['check_jobs'][0]['details_reference']
-        detail = ctx.handle(ref['tool'].removeprefix('mizu_'), ref['arguments'])
-        self.assertEqual(detail['command_preview'], ['echo queued details'])
+        for shown in (initial, prompt):
+            ref = shown['open_work_items']['items'][0]['details_reference']
+            detail = ctx.handle(ref['tool'].removeprefix('mizu_'), ref['arguments'])
+            self.assertIn(self.item['description'], json.dumps(detail))
+            ref = shown['check_jobs'][0]['details_reference']
+            detail = ctx.handle(ref['tool'].removeprefix('mizu_'), ref['arguments'])
+            self.assertEqual(detail['command_preview'], ['echo queued details'])
         self.assertEqual(read_prompt_state(self.path.parent), cursor)  # peeking never writes.
         self.project.work_items.transition(self.item['id'], expected_rev=1, status='doing', actor='worker')
         self.project.work_items.create(idempotency_key='new', title='New', actor='worker', description='New scope')
         _, changed, _ = self.peek()
         self.assertEqual(len(changed['open_work_items']['items']), 2)
         for work in changed['open_work_items']['items']:
-            self.assertIn('description_preview', work)
+            self.assertNotIn('description_preview', work)
+            self.assertIn('details_reference', work)
             self.assertNotIn('details_unchanged', work)
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, session_delta_details='full'))
@@ -181,7 +204,7 @@ class SessionRowDetailsTests(Fixture):
             with self.assertRaisesRegex(Denied, 'No matching reusable check'):
                 check_jobs.join(ctx, self.job['id'])
 
-    def test_invalid_cursor_and_session_resets_resend_full_details(self):
+    def test_invalid_cursor_and_session_resets_never_claim_unchanged(self):
         self.run_observed()
         cursor = read_prompt_state(self.path.parent)
         bad_digest = copy.deepcopy(cursor)
@@ -198,31 +221,31 @@ class SessionRowDetailsTests(Fixture):
                         bad_key, bad_inbox, bad_grant):
             with self.subTest(invalid=invalid):
                 write_json(self.path.parent / 'prompt_state.json', invalid)
-                self.assert_full_details(self.peek()[1])
+                self.assert_fresh_references(self.peek()[1])
         (self.path.parent / 'prompt_state.json').unlink()
-        self.assert_full_details(self.peek()[1])
+        self.assert_fresh_references(self.peek()[1])
         (self.path.parent / 'prompt_state.json').write_text('{')
-        self.assert_full_details(self.peek()[1])
+        self.assert_fresh_references(self.peek()[1])
         (self.path.parent / 'prompt_state.json').write_text('x' * (PROMPT_STATE_BYTES + 1))
         self.assertIsNone(read_prompt_state(self.path.parent))
-        self.assert_full_details(self.peek()[1])
+        self.assert_fresh_references(self.peek()[1])
         write_json(self.path.parent / 'prompt_state.json', cursor)
         write_json(self.path.parent / 'generation.json', {'generation': 1})
-        self.assert_full_details(self.peek()[1])
+        self.assert_fresh_references(self.peek()[1])
         (self.path.parent / 'generation.json').unlink()
         save_session(self.path, 'replacement-session', {})
-        self.assert_full_details(self.peek()[1])
+        self.assert_fresh_references(self.peek()[1])
         self.path.unlink()
         _, fresh, mode = self.peek()
         self.assertEqual(mode, 'full')
-        self.assert_full_details(fresh)
+        self.assert_fresh_references(fresh)
         # Even a copied cursor/session in a different selected key is not reused.
         new_path = self.path.parent.with_name('new-key') / 'session.json'
         new_path.parent.mkdir()
         save_session(new_path, 'row-session', {})
         write_json(new_path.parent / 'prompt_state.json', cursor)
         with patch('mizu.engine_config.session_record', return_value=(new_path, read_json(new_path))):
-            self.assert_full_details(self.peek()[1])
+            self.assert_fresh_references(self.peek()[1])
 
     def test_unsettled_or_unobserved_dispatch_cannot_supply_fingerprints(self):
         self.run_observed()
@@ -231,4 +254,4 @@ class SessionRowDetailsTests(Fixture):
         self.assertEqual((self.path.parent / 'prompt_state.json').read_bytes(), cursor)
         self.run_observed(observe=False)
         self.assertNotIn('row_details', read_prompt_state(self.path.parent))
-        self.assert_full_details(self.peek()[1])
+        self.assert_fresh_references(self.peek()[1])

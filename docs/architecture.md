@@ -1397,20 +1397,22 @@ history again; a new or rotated session receives the full prompt, which
 states the same backlog alongside the full entries. The durable adapter exposes
 no internal compaction event; the harness does not infer one.
 
-`limits.session_delta_details` selects `full` or the default `elide` for resumed
-deltas only. Every bounded work/check row remains explicit, including identity,
-title/status/revision/wait/liveness, continuation and discovery metadata, page
-totals, truncation and coverage. Only unchanged `description_preview`,
-`scope_preview`, `reason_preview`, and role-owned `check_jobs`
-`command_preview`/`error` text are omitted. Such rows
-carry `details_unchanged: true` and `details_reference` with exact tool
-arguments: `work_items_read` by ID or own `check_job result` (which may
-acknowledge a terminal result/import matching acceptance). Shared-check
-candidates retain their full command/error details: prompt discovery is a
-pre-validation view, while `check_job join` revalidates and creates a
-subscription, so it is not a guaranteed details read. New or content-changed
-rows send full details. Full prompts, ready-work,
-work-order generations, source page reads and check discovery are unchanged.
+`limits.session_delta_details` selects `full` or the default `elide` for both
+full and resumed prompts. Every bounded work/check row remains explicit,
+including identity, title/status/revision/wait/liveness, result and discovery
+metadata, page totals, truncation and coverage. Elision replaces only
+`description_preview`, `scope_preview`, `reason_preview`, and role-owned
+`check_jobs` `command_preview`/`error` text with `details_reference` requests:
+`mizu_work_items_read` by ID or own `mizu_check_job` result by ID. Only roles
+already holding that exact read capability receive references; other roles
+retain their previews. Reads are bounded live views, not frozen detail copies;
+check result may acknowledge completion/import matching acceptance.
+Shared-check candidates retain previews: discovery precedes validation and
+`join` revalidates/subscribes, so it is not a guaranteed details read.
+Only validated same-session fingerprints add `details_unchanged: true`;
+new/changed rows never claim unchanged. Ready-work, captured work-order inputs
+and hashes, dispatch/liveness/authority and check execution are unchanged.
+This display-only byte reduction makes no cross-run or provider-cache claim.
 
 The existing atomic `prompt_state.json` cursor replaces bounded per-row SHA-256
 fingerprints under `row_details`, never retaining a growing seen-set. These hash
@@ -1419,7 +1421,7 @@ the complete current bounded row except `age_seconds`, `doing_age_seconds` and
 are limited to the configured work-item page and the existing two 32-check
 pages. A 64 KiB managed cursor envelope accommodates their ID/digest pairs and
 the protocol-bounded grant. Missing, malformed, oversized, key/session-ID/
-creation-time/generation-mismatched cursors resend all details. Fingerprints are
+creation-time/generation-mismatched cursors never mark details unchanged. Fingerprints are
 written only after a settled dispatch whose observed selection proves the
 persistent session/generation, alongside (without replacing) grant evidence.
 No new cursor store, compaction detection or adapter guarantee is introduced.

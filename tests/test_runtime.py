@@ -905,6 +905,8 @@ class PromptProjectionTests(Fixture):
         self.assertIsNotNone(page["next_cursor"])
         self.assertEqual(page["unseeded_decisions"], 1)
         self.assertFalse(page["coverage_complete"])
+        self.assertEqual(page, ctx._work_order_inputs["open_work_items"])
+        self.assertTrue(all("details_reference" not in row for row in page["items"]))
         # Fail-closed is judged on a fresh unit: the frozen unit reuses
         # its opening capture and does not reread the store.
         fresh = self.context("consult")

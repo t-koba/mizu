@@ -425,12 +425,14 @@ def _row_detail_projection(context: Context, work: dict, checks: dict, prior=Non
 
     Fingerprint the complete bounded row, excluding only volatile age counters.
     Identity, status, revision, wait, liveness, truncation and discovery metadata
-    always remain explicit. Current fingerprints replace (never accumulate in)
+    always remain explicit. With elision enabled, exact-read-capable roles get
+    detail references in full and delta prompts; only validated prior rows can
+    additionally be marked unchanged. Current fingerprints replace (never accumulate in)
     the existing session cursor after a settled dispatch.
     """
     fingerprints = {}
     projected = {}
-    can_read_work_items = "work_items_read" in set(context.role.capabilities)
+    caps = set(context.role.capabilities)
     for group, rows in (("open_work_items", work["items"]),
                         ("check_jobs", checks["check_jobs"]),
                         ("shared_checks", checks["shared_checks"])):
@@ -448,15 +450,16 @@ def _row_detail_projection(context: Context, work: dict, checks: dict, prior=Non
             # `join` revalidates and subscribes, so it is not a guaranteed read.
             if (group != "shared_checks"
                     and context.config.limits.session_delta_details == "elide"
-                    and prior is not None and prior[group].get(identifier) == fingerprint
-                    and (group != "open_work_items" or can_read_work_items)
+                    and ("work_items_read" if group == "open_work_items" else "check_job") in caps
                     and detail_keys.intersection(row)):
                 row = {k: v for k, v in row.items() if k not in detail_keys}
                 request = ({"tool": "mizu_work_items_read", "arguments": {"id": identifier}}
                            if group == "open_work_items" else
                            {"tool": "mizu_check_job", "arguments": {
                                "action": "result", "id": identifier}})
-                row = {**row, "details_unchanged": True, "details_reference": request}
+                row = {**row, "details_reference": request}
+                if prior is not None and prior[group].get(identifier) == fingerprint:
+                    row["details_unchanged"] = True
             projected[group].append(row)
     context.prompt_row_fingerprints = fingerprints
     return ({**work, "items": projected["open_work_items"]},
@@ -595,9 +598,11 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     ``[limits] pending_insights`` (newest kept; ``truncated`` says so
     explicitly); the work-item page follows ``[limits] work_items_prompt`` and
     includes its overflow count, cursor, truncation, and legacy coverage status.
-    ``session_delta_details=elide`` omits only unchanged bulky row details when
-    a validated same-session cursor supplies ``prior_rows``; every row keeps its
-    state/liveness and exact detail reference. Otherwise details are full.
+    ``session_delta_details=elide`` replaces bulky previews with exact read
+    references when the role holds that read capability, as in full prompts.
+    A validated same-session ``prior_rows`` cursor additionally marks unchanged
+    rows. Shared candidates, roles without exact reads, and the ``full`` setting
+    retain their previews; state/liveness and discovery metadata always remain.
     The delta carries no workspace file contents and no history
     array, so resumed-unit bytes stay flat as history grows apart from the
     fixed previous-report preview (at most ``report.PREVIOUS_REPORT_BYTES``).

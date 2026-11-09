@@ -190,6 +190,67 @@ class UnitPromptSeamTests(Fixture):
         unit_prompts.prompt_delta_for(ctx, [])
         self.assertEqual(ctx.ready_work_signature, first)
 
+    def test_full_delta_compaction_preserves_metadata_and_reduces_utf8_bytes(self):
+        import copy
+        import dataclasses
+        from mizu import check_jobs, unit_prompts, work_order
+        ctx = self.context("worker")
+        ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(set(ctx.role.capabilities)
+                                                                   | {"check_job", "work_items_read"}))
+        opening = copy.deepcopy(work_order._capture_opening(ctx))
+        # Bounded synthetic pages, not provider/cache or scheduler measurements.
+        opening["open_work_items"] = {
+            "items": [{"id": "wi_" + f"{n:032x}", "title": "Scope", "status": "blocked", "rev": 3,
+                       "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"},
+                       **{key: "界" * 256 for key in
+                          ("description_preview", "scope_preview", "reason_preview")},
+                       "description_truncated": True, "doing_stale": False} for n in range(6)],
+            "total": 9, "truncated": True, "overflow_count": 3, "coverage_complete": False}
+        checks = {"check_jobs": [{"id": f"{n:032x}", "status": "completed", "passed": False,
+                                  "kind": "experiment", "command_count": 2,
+                                  "command_preview": ["界" * 100] * 2, "error": "界" * 256}
+                                 for n in range(6)],
+                  "shared_checks": [{"id": "f" * 32, "command_preview": ["echo shared"],
+                                     "requires_input_check": True}],
+                  "check_continuation": None,
+                  "check_discovery": {"coverage_complete": False, "summaries_omitted": 2}}
+        originals = copy.deepcopy((opening, checks))
+        self.prompt_size_comparison = {}
+        with patch.object(work_order, "_capture_opening", return_value=opening), \
+                patch.object(check_jobs, "prompt_projection", return_value=checks), \
+                patch.object(unit_prompts, "_prompt_clock", return_value={"now": "fixed"}):
+            for mode, build in (("full", lambda: unit_prompts.prompt_for(ctx)),
+                                ("delta", lambda: unit_prompts.prompt_delta_for(ctx, []))):
+                ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
+                    ctx.config.limits, session_delta_details="full"))
+                before = build()
+                fingerprints = ctx.prompt_row_fingerprints
+                ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
+                    ctx.config.limits, session_delta_details="elide"))
+                after = build()
+                self.assertEqual(ctx.prompt_row_fingerprints, fingerprints)
+                baseline, compact = json.loads(before), json.loads(after)
+                for group, tool, arguments in (
+                        ("open_work_items", "mizu_work_items_read", {}),
+                        ("check_jobs", "mizu_check_job", {"action": "result"})):
+                    rows = compact[group]["items"] if group == "open_work_items" else compact[group]
+                    source = baseline[group]["items"] if group == "open_work_items" else baseline[group]
+                    keys = ({"description_preview", "scope_preview", "reason_preview"}
+                            if group == "open_work_items" else {"command_preview", "error"})
+                    for row, original in zip(rows, source, strict=True):
+                        self.assertEqual(row["details_reference"], {
+                            "tool": tool, "arguments": {**arguments, "id": row["id"]}})
+                        self.assertEqual({k: v for k, v in row.items() if k != "details_reference"},
+                                         {k: v for k, v in original.items() if k not in keys})
+                    if group == "open_work_items":
+                        self.assertEqual({**compact[group], "items": source}, baseline[group])
+                    compact[group] = baseline[group]
+                self.assertEqual(compact, baseline)  # All other opening facts are unchanged.
+                sizes = {"before": len(before.encode("utf-8")), "after": len(after.encode("utf-8"))}
+                self.prompt_size_comparison[mode] = sizes
+                self.assertLess(sizes["after"], sizes["before"])
+        self.assertEqual((opening, checks), originals)
+
 
 if __name__ == "__main__":
     unittest.main()
