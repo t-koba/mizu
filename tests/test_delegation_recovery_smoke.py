@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 from mizu.delegation_jobs import DelegationJobs
+from mizu import delegation_recovery
+from mizu.delegation_recovery import _recover_quiescent
 from mizu.delegation_scope import _scope_empty
 from mizu.errors import Denied
 from mizu.fs import canonical, loads_finite
@@ -123,10 +125,10 @@ def unit_state(record):
     return fields
 
 
-def scope_empty(binding):
-    return _scope_empty(binding, maximum=8192, query=lambda unit: command(
+def scope_query(unit):
+    return command(
         'sudo', '-n', 'systemctl', 'show', unit,
-        '--property=LoadState,ActiveState,ControlGroup', codes=(0, 1)))
+        '--property=LoadState,ActiveState,ControlGroup', codes=(0, 1))
 
 
 def container_exists(identity):
@@ -274,31 +276,35 @@ def recover(path):
         return
     binding = store.runner_binding(*credentials)
     scope = binding['scope']
-    cgroup_clean, absent = None, []
+    # Host fixture owns the one-shot launch fence: no relaunch path exists,
+    # create/start commands have settled, and --live waited for the synthetic
+    # supervisor to die. This is NOT a fence against unrelated host mutation.
+    # Validate terminal execution before any host query or cleanup action.
+    if reservation['execution'] is None:
+        raise Denied('Delegation execution is not terminal')
     require_host()
-    try:
-        fields = unit_state(scope)
-        if fields['LoadState'] == 'loaded':
-            command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
-                    '--signal=SIGKILL', scope['unit'], codes=(0, 1))
-            command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
-            command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
-        cgroup_clean = scope_empty(binding)
-    finally:
-        # Failure in one scope must not prevent cleanup attempts for every
-        # other bound resource. Never seal after an exception/unknown result.
-        errors = []
-        for container in binding['containers']:
-            try:
-                if clean_container(container) is True:
-                    absent.append(container['id'])
-            except Exception as error:
-                errors.append(error)
-        if errors:
-            raise errors[0]
-    store.runner_quiescent(*credentials, 'Synthetic descendant and OCI cleanup verified',
-                           cleanup={'binding': binding, 'scope_clean': cgroup_clean,
-                                    'containers_absent': absent})
+    fields = unit_state(scope)
+    if fields['LoadState'] == 'loaded':
+        command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
+                '--signal=SIGKILL', scope['unit'], codes=(0, 1))
+        command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
+        command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
+    def attest_launch_fence(saved):
+        # Host one-shot fence is held for this exact binding; a fence attested
+        # for any other binding is stale and must not release this reservation.
+        if canonical(saved) != canonical(binding):
+            raise Denied('stale launch fence attestation')
+        return True
+
+    def attest_supervisor_settled(saved):
+        if canonical(saved) != canonical(binding):
+            raise Denied('stale supervisor attestation')
+        return True
+
+    _recover_quiescent(store, *credentials, 'Synthetic descendant and OCI cleanup verified',
+                       binding=binding, attest_launch_fence=attest_launch_fence,
+                       attest_supervisor_settled=attest_supervisor_settled,
+                       query=scope_query, reconcile_container=clean_container, maximum=8192)
 
 
 def process_in_scope(pid, record):
@@ -417,7 +423,8 @@ def live(path):
             time.sleep(.05)
         if (Path(f"/proc/{ready['supervisor']}").exists()
                 or not process_in_scope(ready['descendant'], scope)
-                or scope_empty(store.runner_binding(*credentials)) or not container_exists(cid)
+                or _scope_empty(store.runner_binding(*credentials), query=scope_query, maximum=8192)
+                or not container_exists(cid)
                 or ledger(path).reservation()['binding']['containers'][0]['id'] != cid):
             raise RuntimeError('supervisor-death/held-reservation evidence missing')
         # All launches have settled and the execution supervisor is dead, but
@@ -502,7 +509,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 with (mock.patch.object(module, 'require_host'),
                       mock.patch.object(module, 'unit_state', return_value={
                           'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}),
-                      mock.patch.object(module, 'scope_empty', side_effect=lambda _: probe(group)),
+                      mock.patch.object(delegation_recovery, '_scope_empty', side_effect=lambda *a, **k: probe(group)),
                       mock.patch.object(module, 'clean_container', side_effect=lambda _: probe(container)) as cleanup):
                     if group is True and container is True and terminal:
                         recover(path)
@@ -512,7 +519,7 @@ class RecoveryReservationTests(unittest.TestCase):
                         with self.assertRaises((Denied, OSError)):
                             recover(path)
                         self.assertIsNotNone(ledger(path).reservation())
-                    self.assertEqual(cleanup.call_count, 2)
+                    self.assertEqual(cleanup.call_count, 2 if terminal else 0)
 
     @unittest.skipUnless(os.name == 'posix', 'systemd/rootless OCI recovery fixture')
     def test_unavailable_host_or_missing_binding_never_releases(self):
@@ -595,11 +602,11 @@ class RecoveryReservationTests(unittest.TestCase):
             with (mock.patch.object(module, 'require_host'),
                   mock.patch.object(module, 'unit_state', return_value={
                       'LoadState': 'not-found', 'ActiveState': 'inactive', 'ControlGroup': ''}) as scope,
-                  mock.patch.object(module, 'scope_empty', return_value=True) as proof,
+                  mock.patch.object(delegation_recovery, '_scope_empty', return_value=True) as proof,
                   mock.patch.object(module, 'clean_container', return_value=True) as cleanup):
                 recover(path)
                 scope.assert_called_with(binding['scope'])
-                proof.assert_called_once_with(binding)
+                self.assertEqual(proof.call_args.args, (binding,))
                 cleanup.assert_called_once_with(binding['containers'][0])
             self.assertIsNone(store.reservation())
 
@@ -621,11 +628,11 @@ class RecoveryReservationTests(unittest.TestCase):
                 'LoadState=loaded\nActiveState=inactive\nControlGroup=' + binding['scope']['cgroup'] + '\n'))
             product_proof = _scope_empty
             def proof(saved, **kwargs):
-                return product_proof(saved, **kwargs, cgroup_root=root)
+                return product_proof(saved, **(kwargs | {'cgroup_root': root}))
             with (mock.patch.object(module, 'require_host'),
                   mock.patch.object(module, 'unit_state', return_value={'LoadState': 'not-found'}),
                   mock.patch.object(module, 'command', return_value=observed) as query,
-                  mock.patch.object(module, '_scope_empty', side_effect=proof),
+                  mock.patch.object(delegation_recovery, '_scope_empty', side_effect=proof),
                   mock.patch.object(module, 'clean_container', return_value=True)):
                 with self.assertRaises(Denied):
                     recover(path)
@@ -640,6 +647,191 @@ class RecoveryReservationTests(unittest.TestCase):
                 self.assertEqual(query.call_count, 3)
                 for call in query.call_args_list:
                     self.assertEqual(call.args[:5], ('sudo', '-n', 'systemctl', 'show', binding['scope']['unit']))
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_coordinator_rejects_stale_or_unsettled_inputs_before_callbacks(self):
+        for case in ('job', 'token', 'inactive', 'unbound', 'binding', 'missing-binding', 'directory',
+                     'execution', 'result', 'missing-fence', 'missing-supervisor',
+                     'fence-false', 'fence-truthy', 'fence-raises', 'stale-fence',
+                     'supervisor-false', 'supervisor-raises', 'stale-supervisor'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                if case == 'unbound':
+                    store, pending, _ = create_job(path)
+                    store.runner_finished(pending['id'], pending['token'], 'failed')
+                else:
+                    store = self.fixture(path, terminal=case != 'execution')
+                reservation = store.reservation()
+                binding = reservation['binding']
+                job_id, token = reservation['id'], reservation['token']
+                stale = None if binding is None else copy.deepcopy(binding)
+                if stale is not None:
+                    stale['containers'][0]['id'] = 'e' * 64
+                fence_seen, settled_seen = [], []
+                def attest_fence(saved):
+                    fence_seen.append(copy.deepcopy(saved))
+                    if case == 'fence-false':
+                        saved['run_id'] = '0' * 32
+                        return False
+                    if case == 'fence-truthy':
+                        saved['run_id'] = '0' * 32
+                        return 1
+                    if case == 'fence-raises':
+                        raise Denied('stale launch fence attestation')
+                    if case == 'stale-fence':
+                        # This fence attests a different binding, not the saved one.
+                        verdict = canonical(saved) == canonical(stale)
+                        saved['run_id'] = '0' * 32  # mutation must not escape the copy
+                        return True if verdict else False
+                    saved['run_id'] = '0' * 32  # mutation must not escape the copy
+                    return True
+                def attest_settled(saved):
+                    settled_seen.append(copy.deepcopy(saved))
+                    if case == 'supervisor-false':
+                        saved['run_id'] = '0' * 32
+                        return None
+                    if case == 'supervisor-raises':
+                        raise OSError('unobservable supervisor')
+                    if case == 'stale-supervisor':
+                        verdict = canonical(saved) == canonical(stale)
+                        saved['run_id'] = '0' * 32
+                        return True if verdict else {}
+                    saved['run_id'] = '0' * 32
+                    return True
+                options = dict(binding=binding, attest_launch_fence=attest_fence,
+                               attest_supervisor_settled=attest_settled,
+                               query=mock.Mock(), reconcile_container=mock.Mock(), maximum=8192)
+                result = 'Recovery evidence'
+                if case == 'inactive':
+                    store.runner_quiescent(job_id, token, result, cleanup={
+                        'binding': binding, 'scope_clean': True,
+                        'containers_absent': [c['id'] for c in binding['containers']]})
+                elif case == 'job':
+                    job_id = '0' * 64
+                elif case == 'token':
+                    token = '0' * 64
+                elif case == 'binding':
+                    options['binding'] = stale
+                elif case == 'missing-binding':
+                    options['binding'] = None
+                elif case == 'directory':
+                    directory = Path(binding['directory']['path'])
+                    directory.rename(directory.with_name('replaced'))
+                    directory.mkdir()
+                elif case == 'missing-fence':
+                    options['attest_launch_fence'] = None
+                elif case == 'missing-supervisor':
+                    options['attest_supervisor_settled'] = 'attested'
+                elif case == 'result':
+                    result = 'x' * (32 * 1024 + 1)
+                before = (store.root / 'state.json').read_bytes()
+                with self.assertRaises(Denied):
+                    _recover_quiescent(store, job_id, token, result, **options)
+                options['query'].assert_not_called()
+                options['reconcile_container'].assert_not_called()
+                if case in ('job', 'token', 'inactive', 'unbound', 'binding',
+                            'missing-binding', 'directory', 'execution', 'result',
+                            'missing-fence', 'missing-supervisor'):
+                    # Token/binding/terminal/callback validation precedes attestations.
+                    self.assertEqual(fence_seen, [])
+                    self.assertEqual(settled_seen, [])
+                elif case in ('fence-false', 'fence-truthy', 'fence-raises', 'stale-fence'):
+                    # A refused fence never reaches the supervisor or any evidence query.
+                    self.assertEqual(len(fence_seen), 1)
+                    self.assertEqual(settled_seen, [])
+                    if case == 'stale-fence':
+                        self.assertNotEqual(canonical(fence_seen[0]), canonical(stale))
+                        self.assertEqual(canonical(fence_seen[0]), canonical(binding))
+                else:
+                    self.assertEqual(len(fence_seen), 1)
+                    self.assertEqual(len(settled_seen), 1)
+                    self.assertEqual(canonical(fence_seen[0]), canonical(binding))
+                    self.assertEqual(canonical(settled_seen[0]), canonical(binding))
+                self.assertEqual((store.root / 'state.json').read_bytes(), before)
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_coordinator_requires_literal_absence_and_preserves_saved_inventory(self):
+        for evidence in (None, False, 1, {}, {'absent': True}, True):
+            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store = self.fixture(path, containers=2)
+                reservation = store.reservation()
+                binding = copy.deepcopy(reservation['binding'])
+                seen = []
+                fence_seen, settled_seen = [], []
+                def attest_fence(saved):
+                    fence_seen.append(copy.deepcopy(saved))
+                    saved['containers'][0]['id'] = 'f' * 64  # cannot rewrite saved proof
+                    return True
+                def attest_settled(saved):
+                    settled_seen.append(copy.deepcopy(saved))
+                    saved['run_id'] = '0' * 32
+                    return True
+                def reconcile(container):
+                    seen.append(copy.deepcopy(container))
+                    container['id'] = 'f' * 64  # cannot rewrite saved cleanup proof
+                    return evidence
+                with (mock.patch.object(delegation_recovery, '_scope_empty', return_value=True),
+                      mock.patch.object(store, 'runner_quiescent', wraps=store.runner_quiescent) as seal):
+                    def attempt():
+                        _recover_quiescent(store, reservation['id'], reservation['token'], 'Evidence',
+                                           binding=binding, attest_launch_fence=attest_fence,
+                                           attest_supervisor_settled=attest_settled,
+                                           query=mock.Mock(), reconcile_container=reconcile, maximum=8192)
+                    if evidence is True:
+                        attempt()
+                        self.assertEqual(seal.call_args.kwargs['cleanup'], {
+                            'binding': binding, 'scope_clean': True,
+                            'containers_absent': [c['id'] for c in binding['containers']]})
+                        self.assertIsNone(store.reservation())
+                    else:
+                        with self.assertRaises(Denied):
+                            attempt()
+                        seal.assert_not_called()
+                        self.assertEqual(store.reservation(), reservation)
+                self.assertEqual(seen, binding['containers'])
+                self.assertEqual(fence_seen, [binding])
+                self.assertEqual(settled_seen, [binding])
+
+    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
+    def test_bound_recovery_interrupted_cleanup_and_uncertain_commit_retry(self):
+        module = sys.modules[__name__]
+        for boundary in ('container', 'before-commit', 'after-commit'):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp).resolve() / 'state.json'
+                store = self.fixture(path, containers=2)
+                binding = store.reservation()['binding']
+                remaining = {c['id'] for c in binding['containers']}
+                interrupted = False
+                def reconcile(container):
+                    nonlocal interrupted
+                    if boundary == 'container' and len(remaining) == 1 and not interrupted:
+                        interrupted = True
+                        raise OSError('interrupted after first removal')
+                    remaining.discard(container['id'])
+                    return True  # exact absence remains positive on retry
+                original_save = DelegationJobs._save
+                def uncertain_save(current, state):
+                    if boundary == 'after-commit':
+                        original_save(current, state)
+                    raise OSError('interrupted handback acknowledgement')
+                with (mock.patch.object(module, 'require_host'),
+                      mock.patch.object(module, 'unit_state', return_value={'LoadState': 'not-found'}),
+                      mock.patch.object(delegation_recovery, '_scope_empty', return_value=True),
+                      mock.patch.object(module, 'clean_container', side_effect=reconcile) as cleanup):
+                    if boundary == 'container':
+                        with self.assertRaises(OSError):
+                            recover(path)
+                    else:
+                        with mock.patch.object(DelegationJobs, '_save', uncertain_save):
+                            with self.assertRaises(OSError):
+                                recover(path)
+                    self.assertEqual(ledger(path).reservation() is None, boundary == 'after-commit')
+                    recover(path)  # reopen ledger; no persisted partial proof is reused
+                    recover(path)  # uncertain success is resolved without any more callbacks
+                    self.assertIsNone(ledger(path).reservation())
+                    self.assertFalse(remaining)
+                    self.assertEqual(cleanup.call_count, 2 if boundary == 'after-commit' else 4)
 
     def prepared_fixture(self, path, uid_offset=0, prepared=True):
         store, reservation, directory = create_job(path)

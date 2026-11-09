@@ -113,7 +113,7 @@ quiescence_release_rule = "Keep the reservation through cancellation, supervisor
 # Inventory gaps that must be closed before runner integration or a pilot.
 not_yet_proven = [
   "Engine.run binds a scoped parent gate and the admitted handoff binds resolved child configuration in the immutable queued request; actual runner integration with supervisor-only directory/resources remains absent.",
-  "Driver quiescence only observes the direct process and reader threads; production descendant/container recovery after supervisor death remains absent. A private Linux read-only empty-scope helper is exercised by the synthetic CI smoke, not by a runner or adapter.",
+  "Driver quiescence only observes the direct process and reader threads; production descendant/container recovery after supervisor death remains absent. A private callback-only Linux handback coordinator is exercised by the synthetic smoke, not by a runner or adapter.",
   "External MCP names are recorded in run configuration, but crash-time server/container reconciliation is absent.",
   "Admitted-parent lease handoff commits and refreshes the Context gate, but has no model entrypoint, exact-job wait, child launch or runner integration.",
 ]
@@ -183,13 +183,20 @@ Recorded Ubuntu 24.04 CI evidence on SHA
 delegation-recovery-smoke passed its real bounded --prepare, --live and
 independent --recover phases (vcs-read/a3b20907f2c349c18ac8ce5c5e82740f).
 That synthetic smoke uses real systemd/cgroup v2 and rootless Podman, including
-a setsid descendant surviving supervisor death. The smoke now calls the private
-delegation_scope read-only helper for the bound run's inactive/absent unit and
-empty/consistently absent cgroup proof. The helper performs no cleanup or ledger
-release; test-only cleanup still owns those actions. The extraction needs its
-own exact-revision CI evidence; the recorded pass predates it. There is no
-Windows/macOS scope proof, product container reaper, or production runner/adapter
-integration, and this helper makes no container-quiescence claim.
+a setsid descendant surviving supervisor death. Bound recovery now calls the
+private delegation_recovery coordinator: before callbacks it requires the active
+token, exact immutable binding, terminal execution report and host attestations
+of a one-shot launch fence and settled supervisor. It calls delegation_scope for
+the inactive/absent unit and empty/consistently absent cgroup, then requires each
+exact saved name/ID/UID positively absent through a host-owned OCI reconciliation
+callback before submitting runner_quiescent with the original full inventory.
+Host callbacks own bounded queries, cleanup, the existing rootless namespace and
+retry safety; Mizu executes no host commands. Unknown proof or interrupted cleanup
+retains the reservation; retries reinspect all resources, and an uncertain final
+commit is resolved from ledger status. Test-only host commands still own cleanup.
+This coordinator needs its own exact-revision CI evidence; the recorded pass
+predates it. There is no Windows/macOS scope proof, product container reaper,
+runner/launch path or production-host/adapter integration.
 This is synthetic fixture recovery only, not real-adapter, production-quiescence,
 authority, handoff or pilot proof.
 """
