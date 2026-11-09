@@ -7,6 +7,7 @@ from mizu import ci_waits, proposal_waits, vcs
 from mizu.distribution import public_source_identity
 from mizu.errors import Denied
 from mizu.fs import read_json, write_json
+from mizu.platform import IS_WINDOWS
 from mizu.project import Project
 from mizu.publication import Publication
 from mizu.runtime import _receipt_wait_due
@@ -98,7 +99,7 @@ class CombinedWaitReadinessTests(CombinedFixture):
             seed["id"], expected_rev=3, status="blocked", actor="worker",
             wait=self.ci_wait)
 
-    def test_unchanged_readiness_reuses_full_chain_proof_and_invalidates_on_change(self):
+    def test_readiness_cache_behavior_matches_platform_and_invalidates_on_change(self):
         self._delivered_ci_wait("warm-proof")
         self.store._projection_cache.clear()
         with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay, \
@@ -110,16 +111,21 @@ class CombinedWaitReadinessTests(CombinedFixture):
             replay.reset_mock()
             manifest.reset_mock()
             self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-            self.assertEqual(replay.call_count, 0)
-            self.assertEqual(manifest.call_count, 0)
+            if IS_WINDOWS:
+                # Windows intentionally bypasses the local metadata cache.
+                self.assertEqual(replay.call_count, 1)
+                self.assertGreater(manifest.call_count, 0)
+            else:
+                self.assertEqual(replay.call_count, 0)
+                self.assertEqual(manifest.call_count, 0)
 
             self._delivered_ci_wait("changed-proof")
             replay.reset_mock()
             manifest.reset_mock()
             self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-            # Adding one item replays only its chain; the unchanged item keeps
-            # its exact snapshot and history proof.
-            self.assertEqual(replay.call_count, 1)
+            # POSIX replays only the new chain; Windows deliberately replays
+            # both chains because its metadata-cache fast path is disabled.
+            self.assertEqual(replay.call_count, 2 if IS_WINDOWS else 1)
             self.assertGreater(manifest.call_count, 0)
 
             manifest_path = (self.project.root / "snapshots" /
