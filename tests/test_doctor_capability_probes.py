@@ -194,8 +194,9 @@ class ContainerRuntimeProbeTests(Fixture):
                 return doctor.container_runtime(config)
 
         self.assertEqual(probe('0 1000 1\n0\n')['namespace_map'], '0 1000 1')
-        with self.assertRaises(doctor.Denied):
-            probe('0 1000 1 0 extra\n')
+        for malformed in ('0 1000 1\n', '0 1000 1 0 extra\n'):
+            with self.subTest(helper_output=malformed), self.assertRaises(doctor.Denied):
+                probe(malformed)
 
     def test_a_child_that_outlived_its_bound_names_the_bound(self):
         with self.assertRaises(ConfigError) as caught:
