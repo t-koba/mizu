@@ -197,7 +197,14 @@ class WorkItemDescriptionTests(Fixture):
         row = self.store.page_open()["items"][0]
         self.assertEqual(row, self.store.page_open_readonly()["items"][0])
         for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
-            self.assertEqual(json.loads(text)["open_work_items"]["items"][0], row)
+            prompt_row = json.loads(text)["open_work_items"]["items"][0]
+            expected = {key: value for key, value in row.items()
+                        if key not in {"description_preview", "scope_preview", "reason_preview"}}
+            reference = {"tool": "mizu_work_items_read", "arguments": {"id": item_id}}
+            self.assertEqual(prompt_row, {**expected, "details_reference": reference})
+            detailed = ctx.handle("work_items_read", reference["arguments"])
+            self.assertEqual(detailed["item"]["description"], description)
+            self.assertEqual(detailed["history"][0]["description"], description)
         self.store.transition(item_id, expected_rev=1, status="dropped", actor="worker", reason="Closed")
         closed = self.store.page_closed_readonly()["items"][0]
         payload = events.pending(self.store, "reviewer", ("dropped",), sources="any")["events"][0]
