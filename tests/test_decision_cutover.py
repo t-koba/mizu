@@ -417,6 +417,29 @@ class DecisionCutoverTests(Fixture):
         with patch.object(delivery, 'authority', side_effect=switched), self.assertRaises(LimitExceeded):
             _role_events_due(self.project, self.project.snapshots.get(), 'reviewer')
 
+    def test_authority_marker_requires_exact_integer_schema_version_one(self):
+        plan_digest = 'a' * 64
+        report_raw = canonical({'plan_digest': plan_digest})
+        (self.root / delivery.REPORT_FILE).write_bytes(report_raw)
+        marker = {'schema': 1, 'kind': 'insight.decision', 'authority': 'shared',
+                  'plan_digest': plan_digest, 'report_digest': digest(report_raw)}
+        path = self.root / delivery.AUTHORITY_FILE
+        path.write_bytes(canonical(marker))
+        self.assertEqual(delivery.authority(self.root), marker)
+        for schema in (0, 2, True):
+            path.write_bytes(canonical(dict(marker, schema=schema)))
+            with self.subTest(schema=schema), self.assertRaisesRegex(
+                    Denied, 'Invalid decision authority marker'):
+                delivery.authority(self.root)
+
+    def test_page_bytes_accepts_positive_boundaries_and_refuses_adjacent_values(self):
+        role = self.config.roles['reviewer']
+        for value in (1, MAX_FRAME):
+            self.assertEqual(delivery.page_bytes(replace(role, decision_page_bytes=value)), value)
+        for value in (0, MAX_FRAME + 1, True):
+            with self.subTest(value=value), self.assertRaises(Denied):
+                delivery.page_bytes(replace(role, decision_page_bytes=value))
+
     def test_authority_reads_a_history_scale_report_under_the_safety_ceiling(self):
         plan_digest = 'a' * 64
         report = {'plan_digest': plan_digest, 'padding': 'x' * (MAX_FRAME + 1)}
