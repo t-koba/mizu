@@ -136,6 +136,28 @@ class CombinedWaitReadinessTests(CombinedFixture):
                 _receipt_wait_due(self.store, "worker", limit=1)
             self.assertEqual(replay.call_count, 1)
 
+    def test_readiness_projection_reuses_stronger_status_cache_and_invalidates(self):
+        if IS_WINDOWS:
+            self.skipTest("POSIX metadata cache")
+        item = self._delivered_ci_wait("cross-mode-proof")
+        self.store._projection_cache.clear()
+        writers = {name for name in self.project.roles
+                   if self.project.config.roles[name].workspace == "write"}
+        self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+        cached = self.store._projection_cache[item["id"]]
+        self.assertEqual(cached[0][2], "readiness-full-history")
+        with patch.object(self.store, "_sidecar_load", wraps=self.store._sidecar_load) as sidecar:
+            status = self.store.open_state_readonly(limit=10, writer_roles=writers)
+            self.assertEqual(sidecar.call_count, 0)
+        self.assertTrue(status["blocked_work"]["coverage_complete"])
+        self.assertIn(item["id"], [row["id"] for row in status["blocked_work"]["items"]])
+
+        history = self.project.root / "work-items" / item["id"] / "3.json"
+        history.write_text("{}")
+        status = self.store.open_state_readonly(limit=10, writer_roles=writers)
+        self.assertFalse(status["blocked_work"]["coverage_complete"])
+        self.assertEqual(status["blocked_work"]["diagnostic"], "unreadable")
+
     def test_readiness_cache_is_bound_to_snapshot_policy(self):
         self._delivered_ci_wait("policy-proof")
         self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))

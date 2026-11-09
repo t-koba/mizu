@@ -2817,7 +2817,12 @@ class WorkItems:
                       if cacheable and history_key is not None else None)
             if cacheable and history_key is not None:
                 self._seed(seed["id"], event, history_revisions=history_revisions)
-            valid = cached is not None and cached[0] == cache_key
+            # A strict readiness replay proves the same current projection and
+            # more: unlike current-delivery mode, it validates every historical
+            # delivery. Reuse it in this weaker status scan, but never use a
+            # status-only projection to satisfy readiness validation.
+            readiness_key = self._projection_key(seed, history_key, "readiness-full-history")
+            valid = cached is not None and cached[0] in (cache_key, readiness_key)
             if valid:
                 if len(cached) == 4:
                     valid = self._proof_unchanged(cached[3])
