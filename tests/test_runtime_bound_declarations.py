@@ -1949,6 +1949,26 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('budget.py', 'Budget.peek', 1, 0): (
         '1', 'safety',
         'budget peek / trust only a singly linked regular daily ledger file'),
+    ('ci_acceptance.py', 'policy', 0, 0): (
+        '1', 'format', 'CI acceptance / at least one local verification command is required'),
+    ('ci_acceptance.py', 'policy', 0, 1): (
+        '1', 'format', 'CI acceptance / an explicit equivalence policy contains at least one check'),
+    ('ci_acceptance.py', 'policy', 0, 2): (
+        '1', 'format', 'CI acceptance / each declared check covers at least one local command'),
+    ('ci_acceptance.py', 'policy', 0, 3): (
+        '1', 'format', 'CI acceptance / each declared check names at least one coverage obligation'),
+    ('ci_acceptance.py', 'policy', 0, 4): (
+        '1', 'format', 'CI acceptance / each declared check names at least one environment fact'),
+    ('ci_acceptance.py', 'policy', 1, 0): (
+        '1', 'format', 'CI acceptance policy / schema version one selects the declared policy layout'),
+    ('ci_acceptance.py', 'validate', 1, 0): (
+        '1', 'format', 'CI acceptance receipt / schema version one selects provider evidence layout'),
+    ('ci_acceptance.py', 'validate', 1, 1): (
+        '1', 'format', 'CI acceptance receipt / provider attempt number is a positive integer'),
+    ('ci_acceptance.py', 'selected', 1, 0): (
+        '2', 'format', 'CI acceptance reuse / schema version two is the retained provider-proof format'),
+    ('ci_acceptance.py', 'retain', 0, 0): (
+        '1', 'format', 'CI acceptance ingestion / provider attempt selector is positive'),
     ('ci_observation.py', '_valid_ci_run', 1, 0): (
         '128', 'safety',
         'CI observation / bound the opaque cached run identity before persistence and projection'),
@@ -2624,10 +2644,10 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_acceptance.py', 'policy', 2, 4): (
         '32', 'format',
         'CI acceptance / per-check environment facts follow the 32-entry policy schema'),
-    ('ci_acceptance.py', 'policy', 1, 0): (
+    ('ci_acceptance.py', 'policy', 1, 1): (
         '32768', 'safety',
         'CI acceptance / complete operator policy is capped at the documented 32 KiB'),
-    ('ci_acceptance.py', 'validate', 1, 0): (
+    ('ci_acceptance.py', 'validate', 1, 2): (
         '2147483647', 'format',
         'CI acceptance / receipt attempt range is the documented 1-2147483647 integer contract'),
     ('ci_acceptance.py', 'retain', 2, 0): (
@@ -3375,7 +3395,8 @@ def sibling():
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
-                'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py'}
+                'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
+                'ci_acceptance.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

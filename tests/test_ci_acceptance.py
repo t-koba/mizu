@@ -205,6 +205,12 @@ class CIAcceptanceTests(Fixture):
         self.assertIsNone(acceptance.effective(self.project, {**self.snapshot, 'id': 'f' * 64}))
 
     def test_provenance_and_partial_scope_fail_closed(self):
+        scope = ci_acceptance.bound(self.project, self.snapshot, self.local)
+        bad_attempt = {'schema': 2, 'code_digest': self.snapshot['code_digest'],
+                       'scope': scope, 'publication_id': self.selectors['publication_id'],
+                       'passed': True, 'evidence': {**self.response, 'attempt': 0}}
+        with self.assertRaises(Denied):
+            ci_acceptance.validate(bad_attempt)
         mutations = [
             ('green only', lambda e: e.clear()),
             ('wrong sha', lambda e: e.update(sha='d' * 40)),
@@ -212,6 +218,7 @@ class CIAcceptanceTests(Fixture):
             ('wrong repo', lambda e: e.update(repository='other/project')),
             ('wrong workflow', lambda e: e.update(workflow='different.yml')),
             ('wrong workflow digest', lambda e: e.update(workflow_digest='d' * 64)),
+            ('wrong evidence schema', lambda e: e.update(schema=2)),
             ('wrong run', lambda e: e.update(run='124')),
             ('wrong attempt', lambda e: e.update(attempt=2)),
             ('stale', lambda e: e.update(current_attempt=False)),
@@ -235,6 +242,13 @@ class CIAcceptanceTests(Fixture):
                     self.retain()
                 self.assertIsNone(acceptance.effective(self.project, self.snapshot))
 
+    def test_singleton_policy_lists_are_valid_and_empty_command_scope_is_not(self):
+        spec = copy.deepcopy(self.spec)
+        spec['checks'][0]['environment'] = {'os': 'linux'}
+        self.assertEqual(ci_acceptance.policy(spec, ['verify']), spec)
+        with self.assertRaises(Denied):
+            ci_acceptance.policy(spec, [])
+
     def test_policy_parser_requires_complete_explicit_bounded_mapping(self):
         check_project_settings(self.project.settings)
         for modify in (lambda p: p.pop('version'),
@@ -253,6 +267,10 @@ class CIAcceptanceTests(Fixture):
         cli = parser().parse_args(['ci-acceptance', 'sample', '--snapshot', self.snapshot['id'],
             '--publication-id', self.selectors['publication_id'], '--run', '123', '--attempt', '1'])
         self.assertEqual(cli.attempt, 1)
+        with patch.object(vcs, 'invoke', side_effect=AssertionError('invalid selector queried')):
+            with self.assertRaises(Denied):
+                ci_acceptance.retain(
+                    self.project, **{**self.selectors, 'attempt': 0})
         with self.assertRaises(Denied):
             vcs.read_via(self.project.config.vcs, 'acceptance', {})
 
@@ -358,6 +376,13 @@ class CIAcceptanceTests(Fixture):
             with self.assertRaises(Denied):
                 read()
         self.assertEqual(json.loads(path.read_bytes()), value)
+
+    def test_selected_refuses_a_non_schema_two_receipt(self):
+        self.retain()
+        with patch.object(acceptance, '_selected', return_value='a' * 64), \
+                patch.object(acceptance, 'get', return_value={'schema': 1}):
+            with self.assertRaises(Denied):
+                ci_acceptance.selected(self.project, self.snapshot['id'])
 
     def test_ci_proof_selection_is_independent_of_local_cache_and_policy(self):
         self.project.config = dataclasses.replace(self.project.config,
