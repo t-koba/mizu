@@ -2269,7 +2269,15 @@ class CacheInputTests(Fixture):
 
     def test_hardlink_names_count_against_file_and_byte_bounds(self):
         self.seed()
+        # The configured directory and its one file are two entries; this also
+        # exercises the +1 reserve while that directory's children are listed.
+        for file_limit, expected in ((1, False), (2, True)):
+            with self.subTest(file_limit=file_limit, hardlinks=False):
+                self.project.config = dataclasses.replace(self.config,
+                    sandbox=dataclasses.replace(self.config.sandbox, check_input_files=file_limit))
+                self.assertEqual(self.fingerprint() is not None, expected)
         self.link(self.cache / 'object', self.cache / 'alias')
+        # Each hardlink name adds an entry; the directory plus both names is 3.
         for limits, expected in (({'check_input_files': 2}, False),
                                  ({'check_input_bytes': 5}, False),
                                  ({'check_input_files': 3, 'check_input_bytes': 6}, True)):

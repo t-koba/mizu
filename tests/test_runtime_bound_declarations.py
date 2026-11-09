@@ -2561,6 +2561,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('check_jobs.py', '_mount_fingerprint', 0, 0): (
         '1', 'configured policy',
         'check jobs / dependency traversal file and byte bounds follow the configured 1-to-MAX_CHECK_INPUT_BOUND range'),
+    ('check_jobs.py', 'cache_input', 1, 0): (
+        '1', 'safety',
+        'check jobs / a regular cache file must have at least one filesystem link before fingerprinting'),
+    ('check_jobs.py', 'cache_input', 1, 1): (
+        '1', 'safety',
+        'check jobs / multiply-linked cache files require accounting for every name before reuse'),
     ('check_jobs.py', 'cache_input.unbound', 1, 0): (
         '256', 'safety',
         'check jobs / only expose untrusted relative cache paths within a bounded diagnostic field'),
@@ -3361,7 +3367,7 @@ def sibling():
         # Audit these selected check_jobs comparisons at magnitude one without
         # broadening the threshold for the module's unrelated comparisons.
         tree = ast.parse((ROOT / 'check_jobs.py').read_text(encoding='utf-8'))
-        for scope_name in ('purpose_label', '_mount_fingerprint'):
+        for scope_name in ('purpose_label', '_mount_fingerprint', 'cache_input'):
             function = next(node for node in tree.body
                             if isinstance(node, ast.FunctionDef) and node.name == scope_name)
             scoped = ast.Module(body=[function], type_ignores=[])
@@ -3606,6 +3612,15 @@ def no_defaults(limit, /, count, *, size):
                  if isinstance(node, ast.Call) and ast.unparse(node.func) == 'stream.read']
         self.assertEqual([ast.unparse(node.args[0]) for node in reads],
                          ['min(remaining, CHECK_INPUT_HASH_CHUNK_BYTES)', '1'])
+        # Reserve the directory currently being enumerated as one entry before
+        # listing children, alongside already visited, pending and listed names.
+        directory_count_guards = [node for node in ast.walk(fingerprint)
+                                  if isinstance(node, ast.Compare)
+                                  and ast.unparse(node.left) ==
+                                  'len(entries) + len(pending) + len(children) + 1'
+                                  and ast.unparse(node.comparators[0]) ==
+                                  'project.config.sandbox.check_input_files']
+        self.assertEqual(len(directory_count_guards), 1)
         logs = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == 'logs')
         evidence_bound = next(node for node in ast.walk(logs)
