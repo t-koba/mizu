@@ -2027,6 +2027,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('materialize.py', 'invoke', 1, 0): (
         '64', 'format',
         'materialized content digest / exact SHA-256 hexadecimal text length'),
+    ('distribution.py', 'is_public_source_path', 1, 0): (
+        '1', 'format',
+        'public-source path / the relative path must not be empty'),
     ('operator_record_index.py', '_files', 1, 0): (
         '1', 'safety',
         'operator record index / ignore only single-link unpublished atomic-write scratch'),
@@ -3463,7 +3466,7 @@ def sibling():
                 'usage.py', 'config.py', 'runtime.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
-                'operator_records.py', 'operator_record_index.py', 'work_order.py',
+                'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
                 'budget.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
@@ -3473,7 +3476,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():
