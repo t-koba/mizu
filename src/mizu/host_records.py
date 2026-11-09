@@ -2,7 +2,7 @@
 
 The publisher CLI is a trusted host entry point, not a model capability. Its
 principal is fixed here. Declarations are data: exact snapshot subjects and
-bounded discriminated publisher payloads or unrouted role JSON objects, with no
+bounded discriminated publisher payloads or declared role JSON objects, with no
 executable policy.
 """
 import contextlib
@@ -39,7 +39,9 @@ def configuration(raw=None):
                 identifier(row['writer'][5:])
                 if (set(row) != {'writer', 'route', 'wake', 'retention',
                                  'acknowledgement', 'subject', 'maximum'}
-                        or row['route'] != 'none' or row['wake'] is not False
+                        or row['route'] not in ('none', 'operator_question')
+                        or type(row['wake']) is not bool
+                        or (row['route'] == 'none' and row['wake'])
                         or row['retention'] != 'permanent'
                         or row['acknowledgement'] != 'explicit' or row['subject'] != 'object'
                         or type(row['maximum']) is not int or not 1 <= row['maximum'] <= PREVIEW_BYTES):
@@ -94,7 +96,7 @@ def _snapshot(snapshots, value):
 
 
 def _validate(snapshots, policy, subject, payload):
-    if policy['route'] == 'none':
+    if policy['writer'].startswith('role.'):
         return  # SharedRecords validates bounded JSON objects; no source authority.
     _snapshot(snapshots, subject)
     if type(payload) is not dict or type(payload.get('outcome')) is not str:
@@ -152,17 +154,22 @@ def write_publisher(project, *, kind, subject, payload):
             _sync(shared, record_id)
     # Non-authoritative platform hint only when this declaration enables wake.
     if policies[kind]['wake']:
-        with contextlib.suppress(OSError, NotImplementedError, Denied):
-            from .work_items import _directory
-            directory = project.root / 'waits'
-            _directory(directory)
-            mkdir(directory)
-            os.utime(directory, None, follow_symlinks=False)
+        _wake(project)
     return {'record': envelope, 'record_digest': computed}
 
 
+def _wake(project):
+    """Best-effort host watch hint, never delivery or model admission authority."""
+    with contextlib.suppress(OSError, NotImplementedError, Denied):
+        from .work_items import _directory
+        directory = project.root / 'waits'
+        _directory(directory)
+        mkdir(directory)
+        os.utime(directory, None, follow_symlinks=False)
+
+
 def write_role(context, args):
-    """Runtime-authenticated, unrouted data; no caller principal or source IDs."""
+    """Runtime-authenticated declared data; no caller principal or source IDs."""
     if "record_write" not in context.role.capabilities:
         raise Denied("Role record writing requires the record_write grant")
     if set(args) != {'kind', 'id', 'subject', 'payload'}:
@@ -191,6 +198,8 @@ def write_role(context, args):
         computed = shared.put(envelope, writer=writer)
         if existing:
             _sync(shared, record_id)
+    if policies[kind]['wake']:
+        _wake(context.project)
     return {'record': envelope, 'record_digest': computed}
 
 

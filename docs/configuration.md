@@ -23,11 +23,15 @@ complete schema, CLI lifecycle, wake behavior and acknowledgement rules are in
 
 ## Declared host records
 
-`record_kinds` defaults to empty. The data-only declarations bind a host writer,
-route/wake, exact snapshot subject, bounded payload variants, and permanent
-retention with explicit acknowledgements. Only the trusted publisher route is
-implemented; it adds no model writer. See the complete
-[declaration and adapter contract](shared-records.md#declared-host-publisher-outcomes).
+`record_kinds` defaults to empty. Data-only declarations bind an authenticated
+writer, route/wake, subject format, envelope bound and permanent retention with
+explicit acknowledgements. Publisher outcomes use the trusted host route; role
+writes require an explicit `record_write` grant and matching `role.<name>` writer.
+Role kinds use `route = "none", wake = false` for unrouted data, or opt in to
+`route = "operator_question"` for bounded host-CLI listing and exact record-bound
+operator answers. Wake is an explicit required boolean; only the question route
+permits enabling it. No role kind, route or wake is enabled by default. See the
+[record contracts](shared-records.md) for declarations, bounds and trust behavior.
 
 ## Regenerable workspace caches
 

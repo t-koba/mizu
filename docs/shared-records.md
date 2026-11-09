@@ -9,8 +9,9 @@ configuration default can activate that cutover. Operator-written `answer` and
 `operator.notice` records are a separate active SharedRecords slice, enabled
 only by their explicitly declared `operator_records` kind policy. Declared host
 publisher outcomes use the same store and the existing work-item wait delivery;
-explicitly declared role-authenticated data writes with author-only retrieval are opt-in and unrouted; all
-other source families retain their existing authorities.
+role-authenticated writes and author-only retrieval are opt-in, with an optional
+operator-question route and exact record-bound replies. Other source families
+retain their existing authorities.
 
 ## Role-authenticated data writes and author-only retrieval
 
@@ -35,12 +36,15 @@ maximum = 8192
 
 Add `"record_write"` to `[roles.worker].capabilities` to write and `"record_read"` to read that role's own records separately. These are the
 exact declaration keys; `writer` must be `role.<valid role name>`, `route` must be
-`none`, `wake` must be false, and retention/acknowledgement/subject must have the
-values shown. `maximum` is a positive integer at most `PREVIEW_BYTES` (128 KiB),
+`none` or `operator_question`. `wake` is a required explicit boolean and must be
+false for `none`; question wake hints require explicit `true`.
+Retention/acknowledgement/subject must have the values shown. `maximum` is a positive integer at most `PREVIEW_BYTES` (128 KiB),
 bounding the entire canonical envelope. The existing schema-v1 ceiling of 16
-kind declarations also covers these entries. No validator code or source-specific
-route is accepted. Subject and payload are data, not authoritative snapshot,
-Insight, question, CI or work-item references; they retain no external objects.
+kind declarations also covers these entries. No validator code or other route
+is accepted. Subject and payload are data, not authoritative snapshot, Insight,
+CI or work-item references; they retain no external objects. The declared
+question route authorizes only the envelope identity and its authenticated writer,
+never an identity or routing instruction embedded in its content.
 
 The tool `mizu_record_write` accepts exactly four required strings:
 
@@ -76,7 +80,7 @@ undeclared, oversized or corrupt records fail closed.
 
 The tool `mizu_record_read` with `{"kind":"role.note","id":"note1"}` plus optional `offset`/`limit` reads one own record by exact kind and stable id. The runtime derives `writer = "role." + authenticated_role.name`, requires that writer to match the declared kind, constructs the exact ID `role/<role>/<kind>/<id>` and refuses other authors, undeclared kinds, ID-namespace escapes and digest/plaintext mismatches. Paging counts Unicode characters with `limit` 1-8192 and revalidates the exact full-envelope digest on every page; reads use the existing store only, with no listing, index, cursor, routing, wake or acknowledgement. A role needs the explicit `record_read` grant for this mode; the `ack_token` manifest mode for operator answers/notices is unchanged and the two modes never mix.
 
-These declarations provide no routing, wake or delivery authority. Records
+The `none` route provides no routing, wake or delivery authority. Records
 are permanent immutable audit data in the existing backup/restore members; there
 is no TTL, cancellation/deletion operation or automatic acknowledgement. A write,
 replay or role read selects no receipt. Any trusted host consumer using SharedRecords must
@@ -85,11 +89,94 @@ identity-bound acknowledgement selections; existing `finish.ack_events` source
 authorities are unchanged. Operator answers/notices and publisher outcomes retain
 their dedicated host-authenticated entry points and validators below.
 
+## Opt-in role questions to the operator
+
+To expose a role kind as questions, grant the role `record_write` and declare:
+
+```toml
+[record_kinds."role.question"]
+writer = "role.worker"
+route = "operator_question"
+wake = false
+retention = "permanent"
+acknowledgement = "explicit"
+subject = "object"
+maximum = 8192
+```
+
+The same `mizu_record_write` contract above creates immutable questions. No
+questions are migrated from Insights. The host operator can inspect them with
+explicit per-call bounds (shown values are examples, not defaults):
+
+```sh
+mizu record-questions PROJECT --limit 20 --scan-limit 1000
+```
+
+This operator-only command returns `{questions, scanned, truncated}`. Each row
+contains the canonical `record`, its recomputed `record_digest`, and a ready-to-use
+answer `subject = {type:"record", kind, id, digest}`. Only currently declared
+`operator_question` kinds with valid authenticated writer/ID bindings are shown;
+ordinary role notes and other source namespaces are not questions. With no such
+route, listing returns an empty complete result without scanning. The view reads
+the existing `shared-records/role` partition, not chronological or pending order.
+It creates no index, cursor, receipt or queue.
+
+Both command-line bounds are required positive per-invocation integers:
+`--limit` bounds returned rows and `--scan-limit` bounds role-partition filenames
+examined, including unrouted role data. There is no default scan of the partition.
+The scan uses filesystem enumeration order, not chronological or globally sorted
+order, and reads at most the requested number of record envelopes; `scanned`
+counts those envelopes, not the total questions stored. A further eligible row
+or exhaustion of the scan budget reports `truncated = true`; exhaustion is
+conservatively incomplete even at actual EOF. There is no continuation cursor or
+snapshot consistency promise across calls. Unsafe, corrupt, undeclared, non-record
+or identity-mismatched entries in the bounded slice fail the command, never a
+successful empty/completeness claim. Work is proportional to the explicit
+per-call bounds, not the total number of stored role records.
+
+`wake = false` performs no wake operation. Explicit `true` requests only the
+existing best-effort host `waits` directory modification hint after a committed
+write or exact replay. It does not admit a model role, notify a human, install
+services or imply an operator dashboard. Listing remains available independently
+of wake. A hint failure does not undo a committed record; cancellation before
+write leaves none, while uncertain writes use exact replay as above.
+
+Enable the existing `operator_records.answer` policy to reply:
+
+```sh
+mizu record PROJECT publish --kind answer --id answer-event-1 \
+  --subject-kind role.question --subject-id role/worker/role.question/question1 \
+  --subject-digest EXACT_QUESTION_ENVELOPE_DIGEST --body 'The explicit answer'
+```
+
+The record subject has exactly `type = "record"`, `kind`, full `id` and SHA-256
+`digest`; do not also supply `--subject-rev`. Write, exact replay and pending
+manifest creation revalidate that immutable target and its current declared route.
+Missing targets, wrong kind/digest, removed routes, changed writer bindings,
+malformed ID namespaces and unconfigured asking roles are refused there. Once a
+unit's reply manifest is frozen, its read and acknowledgement remain valid under
+the existing current-unit manifest contract; each still revalidates the exact
+operator-answer envelope digest without re-routing its source.
+The reply recipient is derived from the referenced envelope's authenticated
+`role.<name>` writer, never from its subject/payload or a caller-supplied identity.
+Optional `--role` may only confirm that same role. These record subjects are
+accepted only for answers, not notice attachments or notice closure targets.
+
+Replies retain the existing authenticated `operator.cli` writer, stable event-ID
+replay, answer enablement/wake policy, frozen role delivery, manifest-bound reads
+and explicit `finish.ack_events` acknowledgements. Default role kind policy stays
+closed; this route adds no operator write authority to a model. Answers and
+questions remain permanent audit records: listing includes answered questions,
+and neither answering nor acknowledging a reply closes, supersedes or implicitly
+acknowledges a question. No closure/supersession semantics are added here. Existing
+Insight `{type:"insight", id, rev}` answer routing remains unchanged and separate;
+record-bound answers do not satisfy Insight-revision wait liveness.
+
 ## Declared host publisher outcomes
 
 `record_kinds` defaults to empty (no authority). It is independent of the existing
-explicit `operator_records.answer` / `operator.notice` policies; those formats,
-routes and authenticated `operator.cli` writer are unchanged. A declaration uses
+explicit `operator_records.answer` / `operator.notice` policies and their
+authenticated `operator.cli` writer. A declaration uses
 this bounded data-only schema, with no executable configuration or callbacks:
 
 ```toml
@@ -223,7 +310,8 @@ introduced. Acknowledged or closed records cease to admit; omitted acknowledgeme
 remain eligible. Re-render operator-managed services to install the new watch;
 these changes do not modify installed services.
 
-For an answer, supply the full existing question/Insight ID **and exact revision**:
+For an Insight answer, supply the full existing question/Insight ID **and exact revision**
+(record-bound answers use the separate subject form above):
 
 ```sh
 mizu record PROJECT publish --kind answer --id answer-event-1 \
@@ -241,7 +329,7 @@ gaining a second copy on replay. The generic `records(namespace="operator")`
 scanner still covers only the operator partition; dispatch instead uses the
 checked metadata projection described below. The kind `answer`
 is single-component; other envelope IDs and writers remain namespaced. An answer
-requires subject `{type="insight", id, rev}`; prefixes, missing revisions and
+to an Insight requires subject `{type="insight", id, rev}`; prefixes, missing revisions and
 unavailable revisions are refused. A retained prior revision can be answered.
 The asking role is the question's authenticated `source`, not its free-text body,
 origin label or current holder. That source must be a configured project role.

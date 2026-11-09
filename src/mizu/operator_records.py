@@ -11,7 +11,7 @@ import heapq
 
 from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .fs import DIGEST, identifier, lock, now
-from .shared_records import RECORD_NAME_MAX_CHARS, KindPolicy, SharedRecords
+from .shared_records import RECORD_NAME_MAX_CHARS, KindPolicy, SharedRecords, _name
 from .operator_record_index import catalog, remember
 
 WRITER = 'operator.cli'
@@ -39,6 +39,13 @@ def configuration(raw=None):
 
 
 def _subject(subject):
+    if type(subject) is dict and subject.get('type') == 'record':
+        if (set(subject) != {'type', 'kind', 'id', 'digest'}
+                or not isinstance(subject['digest'], str) or not DIGEST.fullmatch(subject['digest'])):
+            raise Denied('Expected an exact record kind, ID and digest')
+        _name(subject['kind'], kind=True)
+        _name(subject['id'])
+        return
     if (type(subject) is not dict or set(subject) != {'type', 'id', 'rev'} or subject['type'] != 'insight'
             or type(subject['rev']) is not int or subject['rev'] < 1):
         raise Denied('Expected an exact insight subject and revision')
@@ -48,6 +55,8 @@ def _subject(subject):
 def _validate(kind, subject, payload):
     if subject:
         _subject(subject)
+        if subject['type'] == 'record' and kind != 'answer':
+            raise Denied('Only answers may address role questions')
     if kind == 'answer' and not subject:
         raise Denied('Answer requires an exact question subject')
     if set(payload) != {'action', 'body', 'addressee', 'target'}:
@@ -81,6 +90,8 @@ def store(project):
 
 def _question(project, subject):
     _subject(subject)
+    if subject['type'] != 'insight':
+        raise Denied('Expected an insight subject')
     current = project.insights.read(subject['id'])
     if current.get('id') != subject['id']:
         raise Denied('Subject must use the full exact insight ID')
@@ -103,11 +114,74 @@ def _role(project, role):
     return role
 
 
+def _record_question(project, subject):
+    """Resolve only a declared route and its authenticated immutable writer."""
+    from .host_records import configuration, store
+    _subject(subject)
+    policies = configuration(project.config.record_kinds)
+    policy = policies.get(subject['kind'])
+    if policy is None or policy['route'] != 'operator_question':
+        raise Denied('Role question route is undeclared')
+    shared = store(project.root, project.snapshots, policies)
+    envelope, _ = shared.get(subject['id'], expected_digest=subject['digest'])
+    return _question_writer(project, envelope, subject['kind'], policy)
+
+
+def _question_writer(project, envelope, kind, policy):
+    role = _role(project, envelope['writer'][5:])
+    prefix = f"role/{role}/{kind}/"
+    if (envelope['kind'] != kind or envelope['writer'] != policy['writer']
+            or not envelope['id'].startswith(prefix) or not envelope['id'][len(prefix):]):
+        raise Denied('Role question identity differs from declaration')
+    return role
+
+
+def _asking(project, subject):
+    _subject(subject)
+    if subject['type'] == 'record':
+        return _record_question(project, subject)
+    return _question(project, subject).get('source')
+
+
+def questions(project, *, limit, scan_limit):
+    """Bounded host-only view; no acknowledgements, queue, index or cursor.
+
+    The caller supplies positive per-request row and scan bounds. A full scan
+    budget is reported as incomplete without a lookahead read, even if it
+    happened to reach EOF; directory enumeration and record reads stay within
+    that requested budget.
+    """
+    from .host_records import configuration, store
+    if (type(limit) is not int or limit < 1
+            or type(scan_limit) is not int or scan_limit < 1):
+        raise Denied('Question listing bounds must be positive integers')
+    policies = configuration(project.config.record_kinds)
+    if not any(row['route'] == 'operator_question' for row in policies.values()):
+        return {'questions': [], 'scanned': 0, 'truncated': False}
+    shared = store(project.root, project.snapshots, policies)
+    rows, scanned, truncated = [], 0, False
+    records = shared.records(namespace='role', scan_limit=scan_limit)
+    try:
+        for envelope, computed in records:
+            scanned += 1
+            if policies[envelope['kind']]['route'] != 'operator_question':
+                continue
+            subject = dict(type='record', kind=envelope['kind'], id=envelope['id'], digest=computed)
+            _question_writer(project, envelope, envelope['kind'], policies[envelope['kind']])
+            if len(rows) == limit:
+                truncated = True
+                break
+            rows.append({'subject': subject, 'record': envelope, 'record_digest': computed})
+    finally:
+        records.close()
+    return {'questions': rows, 'scanned': scanned,
+            'truncated': truncated or scanned == scan_limit}
+
+
 def _route(project, envelope):
     role = _role(project, envelope['payload']['addressee'])
     if envelope['kind'] == 'answer':
-        question = _question(project, envelope['subject'])
-        if question.get('source') != role:
+        if _asking(project, envelope['subject']) != role:
             raise Denied('Answer must address the authenticated asking role')
     return role
 
@@ -142,8 +216,7 @@ def write(project, *, event_id, kind, body='', addressee=None, subject=None,
     record_id = f'operator/{project.name}/{event_id}'
     subject = {} if subject is None else subject
     if kind == 'answer':
-        question = _question(project, subject)
-        asking = _role(project, question.get('source'))
+        asking = _role(project, _asking(project, subject))
         if addressee is not None and addressee != asking:
             raise Denied('Answer addressee differs from asking role')
         addressee = asking
@@ -243,7 +316,8 @@ def answer_lookup(project):
                 if configuration(project.config.operator_records)['answer']['enabled']:
                     with lock(project.root / 'locks' / 'operator-records.lock'):
                         for envelope, _ in catalog(store(project), readonly=True).values():
-                            if envelope['kind'] == 'answer':
+                            if (envelope['kind'] == 'answer'
+                                    and envelope['subject']['type'] == 'insight'):
                                 subject = envelope['subject']
                                 key = (subject['id'], subject['rev'], envelope['payload']['addressee'])
                                 answers[key] = None if key in answers else envelope

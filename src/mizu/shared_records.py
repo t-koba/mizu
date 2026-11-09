@@ -33,9 +33,11 @@ is safe, and callers must not interpret a failed call as a complete batch.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import stat
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -291,7 +293,7 @@ class SharedRecords:
             raise Denied("Shared record digest mismatch")
         return envelope, computed
 
-    def records(self, *, namespace: str | None = None):
+    def records(self, *, namespace: str | None = None, scan_limit: int | None = None):
         """Scan this store's declared kinds only, without a second index/queue.
 
         Other source families retain their own validators and lifecycle. Unsafe
@@ -301,34 +303,56 @@ class SharedRecords:
         ``shared-records/<namespace>/`` partition (for example ``"operator"``);
         the unfiltered scan covers both sharded partitions and pre-partition
         flat legacy files, deduplicating identical bytes and refusing
-        conflicting duplicates for one ID.
+        conflicting duplicates for one ID. An optional ``scan_limit`` is only
+        valid for a single namespace; it bounds directory entries examined and
+        deliberately preserves filesystem enumeration order rather than sorting
+        the complete partition.
         """
+        if (scan_limit is not None
+                and (namespace is None or type(scan_limit) is not int or scan_limit < 1)):
+            raise Denied("Invalid shared record scan limit")
         if namespace is not None:
             partition = _partition(namespace)
             if not self._parents(f"shared-records/{partition}/entry.json"):
                 return
             prefix = f"shared-records/{partition}/"
-            for path in sorted((self.root / "shared-records" / partition).glob("*.json")):
-                raw = self._read(f"{prefix}{path.name}", RECORD_BYTES)
-                if raw is None:
-                    raise Denied("Shared record is unavailable")
-                try:
-                    envelope = loads_finite(raw)
-                except (ValueError, TypeError, UnicodeError) as exc:
-                    raise Denied("Corrupt shared record JSON") from exc
-                if type(envelope) is not dict or set(envelope) != _ENVELOPE:
-                    raise Denied("Invalid shared record envelope")
-                _name(envelope["kind"], kind=True)
-                record_id = _name(envelope["id"])
-                if _namespace(record_id) != namespace:
-                    raise Denied("Shared record filename identity mismatch")
-                if self._record_name(record_id) != f"{prefix}{path.name}":
-                    raise Denied("Shared record filename identity mismatch")
-                if envelope["kind"] not in self.policies:
-                    raise Denied("Undeclared kind in shared record namespace")
-                if self._validate(envelope) != raw:
-                    raise Denied("Shared record canonical identity mismatch")
-                yield envelope, digest(raw)
+            directory = self.root / "shared-records" / partition
+            if scan_limit is None:
+                paths = iter(sorted(directory.glob("*.json")))
+            else:
+                def bounded_paths():
+                    with os.scandir(directory) as entries:
+                        for entry in islice(entries, scan_limit):
+                            if not entry.name.endswith(".json"):
+                                raise Denied("Invalid shared record filename")
+                            yield directory / entry.name
+                paths = bounded_paths()
+            try:
+                for path in paths:
+                    raw = self._read(f"{prefix}{path.name}", RECORD_BYTES)
+                    if raw is None:
+                        raise Denied("Shared record is unavailable")
+                    try:
+                        envelope = loads_finite(raw)
+                    except (ValueError, TypeError, UnicodeError) as exc:
+                        raise Denied("Corrupt shared record JSON") from exc
+                    if type(envelope) is not dict or set(envelope) != _ENVELOPE:
+                        raise Denied("Invalid shared record envelope")
+                    _name(envelope["kind"], kind=True)
+                    record_id = _name(envelope["id"])
+                    if _namespace(record_id) != namespace:
+                        raise Denied("Shared record filename identity mismatch")
+                    if self._record_name(record_id) != f"{prefix}{path.name}":
+                        raise Denied("Shared record filename identity mismatch")
+                    if envelope["kind"] not in self.policies:
+                        raise Denied("Undeclared kind in shared record namespace")
+                    if self._validate(envelope) != raw:
+                        raise Denied("Shared record canonical identity mismatch")
+                    yield envelope, digest(raw)
+            finally:
+                close = getattr(paths, "close", None)
+                if callable(close):
+                    close()
             return
         if not self._parents("shared-records/entry.json"):
             return

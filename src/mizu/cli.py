@@ -105,6 +105,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", required=True)
     p.add_argument("--subject", required=True, help="Exact snapshot subject as JSON")
     p.add_argument("--payload", required=True, help="Declared bounded payload as JSON")
+    p = sub.add_parser("record-questions", help="Bounded operator listing of declared role questions")
+    p.add_argument("project")
+    p.add_argument("--limit", type=int, required=True,
+                   help="Maximum questions returned for this invocation")
+    p.add_argument("--scan-limit", type=int, required=True,
+                   help="Maximum role record filenames scanned for this invocation")
     p = sub.add_parser("record", help="Operator-only immutable answers and notices; no Insight decisions")
     p.add_argument("project")
     p.add_argument("action", choices=("publish", "withdraw", "supersede"))
@@ -114,6 +120,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--role", help="Notice addressee; answers derive the authenticated asking role")
     p.add_argument("--subject-id", help="Exact full insight/question ID")
     p.add_argument("--subject-rev", type=int)
+    p.add_argument("--subject-kind", help="Declared role question kind (instead of insight revision)")
+    p.add_argument("--subject-digest", help="Exact role question envelope digest")
     p.add_argument("--target-id", help="Exact notice record ID to withdraw/supersede")
     p.add_argument("--target-digest", help="Exact notice envelope digest")
     p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
@@ -728,14 +736,25 @@ def _execute(config, args):
             raise ConfigError("Publisher record input exceeds frame bound")
         return write_publisher(Project(config, args.project), kind=args.kind,
                                subject=loads_finite(args.subject), payload=loads_finite(args.payload))
+    if args.command == "record-questions":
+        from .operator_records import questions
+        return questions(Project(config, args.project), limit=args.limit, scan_limit=args.scan_limit)
     if args.command == "record":
         from .operator_records import write
-        if (args.subject_id is None) != (args.subject_rev is None):
+        record_subject = args.subject_kind is not None or args.subject_digest is not None
+        if record_subject:
+            if (args.subject_kind is None or args.subject_digest is None
+                    or args.subject_id is None or args.subject_rev is not None):
+                raise ConfigError("Record question requires kind, ID and digest, not revision")
+        elif (args.subject_id is None) != (args.subject_rev is None):
             raise ConfigError("Record subject requires both exact ID and revision")
         if (args.target_id is None) != (args.target_digest is None):
             raise ConfigError("Record target requires both ID and digest")
         subject = ({"type": "insight", "id": args.subject_id, "rev": args.subject_rev}
                    if args.subject_id is not None else None)
+        if record_subject:
+            subject = {"type": "record", "kind": args.subject_kind,
+                       "id": args.subject_id, "digest": args.subject_digest}
         target = ({"id": args.target_id, "digest": args.target_digest}
                   if args.target_id is not None else None)
         return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
