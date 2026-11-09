@@ -233,32 +233,38 @@ class IdleWithOpenWorkTests(Fixture):
             validate_progress({**progress, "recorded_at": at_timestamp_limit + "1"})
 
     def test_writer_wait_conversion_schema_is_bounded_and_projected(self):
-        conversion = {"status": "converted",
-                      "reason": "ready_work_with_pending_structured_wait",
-                      "wait_kind": "ci", "backoff_seconds": 300}
-        progress = _progress_record(
-            {}, "worker", (), {name: False for name in PROGRESS_SIGNALS}, "wait",
-            ready_work=True, wait_conversion=conversion)
-        self.assertEqual(progress["schema"], 6)
-        validate_progress(progress)
-        self.assertEqual(progress_projection(progress)["wait_conversion"], conversion)
-        for backoff in (1, 86400):
-            validate_progress({**progress, "wait_conversion": {**conversion, "backoff_seconds": backoff}})
-        legacy = self.park("wait", has_progress=False, ready_work="legacy")["progress"]
-        with self.assertRaises(Denied):
-            validate_progress({**legacy, "schema": 6, "wait_conversion": conversion})
-        with self.assertRaises(Denied):
-            validate_progress({**progress, "schema": 7})
-        for bad in (
-                None, {}, {**conversion, "wait_kind": "unsupported"},
-                {**conversion, "backoff_seconds": True},
-                {**conversion, "backoff_seconds": 0},
-                {**conversion, "backoff_seconds": 86401},
-                {**conversion, "extra": 1}):
-            with self.subTest(bad=bad), self.assertRaises(Denied):
-                validate_progress({**progress, "wait_conversion": bad})
-        with self.assertRaises(Denied):
-            validate_progress({**progress, "ready_work": False})
+        for schema, reason, kind in (
+                (6, "ready_work_with_pending_structured_wait", "ci"),
+                (7, "ready_work_without_proven_structured_wait", None)):
+            conversion = {"status": "converted", "reason": reason,
+                          "wait_kind": kind, "backoff_seconds": 300}
+            progress = _progress_record(
+                {}, "worker", (), {name: False for name in PROGRESS_SIGNALS}, "wait",
+                ready_work=True, wait_conversion=conversion)
+            self.assertEqual(progress["schema"], schema)
+            validate_progress(progress)
+            self.assertEqual(progress_projection(progress)["wait_conversion"], conversion)
+            for backoff in (1, 86400):
+                validate_progress({**progress, "wait_conversion": {**conversion, "backoff_seconds": backoff}})
+            legacy = self.park("wait", has_progress=False, ready_work="legacy")["progress"]
+            with self.assertRaises(Denied):
+                validate_progress({**legacy, "schema": schema, "wait_conversion": conversion})
+            for invalid_schema in (8, 7 if schema == 6 else 6):
+                with self.assertRaises(Denied):
+                    validate_progress({**progress, "schema": invalid_schema})
+            for bad in (
+                    None, {}, {**conversion, "wait_kind": "unsupported"},
+                    {**conversion, "wait_kind": None if kind else "ci"},
+                    {**conversion, "reason": "unsupported"},
+                    {**conversion, "backoff_seconds": True},
+                    {**conversion, "backoff_seconds": 0},
+                    {**conversion, "backoff_seconds": 86401},
+                    {**conversion, "extra": 1}):
+                with self.subTest(schema=schema, bad=bad), self.assertRaises(Denied):
+                    validate_progress({**progress, "wait_conversion": bad})
+            for ready in (False, None):
+                with self.assertRaises(Denied):
+                    validate_progress({**progress, "ready_work": ready})
 
     def test_writer_run_binds_true_and_single_row_probe(self):
         self.item("ready-at-finish")
@@ -273,7 +279,7 @@ class IdleWithOpenWorkTests(Fixture):
         with patch.object(self.project.work_items, "page_ready", side_effect=probe):
             snap = self.run_writer("wait")
         self.assertEqual(seen.get("limit"), 1)
-        self.assertEqual(snap["progress"]["schema"], 5)
+        self.assertEqual(snap["progress"]["schema"], 7)
         self.assertIs(snap["progress"]["ready_work"], True)
         idle = self.status_idle()
         self.assertTrue(idle["active"])
@@ -300,6 +306,7 @@ class IdleWithOpenWorkTests(Fixture):
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
             snap = self.run_writer("wait")
         self.assertEqual(snap["progress"]["schema"], 5)
+        self.assertNotIn("wait_conversion", snap["progress"])
         self.assertIs(snap["progress"]["ready_work"], None)
         idle = self.status_idle()
         self.assertFalse(idle["active"])

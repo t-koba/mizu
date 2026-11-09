@@ -67,7 +67,8 @@ def validate_progress(value: dict) -> dict:
     Schema 1 is the original progress record. Schema 2 adds the bounded finish-time
     ready-work observation; schema 3 adds the prompt ready-set signature; schemas
     4–5 add exact wait-resolution delivery receipts. Schema 6 adds a bounded
-    writer wait-conversion diagnostic to any schema-2–5 record.
+    writer wait-conversion diagnostic to any schema-2–5 record. Schema 7 records
+    ready work without a proven held structured wait, independently of liveness.
     """
     fields_v1 = {"schema", "signals", "selected", "role", "has_progress",
                  "no_progress_count", "obligations_digest", "recorded_at"}
@@ -79,9 +80,9 @@ def validate_progress(value: dict) -> dict:
     if not isinstance(value, dict):
         raise Denied("Invalid snapshot progress record")
     schema = value.get("schema")
-    if type(schema) is not int or schema not in (1, 2, 3, 4, 5, 6):
+    if type(schema) is not int or schema not in (1, 2, 3, 4, 5, 6, 7):
         raise Denied("Invalid snapshot progress schema")
-    if schema == 6:
+    if schema in (6, 7):
         if "wait_conversion" not in value:
             raise Denied("Invalid snapshot progress record")
         base = frozenset(set(value) - {"wait_conversion"})
@@ -111,15 +112,19 @@ def validate_progress(value: dict) -> dict:
             raise Denied("Invalid snapshot wait-resolution delivery")
     if "wait_resolution_high_water" in value:
         validate_wait_resolution_high_water(value["wait_resolution_high_water"])
-    if schema == 6:
+    if schema in (6, 7):
         conversion = value["wait_conversion"]
         if (not isinstance(conversion, dict)
                 or set(conversion) != {"status", "reason", "wait_kind", "backoff_seconds"}
                 or conversion.get("status") != "converted"
-                or conversion.get("reason") != "ready_work_with_pending_structured_wait"
-                or conversion.get("wait_kind") not in {
-                    "deadline", "code_change", "insight_decided", "dependency",
-                    "ci", "publication_ci", "proposal_merged"}
+                or (schema == 6 and (
+                    conversion.get("reason") != "ready_work_with_pending_structured_wait"
+                    or conversion.get("wait_kind") not in {
+                        "deadline", "code_change", "insight_decided", "dependency",
+                        "ci", "publication_ci", "proposal_merged"}))
+                or (schema == 7 and (
+                    conversion.get("reason") != "ready_work_without_proven_structured_wait"
+                    or conversion.get("wait_kind") is not None))
                 or type(conversion.get("backoff_seconds")) is not int
                 or not 1 <= conversion["backoff_seconds"] <= MAX_NO_PROGRESS_BACKOFF_SECONDS
                 or value.get("ready_work") is not True):

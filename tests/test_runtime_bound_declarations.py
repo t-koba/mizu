@@ -1962,14 +1962,14 @@ COMPARISON_BOUND_ARGUMENTS = {
         '256', 'format',
         'snapshot progress / wait-resolution token revisions share the 256-revision work-item chain ceiling'),
     ('snapshot.py', 'validate_progress', 1, 0): (
-        '6', 'format', 'snapshot progress / schema 6 adds the bounded wait-conversion diagnostic'),
-    ('snapshot.py', 'validate_progress', 1, 1): (
         '2', 'format', 'snapshot progress / wait-conversion diagnostics require a schema-2-or-newer base'),
-    ('snapshot.py', 'validate_progress', 1, 2): (
+    ('snapshot.py', 'validate_progress', 1, 1): (
         '256', 'format',
         'snapshot progress / delivered wait-resolution token revisions share the 256-revision work-item chain ceiling'),
+    ('snapshot.py', 'validate_progress', 1, 2): (
+        '6', 'format', 'snapshot progress / schema 6 preserves exact held-structured-wait conversions'),
     ('snapshot.py', 'validate_progress', 1, 3): (
-        '6', 'format', 'snapshot progress / selected signals are bounded by the six recognized signal names'),
+        '7', 'format', 'snapshot progress / schema 7 adds ready work without a proven held structured wait'),
     ('snapshot.py', 'validate_progress', 1, 4): (
         '64', 'safety', 'snapshot progress / cap persisted timestamp text before parsing'),
     ('snapshot.py', 'validate_progress', 0, 0): (

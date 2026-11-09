@@ -4356,19 +4356,19 @@ _WRITER_CONVERTIBLE_WAIT_KINDS = frozenset((
 
 def _writer_wait_conversion(config, role, finished, ready_work_present, *,
                             wait_kind=None, ready_work_complete=False):
-    """Describe only a verified live structured wait converted for ready work."""
+    """Record complete ready-work evidence, distinguishing proven held waits."""
     if (role.workspace != "write" or finished.get("outcome") != "wait"
-            or finished.get("wait_liveness") is not True
             or getattr(config.limits, "writer_wait_with_ready_work", True) is not True
             or ready_work_present is not True or ready_work_complete is not True):
         return None
-    kind = wait_kind
-    if kind not in _WRITER_CONVERTIBLE_WAIT_KINDS:
-        return None
+    kind = (wait_kind if finished.get("wait_liveness") is True
+            and wait_kind in _WRITER_CONVERTIBLE_WAIT_KINDS else None)
     backoff = role_no_progress_backoff_seconds(config, role)
     if type(backoff) is not int or not 1 <= backoff <= MAX_NO_PROGRESS_BACKOFF_SECONDS:
         return None
-    return {"status": "converted", "reason": "ready_work_with_pending_structured_wait",
+    reason = ("ready_work_with_pending_structured_wait" if kind is not None
+              else "ready_work_without_proven_structured_wait")
+    return {"status": "converted", "reason": reason,
             "wait_kind": kind, "backoff_seconds": backoff}
 
 def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
@@ -4392,11 +4392,15 @@ def _writer_progress_fallback(record, config, role, ready_work_present, current_
                 return False
             if ready_work_present:
                 if getattr(config.limits, "writer_wait_with_ready_work", True) is True:
+                    conversion = progress.get("wait_conversion")
+                    if (isinstance(conversion, dict)
+                            and conversion["reason"] == "ready_work_without_proven_structured_wait"
+                            and conversion["backoff_seconds"] == backoff):
+                        return True
                     live, _, held_wait_kind = _writer_wait_sources(
                         project, role, include_structured_wait=True)
                     if live is False:
                         return True
-                    conversion = progress.get("wait_conversion")
                     return (live is True and held_wait_kind is not None
                             and isinstance(conversion, dict)
                             and conversion.get("wait_kind") == held_wait_kind
@@ -4715,7 +4719,8 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     the ready set shown in the unit input rather than the finish-time probe.
     Schema 4 also records the bounded exact wait-resolution causes offered to
     the writer. Schema 5 adds a proof-set-bound shown prefix for overflow; neither
-    receipt admits an old proof on an unrelated ready-set change.
+    receipt admits an old proof on an unrelated ready-set change. Schemas 6–7
+    distinguish proven held-wait conversion from ready-only conversion.
     """
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
@@ -4769,7 +4774,9 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     if wait_resolution_high_water is not _READY_WORK_UNSET:
         record.update(schema=5, wait_resolution_high_water=wait_resolution_high_water)
     if wait_conversion is not _READY_WORK_UNSET:
-        record.update(schema=6, wait_conversion=wait_conversion)
+        schema = (7 if isinstance(wait_conversion, dict) and wait_conversion.get("reason") ==
+                  "ready_work_without_proven_structured_wait" else 6)
+        record.update(schema=schema, wait_conversion=wait_conversion)
     return validate_progress(record)
 
 

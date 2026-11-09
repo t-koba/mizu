@@ -236,21 +236,29 @@ durations are unchanged; a timer fallback is not an event subscription. The
 `idle_with_open_work` status remains the recorded-at-finish diagnostic, not a
 live scheduler verdict.
 
-When `[limits].writer_wait_with_ready_work` is enabled (default), the same
-bounded fallback also applies while an external source remains live, but only
-when finish-time evidence proves both role-eligible ready work and a current,
-held work item with a pending supported structured wait. This lets the blocked
-item keep its exact CI, dependency, question, deadline or other wait while the
-writer resumes unrelated ready work after the effective `writer_no_progress_backoff_seconds`
-(default 300 seconds, with the existing per-role override). It does not change
-the item's status, holder or wait, shorten `maximum_wait_seconds`, or make a
-free-standing check/question sufficient. Disabled policy, no ready work, or
-incomplete evidence preserves the requested wait; later complete evidence does
-not retroactively authorize that live-source fallback without a finish-time
-conversion diagnostic. No-live and self-resolvable fallback behavior is
-unchanged. The immutable snapshot status projection reports
-a successful conversion at `progress.record.wait_conversion`, including the
-cause, wait kind and delay; older snapshots without that field remain valid.
+When `[limits].writer_wait_with_ready_work` is enabled (default), a complete
+finish-time `page_ready(limit=1)` observation of role-eligible ready work is
+sufficient to resume the writer after the effective
+`writer_no_progress_backoff_seconds` (default 300 seconds, with the existing
+per-role override). A held structured wait is not required: a free-standing
+check/question or unknown wait liveness does not prevent unrelated ready work.
+Admission still requires current role-eligible ready work and enabled policy.
+This does not change any item's status, holder or wait, shorten
+`maximum_wait_seconds`, or add event subscriptions. Disabled policy, no ready
+work, or incomplete/absent finish-time ready evidence cannot authorize a new
+conversion; later complete evidence cannot retroactively supply that marker.
+No-live and self-resolvable fallback behavior is unchanged.
+
+The immutable snapshot status projection reports a successful conversion at
+`progress.record.wait_conversion`, including a bounded cause, wait kind and
+delay. Schema 6 retains `ready_work_with_pending_structured_wait` and the proven
+held kind; admission still matches that exact current held kind and configured
+delay for a live-source conversion. Schema 7 uses
+`ready_work_without_proven_structured_wait` with a null `wait_kind` when no live
+held kind was proven. Its ready-work conversion is independent of current
+liveness but still matches the configured delay. Both require complete positive
+finish-time ready evidence. Older snapshots remain valid; their absent markers
+do not authorize the new conversion.
 
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the

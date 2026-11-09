@@ -470,7 +470,7 @@ class WriterWaitTests(Fixture):
         (self.project.root / 'inbox' / 'broken.json').write_text('{')
         self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
 
-    def test_wait_backoff_requires_current_absence_and_eligible_ready_work(self):
+    def test_ready_conversion_rechecks_readiness_but_not_wait_liveness(self):
         self.config.roles['worker'] = dataclasses.replace(self.role(), on_change=True)
         item = self.project.work_items.create(
             actor='worker', idempotency_key='ready', title='Persistent ready work')['record']['work_item']
@@ -484,13 +484,11 @@ class WriterWaitTests(Fixture):
         for live in (True, None, False):
             with self.subTest(live=live), patch(
                     'mizu.runtime._writer_wait_sources', return_value=(live, False, None)):
-                self.assertEqual(should_run(self.project, snapshot, role_name='worker', current_time=due),
-                                 live is False)
+                self.assertTrue(should_run(self.project, snapshot, role_name='worker', current_time=due))
                 self.assertFalse(_writer_progress_fallback(
                     snapshot, self.config, self.role(), False, due, project=self.project))
         with patch('mizu.runtime.time.time', return_value=due), patch(
                 'mizu.runtime._writer_wait_sources', return_value=(True, False, None)):
-            self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
             # Neither a fallback timer nor plain wait becomes an event subscription.
             self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
             self.project.set_control(wake_generation='independent-event')
@@ -586,6 +584,14 @@ class WriterCiWaitTests(CiWaitFixture):
                     altered, self.config, self.config.roles["worker"], True,
                     due, project=self.project))
 
+        # Legacy schema-6 evidence cannot use the new no-held-wait path.
+        for sources in ((True, False, None), (None, False, "ci")):
+            with self.subTest(sources=sources), patch(
+                    "mizu.runtime._writer_wait_sources", return_value=sources):
+                self.assertFalse(_writer_progress_fallback(
+                    snapshot, self.config, self.config.roles["worker"], True,
+                    due, project=self.project))
+
     def test_future_deadline_item_wait_can_be_converted_without_ci_dispatch(self):
         item = self.store.create(actor="worker", idempotency_key="deadline-held",
                                  title="Deadline-held work")["record"]["work_item"]
@@ -600,7 +606,7 @@ class WriterCiWaitTests(CiWaitFixture):
         self.assertEqual((current["status"], current["holder"], current["wait"]),
                          ("blocked", "worker", deadline))
 
-    def test_live_wait_conversion_requires_ready_work_and_complete_held_item_evidence(self):
+    def test_live_wait_conversion_requires_complete_finish_time_ready_evidence(self):
         item = self.block()
         self.dispatch()
         engine = Engine(self.config, driver=ScriptDriver())
@@ -612,12 +618,13 @@ class WriterCiWaitTests(CiWaitFixture):
 
         self.ready_item("incomplete-ready")
         snapshot_before = self.project.snapshots.get()
-        original = self.store.open_state_readonly
+        original = self.store.page_ready
         def incomplete_page(*args, **kwargs):
-            status = original(*args, **kwargs)
-            status["blocked_work"]["coverage_complete"] = False
-            return status
-        with patch.object(self.store, "open_state_readonly", side_effect=incomplete_page):
+            page = original(*args, **kwargs)
+            if kwargs.get("limit") == 1:
+                page["coverage_complete"] = False
+            return page
+        with patch.object(self.store, "page_ready", side_effect=incomplete_page):
             incomplete = engine.run(self.project, "worker")
             self.assertIs(incomplete["finish"]["wait_liveness"], True)
             current = self.project.snapshots.get()
@@ -630,22 +637,42 @@ class WriterCiWaitTests(CiWaitFixture):
         # that finish-time evidence did not record.
         self.assertFalse(should_run(self.project, current, role_name="worker", current_time=due))
 
-    def test_free_standing_question_and_disabled_policy_do_not_convert_live_wait(self):
-        self.ready_item()
+    def test_free_standing_question_converts_and_rechecks_policy_and_readiness(self):
+        ready = self.ready_item()
         question = self.project.insights.submit(
             source="worker", title="External wait", body="Q: Await operator input?",
             base_snapshot=None, kind="question", addressee="operator")
         engine = Engine(self.config, driver=ScriptDriver())
         result = engine.run(self.project, "worker")
         self.assertIs(result["finish"]["wait_liveness"], True)
-        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot["progress"]["schema"], 7)
+        conversion = {"status": "converted",
+                      "reason": "ready_work_without_proven_structured_wait",
+                      "wait_kind": None, "backoff_seconds": 300}
+        self.assertEqual(snapshot["progress"]["wait_conversion"], conversion)
+        self.assertEqual(self.project.status()["progress"]["record"]["wait_conversion"], conversion)
         self.assertIs(_writer_wait_liveness(self.project, self.config.roles["worker"]), True)
-
+        self.assertEqual(self.project.insights.read(question["id"]), question)
+        stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
+        due = stamp + conversion["backoff_seconds"]
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
+        # A ready item held by another role is no longer eligible for this writer.
+        self.store.transition(ready["id"], expected_rev=1, actor="reviewer", status="doing")
+        self.assertFalse(self.store.page_ready(role_name="worker")["items"])
+        # The changed ready set may independently wake; the conversion cannot.
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.config.roles["worker"], False, due, project=self.project))
+        self.ready_item("replacement-ready")
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
         # A held CI wait is a structured source, but the explicit policy can
         # preserve the requested run-level wait without changing the item.
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, writer_wait_with_ready_work=False))
         self.project.config = self.config
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.config.roles["worker"], True, due, project=self.project))
         item = self.block(key="disabled-policy")
         self.dispatch()
         result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
@@ -653,6 +680,53 @@ class WriterCiWaitTests(CiWaitFixture):
         self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
         current = self.store.get(item["id"])
         self.assertEqual((current["status"], current["wait"]["kind"]), ("blocked", "ci"))
+
+    def test_unknown_liveness_converts_with_role_backoff_but_needs_current_ready_work(self):
+        ready = self.ready_item()
+        role = dataclasses.replace(self.config.roles["worker"], no_progress_backoff_seconds=17)
+        self.config = dataclasses.replace(self.config, roles={**self.config.roles, "worker": role})
+        self.project.config = self.config
+        with patch("mizu.runtime._writer_wait_sources", return_value=(None, False, None)):
+            result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+            self.assertIsNone(result["finish"]["wait_liveness"])
+            snapshot = self.project.snapshots.get()
+            self.assertEqual(snapshot["progress"]["schema"], 7)
+            self.assertEqual(snapshot["progress"]["wait_conversion"], {
+                "status": "converted", "reason": "ready_work_without_proven_structured_wait",
+                "wait_kind": None, "backoff_seconds": 17})
+            stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
+            self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=stamp + 16))
+            self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=stamp + 17))
+            altered_role = dataclasses.replace(role, no_progress_backoff_seconds=18)
+            self.assertFalse(_writer_progress_fallback(
+                snapshot, self.config, altered_role, True, stamp + 18, project=self.project))
+            self.store.transition(ready["id"], expected_rev=1, actor="reviewer", status="doing")
+            self.assertFalse(self.store.page_ready(role_name="worker")["items"])
+            self.assertFalse(_writer_progress_fallback(
+                snapshot, self.config, role, False, stamp + 17, project=self.project))
+
+    def test_missing_or_incomplete_ready_evidence_cannot_authorize_new_conversion(self):
+        self.ready_item()
+        self.project.insights.submit(
+            source="worker", title="External wait", body="Q: Await operator input?",
+            base_snapshot=None, kind="question", addressee="operator")
+        original = self.store.page_ready
+        for unavailable in (False, True):
+            def incomplete_page(*args, **kwargs):
+                if kwargs.get("limit") == 1:
+                    if unavailable:
+                        raise Denied("Unavailable ready evidence")
+                    return {"items": [{"id": "unproven"}], "coverage_complete": False}
+                return original(*args, **kwargs)
+            with self.subTest(unavailable=unavailable):
+                with patch.object(self.store, "page_ready", side_effect=incomplete_page):
+                    Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+                snapshot = self.project.snapshots.get()
+                self.assertNotIn("wait_conversion", snapshot["progress"])
+                stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
+                due = stamp + self.config.limits.writer_no_progress_backoff_seconds
+                # Later complete readiness does not retroactively authorize it.
+                self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
 
     def test_other_holders_wait_does_not_count_as_conversion_witness(self):
         item = self.block(key="other-holder", actor="reviewer")
@@ -663,7 +737,14 @@ class WriterCiWaitTests(CiWaitFixture):
             (False, False, None))
         result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
         self.assertIs(result["finish"]["wait_liveness"], False)
-        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot["progress"]["wait_conversion"]["reason"],
+                         "ready_work_without_proven_structured_wait")
+        self.assertIsNone(snapshot["progress"]["wait_conversion"]["wait_kind"])
+        stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
+        due = stamp + self.config.limits.writer_no_progress_backoff_seconds
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
         self.assertEqual(self.store.get(item["id"])["holder"], "reviewer")
 
     def test_exact_held_ci_request_and_terminal_evidence(self):
