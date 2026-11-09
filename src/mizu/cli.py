@@ -128,8 +128,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=("submit", "list", "page", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--scope", choices=("live", "archive"), default=None, help="Insight page scope (default: live)")
-    p.add_argument("--limit", type=int, default=None, help="Insight page size (1-1000; default: 30)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Insight page size (1-1000; default: 30), or positive history read budget "
+                        "(capped/defaulted by insight_history_entries)")
     p.add_argument("--cursor", default=None, help="Opaque insight page continuation")
+    p.add_argument("--after-rev", type=int, default=None, help="Exclusive history revision cursor (nonnegative; default: 0)")
     p.add_argument("--id", help="Proposal ID for read/submit/decide/withdraw")
     p.add_argument("--title", help="Proposal title for submit")
     p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
@@ -352,8 +355,12 @@ def _cmd_insight(config, project, args):
         raise ConfigError("--work-items applies only to insight decide")
     if args.work_item_intent is not None and args.action != "decide":
         raise ConfigError("--work-item-intent applies only to accept/modify decisions")
-    if args.action != "page" and any(getattr(args, key, None) is not None for key in ("scope", "limit", "cursor")):
-        raise ConfigError("--scope, --limit and --cursor apply only to insight page")
+    if args.action != "page" and any(getattr(args, key, None) is not None for key in ("scope", "cursor")):
+        raise ConfigError("--scope and --cursor apply only to insight page")
+    if args.action not in ("page", "history") and args.limit is not None:
+        raise ConfigError("--limit applies only to insight page/history")
+    if args.action != "history" and args.after_rev is not None:
+        raise ConfigError("--after-rev applies only to insight history")
     if args.action != "decide" and args.accepted_scope is not None:
         raise ConfigError("--accepted-scope applies only to insight decide")
     if args.action == "page":
@@ -368,7 +375,8 @@ def _cmd_insight(config, project, args):
     if args.action == "history":
         if not args.id:
             raise ConfigError("--id is required")
-        return project.insights.history(args.id)
+        return project.insights.history(args.id, after_rev=args.after_rev if args.after_rev is not None else 0,
+                                        limit=args.limit)
     if args.action == "revise":
         if not args.id:
             raise ConfigError("--id is required")

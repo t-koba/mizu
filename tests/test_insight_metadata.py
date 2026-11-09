@@ -55,7 +55,7 @@ class InsightMetadataTests(Fixture):
             self.assertEqual(insight_metadata(row), {})
         self.assertEqual([path.read_bytes() for path in paths], before)
         self.assertEqual(self.project.insights.generation(), generation)
-        self.assertEqual(self.project.insights.history(item["id"]), [])
+        self.assertEqual(self.project.insights.history(item["id"])["records"], [])
         legacy_content = {k: item[k] for k in ("id", "source", "title", "body", "base_snapshot", "rev")}
         self.assertEqual(_content_sha(item), digest(canonical(legacy_content)))
 
@@ -79,7 +79,7 @@ class InsightMetadataTests(Fixture):
                 self.assertEqual(revised[field], value)
                 self.assertNotEqual(_content_sha(revised), old_sha)
                 self.assertNotEqual(self.project.insights.generation(), generation)
-                history = self.project.insights.history(item["id"])
+                history = self.project.insights.history(item["id"])["records"]
                 self.assertEqual(insight_metadata(history[-1]), insight_metadata(item))
                 identity = read_json(self.project.root / "insight-ids" / f'{item["id"]}.json')
                 self.assertEqual(identity["sha256"], digest(canonical(_identity_payload(revised))))
@@ -143,7 +143,7 @@ class InsightMetadataTests(Fixture):
             self.assertEqual(insight_metadata(self.submit(insight_id=item["id"])), insight_metadata(item))
             revised = self.revise(item, urgency="low")
             self.assertEqual(revised["rev"], 2)
-            self.assertEqual(insight_metadata(self.project.insights.history(item["id"])[0]), insight_metadata(item))
+            self.assertEqual(insight_metadata(self.project.insights.history(item["id"])["records"][0]), insight_metadata(item))
 
     def test_invalid_values_fail_before_writes(self):
         item = self.submit()
@@ -158,7 +158,7 @@ class InsightMetadataTests(Fixture):
                     with self.assertRaises(Denied):
                         self.revise(item, **{field: value})
         self.assertEqual(self.project.insights.read(item["id"]), item)
-        self.assertEqual(self.project.insights.history(item["id"]), [])
+        self.assertEqual(self.project.insights.history(item["id"])["records"], [])
         self.assertEqual(len(self.project.insights.list()), 1)
 
     def test_byte_bound_counts_metadata_and_allows_exact_legacy_retry(self):

@@ -222,7 +222,7 @@ class OperatorRecordTests(Fixture):
                                      title='Question revision 3', body='Q: revision three',
                                      base_snapshot=None)
         self.project.insights.history_entries = 1
-        self.assertEqual([row['rev'] for row in self.project.insights.history(self.question['id'])], [1])
+        self.assertEqual([row['rev'] for row in self.project.insights.history(self.question['id'])["records"]], [1])
 
         historical_subject = {**self.subject, 'rev': 2}
         answer = records.write(self.project, event_id='bounded-history-answer', kind='answer',

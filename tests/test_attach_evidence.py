@@ -75,7 +75,7 @@ class AttachEvidenceTests(Fixture):
         self.project.insights.revise(item["id"], source="searcher", title="Finding",
                                      body="v2 with field data", base_snapshot=None)
         self.assertEqual(self.project.insights.read(item["id"])["evidence"], [])
-        archived = self.project.insights.history(item["id"])
+        archived = self.project.insights.history(item["id"])["records"]
         self.assertEqual(len(archived[0]["evidence"]), 1)
 
     def test_decision_event_carries_evidence(self):

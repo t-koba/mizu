@@ -89,7 +89,7 @@ class InsightArchiveTests(Fixture):
         self.assertEqual(json.loads(rows[0][3])["rev"], item["rev"])
         self.assertEqual(json.loads(rows[0][4])["id"], item["id"])
         self.assertEqual(self.project.insights.read(item["id"]), item)
-        self.assertEqual(self.project.insights.history(item["id"]), [])
+        self.assertEqual(self.project.insights.history(item["id"])["records"], [])
         self.assertEqual(self.project.insights.list(pending=False), [])
         self.assertEqual(self.project.insights.scan_source("searcher"), [])
 
@@ -184,7 +184,7 @@ class InsightArchiveTests(Fixture):
         self.assertEqual(revised["evidence"], [])
         self.assertNotEqual(self.project.insights.generation(), generation)
         self.assertEqual(self.project.insights.list()[0]["rev"], 2)
-        self.assertEqual(self.project.insights.history(item["id"])[0]["evidence"], item["evidence"])
+        self.assertEqual(self.project.insights.history(item["id"])["records"][0]["evidence"], item["evidence"])
         self.assertEqual(json.loads(self.rows()[0][2]), item)
         self.assertEqual(self.project.insights.submit(**{**args, "body": "new"}), revised)
         with self.assertRaises(Denied):
@@ -241,11 +241,11 @@ class InsightArchiveTests(Fixture):
         self.assertEqual(self.project.insights.read(item["id"]), item)
         # The archive for the still-current rev is only a crash orphan.
         with patch.object(self.project.insights, "read_revision") as revision:
-            self.assertEqual(self.project.insights.history(item["id"]), [])
+            self.assertEqual(self.project.insights.history(item["id"])["records"], [])
         revision.assert_not_called()
         self.assertEqual(self.project.insights.revise(item["id"], **revise)["rev"], 2)
         self.assertEqual(json.loads(self.rows()[0][2]), item)
-        self.assertEqual(len(self.project.insights.history(item["id"])), 1)
+        self.assertEqual(len(self.project.insights.history(item["id"])["records"]), 1)
         self.project.insights.decide(item["id"], "reject", "reviewed", "", "run", expected_rev=2)
         decision_path = self.project.root / "decisions" / f"{item['id']}.json"
         decision = read_json(decision_path)
@@ -256,7 +256,7 @@ class InsightArchiveTests(Fixture):
         self.assertEqual(self.project.insights.read(item["id"])["body"], "Improved")
         write_json(self.project.root / "insight-revisions" / f"{item['id']}.r2.json",
                    self.project.insights.read(item["id"]))
-        self.assertEqual([row["rev"] for row in self.project.insights.history(item["id"])], [1])
+        self.assertEqual([row["rev"] for row in self.project.insights.history(item["id"])["records"]], [1])
 
     def test_conflicting_crash_leftover_keeps_live_copy(self):
         item = self.proposal()

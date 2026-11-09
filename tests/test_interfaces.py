@@ -644,7 +644,7 @@ class InsightRevisionTests(Fixture):
         revised = self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None, expected_rev=1)
         self.assertEqual(revised["rev"], 2)
         self.assertEqual(self.project.insights.read(item["id"])["body"], "v2")
-        hist = self.project.insights.history(item["id"])
+        hist = self.project.insights.history(item["id"])["records"]
         self.assertEqual(len(hist), 1)
         self.assertEqual(hist[0]["body"], "v1")
         listed = [i for i in self.project.insights.list(pending=False) if i["id"] == item["id"]][0]
@@ -666,18 +666,21 @@ class InsightRevisionTests(Fixture):
         write_json(revision_dir / "other.r1.json", {"id": "other", "rev": 1})
         write_json(revision_dir / f"{insight_id}.r01.json", records[0])
         for current in (None, {"id": insight_id}):
-            with self.subTest(current=current):
-                if current is not None:
-                    write_json(self.project.root / "inbox" / f"{insight_id}.json", current)
-                with patch("mizu.insights.Path.glob", side_effect=AssertionError("glob")), \
-                     patch("mizu.insights.Path.iterdir", side_effect=AssertionError("list")), \
-                     patch("mizu.insights.os.scandir", side_effect=AssertionError("scan")), \
-                     patch("mizu.insights.safe_read", wraps=safe_read) as reads:
-                    self.assertEqual(store.history(insight_id), records[:12])
-                self.assertEqual([call.args[1] for call in reads.call_args_list],
-                                 ([f"inbox/{insight_id}.json"] if current else []) +
-                                 [f"insight-revisions/{insight_id}.r{rev}.json"
-                                  for rev in range(1, 13)])
+            for after_rev, limit, end in ((0, None, 12), (0, 99, 12), (2, 3, 5)):
+                with self.subTest(current=current, after_rev=after_rev, limit=limit):
+                    if current is not None:
+                        write_json(self.project.root / "inbox" / f"{insight_id}.json", current)
+                    with patch("mizu.insights.Path.glob", side_effect=AssertionError("glob")), \
+                         patch("mizu.insights.Path.iterdir", side_effect=AssertionError("list")), \
+                         patch("mizu.insights.os.scandir", side_effect=AssertionError("scan")), \
+                         patch("mizu.insights.safe_read", wraps=safe_read) as reads:
+                        self.assertEqual(store.history(insight_id, after_rev=after_rev, limit=limit),
+                                         {"records": records[after_rev:end], "cursor": after_rev,
+                                          "next_cursor": end, "complete": None})
+                    self.assertEqual([call.args[1] for call in reads.call_args_list],
+                                     ([f"inbox/{insight_id}.json"] if current else []) +
+                                     [f"insight-revisions/{insight_id}.r{rev}.json"
+                                      for rev in range(after_rev + 1, end + 1)])
 
     def test_history_missing_and_invalid_records_consume_read_bound(self):
         from mizu.fs import safe_read
@@ -697,14 +700,78 @@ class InsightRevisionTests(Fixture):
         with patch("mizu.insights.insight_archive.read",
                    return_value={"id": key, "body_unavailable": True}) as archive, \
              patch("mizu.insights.safe_read", wraps=safe_read) as reads:
-            self.assertEqual(store.history(key), [{"id": key, "rev": 6}])
+            first = store.history(key)
+            self.assertEqual(first, {"records": [{"id": key, "rev": 6}], "cursor": 0,
+                                     "next_cursor": 6, "complete": None})
         archive.assert_called_once_with(self.project.root, key, include_unavailable=True)
         self.assertEqual([call.args[1] for call in reads.call_args_list],
                          [f"insight-revisions/{key}.r{rev}.json" for rev in range(1, 7)])
+        with patch("mizu.insights.insight_archive.read",
+                   return_value={"id": key, "body_unavailable": True}), \
+             patch("mizu.insights.safe_read", wraps=safe_read) as reads:
+            self.assertEqual(store.history(key, after_rev=first["next_cursor"], limit=1),
+                             {"records": [{"id": key, "rev": 7}], "cursor": 6,
+                              "next_cursor": 7, "complete": None})
+            self.assertEqual(store.history(key, after_rev=7, limit=1),
+                             {"records": [], "cursor": 7, "next_cursor": 8, "complete": None})
+        self.assertEqual([call.args[1] for call in reads.call_args_list],
+                         [f"insight-revisions/{key}.r{rev}.json" for rev in (7, 8)])
         with patch.object(store, "read_revision") as revision:
             with self.assertRaises(Denied):
                 store.history("../history")
         revision.assert_not_called()
+
+    def test_history_continues_across_missing_revisions_to_known_end(self):
+        from mizu.fs import safe_read
+        store = self.project.insights
+        store.history_entries = 6
+        key = "history"
+        directory = self.project.root / "insight-revisions"
+        directory.mkdir()
+        # Revisions 1-5 are missing; current and a later crash orphan must not leak.
+        for rev in range(6, 10):
+            write_json(directory / f"{key}.r{rev}.json", {"id": key, "rev": rev})
+        for archived in (False, True):
+            with self.subTest(archived=archived):
+                live = self.project.root / "inbox" / f"{key}.json"
+                write_json(live, {"id": key, "rev": 8})
+                if archived:
+                    live.unlink()
+                with patch("mizu.insights.insight_archive.read", return_value={"id": key, "rev": 8}), \
+                     patch("mizu.insights.Path.glob", side_effect=AssertionError("glob")), \
+                     patch("mizu.insights.Path.iterdir", side_effect=AssertionError("list")), \
+                     patch("mizu.insights.os.scandir", side_effect=AssertionError("scan")), \
+                     patch("mizu.insights.safe_read", wraps=safe_read) as reads:
+                    first = store.history(key)
+                    self.assertEqual(first, {"records": [{"id": key, "rev": 6}], "cursor": 0,
+                                             "next_cursor": 6, "complete": False})
+                    self.assertEqual(store.history(key, after_rev=first["next_cursor"]),
+                                     {"records": [{"id": key, "rev": 7}], "cursor": 6,
+                                      "next_cursor": None, "complete": True})
+                    for cursor in (7, 8, 100):
+                        self.assertEqual(store.history(key, after_rev=cursor),
+                                         {"records": [], "cursor": cursor,
+                                          "next_cursor": None, "complete": True})
+                self.assertEqual([call.args[1] for call in reads.call_args_list
+                                  if call.args[1].startswith("insight-revisions/")],
+                                 [f"insight-revisions/{key}.r{rev}.json" for rev in range(1, 8)])
+        write_json(live, {"id": key, "rev": 1})
+        with patch.object(store, "read_revision") as revision:
+            self.assertEqual(store.history(key),
+                             {"records": [], "cursor": 0, "next_cursor": None, "complete": True})
+        revision.assert_not_called()
+
+    def test_history_validates_cursor_and_limit_before_reading(self):
+        store = self.project.insights
+        with patch("mizu.insights.safe_read") as read, \
+             patch("mizu.insights.insight_archive.read") as archive:
+            for field, invalid in (("after_rev", (-1, True, "1", 1.5, None)),
+                                   ("limit", (0, -1, True, "1", 1.5))):
+                for value in invalid:
+                    with self.subTest(field=field, value=value), self.assertRaises(Denied):
+                        store.history("history", **{field: value})
+        read.assert_not_called()
+        archive.assert_not_called()
 
     def test_history_refuses_unsafe_revision_paths_and_invalid_current(self):
         store = self.project.insights
@@ -719,12 +786,12 @@ class InsightRevisionTests(Fixture):
             path.symlink_to(target)
         except OSError:
             self.skipTest("symlinks unavailable")
-        self.assertEqual(store.history(key), [])
+        self.assertEqual(store.history(key)["records"], [])
         path.unlink()
         directory.rmdir()
         directory.symlink_to(self.project.root, target_is_directory=True)
         write_json(self.project.root / path.name, {"id": key, "rev": 1})
-        self.assertEqual(store.history(key), [])
+        self.assertEqual(store.history(key)["records"], [])
         directory.unlink()
         directory.mkdir()
         write_json(path, {"id": key, "rev": 1})
@@ -757,7 +824,7 @@ class InsightRevisionTests(Fixture):
         gen1 = self.project.insights.generation()
         same = self.project.insights.revise(item["id"], source="operator", title="T", body="v1", base_snapshot=None)
         self.assertEqual(same["rev"], 1)
-        self.assertEqual(self.project.insights.history(item["id"]), [])
+        self.assertEqual(self.project.insights.history(item["id"])["records"], [])
         self.assertEqual(self.project.insights.generation(), gen1)
 
     def test_revise_requires_submitter_and_cas(self):
@@ -796,12 +863,12 @@ class InsightRevisionTests(Fixture):
                   "superseded_at": "2000-01-01T00:00:00+00:00", "superseded_by_rev": 2}
         write_json(self.project.root / "insight-revisions" / f"{item['id']}.r1.json", orphan, exclusive=True)
         with patch.object(self.project.insights, "read_revision") as revision:
-            self.assertEqual(self.project.insights.history(item["id"]), [])
+            self.assertEqual(self.project.insights.history(item["id"])["records"], [])
         revision.assert_not_called()
         revised = self.project.insights.revise(item["id"], source="operator", title="T", body="v2", base_snapshot=None)
         self.assertEqual(revised["rev"], 2)
         self.assertEqual(self.project.insights.read(item["id"])["body"], "v2")
-        self.assertEqual(len(self.project.insights.history(item["id"])), 1)
+        self.assertEqual(len(self.project.insights.history(item["id"])["records"]), 1)
 
     def test_conflicting_archive_is_rejected(self):
         from mizu.fs import write_json, mkdir
@@ -827,7 +894,7 @@ class InsightRevisionTests(Fixture):
         same = self.project.insights.revise(gen1["id"], source="operator", title="T", body="v1", base_snapshot=None, run="run-2")
         self.assertEqual(same["rev"], 1)
         self.assertEqual(self.project.insights.read(gen1["id"])["run"], "run-1")
-        self.assertEqual(self.project.insights.history(gen1["id"]), [])
+        self.assertEqual(self.project.insights.history(gen1["id"])["records"], [])
         self.assertEqual(self.project.insights.generation(), gen)
 
 class InsightWithdrawalTests(Fixture):

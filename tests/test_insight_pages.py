@@ -318,7 +318,8 @@ class InsightPageTests(Fixture):
         status, output, error = self.cli('page', 'sample', '--scope', 'archive', '--limit', '1')
         self.assertEqual((status, error), (0, ''))
         self.assertTrue(json.loads(output)['has_more'])
-        for action, expected in (('read', self.project.insights.read(self.record(0)['id'])), ('history', [])):
+        for action, expected in (('read', self.project.insights.read(self.record(0)['id'])),
+                                 ('history', self.project.insights.history(self.record(0)['id']))):
             status, output, error = self.cli(action, 'sample', '--id', self.record(0)['id'])
             self.assertEqual((status, error), (0, ''))
             self.assertEqual(json.loads(output), expected)
@@ -328,6 +329,40 @@ class InsightPageTests(Fixture):
             self.assertNotEqual(status, 0)
             self.assertEqual(output, '')
             self.assertIn('error', json.loads(error))
+
+    def test_cli_history_continuation_and_action_flags(self):
+        key = "history"
+        self.file.write_text(self.file.read_text().replace(
+            "insight_history_entries = 1000", "insight_history_entries = 6"))
+        write_json(self.project.root / "inbox" / f"{key}.json", {"id": key, "rev": 8})
+        directory = self.project.root / "insight-revisions"
+        directory.mkdir()
+        for rev in (6, 7):
+            write_json(directory / f"{key}.r{rev}.json", {"id": key, "rev": rev})
+        for flags in ((), ("--limit", "1000")):
+            status, output, error = self.cli("history", "sample", "--id", key, *flags)
+            self.assertEqual((status, error), (0, ""))
+            first = json.loads(output)
+            self.assertEqual(first, {"records": [{"id": key, "rev": 6}], "cursor": 0,
+                                     "next_cursor": 6, "complete": False})
+        status, output, error = self.cli("history", "sample", "--id", key,
+                                         "--after-rev", str(first["next_cursor"]), "--limit", "1")
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(json.loads(output),
+                         {"records": [{"id": key, "rev": 7}], "cursor": 6,
+                          "next_cursor": None, "complete": True})
+        for args in (("history", "--after-rev", "-1"), ("history", "--limit", "0"),
+                     ("history", "--scope", "live"), ("history", "--cursor", "x"),
+                     ("page", "--after-rev", "0"), ("read", "--after-rev", "0"),
+                     ("read", "--limit", "1"), ("list", "--limit", "1")):
+            status, output, error = self.cli(args[0], "sample", "--id", key, *args[1:])
+            self.assertNotEqual(status, 0)
+            self.assertEqual(output, "")
+            self.assertIn("error", json.loads(error))
+        status, output, error = self.cli("history", "sample")
+        self.assertNotEqual(status, 0)
+        self.assertEqual(output, "")
+        self.assertIn("--id is required", json.loads(error)["error"])
 
     def test_archive_page_is_summary_and_read_keeps_full_body(self):
         body = "Secret archived body marker 7f3a"

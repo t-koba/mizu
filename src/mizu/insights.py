@@ -712,22 +712,26 @@ replacement insight without implying rejected substance.
                        {"id": insight_id, "sha256": sha, "created_at": record["created_at"]})
             return record
 
-    def history(self, insight_id: str) -> list[dict]:
-        """Explicit audit retrieval for prior revisions; never in routine context.
+    def history(self, insight_id: str, *, after_rev: int = 0,
+                limit: int | None = None) -> dict:
+        """Page prior revisions in ascending order without directory discovery.
 
-        Schema: list of archived prior records ascending by rev, each with
-        superseded markers. Bounds: one exact current lookup, then at most
-        ``self.history_entries`` exact revision reads and returned records
-        (default 1000, operator-adjustable down to 1), starting at revision 1.
-        A usable current rev excludes that revision and later crash orphans;
-        legacy current/tombstone records without one use the full read bound.
-        Missing or invalid revisions consume the bound, never trigger scans.
-        Trust: local recorded state. Failure: Denied on unknown ID shape or
-        invalid current state. Missing, corrupt or mismatched revision records
-        are not returned and still consume the read bound; absent current state
-        uses the bounded legacy fallback.
+        Schema: records, cursor (input after_rev), next_cursor, complete.
+        Cursor is exclusive and advances over every attempted revision, including
+        missing/invalid records. complete is true only at a known current rev's
+        prior-history end, false before it, or None if no current rev is known.
+        Only a complete page has no next_cursor; gaps do not prove an end.
+        Bounds: one exact current lookup, then at most history_entries exact
+        revision reads/rows (default 1000), or a smaller caller limit.
+        Trust: local recorded state, not a frozen traversal. Unsafe/corrupt
+        current state is refused; missing/invalid prior records are skipped.
         """
         identifier(insight_id)
+        if type(after_rev) is not int or after_rev < 0:
+            raise Denied("History after_rev must be a nonnegative integer")
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise Denied("History limit must be a positive integer")
+        budget = self.history_entries if limit is None else min(limit, self.history_entries)
         current_path = self.root / "inbox" / f"{insight_id}.json"
         try:
             current_path.lstat()
@@ -755,15 +759,19 @@ replacement insight without implying rejected substance.
                 raise Denied("Corrupt current insight history revision")
         else:
             current_rev = None
-        end = self.history_entries
+        end = after_rev + budget
         if current_rev is not None:
             end = min(end, current_rev - 1)
         out = []
-        for rev in range(1, end + 1):
+        scanned = after_rev
+        for rev in range(after_rev + 1, end + 1):
             record = self.read_revision(insight_id, rev)
+            scanned = rev
             if record is not None:
                 out.append(record)
-        return out
+        complete = scanned >= current_rev - 1 if current_rev is not None else None
+        return {"records": out, "cursor": after_rev,
+                "next_cursor": None if complete else scanned, "complete": complete}
 
     def read_revision(self, insight_id: str, rev: int) -> dict | None:
         """Read one exact archived revision without using the history listing.

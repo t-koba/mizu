@@ -31,7 +31,7 @@ class InsightOriginTests(Fixture):
         revised = self.project.insights.revise(item["id"], source="operator", title="T", body="v2",
                                                base_snapshot=snap)
         self.assertIsNone(revised["origin"])
-        self.assertEqual(self.project.insights.history(item["id"])[0]["origin"], None)
+        self.assertEqual(self.project.insights.history(item["id"])["records"][0]["origin"], None)
         # Origin is provenance, not content: same-content retry preserves it without waking.
         self.assertEqual(self.project.insights.generation() != gen, True)  # meaningful change woke
         gen2 = self.project.insights.generation()

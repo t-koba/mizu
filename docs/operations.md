@@ -462,6 +462,44 @@ mizu wake demo                                         # 作業再開を指示
 
 Worker が `blocked` で終了した場合、人間への質問事項が状態（state）内に番号付きリストとして記録されます。
 
+### Explicit insight history
+
+```sh
+mizu insight history demo --id '<insight-id>' --limit 6
+mizu insight history demo --id '<insight-id>' --after-rev 6 --limit 6
+```
+
+`Insights.history(id, after_rev=0, limit=None)` and `insight history` return:
+
+```json
+{"records": [], "cursor": 0, "next_cursor": 6, "complete": null}
+```
+
+`cursor` echoes the exclusive, nonnegative integer `--after-rev` (default 0).
+Pass `next_cursor` as the next `--after-rev`, even when `records` is empty.
+`--limit` must be a positive integer; it defaults to and is capped by
+`limits.insight_history_entries` (default 1,000). Each page attempts at most that
+many exact numeric revision paths, returning valid prior records in ascending
+order. Missing, corrupt, unsafe or identity-mismatched files consume the budget
+and advance the cursor without returning a row; no revision directory is scanned.
+One separate exact current lookup validates identity/revision and, when known,
+excludes the current revision and later crash orphans.
+
+`complete` is true only when the known current revision's prior-history end has
+been reached (including an empty history or a cursor already beyond it), false
+when that known end remains, and null when absent current state or a legacy
+current/tombstone without a revision leaves the end unknown. Only true has a
+null `next_cursor`. Completion describes numeric traversal, not gap-free archive
+retention. With an unknown end, even empty pages offer further bounded reads;
+the caller decides when to stop rather than inferring completeness from gaps.
+These are live reads of local recorded state, not a frozen traversal: replaying
+a cursor reads the same range against current storage; a later revision may
+extend the end. Unsafe/corrupt current records fail closed (nonzero CLI exit,
+JSON error on stderr, no partial page); repair before retrying. `read_revision`
+remains an independent exact-reference read, not a history continuation.
+`--after-rev` applies only to history; `--limit` to history/page; `--scope` and
+`--cursor` only to page.
+
 ### Explicit insight pages
 
 ```sh
@@ -480,7 +518,8 @@ return the same JSON envelope:
 
 - Scope defaults to `live`; limit defaults to 30 and must be an integer 1–1000.
   `insight list` is unchanged: a bare JSON array of at most the newest 1000 live
-  summaries. `read` and `history` retain their existing behavior.
+  summaries. `read` returns the exact full record; prior revisions use the
+  separate history interface below.
 - Live pages enumerate **all** projected inbox rows, not just pending proposals,
   in ascending `(created_at, id, filename)` order. Items have the same summary
   fields as `list` (including effective decision and evidence count/timestamp).

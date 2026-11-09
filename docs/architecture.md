@@ -509,11 +509,13 @@ rationale never authorizes changed content while the current revision stays
 pending for reassessment. Prior
 revisions are returned only by the explicit history path, never injected into
 routine context, and are durable audit like decisions (backed up, never
-pruned). Explicit history returns at most the configured prior-revision
-count (default and absolute ceiling 1,000); that result cap does not bound
-discovery, because the current reader sorts all matching paths in the shared
-revision directory before applying it. Direct ID reuse with different
-content outside revise is rejected.
+pruned). Explicit history pages bound both exact numeric revision-path reads
+and returned records by `insight_history_entries` (default/ceiling 1,000), or a
+smaller caller limit; no shared revision-directory discovery occurs. An exclusive
+`after_rev` cursor advances over missing/invalid files too. Pages exclude the
+current revision and later orphans when its validated revision is known; otherwise
+completeness stays unknown and continuation remains available. Direct ID reuse
+with different content outside revise is rejected.
 Decisions bind to the reviewed `rev`, so a prior approval never authorizes
 changed content; deferral still requires a revisit condition and stays
 pending. A substantive accept/modify/reject prevents conflicting further
