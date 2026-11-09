@@ -40,7 +40,9 @@ class JobTests(Fixture):
         self.assertFalse(FakeSandbox.calls)
         (ctx.workspace / 'app.py').write_text('VALUE = 3\n')
         self.assertEqual((check_jobs.root(self.project) / job['id'] / 'input/app.py').read_text(), 'VALUE = 2\n')
-        self.run_job()
+        completed = self.run_job()
+        self.assertEqual(completed['status'], 'completed')
+        self.assertNotIn('error', completed)
         result = check_jobs.result(ctx, job['id'])
         self.assertFalse(result['accepted_for_current_source'])
         self.assertIsNone(ctx.verification)
@@ -1087,7 +1089,13 @@ class SharingTests(PurposeTests):
         self.config=dataclasses.replace(self.config,sandbox=dataclasses.replace(self.config.sandbox,mounts=({'source':str(dependency),'target':'/dependency'},)))
         self.project.config=self.config
         ctx,first=self.submit(); file.write_text('two')
-        self.assertEqual(self.run_job()['status'],'refused')
+        refused = self.run_job()
+        self.assertEqual(refused['status'], 'refused')
+        self.assertIn('dependency inputs changed', refused['error'])
+        self.assertRegex(refused['error'], r'fingerprint [0-9a-f]{12} -> [0-9a-f]{12}')
+        self.assertIn('fresh request after the inputs are stable', refused['error'])
+        self.assertNotIn(str(dependency), refused['error'])
+        self.assertNotIn('two', refused['error'])
         later=check_jobs.submit(self.context());self.assertNotIn('shared_job',later)
         self.assertNotEqual(first['id'],later['id'])
 
@@ -1103,6 +1111,31 @@ class SharingTests(PurposeTests):
         check_jobs.run_one(self.project,threading.Event(),sandbox_factory=Changing)
         self.assertFalse(check_jobs.result(ctx,first['id'])['result']['passed'])
         self.assertNotIn('shared_job',check_jobs.submit(self.context()))
+
+    def test_changed_execution_configuration_refusal_is_bounded_and_specific(self):
+        ctx, job = self.submit()
+        self.project.config = dataclasses.replace(
+            self.config, sandbox=dataclasses.replace(
+                self.config.sandbox, env={'EXAMPLE': 'new-value-not-for-diagnostics'}))
+        refused = self.run_job()
+        self.assertEqual(refused['status'], 'refused')
+        self.assertIn('execution configuration inputs changed', refused['error'])
+        self.assertRegex(refused['error'], r'fingerprint [0-9a-f]{12} -> [0-9a-f]{12}')
+        self.assertIn('fresh request after the inputs are stable', refused['error'])
+        self.assertNotIn('new-value-not-for-diagnostics', refused['error'])
+        self.assertNotIn(str(self.root), refused['error'])
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_changed_acceptance_commands_refusal_names_class_without_command_text(self):
+        ctx, job = self.submit()
+        self.project.verify = ('printf private-command-marker',)
+        refused = self.run_job()
+        self.assertEqual(refused['status'], 'refused')
+        self.assertIn('acceptance command inputs changed', refused['error'])
+        self.assertRegex(refused['error'], r'fingerprint [0-9a-f]{12} -> [0-9a-f]{12}')
+        self.assertIn('fresh request after the inputs are stable', refused['error'])
+        self.assertNotIn('private-command-marker', refused['error'])
+        self.assertFalse(FakeSandbox.calls)
 
     def test_changed_source_commands_or_environment_do_not_share(self):
         ctx,first=self.submit()
@@ -2483,6 +2516,8 @@ class CacheInputTests(Fixture):
         with patch.object(check_jobs, 'reset_cache', side_effect=failed_reset):
             result = self.run_job(Compiler)
         self.assertEqual(result['status'], 'refused')
+        self.assertIn('cache output could not be safely reset', result['error'])
+        self.assertIn('fresh request once the cache output is safe to reset', result['error'])
         self.assertEqual(result['cache_diagnostics'][-1]['reason'], 'reset_failed')
         self.assertNotIn(str(outside), str(result))
         self.assertFalse(check_jobs.result(ctx, second['id'])['accepted_for_current_source'])

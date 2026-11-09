@@ -361,7 +361,15 @@ with sharing enabled is refused when dependency inputs cannot be bound; it never
 falls back to accepting unbound evidence. Disable check_reuse to use the original
 non-sharing execution semantics for such an environment. Network-dependent or
 unpinned-image inputs likewise cannot supply reusable acceptance. Fresh runs
-bypass earlier results but still validate their dependency inputs.
+bypass earlier results but still validate their dependency inputs. If a queued
+check is refused because its captured execution configuration, dependency, or
+acceptance-command inputs changed or could not be bound, its error names the
+input class, gives short fingerprints when available, and says to submit a fresh
+request after inputs are stable and bindable. These fingerprints are diagnostic
+only; raw values and paths are never included. Cache output reset failures name
+the cache-output class without leaking paths. Configured cache inputs retain
+their existing rule: they are bound at execution start, so changes since enqueue
+are rebound rather than treated as a stale captured input.
 
 Dependency traversal is bounded by `sandbox.check_input_files` (250000 entries)
 and `sandbox.check_input_bytes` (8 GiB of regular file contents), configurable

@@ -1353,6 +1353,26 @@ def run_pending(project, stop, *, sandbox_factory=Sandbox):
     return {**result, 'processed': processed, **acceptance.producer_diagnostics(invalid)}
 
 
+def _input_fingerprint(value):
+    """Return a short diagnostic fingerprint, never raw execution inputs."""
+    if value is None:
+        return 'unbound'
+    value = value if isinstance(value, str) and DIGEST.fullmatch(value) else digest(canonical(value))
+    return value[:12]
+
+
+def _input_refusal(job, changes):
+    """Explain a fail-closed input refusal without exposing paths or values."""
+    details = []
+    for name, before, after, unbound in changes:
+        if unbound:
+            details.append(f'{name} inputs could not be bound')
+        else:
+            details.append(f'{name} inputs changed (fingerprint {_input_fingerprint(before)} -> {_input_fingerprint(after)})')
+    return (f"Check {job['id']} refused: {'; '.join(details)}. "
+            'Submit a fresh request after the inputs are stable and bindable.')
+
+
 def _execute(project, job, stop, sandbox_factory, slot):
     directory = root(project) / job['id']
     path = directory / 'job.json'
@@ -1376,20 +1396,31 @@ def _execute(project, job, stop, sandbox_factory, slot):
     # the actual fingerprint. A legitimate change since enqueue therefore
     # runs instead of refusing. Unbindable caches are discarded; legacy
     # records without a cache binding still fail closed.
-    if job.get('cache_binding_pending') and not (job['kind'] == 'verify' and project.config.sandbox.check_cache_paths):
-        return refuse('Execution configuration, dependency or cache inputs changed')
-    if (job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None) or (job.get('environment') is not None and execution_environment(project, job) != job['environment']) or job['execution'] != execution_key(project.config) or (job['kind'] == 'verify' and list(project.verify) != job['commands']):
-        return refuse('Dependency inputs could not be bound for reusable acceptance'
-                   if job.get('inputs_bound_required') and job.get('environment') is None
-                   else 'Execution configuration, dependency or cache inputs changed')
-    if job['kind'] == 'verify' and project.config.sandbox.check_cache_paths:
-        if 'cache_input' not in job and job.get('cache_binding_pending') != 1:
-            return refuse('Execution configuration, dependency or cache inputs changed')
+    changed = []
+    cache_configured = job['kind'] == 'verify' and bool(project.config.sandbox.check_cache_paths)
+    if job.get('cache_binding_pending') and not cache_configured:
+        changed.append(('cache', job.get('cache_request'), None, True))
+    if job['kind'] == 'verify' and job.get('inputs_bound_required') and job.get('environment') is None:
+        changed.append(('dependency', None, None, True))
+    elif job.get('environment') is not None:
+        current_environment = execution_environment(project, job)
+        if current_environment != job['environment']:
+            changed.append(('dependency', job['environment'], current_environment, False))
+    current_execution = execution_key(project.config)
+    if job['execution'] != current_execution:
+        changed.append(('execution configuration', job['execution'], current_execution, False))
+    if job['kind'] == 'verify' and list(project.verify) != job['commands']:
+        changed.append(('acceptance command', job['commands'], list(project.verify), False))
+    if cache_configured and 'cache_input' not in job and job.get('cache_binding_pending') != 1:
+        changed.append(('cache', job.get('cache_request'), None, True))
+    if changed:
+        return refuse(_input_refusal(job, changed))
+    if cache_configured:
         try:
             cache_state = {}
             current_cache = recover_cache(project, job, 'input', state=cache_state)
         except Denied:
-            return refuse('Configured check cache reset failed')
+            return refuse(_input_refusal(job, [('cache', job.get('cache_input'), None, True)]))
     else:
         current_cache = None
     if current_cache is not None:
@@ -1500,7 +1531,9 @@ def _execute(project, job, stop, sandbox_factory, slot):
                     # Output is informational; only bindable artifacts persist.
                     record['cache_output'] = recover_cache(project, job, 'output')
             except (OSError, Denied):
-                job.update(status='refused', passed=False, error='Configured check cache reset failed')
+                job.update(status='refused', passed=False,
+                           error=(f"Check {job['id']} refused: cache output could not be safely reset. "
+                                  'Submit a fresh request once the cache output is safe to reset.'))
                 if not job.get('cache_diagnostics') or job['cache_diagnostics'][-1]['reason'] != 'reset_failed':
                     job.setdefault('cache_diagnostics', []).append({'phase': 'output', 'reason': 'reset_failed'})
                     try:
