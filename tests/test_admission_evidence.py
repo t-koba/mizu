@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from mizu.admission import _Queue, role_exclusion
-from mizu.errors import Busy
+from mizu.errors import Busy, Denied
 from mizu.evidence_records import read_retained
 from mizu.fs import canonical, lock, read_json, write_json
 from mizu.runtime import (Engine, MAX_STARTED_EVIDENCE_BYTES,
@@ -196,8 +196,18 @@ class AdmissionEvidenceTests(Fixture):
                    {'id': evidence_id, 'kind': 'command', 'role': 'reporter'})
         context = SimpleNamespace(project=self.project, config=config,
                                   role=SimpleNamespace(name='reporter'))
-        self.assertEqual(read_retained(context, 'commands', {
-            'run': result['run'], 'evidence_id': evidence_id})['run'], result['run'])
+        args = {'run': result['run'], 'evidence_id': evidence_id}
+        self.assertEqual(read_retained(context, 'commands', args)['run'], result['run'])
+
+        # A role-like context predating the optional source policy keeps the
+        # old own-role-only default instead of raising or widening authority.
+        write_json(self.project.root / 'runs' / result['run'] / 'started.json',
+                   {'run': result['run'], 'role': 'worker'})
+        write_json(self.project.root / 'runs' / result['run'] / 'commands' /
+                   f'{evidence_id}.json',
+                   {'id': evidence_id, 'kind': 'command', 'role': 'worker'})
+        with self.assertRaisesRegex(Denied, 'role'):
+            read_retained(context, 'commands', args)
 
     def test_first_contended_readmission_attaches_to_uncontended_start(self):
         engine = Engine(self.config)

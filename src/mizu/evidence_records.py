@@ -39,8 +39,13 @@ def read_retained(context, kind: str, args: dict) -> dict:
         raise Denied("Invalid evidence content_id")
     prefix = f"runs/{run}/"
     evidence = f"{kind}/{evidence_id}.json"
-    source_mode = (context.role.experiment_evidence_sources if kind == "experiments"
-                   else context.role.command_evidence_sources)
+    source_policy = ("experiment_evidence_sources" if kind == "experiments"
+                     else "command_evidence_sources")
+    # Runtime roles carry validated policy fields; lightweight compatible
+    # contexts retain the original same-role-only behavior when they do not.
+    source_mode = getattr(context.role, source_policy, "own")
+    if source_mode not in ("own", "any"):
+        raise Denied("Invalid retained evidence source policy")
     maximum = context.config.limits.file_bytes
     started_maximum = min(maximum, MAX_STARTED_EVIDENCE_BYTES)
     try:
