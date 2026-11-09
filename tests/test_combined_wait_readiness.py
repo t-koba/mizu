@@ -158,6 +158,26 @@ class CombinedWaitReadinessTests(CombinedFixture):
         self.assertFalse(status["blocked_work"]["coverage_complete"])
         self.assertEqual(status["blocked_work"]["diagnostic"], "unreadable")
 
+    def test_readiness_reuse_preserves_legacy_blocked_wait_age(self):
+        item = self.block_ci("legacy-blocked-age")
+        history = self.project.root / "work-items" / item["id"] / f"{item['rev']}.json"
+        record = read_json(history)
+        record.pop("blocked_since")
+        write_json(history, record)
+        writers = {name for name in self.project.roles
+                   if self.project.config.roles[name].workspace == "write"}
+
+        with patch("mizu.work_item_waits.now", return_value="2099-02-01T00:00:00+00:00"):
+            before = self.store.open_state_readonly(
+                limit=10, writer_roles=writers)["blocked_work"]["items"][0]
+            self.assertEqual(before["state"], "expired")
+            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+            after = self.store.open_state_readonly(
+                limit=10, writer_roles=writers)["blocked_work"]["items"][0]
+
+        self.assertEqual((after["blocked_since"], after["blocked_age_seconds"], after["state"]),
+                         (before["blocked_since"], before["blocked_age_seconds"], before["state"]))
+
     def test_readiness_cache_is_bound_to_snapshot_policy(self):
         self._delivered_ci_wait("policy-proof")
         self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))

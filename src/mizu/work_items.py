@@ -2110,7 +2110,7 @@ class WorkItems:
         proof_sources = []
         item, since = self._current_hold(
             item_id, seed_event=event, history_revisions=history_revisions,
-            verify_snapshots=True, derive_blocked=False, proof_sources=proof_sources)
+            verify_snapshots=True, derive_blocked=True, proof_sources=proof_sources)
         if (item["status"] in OPEN_STATUS_ORDER
                 and self._history_identity(item_id) == history_key):
             proof_sources = tuple(dict.fromkeys(proof_sources))
