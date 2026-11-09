@@ -5,11 +5,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from support import Fixture
-from mizu import host_records, operator_records as records
+from mizu import fs, host_records, operator_records as records
 from mizu.cli import execute, parser
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
-from mizu.fs import canonical
+from mizu.fs import ATOMIC_WRITE_TEMP_PREFIX, canonical
 from mizu.project import Project
 from mizu.shared_records import SharedRecords
 
@@ -115,6 +115,65 @@ class OperatorQuestionTests(Fixture):
         with patch.object(self.project, 'config', replace(self.config, record_kinds=policies)), \
                 patch.object(SharedRecords, 'records', side_effect=AssertionError('must not scan')):
             self.assertEqual(records.questions(self.project, limit=20, scan_limit=1000)['questions'], [])
+
+    def test_listing_skips_a_live_atomic_write_stage(self):
+        shared = self.shared()
+        record_id = 'role/worker/role.question/question-active'
+        record_path = shared.root / shared._record_name(record_id)
+        original_posix_publish = fs._rename_exclusive_posix
+        original_windows_publish = fs.os.rename
+        observed = []
+
+        def list_before_posix_publish(source, destination):
+            if Path(destination) == record_path:
+                self.assertTrue(Path(source).name.startswith(ATOMIC_WRITE_TEMP_PREFIX))
+                observed.append(records.questions(self.project, limit=20, scan_limit=1))
+            return original_posix_publish(source, destination)
+
+        def list_before_windows_publish(source, destination):
+            if Path(destination) == record_path:
+                self.assertTrue(Path(source).name.startswith(ATOMIC_WRITE_TEMP_PREFIX))
+                observed.append(records.questions(self.project, limit=20, scan_limit=1))
+            return original_windows_publish(source, destination)
+
+        with patch.object(fs, '_rename_exclusive_posix', side_effect=list_before_posix_publish), \
+                patch.object(fs.os, 'rename', side_effect=list_before_windows_publish):
+            question = self.question(id='question-active')
+
+        self.assertEqual(observed, [{'questions': [], 'scanned': 0, 'truncated': True}])
+        self.assertEqual(records.questions(self.project, limit=20, scan_limit=10), {
+            'questions': [dict(subject=self.subject(question), **question)],
+            'scanned': 1, 'truncated': False})
+
+    def test_listing_skips_orphan_atomic_stages_and_counts_them_in_scan_budget(self):
+        question = self.question()
+        shared = self.shared()
+        record_path = shared.root / shared._record_name(question['record']['id'])
+        # Simulate a process interruption after atomic_write created its stage.
+        staging = record_path.parent / f"{ATOMIC_WRITE_TEMP_PREFIX}interrupted"
+        staging.write_bytes(b"partial record bytes")
+
+        one_budget_short = records.questions(self.project, limit=20, scan_limit=2)
+        self.assertEqual(one_budget_short, {
+            'questions': [dict(subject=self.subject(question), **question)],
+            'scanned': 1, 'truncated': True})
+        enough_budget = records.questions(self.project, limit=20, scan_limit=3)
+        self.assertEqual(enough_budget, {
+            'questions': [dict(subject=self.subject(question), **question)],
+            'scanned': 1, 'truncated': False})
+
+        # The staging exception is narrow; an unrelated unexpected entry still
+        # refuses the listing instead of being mistaken for an ignorable stage.
+        unexpected = record_path.parent / 'unexpected-entry'
+        unexpected.write_bytes(b'not a record')
+        with self.assertRaises(Denied):
+            records.questions(self.project, limit=20, scan_limit=10)
+        unexpected.unlink()
+        # The reserved prefix alone is not enough: a directory is not a
+        # regular, singly linked atomic_write stage.
+        (record_path.parent / f"{ATOMIC_WRITE_TEMP_PREFIX}unexpected-directory").mkdir()
+        with self.assertRaises(Denied):
+            records.questions(self.project, limit=20, scan_limit=10)
 
     def test_listing_filters_unrouted_data_and_does_not_read_other_namespaces(self):
         self.config.record_kinds['role.note'] = {

@@ -11,7 +11,8 @@ import heapq
 
 from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .fs import DIGEST, identifier, lock, now
-from .shared_records import RECORD_NAME_MAX_CHARS, KindPolicy, SharedRecords, _name
+from .shared_records import (RECORD_NAME_MAX_CHARS, KindPolicy, ScanProgress,
+                             SharedRecords, _name)
 from .operator_record_index import catalog, remember
 
 WRITER = 'operator.cli'
@@ -160,7 +161,9 @@ def questions(project, *, limit, scan_limit):
         return {'questions': [], 'scanned': 0, 'truncated': False}
     shared = store(project.root, project.snapshots, policies)
     rows, scanned, truncated = [], 0, False
-    records = shared.records(namespace='role', scan_limit=scan_limit)
+    scan_progress = ScanProgress()
+    records = shared.records(namespace='role', scan_limit=scan_limit,
+                             scan_progress=scan_progress)
     try:
         for envelope, computed in records:
             scanned += 1
@@ -175,7 +178,7 @@ def questions(project, *, limit, scan_limit):
     finally:
         records.close()
     return {'questions': rows, 'scanned': scanned,
-            'truncated': truncated or scanned == scan_limit}
+            'truncated': truncated or scan_progress.entries_examined == scan_limit}
 
 
 def _route(project, envelope):

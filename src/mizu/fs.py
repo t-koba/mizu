@@ -29,6 +29,8 @@ PREVIEW_BYTES = 131072
 #: Maximum decoded characters in one file-read page. This keeps escaped tool
 #: responses well below the protocol frame bound even for control-heavy text.
 READ_PAGE_CHARS = 8192
+#: Reserved prefix for same-directory temporary files created by atomic_write.
+ATOMIC_WRITE_TEMP_PREFIX = ".new-"
 #: MCP/socket LF framing bound shared by the bridge, the MCP proxy and the
 #: Editor capsule server (each rejects anything above it).
 MAX_FRAME = 1024 * 1024
@@ -173,7 +175,7 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
     Unsupported native operations/filesystems fail closed without a fallback.
     """
     mkdir(path.parent)
-    fd, temporary = tempfile.mkstemp(prefix=".new-", dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix=ATOMIC_WRITE_TEMP_PREFIX, dir=path.parent)
     try:
         with contextlib.suppress(AttributeError, OSError, NotImplementedError):
             os.fchmod(fd, mode)

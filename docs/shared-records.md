@@ -126,13 +126,19 @@ Both command-line bounds are required positive per-invocation integers:
 examined, including unrouted role data. There is no default scan of the partition.
 The scan uses filesystem enumeration order, not chronological or globally sorted
 order, and reads at most the requested number of record envelopes; `scanned`
-counts those envelopes, not the total questions stored. A further eligible row
-or exhaustion of the scan budget reports `truncated = true`; exhaustion is
-conservatively incomplete even at actual EOF. There is no continuation cursor or
-snapshot consistency promise across calls. Unsafe, corrupt, undeclared, non-record
-or identity-mismatched entries in the bounded slice fail the command, never a
-successful empty/completeness claim. Work is proportional to the explicit
-per-call bounds, not the total number of stored role records.
+counts those envelopes, not the total questions stored. Regular, singly linked
+files under the reserved `fs.atomic_write` `.new-*` staging prefix are skipped
+without being read as records, but each still consumes one directory-entry slot
+in `--scan-limit`; other unexpected entries still refuse the listing.
+This includes orphaned stages left by an interrupted writer, so exhausting the
+budget on them reports `truncated = true` rather than a complete listing. A
+further eligible row or exhaustion of the scan budget reports `truncated = true`;
+exhaustion is conservatively incomplete even at actual EOF. There is no
+continuation cursor or snapshot consistency promise across calls. Unsafe,
+corrupt, undeclared, other unexpected non-record, or identity-mismatched entries
+in the bounded slice fail the command, never a successful empty/completeness
+claim. Work is proportional to the explicit per-call bounds, not the total
+number of stored role records.
 
 `wake = false` performs no wake operation. Explicit `true` requests only the
 existing best-effort host `waits` directory modification hint after a committed

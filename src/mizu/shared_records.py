@@ -42,8 +42,9 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .errors import Denied, LimitExceeded
-from .fs import (DIGEST, MAX_JSON_DEPTH, READ_PAGE_CHARS, atomic_write, canonical,
-                 digest, identifier, loads_finite, now, safe_read, sync_dir)
+from .fs import (ATOMIC_WRITE_TEMP_PREFIX, DIGEST, MAX_JSON_DEPTH, READ_PAGE_CHARS,
+                 atomic_write, canonical, digest, identifier, loads_finite, now,
+                 safe_read, sync_dir)
 
 RECORD_BYTES = 1024 * 1024 + 4096
 RECEIPT_BYTES = 2048
@@ -140,6 +141,13 @@ class KindPolicy:
     writers: frozenset[str]
     validate: Callable[[dict, dict], None]
     maximum: int = RECORD_BYTES
+
+
+@dataclass
+class ScanProgress:
+    """Directory-entry count for one explicitly bounded namespace scan."""
+
+    entries_examined: int = 0
 
 
 @dataclass(frozen=True)
@@ -293,7 +301,8 @@ class SharedRecords:
             raise Denied("Shared record digest mismatch")
         return envelope, computed
 
-    def records(self, *, namespace: str | None = None, scan_limit: int | None = None):
+    def records(self, *, namespace: str | None = None, scan_limit: int | None = None,
+                scan_progress: ScanProgress | None = None):
         """Scan this store's declared kinds only, without a second index/queue.
 
         Other source families retain their own validators and lifecycle. Unsafe
@@ -306,11 +315,19 @@ class SharedRecords:
         conflicting duplicates for one ID. An optional ``scan_limit`` is only
         valid for a single namespace; it bounds directory entries examined and
         deliberately preserves filesystem enumeration order rather than sorting
-        the complete partition.
+        the complete partition. Reserved ``fs.atomic_write`` staging names
+        are skipped but still consume an entry; optional ``scan_progress``
+        reports the number of raw entries examined.
         """
         if (scan_limit is not None
                 and (namespace is None or type(scan_limit) is not int or scan_limit < 1)):
             raise Denied("Invalid shared record scan limit")
+        if (scan_progress is not None
+                and (not isinstance(scan_progress, ScanProgress)
+                     or namespace is None or scan_limit is None)):
+            raise Denied("Invalid shared record scan progress")
+        if scan_progress is not None:
+            scan_progress.entries_examined = 0
         if namespace is not None:
             partition = _partition(namespace)
             if not self._parents(f"shared-records/{partition}/entry.json"):
@@ -323,6 +340,18 @@ class SharedRecords:
                 def bounded_paths():
                     with os.scandir(directory) as entries:
                         for entry in islice(entries, scan_limit):
+                            if scan_progress is not None:
+                                scan_progress.entries_examined += 1
+                            if entry.name.startswith(ATOMIC_WRITE_TEMP_PREFIX):
+                                try:
+                                    info = entry.stat(follow_symlinks=False)
+                                except FileNotFoundError:
+                                    # A live atomic publisher may have moved its
+                                    # stage after scandir yielded the name.
+                                    continue
+                                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                                    raise Denied("Invalid shared record filename")
+                                continue
                             if not entry.name.endswith(".json"):
                                 raise Denied("Invalid shared record filename")
                             yield directory / entry.name
