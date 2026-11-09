@@ -144,7 +144,9 @@ class Project:
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
         self.insights.snapshots = self.snapshots
         # Late acceptance is a separate projection; immutable snapshots stay unchanged.
+        from .operator_records import answer_lookup
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
+                                    operator_answer_lookup=lambda: answer_lookup(self),
                                     record_kinds=config.record_kinds,
                                     publication_evidence=config.publication_evidence,
                                     effective_verification_projection=self.effective_verification_projection,

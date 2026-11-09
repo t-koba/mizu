@@ -9,7 +9,7 @@ from dataclasses import asdict, replace
 import datetime as dt
 import heapq
 
-from .errors import ConfigError, Denied
+from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .fs import DIGEST, identifier, lock, now
 from .shared_records import RECORD_NAME_MAX_CHARS, KindPolicy, SharedRecords
 from .operator_record_index import catalog, remember
@@ -224,6 +224,44 @@ def _pending(project, role):
               for entry, row in zip(manifest, eligible)]
     return {'events': events, 'pending_count': count, 'truncated': count > len(events),
             'wake_pending': wake_pending}, manifest
+
+
+def answer_lookup(project):
+    """Lazy, projection-local evidence only; no delivery, repair or decision.
+
+    Exactly one authenticated answer must bind the observed current question
+    revision and its asking role. Missing, ambiguous or unreadable evidence
+    proves nothing. Even a failed catalog scan is attempted only once.
+    """
+    answers = None
+
+    def answered(question):
+        nonlocal answers
+        try:
+            if answers is None:
+                answers = {}
+                if configuration(project.config.operator_records)['answer']['enabled']:
+                    with lock(project.root / 'locks' / 'operator-records.lock'):
+                        for envelope, _ in catalog(store(project), readonly=True).values():
+                            if envelope['kind'] == 'answer':
+                                subject = envelope['subject']
+                                key = (subject['id'], subject['rev'], envelope['payload']['addressee'])
+                                answers[key] = None if key in answers else envelope
+            match = answers.get((question['id'], question.get('rev', 1), question['source']))
+            if match is None:
+                return False
+            current = project.insights.read(question['id'])
+            from .insights import insight_metadata
+            return (current['id'] == question['id']
+                    and current.get('rev', 1) == question.get('rev', 1)
+                    and current['source'] == question['source']
+                    and insight_metadata(current).get('kind', 'proposal') == 'question'
+                    and _route(project, match) == question['source'])
+        except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError,
+                TypeError, AttributeError, KeyError):
+            return False
+
+    return answered
 
 
 def due(project, role_name=None):

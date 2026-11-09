@@ -5,9 +5,10 @@ from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
 from test_ci_waits import CiWaitFixture, SHA
+from mizu import operator_records as records
 from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.fs import now, read_json, write_json
+from mizu.fs import canonical, now, read_json, write_json
 from mizu.runtime import (Engine, _writer_progress_fallback, _writer_wait_liveness,
                            _writer_wait_sources, should_run)
 
@@ -76,6 +77,245 @@ class WriterWaitTests(Fixture):
                                      body='Q: A new question?', base_snapshot=None, expected_rev=1)
         self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
         self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+
+    def answer_record(self, question, event='answer'):
+        return records.write(self.project, event_id=event, kind='answer', body='Operator answer',
+                             subject={'type': 'insight', 'id': question['id'], 'rev': question['rev']})
+
+    def blocked_row(self, item):
+        return next(row for row in self.project.status()['blocked_work']['items']
+                    if row['id'] == item['id'])
+
+    def test_operator_answer_annotates_pending_wait_without_transition_or_decision(self):
+        question = self.question()
+        item = self.block('operator answer', {'kind': 'insight_decided', 'insight': question['id']})
+        self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        answer = self.answer_record(question)
+        # A replay is the same immutable record, not ambiguous evidence.
+        self.assertEqual(self.answer_record(question), answer)
+        row = self.blocked_row(item)
+        self.assertEqual((row['state'], row['reason'], row['self_resolvable']),
+                         ('pending', 'undecided', 'answered_own_question'))
+        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+        self.assertEqual(self.project.work_items.get(item['id']), item)
+        self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
+        # The exact answer suppresses the open-question source for this revision;
+        # the held wait itself is now reported as self-resolvable, without
+        # deciding for its writer.
+        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
+                         (False, True, None))
+        self.assertEqual(_writer_wait_sources(self.project, self.role()),
+                         (False, True, None))
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
+        self.project.insights.decide(question['id'], 'defer', 'Await answer handling',
+                                     'After reading the answer', 'fixture', expected_rev=1)
+        self.assertEqual((self.blocked_row(item)['state'], self.blocked_row(item)['self_resolvable']),
+                         ('pending', 'answered_own_question'))
+        self.project.insights.decide(question['id'], 'reject', 'Handled answer', '', 'fixture', expected_rev=1)
+        self.assertEqual(self.blocked_row(item)['state'], 'due')
+
+    def test_answered_own_question_suppresses_live_source_and_backoff_resumes(self):
+        question = self.question()
+        item = self.block('answered backoff', {'kind': 'insight_decided', 'insight': question['id']})
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.answer_record(question)
+        row = self.blocked_row(item)
+        self.assertEqual((row['state'], row['reason'], row['self_resolvable']),
+                         ('pending', 'undecided', 'answered_own_question'))
+        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+        self.assertEqual(self.project.work_items.get(item['id']), item)
+        self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
+        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
+                         (False, True, None))
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
+        engine = Engine(self.config, driver=ScriptDriver())
+        result = engine.run(self.project, 'worker')
+        self.assertIs(result['finish']['wait_liveness'], False)
+        snapshot = self.project.snapshots.get()
+        due = self.backoff_time(snapshot)
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.role(), False, due - 1, project=self.project))
+        self.assertTrue(_writer_progress_fallback(
+            snapshot, self.config, self.role(), False, due, project=self.project))
+        self.assertTrue(should_run(self.project, snapshot, role_name='worker', current_time=due))
+        self.assertEqual(self.blocked_row(item)['state'], 'pending')
+        self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
+        self.assertEqual(self.project.work_items.get(item['id'])['status'], 'blocked')
+
+    def test_unanswered_own_and_foreign_questions_remain_live(self):
+        question = self.question()
+        item = self.block('answered holder', {'kind': 'insight_decided', 'insight': question['id']})
+        self.answer_record(question)
+        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
+                         (False, True, None))
+        # An unrelated unanswered own question stays an external live source.
+        other = self.project.insights.submit(
+            source='worker', title='Other fixture question', body='Q: Other question?',
+            base_snapshot=None, kind='question', addressee='operator')
+        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
+                         (True, True, None))
+        self.assertEqual(_writer_wait_sources(self.project, self.role()),
+                         (True, False, None))
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        engine = Engine(self.config, driver=ScriptDriver())
+        snapshot = engine.run(self.project, 'worker')['finish']
+        # Snapshot is not needed for the live check; use the stored snapshot.
+        stored = self.project.snapshots.get()
+        due = self.backoff_time(stored)
+        self.assertFalse(_writer_progress_fallback(
+            stored, self.config, self.role(), False, due, project=self.project))
+        self.assertEqual(self.blocked_row(item)['self_resolvable'], 'answered_own_question')
+        self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
+        self.assertIsNone(read_json(self.project.root / 'decisions' / f"{other['id']}.json"))
+        # A held wait on a foreign unanswered question is also external.
+        foreign = self.question('reviewer')
+        foreign_item = self.block('foreign holder', {'kind': 'insight_decided', 'insight': foreign['id']})
+        self.assertIsNone(self.blocked_row(foreign_item)['self_resolvable'])
+        self.assertEqual(self.blocked_row(foreign_item)['state'], 'pending')
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.assertFalse(_writer_progress_fallback(
+            stored, self.config, self.role(), False, due, project=self.project))
+
+    def test_answered_liveness_stays_live_on_unavailable_or_ambiguous_evidence(self):
+        question = self.question()
+        item = self.block('fail-closed live', {'kind': 'insight_decided', 'insight': question['id']})
+        self.answer_record(question)
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
+        with patch.object(records, 'catalog', side_effect=Denied('Unavailable')):
+            self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+            self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+            stored = self.project.snapshots.get() if self.project.snapshots.get() else None
+            # Fallback needs a wait snapshot; use a fresh engine run under the failure.
+            # The live question alone suppresses the self-wait backoff.
+            self.assertEqual(_writer_wait_sources(self.project, self.role()), (True, False, None))
+        self.assertEqual(self.blocked_row(item)['self_resolvable'], 'answered_own_question')
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
+        current = self.project.insights.read(question['id'])
+        self.answer_record(current, 'second-answer')
+        row = self.blocked_row(item)
+        self.assertIsNone(row['self_resolvable'])
+        self.assertEqual(row['state'], 'pending')
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True)[0], True)
+
+    def test_stale_decision_does_not_settle_current_revision_and_defer_alone_stays_live(self):
+        question = self.question()
+        item = self.block('stale decision', {'kind': 'insight_decided', 'insight': question['id']})
+        self.project.insights.decide(question['id'], 'accept', 'Old answer', '', 'fixture', expected_rev=1)
+        self.assertEqual(self.blocked_row(item)['state'], 'due')
+        self.project.insights.revise(question['id'], source='worker', title='Follow-up',
+                                     body='Q: New revision?', base_snapshot=None, expected_rev=1)
+        current = self.project.insights.read(question['id'])
+        # The old answer (rev 1) does not settle the new revision.
+        self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+        self.answer_record(current, 'current-answer')
+        row = self.blocked_row(item)
+        self.assertEqual((row['state'], row['self_resolvable']), ('pending', 'answered_own_question'))
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
+        # Defer alone, without an exact answer, is not self-resolvable and stays live.
+        other = self.project.insights.submit(
+            source='worker', title='Defer-alone question', body='Q: Defer without answer?',
+            base_snapshot=None, kind='question', addressee='operator')
+        other_item = self.block('defer alone', {'kind': 'insight_decided', 'insight': other['id']})
+        self.project.insights.decide(other['id'], 'defer', 'Await operator', 'Later', 'fixture', expected_rev=1)
+        self.assertIsNone(self.blocked_row(other_item)['self_resolvable'])
+        self.assertEqual(self.blocked_row(other_item)['state'], 'pending')
+        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+
+    def test_answer_evidence_is_projection_local_lazy_and_readonly(self):
+        question = self.question()
+        items = [self.block(f'wait {i}', {'kind': 'insight_decided', 'insight': question['id']})
+                 for i in range(2)]
+        answer = self.answer_record(question)
+        # A missing disposable reference must be validated without writing it.
+        from mizu import operator_record_index as index
+        shared = records.store(self.project)
+        ref = self.project.root / index.DIRECTORY / shared._record_name(answer['record']['id']).split('/')[-1]
+        ref.unlink()
+        with patch.object(records, 'catalog', wraps=records.catalog) as scan, \
+             patch.object(index, 'atomic_write', side_effect=AssertionError('Read-only evidence wrote')):
+            state = self.project.work_items.open_state_readonly(writer_roles={'worker'})
+            self.assertEqual(scan.call_count, 1)
+            scan.assert_called_once_with(scan.call_args.args[0], readonly=True)
+            self.assertEqual([r['self_resolvable'] for r in state['blocked_work']['items']],
+                             ['answered_own_question'] * 2)
+            self.project.work_items.open_state_readonly()  # No writer annotation requested.
+            self.assertEqual(scan.call_count, 1)
+        self.assertFalse(ref.exists())
+        # Changed evidence is not retained across projections; failures are not
+        # retried per blocked item within one projection either.
+        with patch.object(records, 'catalog', side_effect=Denied('Unavailable')) as scan:
+            state = self.project.work_items.open_state_readonly(writer_roles={'worker'})
+            self.assertEqual(scan.call_count, 1)
+            self.assertTrue(all(r['self_resolvable'] is None for r in state['blocked_work']['items']))
+            self.assertTrue(all(r['state'] == 'pending' for r in state['blocked_work']['items']))
+        self.assertEqual(self.project.work_items.get(items[0]['id']), items[0])
+
+    def test_stale_changed_or_ambiguous_operator_answers_do_not_prove_self_wait(self):
+        question = self.question()
+        item = self.block('revision answer', {'kind': 'insight_decided', 'insight': question['id']})
+        self.answer_record(question)
+        # A current revision change between the liveness read and route read
+        # cannot use the observed old revision as a current-answer witness.
+        with patch.object(self.project.insights, 'read', return_value={**question, 'rev': 2}):
+            self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        self.project.insights.revise(question['id'], source='worker', title='Follow-up',
+                                     body='Q: New revision?', base_snapshot=None, expected_rev=1)
+        self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        current = self.project.insights.read(question['id'])
+        self.answer_record(current, 'current-answer')
+        self.assertEqual(self.blocked_row(item)['self_resolvable'], 'answered_own_question')
+        self.answer_record(current, 'another-current-answer')
+        row = self.blocked_row(item)
+        self.assertIsNone(row['self_resolvable'])
+        self.assertEqual(row['state'], 'pending')
+
+    def test_answer_policy_corruption_and_route_fail_closed(self):
+        question = self.question()
+        item = self.block('unsafe answer', {'kind': 'insight_decided', 'insight': question['id']})
+        answer = self.answer_record(question)
+        policy = self.config.operator_records['answer']
+        with patch.dict(policy, enabled=False), patch.object(records, 'catalog') as scan:
+            self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+            scan.assert_not_called()
+        # Wake policy does not govern whether authenticated answer evidence exists.
+        with patch.dict(policy, wake=False):
+            self.assertEqual(self.blocked_row(item)['self_resolvable'], 'answered_own_question')
+        with patch.object(self.project.insights, 'read', side_effect=Denied('Body unavailable')):
+            self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        shared = records.store(self.project)
+        path = self.project.root / shared._record_name(answer['record']['id'])
+        original = path.read_bytes()
+        for field, value in (('writer', 'worker'), ('payload', {**answer['record']['payload'],
+                                                               'addressee': 'reviewer'})):
+            with self.subTest(field=field):
+                path.write_bytes(canonical({**answer['record'], field: value}))
+                row = self.blocked_row(item)
+                self.assertIsNone(row['self_resolvable'])
+                self.assertEqual(row['state'], 'pending')
+        path.write_bytes(b'{')
+        self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        path.unlink()
+        self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+        path.write_bytes(original)
+        self.assertEqual(self.blocked_row(item)['self_resolvable'], 'answered_own_question')
+
+    def test_non_own_question_waits_never_scan_operator_answers(self):
+        targets = [self.question('reviewer'), self.project.insights.submit(
+            source='worker', title='Own proposal', body='Proposal, not a question',
+            base_snapshot=None, kind='proposal', addressee='operator')]
+        for i, target in enumerate(targets):
+            self.answer_record(target, f'answer-{i}')
+            self.block(f'negative {i}', {'kind': 'insight_decided', 'insight': target['id']})
+        self.block('dependency answer', {'kind': 'dependency', 'recipient': 'reviewer',
+            'requires': {'insight': targets[0]['id'], 'rev': 1, 'action': 'accept'}})
+        self.block('code only', {'kind': 'code_change'})
+        with patch.object(records, 'catalog') as scan:
+            state = self.project.work_items.open_state_readonly(writer_roles={'worker'})
+            scan.assert_not_called()
+        rows = [row for row in state['blocked_work']['items'] if row['wait_kind'] != 'code_change']
+        self.assertTrue(all(row['self_resolvable'] is None for row in rows))
 
     def test_malformed_question_metadata_never_proves_a_self_wait(self):
         question = self.question()

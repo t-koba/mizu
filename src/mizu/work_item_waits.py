@@ -130,8 +130,9 @@ def blocked_age(store, item):
             "blocked_max_age_seconds": None if wait.get("kind") == "deadline" else store.blocked_max_age_seconds}
 
 
-def liveness(store, wait, snapshot, *, item=None, writer_roles=None):
-    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles)
+def liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None):
+    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
+                         operator_answer=operator_answer)
     if item is None:
         return observed
     age = blocked_age(store, item)
@@ -145,7 +146,7 @@ def liveness(store, wait, snapshot, *, item=None, writer_roles=None):
     return {**observed, **age}
 
 
-def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
+def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Insight-decided waits follow the current revision; dependency waits bind an
@@ -234,6 +235,14 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
                     return result("impossible", "target_superseded")
                 if rev < wait["requires"]["rev"]:
                     return result("pending", "future_revision")
+            own_question = False
+            if (kind == "insight_decided" and writer_roles is not None and holder in writer_roles
+                    and item["source"] == holder):
+                from .insights import insight_metadata
+                own_question = insight_metadata(item).get("kind", "proposal") == "question"
+                if (own_question and (decision is None or decision_rev < rev or action == "defer")
+                        and operator_answer is not None and operator_answer(item)):
+                    self_resolvable = "answered_own_question"
             if decision is None:
                 return result("pending", "undecided")
             if decision_rev < rev:
@@ -242,10 +251,8 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
                 if action == "withdraw":
                     return result("impossible", "target_withdrawn")
                 due = action in ("accept", "modify", "reject")
-                if due and writer_roles is not None and holder in writer_roles:
-                    from .insights import insight_metadata
-                    if insight_metadata(item).get("kind", "proposal") == "question" and item["source"] == holder:
-                        self_resolvable = "answered_own_question"
+                if due and own_question:
+                    self_resolvable = "answered_own_question"
             else:
                 if action in ("accept", "modify", "reject") and action != wait["requires"]["action"]:
                     return result("impossible", "decision_conflict")

@@ -207,16 +207,21 @@ held self-resolvable wait exists.
 Two held waits are self-resolvable, not external sources: `code_change` when
 the holder is the project's sole configured `workspace = "write"` role, and
 `insight_decided` on a current, substantively answered (`accept`, `modify` or
-`reject`) `kind = "question"` authored by that holder. The answered question
-remains holder-ready under the existing due-wait rules. A proven self-resolvable
-wait permits the same backoff even when no ledger item is currently ready;
+`reject`) `kind = "question"` authored by that holder. Exactly one enabled,
+authenticated operator `answer` to that same current question revision, routed
+back to its author, also annotates the held wait as self-resolvable and
+suppresses that same answered revision as an independent open-question source.
+This leaves the question and the wait pending without deciding for the writer;
+only an actual substantive current-revision decision makes it due and holder-ready. A proven
+self-resolvable wait permits the same backoff even when no ledger item is currently ready;
 this does not reopen, unblock or transition work.
 
 This path always waits for `writer_no_progress_backoff_seconds` from the
 snapshot's progress timestamp, even if the unit made progress; no immediate
 allowance applies. The host records `finish.wait_liveness` in the existing
 finish intent/result: `true` for a live owned queued/running check, an own
-unresolved operator-addressed question, a pending external ledger wait, or a
+unresolved operator-addressed question without an exact authenticated answer for
+its current revision, a pending external ledger wait, or a
 held CI wait with an exact publication/SHA dispatch request and no terminal
 evidence; `false` for proven absence/terminal/self-resolvable sources; `null`
 for unknown evidence. Future deadlines, pending dependencies, questions awaiting
@@ -473,7 +478,12 @@ readiness), `expired`, and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
 exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change`,
 `answered_own_question`, or `null`. This annotation uses the same bounded
-read-only scan and does not change the wait's state or readiness. The existing
+read-only projection and does not change the wait's state or readiness. Operator
+answer evidence uses at most one read-only catalog scan per projection, only
+when an eligible own-question wait needs it; the writer wait-source check reuses
+the same lazy lookup once per projection, only when an unresolved own question
+remains; missing, stale, ambiguous or
+unreadable answers leave the annotation unset and keep the question live. The existing
 `coverage_complete` reports inventory/observation completeness; `truncated` and
 `overflow_count` separately identify omitted diagnostic rows. An incomplete
 view is not proof that no self-resolvable or external cause exists.

@@ -112,14 +112,15 @@ def _check(shared, ref, raw, name, *, operator):
     return row, ref['digest']
 
 
-def _reference(shared, name, raw, *, operator):
+def _reference(shared, name, raw, *, operator, readonly=False):
     filename = name.rsplit('/', 1)[1]
     ref_name = f'{DIRECTORY}/{filename}'
     ref_raw = shared._read(ref_name, RECORD_BYTES)
     if ref_raw is None:
         ref = _projection(shared, raw, name, operator=operator)
-        shared._parents(ref_name, create=True)
-        atomic_write(shared.root / ref_name, canonical(ref), exclusive=True)
+        if not readonly:
+            shared._parents(ref_name, create=True)
+            atomic_write(shared.root / ref_name, canonical(ref), exclusive=True)
     else:
         try:
             ref = loads_finite(ref_raw)
@@ -135,12 +136,13 @@ def remember(shared, envelope):
     _reference(shared, shared._record_name(envelope['id']), canonical(envelope), operator=True)
 
 
-def catalog(shared):
+def catalog(shared, *, readonly=False):
     """Return checked compact operator envelopes; repair missing refs only.
 
     All canonical bytes are hashed, including unrelated recipients and disabled
     kinds. No mtime trust, mutable cursor or per-recipient canonical identity.
     Identical legacy/sharded duplicates share a ref; conflicting copies refuse.
+    Read-only projections validate missing refs in memory without repairing them.
     """
     files = _files(shared, 'shared-records/operator')
     legacy = {}
@@ -162,7 +164,7 @@ def catalog(shared):
         if filename in files and filename in legacy:
             if shared._read(legacy[filename], RECORD_BYTES) != raw:
                 raise Denied('Shared record identity conflict')
-        row, computed = _reference(shared, name, raw, operator=filename in files)
+        row, computed = _reference(shared, name, raw, operator=filename in files, readonly=readonly)
         if _namespace(row['id']) == 'operator':
             result[row['id']] = (row, computed)
     return result

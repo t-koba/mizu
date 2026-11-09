@@ -217,10 +217,11 @@ class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  blocked_max_age_seconds=604800,
-                 effective_verification_projection=None,
+                 effective_verification_projection=None, operator_answer_lookup=None,
                  publication_evidence: PublicationEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
+        self.operator_answer_lookup = operator_answer_lookup
         self.vcs = vcs or {}
         self.publication_evidence = (publication_evidence if publication_evidence is not None
                                      else PublicationEvidence())
@@ -2686,7 +2687,8 @@ class WorkItems:
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False, writer_roles=None,
                         wait_resolution_role: str | None = None, _active_transform=None,
-                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None):
+                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None,
+                        operator_answer=None):
         """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -2701,6 +2703,8 @@ class WorkItems:
         """
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
+        if operator_answer is None and writer_roles is not None and self.operator_answer_lookup is not None:
+            operator_answer = self.operator_answer_lookup()
         cursor_key = _open_cursor_key(cursor)
         if delivered_wait_resolution_tokens is None:
             delivered_resolution_tokens = None
@@ -2858,7 +2862,7 @@ class WorkItems:
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
                 state = liveness(self, wait, published_snapshot,
-                                 item=item, writer_roles=writer_roles)
+                                 item=item, writer_roles=writer_roles, operator_answer=operator_answer)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
@@ -3068,7 +3072,7 @@ class WorkItems:
                     "truncated": None, "unseeded_decisions": None,
                     "coverage_complete": False, "diagnostic": "unreadable"}
 
-    def open_state_readonly(self, *, limit=25, writer_roles=None) -> dict:
+    def open_state_readonly(self, *, limit=25, writer_roles=None, operator_answer=None) -> dict:
         """Return the seeded open count and blocked liveness from one scan.
 
         The caller gets the same fail-closed diagnostic shape as
@@ -3083,7 +3087,7 @@ class WorkItems:
         try:
             blocked = self._page_open_impl(cursor=None, limit=limit, readonly=True,
                                            blocked_only=True, include_open_count=True,
-                                           writer_roles=writer_roles)
+                                           writer_roles=writer_roles, operator_answer=operator_answer)
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
             return {"open_count": None,
                     "blocked_work": {"items": [], "total": None, "counts": None,
