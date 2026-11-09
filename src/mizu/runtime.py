@@ -392,7 +392,45 @@ def check_consult_role(role_name: str, role) -> None:
             f"{sorted(CONSULT_FORBIDDEN)}")
 
 
+@dataclasses.dataclass
+class _SpendLedger:
+    """One run's aggregate spend; Context admission holds lock through debit.
+
+    Daily request admission runs under the same lock, before any debit, so a
+    refusal leaves both ordinary and wrap-up capacity available to the caller.
+    Deadlines, invocation identities and refusal state remain Context-local.
+    """
+    lock: object = dataclasses.field(default_factory=threading.RLock)
+    request_count: int = 0
+    tool_count: int = 0
+    wrap_up_requests: int = 0
+    wrap_up_tools: int = 0
+    delegated_wrap_up_requests: int = 0
+    delegated_wrap_up_tools: int = 0
+
+
+def _spend_counter(name):
+    # Preserve Context's counter interface for records and driver adapters.
+    # Read/modify/write admission sequences additionally hold the ledger lock.
+    def get(self):
+        with self._spend.lock:
+            return getattr(self._spend, name)
+
+    def set(self, value):
+        with self._spend.lock:
+            setattr(self._spend, name, value)
+
+    return property(get, set)
+
+
 class Context:
+    request_count = _spend_counter("request_count")
+    tool_count = _spend_counter("tool_count")
+    wrap_up_requests = _spend_counter("wrap_up_requests")
+    wrap_up_tools = _spend_counter("wrap_up_tools")
+    delegated_wrap_up_requests = _spend_counter("delegated_wrap_up_requests")
+    delegated_wrap_up_tools = _spend_counter("delegated_wrap_up_tools")
+
     def __init__(self, config: Config, project: Project, role: Role, run_dir: Path,
                  snapshot: dict, workspace: Path, *, stop: threading.Event | None = None,
                  consult=None, delegate=None, goal: str | None = None,
@@ -442,7 +480,7 @@ class Context:
         self.operation_active = threading.Event()
         self.mutex = threading.RLock()
         self.hello = threading.Event()
-        self.request_count = 0
+        self._spend = _SpendLedger()
         # Provider adapters restart their local sequence for each execute;
         # scope it to the reused Context's engine invocation.
         self.execution_attempt = 0
@@ -466,7 +504,6 @@ class Context:
         # One conditional-close adapter dispatch per work unit prevents a
         # later conditional result from replacing its retained receipt.
         self.conditional_close_attempted = False
-        self.tool_count = 0
         self.progress_tool = False
         self.progress_decision = False
         self.progress_insight = False
@@ -480,13 +517,9 @@ class Context:
         # Set by a requests/tools refusal or the reserved wall window, so the
         # unit can seal `bounded` instead of failing.
         self.bound_hit: str | None = None
-        self.wrap_up_requests = 0
-        self.wrap_up_tools = 0
         # Delegated children use an aggregate share of these same wrap-up
         # allowances; the top-level context retains all unused capacity.
         self.delegated_child = False
-        self.delegated_wrap_up_requests = 0
-        self.delegated_wrap_up_tools = 0
         self.wrap_up_attempted = False
         self.finished: dict | None = None
         self.missing_finish_evidence: dict | None = None
@@ -841,22 +874,25 @@ class Context:
         return (max(0, min(self.config.limits.delegate_wrap_up_requests, total_requests - 1)),
                 max(0, min(self.config.limits.delegate_wrap_up_tools, total_tools - 1)))
 
+    def _wrap_up_used_limit(self, kind: str) -> tuple[int, int]:
+        """Apply both the aggregate allowance and the child's clamped share."""
+        with self._spend.lock:
+            own = getattr(self._spend, "wrap_up_" + kind)
+            delegated = getattr(self._spend, "delegated_wrap_up_" + kind)
+            role = self.spend_role or self.role
+            total = (role_wrap_up_requests if kind == "requests" else role_wrap_up_tools)(self.config, role)
+            if self.delegated_child:
+                share = self._delegated_wrap_up_limits()[0 if kind == "requests" else 1]
+                return delegated, min(share, total - own)
+            return own + delegated, total
+
     def _wrap_up_request_used_limit(self) -> tuple[int, int]:
-        """Effective (used, limit) for wrap-up model requests on this context."""
-        if self.delegated_child:
-            return (self.delegated_wrap_up_requests, self._delegated_wrap_up_limits()[0])
-        role = self.spend_role or self.role
-        return (self.wrap_up_requests + self.delegated_wrap_up_requests,
-                role_wrap_up_requests(self.config, role))
+        return self._wrap_up_used_limit("requests")
 
     def _wrap_up_remaining(self) -> tuple[int, int]:
-        if self.delegated_child:
-            child_requests, child_tools = self._delegated_wrap_up_limits()
-            return (child_requests - self.delegated_wrap_up_requests,
-                    child_tools - self.delegated_wrap_up_tools)
-        role = self.spend_role or self.role
-        return (role_wrap_up_requests(self.config, role) - self.wrap_up_requests - self.delegated_wrap_up_requests,
-                role_wrap_up_tools(self.config, role) - self.wrap_up_tools - self.delegated_wrap_up_tools)
+        with self._spend.lock:
+            return tuple(limit - used for used, limit in (
+                self._wrap_up_used_limit("requests"), self._wrap_up_used_limit("tools")))
 
     def _bound_message(self) -> str:
         requests_left, tools_left = self._wrap_up_remaining()
@@ -961,15 +997,16 @@ class Context:
                     return {"allowed": True}
                 if len(self.engine_tool_invocations) >= MAX_ENGINE_TOOL_INVOCATIONS:
                     raise LimitExceeded("Engine tool invocation evidence bound exceeded")
-                self.tool_count += 1
-                if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
-                    # Native tools are never wrap-up operations: record the
-                    # bound and refuse without drawing the allowance.
-                    self.bound_hit = self.bound_hit or "tools"
-                    self.tool_admission_exception = LimitExceeded("Per-run tool limit exceeded")
-                    raise self.tool_admission_exception
-                self.tool_admission_exception = None
-                self.engine_tool_invocations[key] = name
+                with self._spend.lock:
+                    self.tool_count += 1
+                    if self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
+                        # Native tools are never wrap-up operations: record the
+                        # bound and refuse without drawing the allowance.
+                        self.bound_hit = self.bound_hit or "tools"
+                        self.tool_admission_exception = LimitExceeded("Per-run tool limit exceeded")
+                        raise self.tool_admission_exception
+                    self.tool_admission_exception = None
+                    self.engine_tool_invocations[key] = name
                 self.progress_tool = True
                 return {"allowed": True}
             if operation == "_budget":
@@ -986,63 +1023,64 @@ class Context:
                     if type(sequence) is not int or sequence < 1:
                         raise Denied("Invalid request sequence")
                     sequence_key = (self.execution_attempt, sequence)
-                    if sequence_key not in self.request_sequences:
-                        over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
-                            self.config, self.spend_role or self.role)
-                        if (over and self.bound_hit == "deadline"
-                                and not self.wrap_up_attempted):
-                            # The reserved allowance belongs to Engine's
-                            # reduced-grant follow-up, never the still-active
-                            # normal invocation that crossed the cutoff.
-                            raise DeadlineWrapUp(self._bound_message())
-                        if (over and self.bound_hit in (None, "requests")
-                                and not self.wrap_up_attempted):
-                            self.bound_hit = "requests"
-                            self.request_admission_refused = True
-                            raise DeadlineWrapUp("Per-run provider request budget exhausted")
-                        requests_used, requests_limit = self._wrap_up_request_used_limit()
-                        if over and requests_used >= requests_limit:
-                            if self.bound_hit == "drain":
-                                raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
-                            if self.bound_hit == "deadline":
-                                raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
-                            self.request_bound_exhausted = True
-                            raise RequestYieldExceeded("Per-run provider request budget exhausted")
-                        try:
-                            Budget(self.config.data / "budget", self.config.limits.daily_requests,
-                                   self.config.limits.retention_days,
-                                   self.config.limits.shared_daily_requests, self.config.timezone,
-                                   day_file_bytes=self.config.limits.budget_day_file_bytes).take(
-                                       f"{self.run_dir.name}:{self.execution_attempt}:{sequence}",
-                                       project=self.project.name)
-                        except InfraExceeded:
-                            if hasattr(self, 'model_evidence'):
-                                self.model_evidence['admission_status'] = 'rejected'
-                            self.admission_wait = True
-                            raise
-                        except LimitExceeded:
-                            if hasattr(self, 'model_evidence'):
-                                self.model_evidence['admission_status'] = 'rejected'
-                            raise
-                        except Exception:
-                            if hasattr(self, 'model_evidence'):
-                                self.model_evidence.update(requests_known=False, admission_status='unconfirmed')
-                            raise
-                        if over:
-                            # Wrap state records only after daily admission
-                            # succeeds: an infrastructure refusal must not
-                            # burn the allowance or mislabel the context.
-                            self.bound_hit = self.bound_hit or "requests"
-                            if self.delegated_child:
-                                self.delegated_wrap_up_requests += 1
-                            else:
-                                self.wrap_up_requests += 1
-                        self.request_sequences.add(sequence_key)
-                        self.start_request(sequence)
-                        self.request_count += 1
-                        if hasattr(self, "model_evidence"):
-                            self.model_evidence.update(requests=self.request_count, requests_known=True, admission_status="accepted")
-                        write_json(self.run_dir / "admission.json", {"requests": self.request_count})
+                    with self._spend.lock:
+                        if sequence_key not in self.request_sequences:
+                            over = self.bound_hit in ("deadline", "drain") or self.request_count >= role_requests_per_run(
+                                self.config, self.spend_role or self.role)
+                            if (over and self.bound_hit == "deadline"
+                                    and not self.wrap_up_attempted):
+                                # The reserved allowance belongs to Engine's
+                                # reduced-grant follow-up, never the still-active
+                                # normal invocation that crossed the cutoff.
+                                raise DeadlineWrapUp(self._bound_message())
+                            if (over and self.bound_hit in (None, "requests")
+                                    and not self.wrap_up_attempted):
+                                self.bound_hit = "requests"
+                                self.request_admission_refused = True
+                                raise DeadlineWrapUp("Per-run provider request budget exhausted")
+                            requests_used, requests_limit = self._wrap_up_request_used_limit()
+                            if over and requests_used >= requests_limit:
+                                if self.bound_hit == "drain":
+                                    raise DrainYieldExceeded("Drain wrap-up request allowance exhausted")
+                                if self.bound_hit == "deadline":
+                                    raise RunDeadlineExceeded("Deadline wrap-up request allowance exhausted")
+                                self.request_bound_exhausted = True
+                                raise RequestYieldExceeded("Per-run provider request budget exhausted")
+                            try:
+                                Budget(self.config.data / "budget", self.config.limits.daily_requests,
+                                       self.config.limits.retention_days,
+                                       self.config.limits.shared_daily_requests, self.config.timezone,
+                                       day_file_bytes=self.config.limits.budget_day_file_bytes).take(
+                                           f"{self.run_dir.name}:{self.execution_attempt}:{sequence}",
+                                           project=self.project.name)
+                            except InfraExceeded:
+                                if hasattr(self, 'model_evidence'):
+                                    self.model_evidence['admission_status'] = 'rejected'
+                                self.admission_wait = True
+                                raise
+                            except LimitExceeded:
+                                if hasattr(self, 'model_evidence'):
+                                    self.model_evidence['admission_status'] = 'rejected'
+                                raise
+                            except Exception:
+                                if hasattr(self, 'model_evidence'):
+                                    self.model_evidence.update(requests_known=False, admission_status='unconfirmed')
+                                raise
+                            if over:
+                                # Wrap state records only after daily admission
+                                # succeeds: an infrastructure refusal must not
+                                # burn the allowance or mislabel the context.
+                                self.bound_hit = self.bound_hit or "requests"
+                                if self.delegated_child:
+                                    self.delegated_wrap_up_requests += 1
+                                else:
+                                    self.wrap_up_requests += 1
+                            self.request_sequences.add(sequence_key)
+                            self.start_request(sequence)
+                            self.request_count += 1
+                            if hasattr(self, "model_evidence"):
+                                self.model_evidence.update(requests=self.request_count, requests_known=True, admission_status="accepted")
+                            write_json(self.run_dir / "admission.json", {"requests": self.request_count})
                     self.admission_error = None
                     self.admission_exception = None
                     self.admission_wait = False
@@ -1061,33 +1099,29 @@ class Context:
                 raise Denied(f"Role has no capability: {operation}")
             if self.bound_hit is not None and operation not in WRAP_UP_OPS:
                 raise Denied(self._bound_message())
-            self.tool_count += 1
-            if self.bound_hit in ("deadline", "drain") or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
-                self.bound_hit = self.bound_hit or "tools"
-                if self.delegated_child:
-                    tools_used = self.delegated_wrap_up_tools
-                    tools_limit = self._delegated_wrap_up_limits()[1]
-                else:
-                    tools_used = self.wrap_up_tools + self.delegated_wrap_up_tools
-                    tools_limit = role_wrap_up_tools(self.config, self.spend_role or self.role)
-                if operation not in WRAP_UP_OPS or tools_used >= tools_limit:
-                    refusal = LimitExceeded("Per-run tool limit exceeded")
-                    if tools_used >= tools_limit:
-                        if self.bound_hit == "drain":
-                            refusal = DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
-                        elif self.bound_hit == "deadline":
-                            refusal = RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
-                        elif self.wrap_up_attempted:
-                            if self.bound_hit == "requests":
-                                refusal = RequestYieldExceeded("Request wrap-up tool allowance exhausted")
-                            else:
-                                refusal = ToolYieldExceeded("Tool wrap-up allowance exhausted")
-                    self.tool_admission_exception = refusal
-                    raise refusal
-                if self.delegated_child:
-                    self.delegated_wrap_up_tools += 1
-                else:
-                    self.wrap_up_tools += 1
+            with self._spend.lock:
+                self.tool_count += 1
+                if self.bound_hit in ("deadline", "drain") or self.tool_count > role_tools_per_run(self.config, self.spend_role or self.role):
+                    self.bound_hit = self.bound_hit or "tools"
+                    tools_used, tools_limit = self._wrap_up_used_limit("tools")
+                    if operation not in WRAP_UP_OPS or tools_used >= tools_limit:
+                        refusal = LimitExceeded("Per-run tool limit exceeded")
+                        if tools_used >= tools_limit:
+                            if self.bound_hit == "drain":
+                                refusal = DrainYieldExceeded("Drain wrap-up tool allowance exhausted")
+                            elif self.bound_hit == "deadline":
+                                refusal = RunDeadlineExceeded("Deadline wrap-up tool allowance exhausted")
+                            elif self.wrap_up_attempted:
+                                if self.bound_hit == "requests":
+                                    refusal = RequestYieldExceeded("Request wrap-up tool allowance exhausted")
+                                else:
+                                    refusal = ToolYieldExceeded("Tool wrap-up allowance exhausted")
+                        self.tool_admission_exception = refusal
+                        raise refusal
+                    if self.delegated_child:
+                        self.delegated_wrap_up_tools += 1
+                    else:
+                        self.wrap_up_tools += 1
             validate(arguments, DEFINITIONS[operation][1])
             self.operation_active.set()
             self._activity_change(lambda: setattr(self, "_activity_operation", operation),
@@ -3982,19 +4016,12 @@ class Engine:
             ctx.consult = None
             ctx.spend_role = parent.role
             ctx.delegated_child = True
-            ctx.request_count = parent.request_count
-            ctx.tool_count = parent.tool_count
-            ctx.delegated_wrap_up_requests = parent.delegated_wrap_up_requests
-            ctx.delegated_wrap_up_tools = parent.delegated_wrap_up_tools
+            ctx._spend = parent._spend
             try:
                 model = self._execute(ctx, driver, prompt_for(ctx) + "\n\nTask:\n" + task
                                        + "\n\nCall finish once with a result summary (and short state) "
                                        + "when done; that seal returns to the caller, it publishes nothing.")
             finally:
-                parent.request_count = ctx.request_count
-                parent.tool_count = ctx.tool_count
-                parent.delegated_wrap_up_requests = ctx.delegated_wrap_up_requests
-                parent.delegated_wrap_up_tools = ctx.delegated_wrap_up_tools
                 # Shared spend bounds still constrain the caller's seal (a
                 # child's deadline is local). Pending admission refusals are
                 # invocation-local: the returned child result is their evidence,

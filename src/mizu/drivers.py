@@ -6,7 +6,6 @@ one work unit. None of these counts represents HTTP requests or money.
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 from .budget import Budget
@@ -82,9 +81,9 @@ def admit_invocation(context, *, unit: str) -> dict:
     double-charging (see Budget.take). Enforces the role-effective
     `requests_per_run` (per-role override or project default).
     """
-    # The exceptional host-only phase serializes its one admission with
-    # begin_driver/handle. Ordinary query/turn admission is unchanged.
-    with context.mutex if context.checkpoint_seal_only else nullcontext():
+    # Match bridge admission's lock order; identities stay Context-local,
+    # while daily admission and aggregate spend debit form one transaction.
+    with context.mutex, context._spend.lock:
         return _admit_invocation(context, unit=unit)
 
 
@@ -159,10 +158,7 @@ def _admit_invocation(context, *, unit: str) -> dict:
             context.model_evidence.update(requests_known=False,admission_status='unconfirmed')
         raise
     if over:
-        # Wrap state records only after daily admission succeeds. Delegated
-        # children spend their clamped share (checked above); anything else
-        # would bypass the share and be lost on join, which copies only
-        # delegated_* back to the caller.
+        # Debit the shared allowance only after daily admission succeeds.
         context.bound_hit = context.bound_hit or "requests"
         if getattr(context, "delegated_child", False):
             context.delegated_wrap_up_requests = getattr(context, "delegated_wrap_up_requests", 0) + 1

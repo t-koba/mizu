@@ -149,6 +149,7 @@ class DelegateTests(Fixture):
 
         def callback(ctx, prompt, profile):
             if ctx.role.name == "worker":
+                child_spend["parent"] = ctx
                 response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
                 child_spend["requests"] = ctx.request_count
                 child_spend["tools"] = ctx.tool_count
@@ -156,11 +157,15 @@ class DelegateTests(Fixture):
                                       "summary": "child said: " + response["answer"],
                                       "state": "Now: delegated.\nNext: verify.\nTasks: none\nBlocking: none"})
             else:
+                parent = child_spend["parent"]
+                self.assertIs(ctx._spend, parent._spend)
+                self.assertEqual(parent.request_count, ctx.request_count)
                 listing = ctx.handle("files", {"limit": 100, "offset": 0})
                 names = list(listing["files"])
                 assert "delegate-marker.txt" in names, names
                 child_spend["child_requests"] = ctx.request_count
                 child_spend["child_tools"] = ctx.tool_count
+                self.assertEqual(parent.tool_count, ctx.tool_count)
                 ctx.handle("finish", {"outcome": "continue", "summary": "child saw marker",
                                       "state": "Now: done.\nNext: Report the child result.\nTasks: none\nBlocking: none"})
 
@@ -168,7 +173,7 @@ class DelegateTests(Fixture):
         self.assertEqual(result["status"], "completed")
         self.assertIn("child saw marker", result["finish"]["summary"])
         # The child's spend counted against the caller's unit. The tool
-        # adoption includes the child's finish seal, recorded after the
+        # total includes the child's finish seal, recorded after the
         # child's own count was read.
         self.assertEqual(child_spend["requests"], child_spend["child_requests"])
         self.assertEqual(child_spend["tools"], child_spend["child_tools"] + 1)
