@@ -2145,10 +2145,19 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_observation.py', '_clean_ci_failures', 1, 0): (
         '256', 'format',
         'CI observation / check-name length follows the shared 1-256 character VCS schema'),
+    ('cli.py', '_resolve_role', 1, 0): (
+        '1', 'mechanism',
+        'CLI role selection / omission resolves only when exactly one role is configured'),
     ('cli.py', '_parse_wait', 1, 0): (
         '4', 'format',
         'CLI dependency wait / exactly four colon-delimited recipient, insight, revision '
         'and action fields'),
+    ('cli.py', '_parse_wait', 1, 1): (
+        '1', 'format',
+        'CLI dependency wait / requested insight revision is positive, matching revision schema'),
+    ('cli.py', '_execute', 1, 0): (
+        '1', 'mechanism',
+        'CLI explain / omitted role is resolved only for an unambiguous single-role projection'),
     ('codex.py', 'CodexDriver.execute.request', 1, 0): (
         '128', 'safety',
         'Codex app-server initialize / cap unmatched notification records retained before the response'),
@@ -3451,7 +3460,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

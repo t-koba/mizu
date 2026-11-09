@@ -80,6 +80,9 @@ class DependencyRegistrationTests(Fixture):
         self.assertEqual(_parse_wait("dependency:worker:abc:2:reject"),
                          {"kind": "dependency", "recipient": "worker",
                           "requires": {"insight": "abc", "rev": 2, "action": "reject"}})
+        self.assertEqual(_parse_wait("dependency:worker:abc:1:accept"),
+                         {"kind": "dependency", "recipient": "worker",
+                          "requires": {"insight": "abc", "rev": 1, "action": "accept"}})
         for spec in ("dependency", "dependency:worker", "dependency:worker:abc",
                      "dependency:worker:abc:0:accept", "dependency:worker:abc:1:defer",
                      "dependency:worker:abc:x:accept",
