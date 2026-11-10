@@ -97,11 +97,13 @@ Checkpoint-image inspection uses `[sandbox].checkpoint_inspect_timeout_seconds`;
 Systemd-analyze verification uses `[services].systemd_verify_timeout_seconds`.
 Their output reads are safety.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
-not-yet-wired single-child delegation pilot. Its 1024-job history cap is shared
+not-yet-wired single-child runner pilot. Its 1024-job history cap is shared
 project-state capacity policy: exhaustion refuses new starts rather than
-forgetting keys. The module has no `src/mizu` consumer or configuration route;
-defer an operator setting until the pilot integration can actually consume it,
-rather than expose an inert option.
+forgetting keys. Runtime uses the store for admission gates, but the private
+`_reserve_delegation` handoff has no production call site and the runner
+lifecycle methods have no production caller or configuration route; defer an
+operator setting until a lifecycle consumer can use it rather than expose an
+inert option.
 The `storage.py` artifact-retention default is CLI-controlled policy, while the
 day conversion and automatic-prune/audit read limits are fixed mechanism or
 safety bounds. Restore's fixed member-read chunk and archive-member count bound
