@@ -2244,7 +2244,7 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('work_item_events.py', 'progress', 2, 0): (
         '100', 'safety', 'work-item event progress / cap each role-summary page at 100 rows'),
     ('delegation_jobs.py', 'DelegationJobs._validate', 1, 0): (
-        '4', 'format',
+        '5', 'format',
         'delegation ledger / require the exact persisted schema version before interpreting state'),
     ('errors.py', 'ModelFailure.__init__', 1, 0): (
         '16384', 'safety',
