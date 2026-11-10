@@ -1209,12 +1209,17 @@ not change daemon readiness or other schedules.
 `systemd_verify_timeout_seconds` (default 60) bounds the optional
 `systemd-analyze verify` command during `mizu service install`; the install
 fails closed if verification times out. The internal, non-releasing delegation
-systemd observer and fenced cancellation sequence also use this timeout for
-each `systemctl --user` read and exact-unit synchronous stop command;
-`limits.output_bytes` bounds each command's captured output. There is no polling
-or retry cadence. Cancellation commits its durable ledger fence before these
-commands, and timeout/error retains the fence and reservation; even success is
-only diagnostic, not job/creator settlement or workspace handback authority.
+systemd observer performs eight sequential `systemctl`/`busctl` reads, each
+with this full per-command timeout; fenced cancellation's exact-unit synchronous
+stop command uses it too. `limits.output_bytes` bounds each command's captured
+output. These per-command limits do not cap the observer's aggregate elapsed
+time or total output. The durable runner effect holds its store lock while
+invoking the synchronous callback and has no callback-wide timeout, so a
+multi-command callback can outlast any one command timeout. There is no
+settlement polling or retry cadence. Cancellation commits its durable ledger
+fence before these commands, and timeout/error retains the fence and
+reservation; even successful observations or stop commands are diagnostic,
+not job/creator settlement or workspace handback authority.
 It accepts 1 through 2,147,483 seconds:
 the fixed upper bound keeps whole seconds within the signed-32-bit millisecond
 selector timeout representation. The restart and stop settings are positive
