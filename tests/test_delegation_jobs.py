@@ -125,7 +125,7 @@ class DelegationJobTests(unittest.TestCase):
         self.start()
         credentials = self.runner()
         cleanup = self.cleanup()
-        # Exact pre-binding-format v4 record, including already saved resource
+        # Exact legacy-shaped v5 record, including already saved resource
         # identities. Reading never rewrites it or turns it into launch authority.
         state = loads_finite(self.path.read_bytes())
         job = state['jobs'][credentials[0]]
@@ -405,7 +405,7 @@ class DelegationJobTests(unittest.TestCase):
         job_id = state['active']
         variants = [b'{', b'null', b'{"version":NaN}', b'[' * 65 + b']' * 65,
                     b' ' * (jobs.MAX_STATE_BYTES + 1),
-                    valid[:-2], valid + b' ', valid.replace(b'"version":4', b'"version":4,"version":4')]
+                    valid[:-2], valid + b' ', valid.replace(b'"version":5', b'"version":5,"version":5')]
         for field, value in [('status', 'lost'), ('request_digest', '0' * 64),
                              ('token', None), ('run_id', None), ('execution', []),
                              ('request', None), ('result', 'premature'), ('owner', 'editor')]:
@@ -799,7 +799,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_started(*credentials, authority_digest='b' * 64)
         # A schema-v3 ledger is not silently upgraded or reset.
         raw = self.path.read_bytes()
-        self.path.write_bytes(raw.replace(b'"version":4', b'"version":3'))
+        self.path.write_bytes(raw.replace(b'"version":5', b'"version":3'))
         with self.assertRaises(Denied):
             self.store.reservation()
         self.path.write_bytes(raw)
@@ -896,7 +896,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assert_tombstone(loads_finite(self.path.read_text())['jobs'][bound['active']])
 
     def test_intent_null_overhead_preserves_tombstone_capacity(self):
-        # Schema v4 adds one explicit intent field to every job. Terminal
+        # Schema v5 retains one explicit intent field in every job. Terminal
         # tombstones carry `"intent":null` (14 bytes: comma + `"intent":null`),
         # so the ledger ceiling adds exactly that per-record overhead to keep
         # the prior 1024-tombstone capacity.

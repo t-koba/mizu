@@ -930,7 +930,7 @@ The supported-backend design is one transient systemd **user service** per
 stable delegation `run_id`, with a fixed private Mizu helper as `ExecStart`,
 a clean allowlisted environment, and no automatic restart; writer code never
 invokes Podman create/start directly. Mizu persists the unit intent before
-submission; the request sender holds the same per-job lock through
+submission; the request sender holds the same `DelegationJobs` `store.lock` through
 submission and recording the exact job/result. An ambiguous submission is never
 blindly retried or treated as absence. The helper loads the protected ledger,
 validates job/authority and the current monotonic status under that lock, then
@@ -976,7 +976,67 @@ following links. Missing or changed identity refuses cleanup rather than
 falling back to another store. The necessary ledger format change is versioned;
 old records are never reset or given inferred manager/store identities.
 
-Consequence: this is a design gate, not an implemented or supported backend.
+Implemented non-releasing slice: ledger v5 adds `intent.attempts`, with one
+`{state, result}` entry for each of `submit`, `create`, and `start`. State is
+`not-issued`, `issued` (ambiguous), or `completed`; results are only the exact
+run-derived unit for submission or a full 64-hex container ID. Ordering is
+durable: submit first while queued/unclaimed/unbound, create only after
+completed submit while queued/unclaimed/unbound, start only after completed
+submit/create with `runner_bind` holding exactly the create-result ID for the
+intended name/UID and `runner_started` having claimed the job (running,
+claimed). Stored attempts enforce the same ordering, and a stored start also
+requires the claimed/bound linkage. Attempts, intent and binding share the
+existing 8 KiB active inventory allowance; no new history allowance is added.
+Older ledgers, including v4, are refused without migration.
+
+The internal `DelegationJobs.runner_effect` admission primitive reloads and
+validates the current job/token, resolved authority, status, execution outcome,
+recovery fence, exact intent, directory and lifecycle ordering under the
+existing `store.lock`. Submit/create require queued/unclaimed/unbound with the
+exact prior completion; start requires running/claimed plus a binding whose
+single container ID equals the completed create result for the intended
+name/UID. It commits `issued` before calling a trusted bounded effect and holds
+that same lock through exact result validation and commit. No completed attempt
+is repeated; any ambiguous issued attempt denies every further effect, as do
+cancel-requested, execution outcome, recovery, stale authority/intent/directory
+or out-of-order/unclaimed/mismatched admission. Exceptions, process death, or
+an invalid/uncommitted result leave the durable issued marker. The callable is
+external work, not a cleanup callback, settlement assertion or release proof.
+This primitive is not a concrete runtime launcher: its future internal helper
+must use the pinned intent and configured command bounds and must not leave
+background submitters. It is not available to models or Engine runners.
+
+`cancel-requested` is the existing durable fence: owner cancellation and
+prepared recovery serialize with admission on `store.lock`.
+`runner_cancel_effects` refuses terminal/tombstone jobs and fences only an
+active nonterminal reservation. It commits that fence under `store.lock`, then
+releases the lock so a delayed helper can read the fence and exit while bounded
+systemd work proceeds. It observes the exact run-derived unit, requests a
+synchronous `systemctl --user --job-mode=replace stop` for only that unit, and
+re-observes once. It deliberately does not mutate manager-local job IDs: the
+manager endpoint is not pinned, so an observed ID could be stale/reused and
+cancel an unrelated job. This leaves exact job-ID cancellation and manager
+identity as blockers. The existing intent/binding fixture also records
+`/system.slice/<unit>`, while this adapter queries a systemd **user** manager;
+no supported user-manager cgroup path is captured or reconciled. It uses
+`services.systemd_verify_timeout_seconds` and `limits.output_bytes` per command,
+with no polling or retry. The return value and observations are immutable
+diagnostics with `release_authority=false`; jobs may remain and even an inactive
+observation is not settlement. Any unknown/mismatched job, error, timeout or
+incomplete output refuses the result and retains the durable fence/reservation.
+Lock acquisition failure retains the reservation without permission to stop
+ahead of admitted work. Even successful stop does not establish manager
+identity, creator settlement, job settlement, cgroup emptiness or Podman
+absence. Both product handback paths remain unconditionally refusing.
+
+Consequence: the full backend above remains a design gate, not a supported
+backend. Cross-process tests exercise ordered admission/cancel serialization,
+delayed post-fence denial of the would-be valid next phase, death after issued,
+out-of-order/unclaimed/binding-mismatch refusal and terminal fence refusal;
+mocked systemctl outputs exercise exact-unit synchronous stop and
+re-observation; manager-local job IDs remain diagnostic only. These prove only
+the fence protocol,
+not settlement on a supported host.
 Use the existing sandbox, service-manager, lock and output bounds; the current
 `sandbox.cleanup_timeout_seconds` is documented for cleanup calls, so its scope
 must be explicitly updated before it also bounds create/start, rather than

@@ -1208,7 +1208,14 @@ An active check-runner can extend the effective recovery time. This setting does
 not change daemon readiness or other schedules.
 `systemd_verify_timeout_seconds` (default 60) bounds the optional
 `systemd-analyze verify` command during `mizu service install`; the install
-fails closed if verification times out. It accepts 1 through 2,147,483 seconds:
+fails closed if verification times out. The internal, non-releasing delegation
+systemd observer and fenced cancellation sequence also use this timeout for
+each `systemctl --user` read and exact-unit synchronous stop command;
+`limits.output_bytes` bounds each command's captured output. There is no polling
+or retry cadence. Cancellation commits its durable ledger fence before these
+commands, and timeout/error retains the fence and reservation; even success is
+only diagnostic, not job/creator settlement or workspace handback authority.
+It accepts 1 through 2,147,483 seconds:
 the fixed upper bound keeps whole seconds within the signed-32-bit millisecond
 selector timeout representation. The restart and stop settings are positive
 integer seconds within TOML's signed-64-bit representation; systemd's own
@@ -2107,15 +2114,29 @@ its existing access gate, even on failure. The projection contains only
 text or the authority digest. If refresh cannot read the state, the gate remains
 unknown and denies all calls. Neither exceptions nor lease expiry delete a durable reservation.
 
-Schema v4 accepts both the new digest-bearing request (resolved profile required)
-and legacy `{role, task, profile, source_snapshot}` requests. Existing v4 records
-and tombstones remain inspectable and exactly retryable, without migration,
-reset or upgrade. The request bound remains 128 KiB. The ledger ceiling is
+Schema v5 accepts both digest-bearing requests (resolved profile required)
+and legacy-shaped `{role, task, profile, source_snapshot}` requests. Existing
+v5 records and tombstones remain inspectable and exactly retryable; older
+ledgers, including v4, are refused without migration, reset or upgrade. The request bound remains 128 KiB. The ledger ceiling is
 1 MiB + 8 KiB active binding/intent inventory + 14 bytes per job for the explicit
 intent field + exactly 86 bytes for the single active request's authority digest
 (comma + quoted key + colon + quoted 64-hex value, canonical UTF-8). This preserves
-prior active-ledger capacity; terminal handback clears requests, so the new
-allowance does not accumulate in tombstones. No other caps change. Older schema
+prior active-ledger capacity; terminal handback clears requests, so the
+authority-digest allowance does not accumulate in tombstones. V5 adds
+`intent.attempts` for submit/create/start inside the same 8 KiB inventory bound:
+not-issued, issued/ambiguous, or completed with the exact unit/container ID,
+with durable submit-first/create-after-submit/start-after-submit-create-bind-claim
+ordering and stored start linkage (claimed, bound to the create-result ID,
+non-queued). The internal effect admission holds `store.lock` across issued
+commit, external work and result commit; submit/create require
+queued/unclaimed/unbound with exact prior completion, start requires
+running/claimed plus the exact create-result binding. Cancellation persists
+`cancel-requested` under that same lock before a single-command exact start-ID
+cancel plus no-block unit stop; terminal jobs are refused without mutation,
+ambiguous effects never replay, and post-fence, out-of-order, unclaimed,
+mismatched or post-execution effects are denied before external work. Neither
+effect completion nor cancellation diagnostics authorize handback (see ADR-053).
+No caps change. Older schema
 versions remain refused without modification. `runner_bind` and `runner_started`
 require a trusted host's freshly resolved matching `authority_digest`, never a
 copied saved hash; legacy requests cannot launch or acquire new launch bindings.

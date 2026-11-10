@@ -9,9 +9,11 @@ supervisor code may use ``reservation`` or ``runner_*``: the stored random token
 is a runner binding, not a grant exposed to a model. The state directory and its
 ancestors must be protected from concurrent untrusted host mutation. Symlink,
 hardlink, special-file, invalid-schema and oversized state is refused, never
-repaired or treated as an empty queue. This module alone launches nothing.
+repaired or treated as an empty queue. This module constructs no launch command;
+its internal `runner_effect` only admits a trusted bounded operation under the
+fence lock and grants no settlement or handback authority.
 
-Schema v4: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
+Schema v5: one canonical JSON ledger, {version, active, jobs}. Jobs are keyed by
 SHA256([owner, key]); each contains owner/key, immutable request digest, status,
 runner token, stable child run identity, execution outcome, request, result and
 result digest. The run identity is a random lowercase 32-hex string generated
@@ -22,17 +24,22 @@ name/64-hex-ID/UID inventory. A provisioning intent pins one synthetic fixture
 container's expected bounded safe name/UID/run-id marker/image/config before
 creation; the marker must equal run_id while the name is any bounded safe name,
 and only the persisted intent is recovery authority. Intent
-and binding share the 8 KiB inventory allowance and clear at terminal handback.
+and binding, including submit/create/start attempts, share the 8 KiB inventory
+allowance and clear at terminal handback.
 Recovery fences bind/claim/finish before inspection and persists a validated ID
 before removal in the test-only fixture. Even independent unstarted-scope and
 name/ID/marker absence observations never authorize product handback. A durable claim bit survives cancellation: uncertain binds can be
 recovered, but claimed runners never take this prelaunch path. Neither record
-is launch authority. Older ledger versions are refused, never migrated or reset.
-V4 requests are {role, task, profile, source_snapshot}, optionally extended with
+is launch authority. V5 intents carry per-effect not-issued/issued/completed
+attempts; issued is ambiguous after any interruption and never replayable.
+Completed results contain only the exact unit or full container ID, not output.
+The cancel-requested state is the durable fence for all mediated effects. Older
+ledger versions are refused, never migrated or reset.
+V5 requests are {role, task, profile, source_snapshot}, optionally extended with
 an authority_digest (64 lowercase hex). Bound requests require a resolved profile;
 legacy requests may retain null. Engine's admitted-parent handoff resolves the
 child and includes child_authority_digest in the immutable request fingerprint.
-Snapshot is an immutable SHA256 snapshot ID. Existing v4 requests and tombstones
+Snapshot is an immutable SHA256 snapshot ID. V5 requests and tombstones
 remain readable/retryable without rewriting; an unbound legacy request cannot
 be upgraded by retry. runner_bind/runner_started require an explicitly supplied
 matching resolved authority digest, even for an already saved resource binding.
@@ -62,8 +69,8 @@ new directory exists without a ledger. Never delete state to recover a job.
 queued -> running (one successful runner claim only), queued/running ->
 cancel-requested, and any nonterminal state -> terminal only after two reports:
 terminal child execution, THEN Mizu-proven driver/bridge/process teardown.
-Post-execution handback is currently refused: no integrated lifecycle owner
-enforces a durable launch fence and verifies supervisor settlement. Caller
+Post-execution handback is currently refused: the internal effect fence does
+not establish creator or supervisor settlement and is not runner-integrated. Caller
 cleanup assertions cannot release the reservation. Even a
 queued cancellation or failed/dead runner retains the reservation until the
 supervisor proves no child can still access the tree. The prepared path also
@@ -214,13 +221,31 @@ def _intent(value, run_id):
     never derived post hoc, while the marker must equal run_id.
     """
     if (type(value) is not dict or set(value) != {
-            'run_id', 'directory', 'scope', 'container', 'recovering', 'claimed', 'id'}
+            'run_id', 'directory', 'scope', 'container', 'recovering', 'claimed', 'id', 'attempts'}
             or type(value['recovering']) is not bool or type(value['claimed']) is not bool
             or (value['recovering'] and value['claimed'])
             or (value['id'] is not None and (not value['recovering'] or not _sha(value['id'])))
             or type(value['container']) is not dict
             or set(value['container']) != {'name', 'uid', 'marker', 'image', 'config'}):
         raise Denied('Invalid delegation provisioning intent')
+    attempts = value['attempts']
+    if type(attempts) is not dict or set(attempts) != {'submit', 'create', 'start'}:
+        raise Denied('Invalid delegation effect inventory')
+    for phase, attempt in attempts.items():
+        if (type(attempt) is not dict or set(attempt) != {'state', 'result'}
+                or attempt['state'] not in ('not-issued', 'issued', 'completed')):
+            raise Denied('Invalid delegation effect attempt')
+        if attempt['state'] == 'completed':
+            _effect_result(value, phase, attempt['result'])
+        elif attempt['result'] is not None:
+            raise Denied('Unexpected delegation effect result')
+    if (attempts['create']['state'] != 'not-issued'
+            and attempts['submit']['state'] != 'completed'):
+        raise Denied('Invalid delegation effect ordering')
+    if (attempts['start']['state'] != 'not-issued'
+            and (attempts['submit']['state'] != 'completed'
+                 or attempts['create']['state'] != 'completed')):
+        raise Denied('Invalid delegation effect ordering')
     container = value['container']
     _binding({k: value[k] for k in ('run_id', 'directory', 'scope')} | {
         'containers': [{'name': container['name'], 'uid': container['uid'], 'id': '0' * 64}]}, run_id)
@@ -229,6 +254,20 @@ def _intent(value, run_id):
             or not _sha(container['image']) or type(container['config']) is not dict
             or not container['config'] or len(canonical(value)) > MAX_BINDING_BYTES):
         raise Denied('Invalid delegation provisioning identity or config')
+
+
+def _effect_result(intent, phase, result):
+    # Identities only, never unbounded command output or a settlement assertion.
+    if phase == 'submit':
+        valid = result == f"mizu-delegation-{intent['run_id']}.service"
+    elif phase == 'create':
+        valid = _sha(result)
+    else:
+        created = intent['attempts']['create']
+        valid = (created['state'] == 'completed' and _sha(result)
+                 and result == created['result'])
+    if not isinstance(result, str) or not valid:
+        raise Denied('Invalid delegation effect identity result')
 
 
 def _bound(job):
@@ -334,7 +373,7 @@ class DelegationJobs:
             # Directory existence is the initialization marker. If interrupted
             # here, absence of state is an error, not permission for a new start.
             sync_dir(self.root.parent)
-            write_json(self.root / 'state.json', {'version': 4, 'active': None, 'jobs': {}},
+            write_json(self.root / 'state.json', {'version': 5, 'active': None, 'jobs': {}},
                        exclusive=True)
         with self._locked():
             self._load()
@@ -433,7 +472,7 @@ class DelegationJobs:
     @staticmethod
     def _validate(state):
         if (type(state) is not dict or set(state) != {'version', 'active', 'jobs'}
-                or type(state['version']) is not int or state['version'] != 4
+                or type(state['version']) is not int or state['version'] != 5
                 or type(state['jobs']) is not dict or len(state['jobs']) > MAX_JOBS):
             raise Denied('Invalid delegation ledger')
         active = []
@@ -469,6 +508,12 @@ class DelegationJobs:
                 if intent['recovering'] and (job['status'] != 'cancel-requested'
                         or job['execution'] is not None):
                     raise Denied('Invalid delegation provisioning recovery')
+                attempts = intent['attempts']
+                if attempts['start']['state'] != 'not-issued':
+                    if (not intent['claimed'] or binding is None
+                            or binding['containers'][0]['id'] != attempts['create']['result']
+                            or job['status'] == 'queued'):
+                        raise Denied('Invalid delegation start linkage')
             execution = job['execution']
             if execution is not None and (not isinstance(execution, str) or execution not in _OUTCOMES):
                 raise Denied('Invalid delegation execution outcome')
@@ -597,7 +642,9 @@ class DelegationJobs:
             job = self._runner(state, job_id, token)
             intent = loads_finite(canonical({
                 'run_id': job['run_id'], 'directory': _directory_identity(run_directory),
-                'scope': scope, 'container': container, 'recovering': False, 'claimed': False, 'id': None}))
+                'scope': scope, 'container': container, 'recovering': False, 'claimed': False, 'id': None,
+                'attempts': {phase: {'state': 'not-issued', 'result': None}
+                             for phase in ('submit', 'create', 'start')}}))
             _intent(intent, job['run_id'])
             if job['intent'] == intent:
                 return intent
@@ -608,11 +655,103 @@ class DelegationJobs:
             self._save(state)
             return intent
 
+    def runner_effect(self, job_id, token, intent, phase, operation, *, authority_digest=None):
+        """Admit one trusted external operation, NOT a model/runner grant.
+
+        The internal controller supplies the exact current persisted intent and
+        a bounded operation on its pinned identities, returning only the exact
+        unit (submit) or full container ID (create/start). Submit is first while
+        queued/unclaimed/unbound; create follows completed submit while
+        queued/unclaimed/unbound; start follows completed submit/create after
+        runner_bind recorded exactly the create-result ID for the intended
+        name/UID and runner_started claimed the job (running, claimed). The
+        callback is work, never evidence of cleanup/settlement. It must not
+        re-enter this store or leave background submitters. No callback or
+        result can release a hold. Persist issued BEFORE calling it; retain
+        store.lock through result commit. Any exception/death/invalid result
+        leaves issued and forbids all replay. Even completed calls are not
+        retried. Caller time/output bounds remain mandatory; this admission
+        primitive adds no timeout or polling policy.
+        """
+        if phase not in ('submit', 'create', 'start') or not callable(operation):
+            raise Denied('Invalid delegation effect')
+        intent = loads_finite(canonical(intent))
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            self._authority(job, authority_digest)
+            saved = job['intent']
+            if (saved is None or saved != intent
+                    or job['execution'] is not None or saved['recovering']
+                    or saved['scope']['unit'] != f"mizu-delegation-{job['run_id']}.service"
+                    or _directory_identity(saved['directory']['path']) != saved['directory']
+                    or any(a['state'] == 'issued' for a in saved['attempts'].values())
+                    or saved['attempts'][phase]['state'] != 'not-issued'):
+                raise Denied('Fenced, stale or ambiguous delegation effect; do not replay')
+            attempts = saved['attempts']
+            if phase == 'submit':
+                if (job['status'] != 'queued' or saved['claimed'] or job['binding'] is not None
+                        or attempts['submit']['state'] != 'not-issued'
+                        or attempts['create']['state'] != 'not-issued'
+                        or attempts['start']['state'] != 'not-issued'):
+                    raise Denied('Fenced, stale or ambiguous delegation effect; do not replay')
+            elif phase == 'create':
+                if (job['status'] != 'queued' or saved['claimed'] or job['binding'] is not None
+                        or attempts['submit']['state'] != 'completed'
+                        or attempts['create']['state'] != 'not-issued'
+                        or attempts['start']['state'] != 'not-issued'):
+                    raise Denied('Fenced, stale or ambiguous delegation effect; do not replay')
+            else:
+                binding = job['binding']
+                if (job['status'] != 'running' or not saved['claimed'] or binding is None
+                        or len(binding['containers']) != 1
+                        or binding['containers'][0]['name'] != saved['container']['name']
+                        or binding['containers'][0]['uid'] != saved['container']['uid']
+                        or binding['containers'][0]['id'] != attempts['create']['result']
+                        or attempts['submit']['state'] != 'completed'
+                        or attempts['create']['state'] != 'completed'
+                        or attempts['start']['state'] != 'not-issued'):
+                    raise Denied('Fenced, stale or ambiguous delegation effect; do not replay')
+            attempt = saved['attempts'][phase]
+            attempt['state'] = 'issued'
+            self._save(state)
+            result = operation()
+            _effect_result(saved, phase, result)
+            attempt.update(state='completed', result=result)
+            self._save(state)
+            return result  # immutable identity, not release authority
+
+    def runner_cancel_effects(self, job_id, token, config):
+        """Commit the launch fence before exact-unit systemd stop diagnostics.
+
+        Only an active nonterminal reservation may be fenced; a terminal or
+        tombstone job is refused without mutation. Lock contention/error
+        retains the hold, not permission to cancel ahead of an admitted
+        effect. The durable fence survives all systemd failures. This API
+        never calls a handback path or treats completion as settlement.
+        """
+        from .delegation_systemd import _cancel_stop
+
+        with self._locked():
+            state = self._load()
+            job = self._runner(state, job_id, token)
+            if job['status'] == 'terminal':
+                raise Denied('Delegation reservation is terminal; no fence to commit')
+            if job['status'] not in {'queued', 'running', 'cancel-requested'}:
+                raise Denied('Delegation reservation is not active; no fence to commit')
+            if job['status'] != 'cancel-requested':
+                job['status'] = 'cancel-requested'
+                self._save(state)
+            run_id = job['run_id']
+        # The fence is durable; release store.lock so a delayed helper can read
+        # it and exit while the bounded synchronous systemd stop waits.
+        return _cancel_stop(config, run_id)
+
     def runner_recover_prepared(self, job_id, token, *, container_id=None):
         """Fence provisioning/claim before inspection; never infer OS absence.
 
-        This fences later ledger bind/claim/finish calls, NOT an external create
-        already in flight. It cannot authorize cleanup or handback. A validated
+        This fences later ledger bind/claim/finish calls and waits for any
+        runner_effect holding store.lock. Unmediated external work is not fenced. It cannot authorize cleanup or handback. A validated
         candidate ID may be saved before test-only removal; missing initial
         evidence and uncertain external settlement retain the reservation.
         """

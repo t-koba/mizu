@@ -169,6 +169,55 @@ class SystemdObservationTests(unittest.TestCase):
                 with self.assertRaises(Denied):
                     systemd.observe(self.config, self.run_id)
 
+    def test_pending_jobs_stop_exact_unit_synchronously_and_reobserve(self):
+        # Pending jobs are diagnostic only: without a pinned manager endpoint,
+        # mutate no manager-local IDs. A synchronous replace-stop targets only
+        # the exact run-derived unit, then the queue is re-observed.
+        jobs = (f'71 {self.unit} start waiting\n'
+                f'72 {self.unit} stop running\n'
+                f'73 {self.unit} start running\n')
+        remaining = f'74 {self.unit} start running\n'
+        outputs = self.outputs(jobs) + [self.result('')] + self.outputs(remaining)
+        with mock.patch('mizu.process.run', side_effect=outputs) as run:
+            diagnostic = systemd._cancel_stop(self.config, self.run_id)
+        self.assertEqual(run.call_args_list[3].args[0],
+                         ['systemctl', '--user', '--no-pager', '--job-mode=replace', 'stop', self.unit])
+        self.assertEqual(run.call_count, 7)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs['timeout'], 17)
+            self.assertEqual(call.kwargs['maximum'], 2048)
+        self.assertEqual(tuple(job.id for job in diagnostic.before.jobs), (71, 72, 73))
+        self.assertEqual(diagnostic.after.jobs[0].id, 74)
+        self.assertFalse(diagnostic.release_authority)
+        with self.assertRaises(FrozenInstanceError):
+            diagnostic.release_authority = True
+        with self.assertRaises(FrozenInstanceError):
+            diagnostic.before.jobs = ()
+
+    def test_unknown_or_mismatched_pending_job_refuses_before_mutation(self):
+        for row in (f'71 other.service start waiting\n', f'71 {self.unit} future waiting\n',
+                    f'71 {self.unit} start unknown\n'):
+            with self.subTest(row=row), mock.patch('mizu.process.run', side_effect=self.outputs(row)) as run:
+                with self.assertRaises(Denied):
+                    systemd._cancel_stop(self.config, self.run_id)
+                self.assertEqual(run.call_count, 3)
+
+    def test_cancel_stop_and_reobservation_failures_never_return_diagnostics(self):
+        base = self.outputs(f'71 {self.unit} start waiting\n') + [self.result('')] + self.outputs()
+        # Every mutation/re-observation command must complete without partial
+        # output, diagnostics, timeout, overflow or surviving I/O workers.
+        failures = [self.result('unexpected'), replace(self.result(''), exit_code=1),
+                    replace(self.result(''), reason='timeout'),
+                    replace(self.result(''), reason='overflow'),
+                    replace(self.result(''), survivors=('reader',))]
+        for index in range(3, len(base)):
+            for failure in failures:
+                with self.subTest(index=index, failure=failure), mock.patch('mizu.process.run',
+                        side_effect=base[:index] + [failure]) as run:
+                    with self.assertRaises(Denied):
+                        systemd._cancel_stop(self.config, self.run_id)
+                    self.assertEqual(run.call_count, index + 1)
+
 
 if __name__ == '__main__':
     unittest.main()

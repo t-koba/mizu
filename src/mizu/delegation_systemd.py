@@ -1,11 +1,14 @@
-"""Read-only, non-releasing observations of one delegation's user unit.
+"""Non-releasing observation/cancellation of one delegation's user unit.
 
 ``observe(config, run_id)`` derives the unit; no caller-selected unit or manager
 endpoint is accepted. Three sequential systemctl reads are bounded individually
 by services.systemd_verify_timeout_seconds and limits.output_bytes. The minimal
 process environment selects the current user manager and pins UTF-8/C locale.
-No retries, mutations, launch fencing, endpoint identity pinning or cgroup reads
-are provided. Failure raises Denied without returning partial evidence.
+No retries, endpoint identity pinning or cgroup reads are provided. The
+internal cancellation path runs only after DelegationJobs commits and releases
+its fence lock; it uses the same per-command bounds for an exact-unit stop.
+Manager-local job IDs are diagnostic only and are never mutated without a pinned
+manager endpoint identity. Failure raises Denied without partial evidence.
 
 The decoder records any nonempty syntactically numeric manager version
 (numeric major with optional dotted components and a distro suffix). This is
@@ -93,6 +96,26 @@ def _jobs(text: str, unit: str) -> tuple[PendingJob, ...]:
     return tuple(rows)
 
 
+def _command(config: Config, *args) -> str:
+    """One bounded command, no retry and no interpretation of partial output."""
+    timeout = config.services.systemd_verify_timeout_seconds
+    maximum = config.limits.output_bytes
+    if type(timeout) is not int or timeout <= 0 or type(maximum) is not int or maximum <= 0:
+        raise Denied('Delegation systemd command bounds required')
+    env = process.environment(extra={'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
+                                     'SYSTEMD_COLORS': '0', 'SYSTEMD_URLIFY': '0'})
+    try:
+        result = process.run(['systemctl', '--user', '--no-pager', *args],
+                             timeout=timeout, maximum=maximum, env=env)
+    except OSError as exc:
+        raise Denied('Unavailable delegation systemd controller') from exc
+    if (result.reason != 'exited' or type(result.exit_code) is not int or result.exit_code != 0
+            or result.survivors or result.stderr
+            or len(result.stdout.encode('utf-8')) + len(result.stderr.encode('utf-8')) > maximum):
+        raise Denied('Unobservable delegation systemd state')
+    return result.stdout
+
+
 def observe(config: Config, run_id: str) -> Observation:
     """Read exact unit state and pending jobs; grant no release authority.
 
@@ -103,29 +126,10 @@ def observe(config: Config, run_id: str) -> Observation:
     if not isinstance(run_id, str) or re.fullmatch(r'[0-9a-f]{32}', run_id) is None:
         raise Denied('Invalid delegation systemd run identity')
     unit = f'mizu-delegation-{run_id}.service'
-    timeout = config.services.systemd_verify_timeout_seconds
-    maximum = config.limits.output_bytes
-    if type(timeout) is not int or timeout <= 0 or type(maximum) is not int or maximum <= 0:
-        raise Denied('Delegation systemd observation bounds required')
-    env = process.environment(extra={'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
-                                     'SYSTEMD_COLORS': '0', 'SYSTEMD_URLIFY': '0'})
-
-    def query(*args):
-        try:
-            result = process.run(['systemctl', '--user', '--no-pager', *args],
-                                 timeout=timeout, maximum=maximum, env=env)
-        except OSError as exc:
-            raise Denied('Unavailable delegation systemd observer') from exc
-        if (result.reason != 'exited' or type(result.exit_code) is not int or result.exit_code != 0
-                or result.survivors or result.stderr
-                or len(result.stdout.encode('utf-8')) + len(result.stderr.encode('utf-8')) > maximum):
-            raise Denied('Unobservable delegation systemd state')
-        return result.stdout
-
-    version = _fields(query('show', '--all', '--property=Version'), ('Version',))['Version']
+    version = _fields(_command(config, 'show', '--all', '--property=Version'), ('Version',))['Version']
     if re.fullmatch(r'[0-9]+(?:\.[0-9]+)*(?:-[A-Za-z0-9.+~]+)?', version) is None:
         raise Denied('Unknown delegation systemd manager version')
-    fields = _fields(query('show', '--all', '--property=' + ','.join(_PROPERTIES), unit), _PROPERTIES)
+    fields = _fields(_command(config, 'show', '--all', '--property=' + ','.join(_PROPERTIES), unit), _PROPERTIES)
     group = fields['ControlGroup']
     invocation = fields['InvocationID']
     if (fields['Id'] != unit or fields['LoadState'] not in _LOAD
@@ -139,6 +143,30 @@ def observe(config: Config, run_id: str) -> Observation:
                 and (fields['ActiveState'] != 'inactive' or fields['SubState'] != 'dead' or group or invocation))):
         raise Denied('Unknown or malformed delegation systemd unit state')
     # --full prevents ellipsizing the exact unit name in list-jobs output.
-    jobs = _jobs(query('list-jobs', '--no-legend', '--plain', '--full', unit), unit)
+    jobs = _jobs(_command(config, 'list-jobs', '--no-legend', '--plain', '--full', unit), unit)
     return Observation(unit, version, fields['LoadState'], fields['ActiveState'],
                        fields['SubState'], group, invocation, jobs)
+
+
+@dataclass(frozen=True)
+class Cancellation:
+    before: Observation
+    after: Observation
+    release_authority: bool = field(default=False, init=False)
+
+
+def _cancel_stop(config: Config, run_id: str) -> Cancellation:
+    """Request stop for the exact run unit; immutable diagnostics, NEVER settlement.
+
+    Only DelegationJobs.runner_cancel_effects calls this after committing and
+    releasing the durable fence. Manager-local job IDs are not cancelled: the
+    manager endpoint is not pinned, so an ID could be stale/reused and mutate an
+    unrelated job. A bounded synchronous stop targets only the derived unit and
+    replaces conflicting jobs for that unit. Re-observe once; this still does
+    not prove manager identity, creator settlement, job settlement or absence.
+    """
+    before = observe(config, run_id)
+    if _command(config, '--job-mode=replace', 'stop', before.unit) != '':
+        raise Denied('Unexpected delegation systemd stop output')
+    after = observe(config, run_id)
+    return Cancellation(before, after)
