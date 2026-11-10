@@ -9,6 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from mizu.delegation_scope import _scope_empty
+from mizu.delegation_jobs import user_cgroup
 from mizu.errors import Denied
 from mizu.process import Result
 
@@ -21,12 +22,12 @@ class ScopeTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.run_id = 'a' * 32
         self.unit = 'mizu-delegation-' + self.run_id + '.service'
-        self.group = '/system.slice/' + self.unit
+        self.group = user_cgroup(self.unit)
         self.binding = {'run_id': self.run_id, 'directory': {
             'path': '/fixture/run', 'device': 1, 'inode': 1},
             'scope': {'unit': self.unit, 'cgroup': self.group}, 'containers': []}
         (self.root / 'cgroup.controllers').write_text('cpu memory pids\n')
-        self.path = self.root / 'system.slice' / self.unit
+        self.path = self.root / self.group[1:]
         self.path.mkdir(parents=True)
         (self.path / 'cgroup.events').write_text('populated 0\nfrozen 0\n')
         (self.path / 'cgroup.procs').write_text('')
@@ -65,6 +66,16 @@ class ScopeTests(unittest.TestCase):
                     self.proof()
                 self.query.assert_not_called()
 
+    def test_system_manager_wrong_uid_and_wrong_unit_bindings_refuse_before_query(self):
+        for group in ('/system.slice/' + self.unit,
+                      self.group.replace(f'user-{os.getuid()}.slice', f'user-{os.getuid()+1}.slice'),
+                      self.group.replace(f'user@{os.getuid()}.service', f'user@{os.getuid()+1}.service'),
+                      self.group.replace(self.unit, 'other.service')):
+            with self.subTest(group=group), self.assertRaises(Denied):
+                self.binding['scope']['cgroup'] = group
+                self.proof()
+            self.query.assert_not_called()
+
     def test_active_failed_descendant_or_direct_process_is_not_empty(self):
         for active, events, procs in (
                 ('active', 'populated 0\n', ''), ('failed', 'populated 0\n', ''),
@@ -85,10 +96,10 @@ class ScopeTests(unittest.TestCase):
         for load in ('loaded', 'not-found'):
             self.query.return_value = self.state(load=load, group='')
             self.assertTrue(self.proof())
-        (self.root / 'system.slice').rmdir()
+        self.path.parent.rmdir()
         with self.assertRaises(FileNotFoundError):
             self.proof()  # absent ancestor is not exact-group ENOENT
-        (self.root / 'system.slice').mkdir()
+        self.path.parent.mkdir()
         (self.root / 'cgroup.controllers').unlink()
         with self.assertRaises(FileNotFoundError):
             self.proof()
@@ -134,7 +145,7 @@ class ScopeTests(unittest.TestCase):
             self.proof()
 
     def test_symlinked_scope_parent_and_root_fail_closed(self):
-        for path in (self.path, self.path.parent, self.root):
+        for path in (self.path, *self.path.parents[:4], self.root):
             with self.subTest(path=path.name):
                 moved = path.with_name(path.name + '-saved')
                 path.rename(moved)

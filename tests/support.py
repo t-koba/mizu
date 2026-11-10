@@ -1,6 +1,7 @@
 from __future__ import annotations
 import dataclasses
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -62,11 +63,15 @@ def host_child_cost() -> float:
 
 def bind_delegation_fixture(store):
     """Bind fake resources for gate tests; NOT process/OCI cleanup evidence."""
+    if not hasattr(os, 'getuid'):
+        raise unittest.SkipTest('User-manager binding fixture requires a POSIX uid')
     reservation = store.reservation()
     directory = (store.root.parent / reservation['run_id']).resolve()
     directory.mkdir(exist_ok=True)
+    from mizu.delegation_jobs import user_cgroup
+    unit = 'mizu-delegation-' + reservation['run_id'] + '.service'
     binding = store.runner_bind(reservation['id'], reservation['token'], str(directory),
-                                {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [], authority_digest='b' * 64)
+                                {'unit': unit, 'cgroup': user_cgroup(unit)}, [], authority_digest='b' * 64)
     return {'binding': binding, 'scope_clean': True, 'containers_absent': []}
 
 

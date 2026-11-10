@@ -987,7 +987,7 @@ intended name/UID and `runner_started` having claimed the job (running,
 claimed). Stored attempts enforce the same ordering, and a stored start also
 requires the claimed/bound linkage. Attempts, intent and binding share the
 existing 8 KiB active inventory allowance; no new history allowance is added.
-Older ledgers, including v4, are refused without migration.
+Older ledgers, including v4, are refused without migration; v5 bindings with the legacy system-slice path are rejected rather than reinterpreted.
 
 The internal `DelegationJobs.runner_effect` admission primitive reloads and
 validates the current job/token, resolved authority, status, execution outcome,
@@ -1013,30 +1013,55 @@ active nonterminal reservation. It commits that fence under `store.lock`, then
 releases the lock so a delayed helper can read the fence and exit while bounded
 systemd work proceeds. It observes the exact run-derived unit, requests a
 synchronous `systemctl --user --job-mode=replace stop` for only that unit, and
-re-observes once. It deliberately does not mutate manager-local job IDs: the
-manager endpoint is not pinned, so an observed ID could be stale/reused and
-cancel an unrelated job. This leaves exact job-ID cancellation and manager
-identity as blockers. The existing intent/binding fixture also records
-`/system.slice/<unit>`, while this adapter queries a systemd **user** manager;
-no supported user-manager cgroup path is captured or reconciled. It uses
-`services.systemd_verify_timeout_seconds` and `limits.output_bytes` per command,
-with no polling or retry. The return value and observations are immutable
-diagnostics with `release_authority=false`; jobs may remain and even an inactive
-observation is not settlement. Any unknown/mismatched job, error, timeout or
-incomplete output refuses the result and retains the durable fence/reservation.
+re-observes once. It deliberately does not mutate manager-local job IDs:
+even a matching diagnostic pin cannot bind a later D-Bus connection or prevent
+an ID being reused for an unrelated job.
+
+`delegation_systemd.observe` now brackets unit/job reads with a read-only
+manager pin: current UID, kernel boot ID, selected AF_UNIX socket path and
+no-follow ancestor/leaf identities, systemd version and the systemd D-Bus
+unique name owner. One frozen minimal environment selects both commands.
+Only a single literal canonical `DBUS_SESSION_BUS_ADDRESS=unix:path=...` is
+accepted; abstract/remote addresses, options, percent escapes, lists and
+symlinked paths are refused. With no bus address, the selected fallback is
+`XDG_RUNTIME_DIR/systemd/private`; busctl is explicitly addressed to the same
+socket, not its default session bus. The socket must belong to the current UID.
+A failed/unavailable `busctl --user` name-owner query (including a private peer
+without `GetNameOwner`) refuses the observation rather than inferring identity.
+The pin is private immutable diagnostic data, not a persisted settlement claim.
+Six sequential commands use `services.systemd_verify_timeout_seconds` and
+`limits.output_bytes` individually, with no polling or retry. Endpoint stats are
+rechecked within each pin capture; both pins must match across the observation.
+This detects observed replacement, not transient replacement between reads or
+the TOCTOU window when systemctl/busctl opens a new connection.
+
+Intent/binding validation and nonempty observed ControlGroup accept only the
+exact run unit at
+`/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>` for the current
+UID. `/system.slice`, other UIDs/units and other slice layouts are refused;
+old incompatible bindings are not migrated or inferred. The private cgroup-v2
+reader traverses every exact ancestor with no-follow dirfds, and still requires
+consistent unit state plus exact empty/absent cgroup evidence. It grants no
+release authority. The synthetic host fixture targets a user manager too; this
+is not evidence that CI or any supported host has that manager available.
+
+Return values remain immutable diagnostics with `release_authority=false`;
+jobs may remain and even an inactive observation is not settlement. Any
+unknown/mismatched job, changed/unknown manager, error, timeout or incomplete
+output refuses the result and retains the durable fence/reservation.
 Lock acquisition failure retains the reservation without permission to stop
-ahead of admitted work. Even successful stop does not establish manager
-identity, creator settlement, job settlement, cgroup emptiness or Podman
+ahead of admitted work. Even successful stop with matching diagnostic pins does
+not establish creator settlement, job settlement, cgroup emptiness or Podman
 absence. Both product handback paths remain unconditionally refusing.
 
 Consequence: the full backend above remains a design gate, not a supported
 backend. Cross-process tests exercise ordered admission/cancel serialization,
 delayed post-fence denial of the would-be valid next phase, death after issued,
 out-of-order/unclaimed/binding-mismatch refusal and terminal fence refusal;
-mocked systemctl outputs exercise exact-unit synchronous stop and
-re-observation; manager-local job IDs remain diagnostic only. These prove only
-the fence protocol,
-not settlement on a supported host.
+mocked systemctl/busctl outputs and local socket fixtures exercise address
+parsing, identity-change refusal, bounded reads, exact-unit stop and
+re-observation; manager-local job IDs remain diagnostic only. These prove parsing
+and control flow of the fence protocol, not settlement on a supported host.
 Use the existing sandbox, service-manager, lock and output bounds; the current
 `sandbox.cleanup_timeout_seconds` is documented for cleanup calls, so its scope
 must be explicitly updated before it also bounds create/start, rather than

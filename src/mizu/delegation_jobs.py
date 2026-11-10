@@ -87,6 +87,7 @@ results are reported as evicted; tombstones still prevent duplicate execution.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import secrets
 import stat
@@ -179,6 +180,14 @@ def _directory_identity(path):
     return {'path': path, 'device': info.st_dev, 'inode': info.st_ino}
 
 
+def user_cgroup(unit):
+    """Only the current-uid user manager's app.slice layout is supported."""
+    if not hasattr(os, 'getuid'):
+        raise Denied('Delegation user-manager uid unavailable')
+    uid = os.getuid()
+    return f'/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/{unit}'
+
+
 def _binding(value, run_id):
     """Validate the bounded supervisor-only systemd/rootless-Podman format."""
     if (type(value) is not dict
@@ -195,8 +204,8 @@ def _binding(value, run_id):
             or directory['inode'] == 0
             or type(scope) is not dict or set(scope) != {'unit', 'cgroup'}
             or not isinstance(scope['unit'], str)
-            or re.fullmatch(r'[A-Za-z0-9_-]+\.service', scope['unit']) is None
-            or scope['cgroup'] != '/system.slice/' + scope['unit']
+            or scope['unit'] != f'mizu-delegation-{run_id}.service'
+            or scope['cgroup'] != user_cgroup(scope['unit'])
             or type(containers) is not list):
         raise Denied('Invalid delegation directory or scope binding')
     names, ids = set(), set()

@@ -26,7 +26,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
-from mizu.delegation_jobs import DelegationJobs
+from mizu.delegation_jobs import DelegationJobs, user_cgroup
 from support import seed_terminal_delegation_fixture
 from mizu.delegation_recovery import _recover_quiescent
 from mizu.delegation_scope import _scope_empty
@@ -123,7 +123,7 @@ def require_host():
 
 
 def unit_state(record):
-    result = command('sudo', '-n', 'systemctl', 'show', record['unit'],
+    result = command('systemctl', '--user', 'show', record['unit'],
                      '--property=LoadState,ActiveState,ControlGroup', codes=(0, 1))
     fields = dict(line.split('=', 1) for line in result.stdout.splitlines())
     if (set(fields) != {'LoadState', 'ActiveState', 'ControlGroup'}
@@ -135,7 +135,7 @@ def unit_state(record):
 
 def scope_query(unit):
     return command(
-        'sudo', '-n', 'systemctl', 'show', unit,
+        'systemctl', '--user', 'show', unit,
         '--property=LoadState,ActiveState,ControlGroup', codes=(0, 1))
 
 
@@ -311,10 +311,10 @@ def recover(path):
             raise RuntimeError('systemd unit mismatch')
         fields = unit_state(scope)
         if fields['LoadState'] == 'loaded':
-            command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=all',
+            command('systemctl', '--user', 'kill', '--kill-whom=all',
                     '--signal=SIGKILL', scope['unit'], codes=(0, 1))
-            command('sudo', '-n', 'systemctl', 'stop', scope['unit'])
-            command('sudo', '-n', 'systemctl', 'reset-failed', scope['unit'], codes=(0, 1))
+            command('systemctl', '--user', 'stop', scope['unit'])
+            command('systemctl', '--user', 'reset-failed', scope['unit'], codes=(0, 1))
         return scope_query(unit)
 
     # Synthetic host cleanup remains test-only, NOT the product handback path.
@@ -401,7 +401,7 @@ def live(path):
     store, reservation, directory = create_job(path, key='smoke-prepared')
     credentials = reservation['id'], reservation['token']
     name = 'mizu-delegation-' + reservation['run_id']
-    scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+    scope = {'unit': name + '.service', 'cgroup': user_cgroup(name + '.service')}
     image = command('podman', 'image', 'inspect', '--format', '{{.Id}}', IMAGE).stdout.strip()
     container = fixture_container(reservation, image.removeprefix('sha256:'))
     store.runner_prepare(*credentials, str(directory), scope, container)
@@ -426,19 +426,19 @@ def live(path):
     store, reservation, directory = create_job(path, key='smoke-bound')
     credentials = reservation['id'], reservation['token']
     name = 'mizu-delegation-' + reservation['run_id']
-    scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+    scope = {'unit': name + '.service', 'cgroup': user_cgroup(name + '.service')}
     try:
         cid = provision(store, reservation, directory, scope)
         store.runner_started(*credentials, authority_digest='b' * 64)  # durable identities AND claim precede execution
-        command('sudo', '-n', 'systemd-run', '--unit=' + scope['unit'],
-                '--slice=system.slice', '--service-type=exec',
-                '--property=User=' + str(os.getuid()), '--property=WorkingDirectory=/',
+        command('systemd-run', '--user', '--unit=' + scope['unit'],
+                '--slice=app.slice', '--service-type=exec',
+                '--property=WorkingDirectory=/',
                 '--property=ExitType=cgroup', '--property=KillMode=control-group',
                 '--property=TasksMax=8', '--property=CPUQuota=10%',
                 '--property=MemoryMax=64M', '--property=RuntimeMaxSec=120',
                 '--property=TimeoutStopSec=5', '--property=StandardOutput=null',
                 '--property=StandardError=null', '--property=NoNewPrivileges=yes',
-                '--property=PrivateNetwork=yes', sys.executable, str(Path(__file__).resolve()),
+                sys.executable, str(Path(__file__).resolve()),
                 '--supervise', str(path))
         ready_path = directory / 'ready.json'
         deadline = time.monotonic() + 5
@@ -454,7 +454,7 @@ def live(path):
         command('podman', 'start', cid)
         if command('podman', 'inspect', '--format', '{{.State.Running}}', cid).stdout.strip() != 'true':
             raise RuntimeError('container not running')
-        command('sudo', '-n', 'systemctl', 'kill', '--kill-whom=main',
+        command('systemctl', '--user', 'kill', '--kill-whom=main',
                 '--signal=SIGKILL', scope['unit'])
         deadline = time.monotonic() + 5
         while Path(f"/proc/{ready['supervisor']}").exists() and time.monotonic() < deadline:
@@ -519,7 +519,7 @@ class RecoveryReservationTests(unittest.TestCase):
         store, reservation, directory = create_job(path)
         credentials = reservation['id'], reservation['token']
         unit = 'mizu-delegation-' + reservation['run_id'] + '.service'
-        scope = {'unit': unit, 'cgroup': '/system.slice/' + unit}
+        scope = {'unit': unit, 'cgroup': user_cgroup(unit)}
         saved = [{'name': 'fixture-' + str(i), 'id': str(i + 1) * 64, 'uid': os.getuid()}
                  for i in range(containers)]
         store.runner_bind(*credentials, str(directory), scope, saved, authority_digest='b' * 64)
@@ -707,7 +707,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 self.assertIsNone(store.reservation())
                 self.assertEqual(query.call_count, 3)
                 for call in query.call_args_list:
-                    self.assertEqual(call.args[:5], ('sudo', '-n', 'systemctl', 'show', binding['scope']['unit']))
+                    self.assertEqual(call.args[:4], ('systemctl', '--user', 'show', binding['scope']['unit']))
 
     @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
     def test_product_recovery_rejects_identity_drift_before_any_effects(self):
@@ -775,7 +775,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 store, saved, directory = create_job(path)
                 credentials = saved['id'], saved['token']
                 unit = 'mizu-delegation-' + saved['run_id'] + '.service'
-                scope = {'unit': unit, 'cgroup': '/system.slice/' + unit}
+                scope = {'unit': unit, 'cgroup': user_cgroup(unit)}
                 container = fixture_container(saved, 'a' * 64)
                 store.runner_prepare(*credentials, str(directory), scope, container)
                 if phase == 'claimed':
@@ -899,7 +899,7 @@ class RecoveryReservationTests(unittest.TestCase):
                                           stdout=('LoadState=not-found\nActiveState=inactive\n'
                                                   'ControlGroup=\n'))
                 def settling_command(*argv, **kwargs):
-                    sub = argv[3] if len(argv) > 3 else ''
+                    sub = argv[2] if len(argv) > 2 else ''
                     if failure == 'settle_kill' and sub == 'kill':
                         raise RuntimeError('systemctl kill failed')
                     if failure == 'settle_stop' and sub == 'stop':
@@ -959,7 +959,7 @@ class RecoveryReservationTests(unittest.TestCase):
         container = fixture_container(reservation, 'a' * 64)
         container['uid'] += uid_offset
         name = container['name']
-        scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+        scope = {'unit': name + '.service', 'cgroup': user_cgroup(name + '.service')}
         if prepared:
             store.runner_prepare(*credentials, str(directory), scope, container)
         cid = 'b' * 64
@@ -1038,7 +1038,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 reservation = store.reservation()
                 directory = path.parent / reservation['run_id']
                 name = runtime['observed']['Name']
-                scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+                scope = {'unit': name + '.service', 'cgroup': user_cgroup(name + '.service')}
                 save = store._save
                 def uncertain(state):
                     binding = state['jobs'][credentials[0]]['binding']
@@ -1080,7 +1080,7 @@ class RecoveryReservationTests(unittest.TestCase):
                 reservation = store.reservation()
                 directory = path.parent / reservation['run_id']
                 name = runtime['observed']['Name']
-                scope = {'unit': name + '.service', 'cgroup': '/system.slice/' + name + '.service'}
+                scope = {'unit': name + '.service', 'cgroup': user_cgroup(name + '.service')}
                 observed = runtime['observed']
                 if failure == 'mismatch-id':
                     runtime.update(name=['b' * 64], marker=['c' * 64])

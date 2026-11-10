@@ -30,13 +30,19 @@ class DelegationJobTests(unittest.TestCase):
     def start(self, key='first', owner='worker'):
         return self.store.start(owner, key, self.request)['id']
 
+    def scope(self):
+        if not hasattr(os, 'getuid'):
+            self.skipTest('User-manager binding fixture requires a POSIX uid')
+        unit = 'mizu-delegation-' + self.store.reservation()['run_id'] + '.service'
+        return {'unit': unit, 'cgroup': jobs.user_cgroup(unit)}
+
     def runner(self):
         reservation = self.store.reservation()
         if reservation['binding'] is None:
             directory = self.root / reservation['run_id']
             directory.mkdir(exist_ok=True)
             self.store.runner_bind(reservation['id'], reservation['token'], str(directory),
-                                   {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [], authority_digest='b' * 64)
+                                   self.scope(), [], authority_digest='b' * 64)
         return reservation['id'], reservation['token']
 
     def cleanup(self):
@@ -92,7 +98,7 @@ class DelegationJobTests(unittest.TestCase):
         credentials = reservation['id'], reservation['token']
         directory = self.root / reservation['run_id']
         directory.mkdir()
-        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        scope = self.scope()
         for bound in (False, True):
             if bound:
                 self.store.runner_bind(*credentials, str(directory), scope, [], authority_digest='b' * 64)
@@ -115,7 +121,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assertEqual(saved['request'], request)
         with self.assertRaises(Denied):
             store.runner_bind(saved['id'], saved['token'], str(self.root),
-                              {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}, [],
+                              self.scope(), [],
                               authority_digest='b' * 64)
         with self.assertRaises(Denied):
             jobs.DelegationJobs.guard(self.root)
@@ -554,7 +560,7 @@ class DelegationJobTests(unittest.TestCase):
         credentials = reservation['id'], reservation['token']
         directory = self.root / 'actual-child-run'
         directory.mkdir()
-        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        scope = self.scope()
         containers = [{'name': 'fixture', 'id': 'c' * 64, 'uid': 1000}]
         real_write = jobs.safe_write
         for committed in (False, True):
@@ -596,7 +602,7 @@ class DelegationJobTests(unittest.TestCase):
         self.assertEqual(self.store.cancel('worker', job_id)['status'], 'cancel-requested')
         directory = self.root / reservation['run_id']
         directory.mkdir()
-        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        scope = self.scope()
         binding = self.store.runner_bind(*credentials, str(directory), scope, [], authority_digest='b' * 64)
         with self.assertRaises(Denied):
             self.store.runner_started(*credentials, authority_digest='b' * 64)
@@ -616,7 +622,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_quiescent(*credentials, 'Unbound', cleanup={})
         directory = self.root / 'child'
         directory.mkdir()
-        scope = {'unit': 'fixture.service', 'cgroup': '/system.slice/fixture.service'}
+        scope = self.scope()
         containers = [{'name': 'one', 'id': 'c' * 64, 'uid': 1000},
                       {'name': 'two', 'id': 'd' * 64, 'uid': 1000}]
         self.store.runner_bind(*credentials, str(directory), scope, containers, authority_digest='b' * 64)
@@ -774,7 +780,7 @@ class DelegationJobTests(unittest.TestCase):
         reservation = self.store.reservation()
         directory = self.root / reservation['run_id']
         directory.mkdir()
-        scope = {'unit': 'prepared.service', 'cgroup': '/system.slice/prepared.service'}
+        scope = self.scope()
         container = {'name': 'mizu-recovery-' + reservation['run_id'], 'uid': 1000,
                      'marker': reservation['run_id'], 'image': 'b' * 64,
                      'config': {'Cmd': ['/bin/sleep', '90']}}
@@ -843,10 +849,10 @@ class DelegationJobTests(unittest.TestCase):
                 operation()
         self.assertEqual(self.path.read_bytes(), before)
 
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'User-manager binding requires a POSIX uid')
     def test_intent_accepts_any_bounded_safe_name_but_pins_marker(self):
         # Names are persisted in the intent, not reconstructed during recovery;
         # the marker remains bound to the stable run identity.
-        scope = {'unit': 'custom.service', 'cgroup': '/system.slice/custom.service'}
         base = {'uid': 1000, 'image': 'b' * 64, 'config': {'Cmd': ['/bin/sleep', '90']}}
         for name in ('custom-safe.name_1', 'fixture-0', 'a'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
@@ -856,6 +862,8 @@ class DelegationJobTests(unittest.TestCase):
                 reservation = store.reservation()
                 directory = root / reservation['run_id']
                 directory.mkdir()
+                unit = 'mizu-delegation-' + reservation['run_id'] + '.service'
+                scope = {'unit': unit, 'cgroup': jobs.user_cgroup(unit)}
                 container = {**base, 'name': name, 'marker': reservation['run_id']}
                 intent = store.runner_prepare(reservation['id'], reservation['token'],
                                               str(directory), scope, container)
@@ -870,6 +878,8 @@ class DelegationJobTests(unittest.TestCase):
             reservation = store.reservation()
             directory = root / reservation['run_id']
             directory.mkdir()
+            unit = 'mizu-delegation-' + reservation['run_id'] + '.service'
+            scope = {'unit': unit, 'cgroup': jobs.user_cgroup(unit)}
             for bad in ('', '../evil', '/abs', 'a/b', 'a:b', 'x' * 9000):
                 with self.subTest(bad=bad), self.assertRaises(Denied):
                     store.runner_prepare(

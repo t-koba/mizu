@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mizu.delegation_jobs import DelegationJobs
+from mizu.delegation_jobs import DelegationJobs, user_cgroup
 from mizu.errors import Denied
 from mizu.fs import canonical, loads_finite
 
@@ -70,6 +70,7 @@ def _delayed(root, credentials, intent, phase, ready, resume, operated, denied):
         denied.set()
 
 
+@unittest.skipUnless(hasattr(os, 'getuid'), 'User-manager binding requires a POSIX uid')
 class DelegationFenceTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -86,7 +87,7 @@ class DelegationFenceTests(unittest.TestCase):
         directory = self.root / self.run_id
         directory.mkdir()
         self.intent = self.store.runner_prepare(*self.credentials, str(directory),
-            {'unit': self.unit, 'cgroup': '/system.slice/' + self.unit},
+            {'unit': self.unit, 'cgroup': user_cgroup(self.unit)},
             {'name': 'fixture-' + self.run_id, 'uid': 1000, 'marker': self.run_id,
              'image': 'c' * 64, 'config': {'Cmd': ['true']}})
         self.ctx = multiprocessing.get_context('spawn')
