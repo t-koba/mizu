@@ -233,11 +233,18 @@ class SystemdObservationTests(unittest.TestCase):
 
     def test_exact_current_uid_cgroup_required(self):
         group = self.fields['ControlGroup']
+        properties_argv = ['systemctl', '--user', '--no-pager', 'show', '--all',
+                           '--property=' + ','.join(systemd._PROPERTIES), self.unit]
         for wrong in ('/system.slice/' + self.unit, group.replace(self.unit, 'other.service'),
                       group.replace(f'user-{os.getuid()}.slice', f'user-{os.getuid()+1}.slice'),
                       group.replace(f'user@{os.getuid()}.service', f'user@{os.getuid()+1}.service')):
-            with self.subTest(group=wrong), self.assertRaises(Denied):
-                self.observe([*self.outputs()[:2], self.result(self.properties(ControlGroup=wrong))])
+            outputs = self.outputs()
+            outputs[3] = self.result(self.properties(ControlGroup=wrong))
+            with self.subTest(group=wrong), mock.patch('mizu.process.run', side_effect=outputs) as run:
+                with self.assertRaisesRegex(Denied, 'Unknown or malformed delegation systemd unit state'):
+                    systemd.observe(self.config, self.run_id)
+                self.assertEqual(run.call_count, 4)
+                self.assertEqual(run.call_args_list[3].args[0], properties_argv)
 
     def test_pending_jobs_stop_exact_unit_synchronously_and_reobserve(self):
         # Pending jobs are diagnostic only: even with a diagnostic manager pin,
