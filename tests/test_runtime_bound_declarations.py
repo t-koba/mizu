@@ -2125,6 +2125,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('operator_record_index.py', '_files', 1, 0): (
         '1', 'safety',
         'operator record index / ignore only single-link unpublished atomic-write scratch'),
+    ('operator_record_index.py', 'catalog', 1, 0): (
+        '1', 'configured policy',
+        'operator record catalog / supplied scan_limit must be a positive configured entry budget'),
     ('operator_record_index.py', '_parts', 1, 0): (
         '1', 'format',
         'operator record index framing / exactly one empty-body marker anchors body elision'),
