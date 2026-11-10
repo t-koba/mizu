@@ -1,10 +1,12 @@
 """Private handback preflight; unsupported execution substrates stay reserved.
 
-No integrated launch owner currently enforces a durable no-new-launch fence or
-observes supervisor settlement. Even an empty Linux cgroup and absent containers
-are only point-in-time observations without that fence. Host callbacks cannot
-supply the missing authority. This boundary deliberately executes no callbacks,
-cleanup commands or handback until Mizu owns that lifecycle contract.
+The ledger claim returns before external creation/start. A caller paused after
+that return can launch after cleanup observes the saved unit and containers
+absent. Terminal execution reports block another claim, not that outstanding
+launch; the prepared recovery bit likewise cannot settle an in-flight create.
+The saved scope does not bind that outer launcher. Ledger locks and bounded
+systemd/Podman cleanup cannot settle it. No callbacks, cleanup or release proof
+are permitted from point-in-time absence or caller assertions.
 """
 from .delegation_jobs import MAX_RESULT_BYTES, _bound, _text
 from .errors import Denied

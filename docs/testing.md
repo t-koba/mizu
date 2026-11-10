@@ -535,18 +535,22 @@ Do not run its explicit `--prepare` / `--live` modes on a development host.
 Missing systemd, cgroup-v2, or usable rootless Podman evidence fails this job;
 it is not a skip or proof for other environments.
 
-The fixture records unique unit/cgroup and container names before launch and
-the full container ID before start in a private, atomic, fsynced JSON record.
-It kills only the synthetic supervisor, proves its `setsid` descendant remains
-in the recorded cgroup, and invokes a separate `--recover` process. An
-`always()` cleanup step uses the same record after controller failure. Cleanup
-is scoped to those exact identities: the reservation remains held until both
-systemd inactivity plus cgroup emptiness/absence and container absence are
-independently proven. Unknown evidence, mismatched identities, or incomplete
-launch acknowledgement fail closed (even after best-effort cleanup). No retry
-launch, scheduler access, credentials, production identities, or runtime sockets
-in role sandboxes are involved. The record is disposable CI scratch, not a
-production reservation or a claim of general process quiescence.
+The fixture persists exact unit/cgroup and rootless-Podman name/ID/UID identities
+in the private delegation ledger. It kills the synthetic supervisor, observes
+its surviving `setsid` descendant, and invokes a separate `--recover` process;
+an `always()` step retries cleanup. Bounded host recipes still live in this
+fixture. They observe exact scope/container cleanup, verify that product
+handback refuses, then explicitly seed terminal TEST state via a test helper.
+That seed is not Mizu-proven handback, a supported backend, or general quiescence.
+Unknown, mismatched or partial evidence fails the smoke rather than seeding it.
+
+Offline tests also pause a disposable file-writing child until after recovery
+refusal. Both a prepared recovery fence and a terminal claimed execution survive
+ledger reopening, but neither revokes the outstanding external launch. The child
+still writes its file after resuming; the reservation stays held. This ordered
+race tests the missing launch-ownership boundary without systemd, Podman, an
+actual delegate runner or an unbounded wait. See `async-delegation-gates.toml`
+for why point-in-time absence cannot authorize production handback.
 
 Commands have time/output bounds; the unit has PID/CPU/RAM/runtime/stop caps
 and `PrivateNetwork=yes`. The single minimal container has PID/CPU/RAM/runtime

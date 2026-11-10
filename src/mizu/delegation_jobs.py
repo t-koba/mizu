@@ -611,10 +611,10 @@ class DelegationJobs:
     def runner_recover_prepared(self, job_id, token, *, container_id=None):
         """Fence provisioning/claim before inspection; never infer OS absence.
 
-        Once fenced, no new bind/claim/finish can race cleanup. After validating a
-        unique prelaunch candidate, persist its ID here BEFORE removal. A retry
-        can then prove exact name/ID/marker absence even after uncertain removal.
-        Missing initial candidate evidence cannot release the reservation.
+        This fences later ledger bind/claim/finish calls, NOT an external create
+        already in flight. It cannot authorize cleanup or handback. A validated
+        candidate ID may be saved before test-only removal; missing initial
+        evidence and uncertain external settlement retain the reservation.
         """
         if container_id is not None and not _sha(container_id):
             raise Denied('Invalid delegation provisioning container ID')
@@ -724,9 +724,10 @@ class DelegationJobs:
     def runner_started(self, job_id, token, *, authority_digest=None):
         """Consume the queued claim once BEFORE launch; uncertain claim never replays.
 
-        A failed acknowledgement requires reconciliation, not a second launch.
-        The complete binding and freshly resolved matching authority_digest must
-        precede the claim; legacy requests cannot be claimed. A queued cancellation cannot
+        A paused claimant can still launch after a terminal report: neither
+        revokes outstanding external work. Uncertain claims never replay. The
+        binding and freshly resolved matching authority_digest must precede the
+        claim; legacy requests cannot be claimed. A queued cancellation cannot
         be claimed; supervisor reports no-execution cancellation then quiescence
         instead. An unbound cancellation remains held for reconciliation.
         """

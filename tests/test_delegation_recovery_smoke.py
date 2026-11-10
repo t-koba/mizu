@@ -765,43 +765,62 @@ class RecoveryReservationTests(unittest.TestCase):
                 self.assertEqual((store.root / 'state.json').read_bytes(), before)
 
     @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
-    def test_product_recovery_never_trusts_callback_observations(self):
-        # Even empty/absent assertions cannot establish the missing launch fence
-        # or supervisor settlement. Live, unknown, timeout and partial evidence
-        # are refused earlier, without invoking any caller-supplied observer.
-        for evidence in (None, False, 1, True, OSError('unknown namespace'),
-                         TimeoutError('scope timeout'), KeyboardInterrupt()):
-            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as tmp:
+    def test_outstanding_launch_is_not_revoked_by_ledger_fences(self):
+        # A disposable file-writing child stands in for an already admitted
+        # external create/start command, NOT a real systemd/Podman runner.
+        # Events force the launch AFTER attempted recovery, without sleeps.
+        for phase in ('prepared', 'claimed'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp).resolve() / 'state.json'
-                store = self.fixture(path, containers=2)
-                reservation = store.reservation()
-                before = (store.root / 'state.json').read_bytes()
-                callbacks = [mock.Mock() for _ in range(4)]
-                for callback in callbacks:
-                    if isinstance(evidence, BaseException):
-                        callback.side_effect = evidence
-                    else:
-                        callback.return_value = evidence
-                for _ in range(2):  # reopening/retrying cannot turn uncertainty into absence
-                    store = ledger(path)
-                    with (mock.patch.object(store, 'runner_quiescent') as seal,
-                          mock.patch.object(store, '_save') as save):
+                store, saved, directory = create_job(path)
+                credentials = saved['id'], saved['token']
+                unit = 'mizu-delegation-' + saved['run_id'] + '.service'
+                scope = {'unit': unit, 'cgroup': '/system.slice/' + unit}
+                container = fixture_container(saved, 'a' * 64)
+                store.runner_prepare(*credentials, str(directory), scope, container)
+                if phase == 'claimed':
+                    store.runner_bind(*credentials, str(directory), scope, [{
+                        'name': container['name'], 'id': 'd' * 64, 'uid': os.getuid()}],
+                        authority_digest='b' * 64)
+                    store.runner_started(*credentials, authority_digest='b' * 64)
+                resume = threading.Event()
+                marker = directory / 'late-resource'
+                def delayed_launch():
+                    if not resume.wait(5):
+                        raise TimeoutError('fixture launch was not resumed')
+                    command(sys.executable, '-c',
+                            'import pathlib,sys; pathlib.Path(sys.argv[1]).touch()',
+                            str(marker), seconds=5)
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    pending = pool.submit(delayed_launch)
+                    try:
+                        if phase == 'claimed':
+                            store.runner_finished(*credentials, 'failed')
+                            with self.assertRaises(Denied):
+                                store.runner_recover_prepared(*credentials)
+                        else:
+                            intent = store.runner_recover_prepared(*credentials, container_id='d' * 64)
+                        store = ledger(path)  # fence/report survives reopening
+                        before = (store.root / 'state.json').read_bytes()
+                        self.assertFalse(marker.exists())
                         with self.assertRaisesRegex(Denied, 'handback unsupported'):
-                            _recover_quiescent(store, reservation['id'], reservation['token'], 'Evidence',
-                                               binding=reservation['binding'],
-                                               attest_launch_fence=callbacks[0],
-                                               attest_supervisor_settled=callbacks[1], query=callbacks[2],
-                                               reconcile_container=callbacks[3], maximum=8192)
-                        # Omitting all callbacks (including the fence) also refuses.
-                        with self.assertRaisesRegex(Denied, 'handback unsupported'):
-                            _recover_quiescent(store, reservation['id'], reservation['token'], 'Evidence',
-                                               binding=reservation['binding'])
-                        seal.assert_not_called()
-                        save.assert_not_called()
-                    self.assertEqual(store.reservation(), reservation)
-                    self.assertEqual((store.root / 'state.json').read_bytes(), before)
-                for callback in callbacks:
-                    callback.assert_not_called()
+                            if phase == 'claimed':
+                                _recover_quiescent(store, *credentials, 'Evidence',
+                                                   binding=store.runner_binding(*credentials))
+                            else:
+                                store.runner_prepared_quiescent(*credentials, 'Evidence', cleanup={
+                                    'intent': intent, 'scope_unstarted': True, 'container_absent': 'd' * 64})
+                        for action in (
+                                lambda: store.runner_started(*credentials, authority_digest='b' * 64),
+                                lambda: store.start('worker', 'another', saved['request'])):
+                            with self.assertRaises(Denied):
+                                action()
+                        self.assertEqual((store.root / 'state.json').read_bytes(), before)
+                    finally:
+                        resume.set()
+                    pending.result(timeout=10)
+                self.assertTrue(marker.is_file())  # old launch still completes
+                self.assertIsNotNone(ledger(path).reservation())
 
     @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
     def test_product_recovery_interrupted_before_proof_never_releases_on_retry(self):
@@ -817,31 +836,6 @@ class RecoveryReservationTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, 'handback unsupported'):
                 _recover_quiescent(reopened, saved['id'], saved['token'], 'Evidence', binding=saved['binding'])
             self.assertEqual(reopened.reservation(), saved)
-            self.assertEqual((store.root / 'state.json').read_bytes(), before)
-
-    @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')
-    def test_racing_handback_cannot_admit_a_new_launch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = self.fixture(Path(tmp).resolve() / 'state.json')
-            saved = store.reservation()
-            credentials = saved['id'], saved['token']
-            before = (store.root / 'state.json').read_bytes()
-            barrier = threading.Barrier(4)
-            def race(action):
-                barrier.wait()
-                with self.assertRaises(Denied):
-                    action()
-            actions = (
-                lambda: _recover_quiescent(store, *credentials, 'Evidence', binding=saved['binding']),
-                lambda: store.runner_quiescent(*credentials, 'Asserted proof', cleanup={
-                    'binding': saved['binding'], 'scope_clean': True,
-                    'containers_absent': [c['id'] for c in saved['binding']['containers']]}),
-                lambda: store.runner_started(*credentials, authority_digest='b' * 64),
-                lambda: store.start('worker', 'new-child', saved['request']),
-            )
-            with ThreadPoolExecutor(max_workers=len(actions)) as pool:
-                list(pool.map(race, actions))
-            self.assertEqual(store.reservation(), saved)
             self.assertEqual((store.root / 'state.json').read_bytes(), before)
 
     @unittest.skipUnless(os.name == 'posix', 'private POSIX job ledger')

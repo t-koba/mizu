@@ -177,37 +177,41 @@ systemd/rootless-Podman commands are not a supported execution substrate.
 Normal execution does not import the binding into Engine.run. Engine/CLI/adapter
 launch integration remains disabled; synchronous delegation is unchanged.
 
-All production handback is fail-closed in Mizu: `delegation_recovery` validates
+All production handback is fail-closed in Mizu. `delegation_recovery` validates
 the active job/token, terminal execution, saved run/directory/scope/container
-binding and exact caller binding, then refuses unsupported handback. Legacy
-fence/settlement/query/container callbacks are never invoked. Direct
-`runner_quiescent` and `runner_prepared_quiescent` also refuse, even with exact
-IDs and positive cleanup booleans: the prepared path validates the active token,
-exact persisted recovering intent, container ID and directory identity, then
-refuses without changing ledger state. No path writes partial proof or clears
-the reservation; retries and interruptions cannot turn missing authority into
-absence. There is currently NO supported production handback substrate, prepared
-or post-execution, including Linux systemd/cgroup v2 and rootless Podman. A persisted terminal execution report alone is not proof of
-supervisor settlement, and an instantaneous empty scope cannot prevent a late
-launch. No new host commands, grants, configuration defaults or launch API are
-introduced.
+binding and exact caller binding, then refuses. Fence/settlement/query/container
+callbacks are never invoked. Direct `runner_quiescent` and
+`runner_prepared_quiescent` also refuse exact caller assertions without ledger
+mutation. No partial proof is saved. There is NO supported production handback
+backend, including Linux systemd/cgroup v2 plus rootless Podman.
 
-The existing read-only `delegation_scope` observer validates Linux unit/cgroup
-identity and bounded empty/consistently-absent observations; it is not a fence or
-release authority. The synthetic smoke still owns bounded `process.run` host
-commands, cleanup and interruption/retry probes. After successful test-only bound
-or prepared cleanup it checks that product handback refuses, then explicitly
-seeds terminal TEST state via the test helper to exercise ledger reads and access
-gates. That seed is not product handback evidence. Offline tests verify
-stale/mismatched identities, unobservable or fabricated callback evidence, missing
-fence, interruption/retry, unchanged ledger bytes and no product handback from a
-failed recovery.
+The missing fence is not just an absent kill/remove recipe: `runner_started`
+commits a one-shot claim and returns BEFORE its caller creates/starts external
+resources. A claimant paused outside the saved unit can launch after recovery
+observes that unit and every saved container absent. A terminal execution report
+prevents a second claim but cannot revoke the first. The prepared `recovering`
+bit prevents later ledger calls, not completion of an already in-flight create;
+it cannot coexist with `claimed` or terminal execution in the current format.
+Neither binding records the outer launcher or its outstanding command. Holding
+the ledger lock through bounded stop/query/remove operations cannot settle that
+caller. No proof may release the hold on this evidence. Closing this gap needs
+Mizu-owned launch/settlement, not a caller boolean, another absence check, or an
+unsupported reinterpretation of existing state. Runner integration stays off.
 
-Before enabling integration, Mizu must own a durable no-new-launch fence for the
-exact persisted run/token and inventory, settle the exact supervisor, and perform
-or verify bounded exact process-scope and container-namespace cleanup under that
-fence. Unsupported, ambiguous, timed-out, renamed, wrong-UID or partial evidence
-must retain the hold. No production pilot, Windows/macOS scope support, container
-reaper, launch integration, fan-out or production quiescence is established here.
+The read-only Linux `delegation_scope` observer validates exact unit/cgroup
+emptiness or consistent absence, not fencing or release authority. The synthetic
+smoke still owns bounded `process.run` cleanup recipes. After bound or prepared
+cleanup it verifies product handback refusal and seeds terminal TEST state via
+a test helper, not a product proof. Offline tests cover exact identities,
+interruption/retry, unchanged ledger bytes and failed-proof retention. A bounded
+race reopens the fenced/reported ledger, verifies refusal, then resumes an old
+file-writing launch: it still creates its resource while the reservation stays
+held, in prepared and claimed phases. This is not a systemd/OCI launch test.
+
+Mizu must own launch/settlement plus bounded exact process-scope and local
+container-namespace cleanup before enabling integration. Unsupported, ambiguous,
+timed-out, renamed, wrong-UID or partial evidence must retain the hold. No
+production pilot, Windows/macOS backend, reaper, fan-out or production quiescence
+is established here.
 """
 process_group_experiment = "A bounded Linux sandbox reproduction observed a setsid descendant survive SIGTERM to its parent's process group; a direct signal then stopped it. This is not a systemd/cgroup, OCI, or Windows recovery smoke."
