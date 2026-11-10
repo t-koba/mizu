@@ -917,3 +917,75 @@ result. It does not grant `verify` or work-item completion authority; each role
 keeps its own `check_job` capability and subscription lifecycle. This reuse
 policy is separate from ADR-041's asynchronous-job mechanism. See
 `docs/check-jobs.md` for the input-binding, subscription and evidence rules.
+
+## ADR-053 — Delegated resource operations are mediated by a fenced user unit
+
+A ledger claim returns before an external create/start finishes, so fencing the
+ledger alone cannot settle an in-flight caller. A `/proc` argv scan is neither
+an exact creator identity nor safe cleanup authority, and a missing unit from
+`systemctl show` does not establish that its start job is gone. Handback remains
+refused until the launch owner closes both gaps.
+
+The supported-backend design is one transient systemd **user service** per
+stable delegation `run_id`, with a fixed private Mizu helper as `ExecStart`,
+a clean allowlisted environment, and no automatic restart; writer code never
+invokes Podman create/start directly. Mizu persists the unit intent before
+submission; the request sender holds the same per-job lock through
+submission and recording the exact job/result. An ambiguous submission is never
+blindly retried or treated as absence. The helper loads the protected ledger,
+validates job/authority and the current monotonic status under that lock, then
+performs each bounded Podman side effect and persists its exact result before
+releasing the lock. Every create and start repeats that check. Recovery cannot
+commit its fence while a request sender holds the lock. A previously submitted
+but delayed systemd start can launch only a helper that observes the fence and
+exits before touching Podman. Use `Delegate=yes`,
+`KillMode=control-group`, and `ExitType=cgroup` when supported; require a live
+rootless-Podman test of `--cgroup-parent` before treating the unit cgroup as the
+container's scope. Otherwise container termination and absence remain a separate
+exact-ID proof in the pinned Podman store.
+
+Recovery first atomically persists `cancel-requested` (and the prepared-path
+recovery fence) under that same lock, then addresses only the recorded user
+manager and exact unit. An unacknowledged submission without a complete exact
+job/unit reconciliation remains held; an absent unit alone is never proof.
+The binding includes the manager endpoint identity (uid, boot id, user-bus
+socket identity and systemd version), exact unit name, and unit
+invocation/cgroup identity once observed. Recovery enumerates the manager's
+current jobs, filters and validates the exact unit, cancels every pending
+start job by its exact ID, requests stop even if the unit reports not-found, then
+re-reads jobs and unit state until no matching job remains and the unit is
+inactive. It proves the saved cgroup empty before inventory reconciliation. A
+changed manager endpoint on the same boot is ambiguous and retains the
+reservation; a changed boot ID proves old host processes/jobs cannot survive,
+but cleanup still requires the pinned store to be available and exact. It
+then revalidates that local store, inspects/removes only the saved container
+ID after matching its run label, name, image digest, uid, and persisted config,
+and proves absence in that same store. Zero or multiple candidates, or any
+mismatch, retain the reservation. Unknown jobs, manager identity, cgroup
+state, store identity, or command completion retain the reservation. Transient
+units are collected after teardown; manager/job identities and container
+bindings are cleared with the existing terminal handback, not retained as a
+second history.
+
+Every Podman call uses the configured runtime argv/environment with
+`--remote=false`. The active intent pins the resolved runtime/helper identity,
+uid and relevant sanitized environment, plus canonical `podman info` fields:
+rootless/local-service flags, graph/run roots and config file, driver/options,
+uid/gid mappings, and cgroup manager/version; paths are rechecked without
+following links. Missing or changed identity refuses cleanup rather than
+falling back to another store. The necessary ledger format change is versioned;
+old records are never reset or given inferred manager/store identities.
+
+Consequence: this is a design gate, not an implemented or supported backend.
+Use the existing sandbox, service-manager, lock and output bounds; the current
+`sandbox.cleanup_timeout_seconds` is documented for cleanup calls, so its scope
+must be explicitly updated before it also bounds create/start, rather than
+adding a literal timeout or an unreviewed default. Add no model grants or config
+defaults; keep synchronous delegation, runner integration and fan-out unchanged
+(the latter two remain disabled). No release path is added until bounded tests
+cover pause-before/during create and start, crash/recovery, same-boot manager
+replacement, a pending or late start job, a post-fence start attempt,
+changed/remote Podman stores, and exact cgroup/container cleanup on a real
+supported Linux user manager. The current sandbox preflight found cgroup v2 but
+no `systemctl` or `podman`; runtime guarantees remain unverified and
+`runner_integration_allowed` remains `false`.
