@@ -177,7 +177,8 @@ blocking lock deadlines were later moved to `[limits].lock_timeout_seconds` by A
 | `poll_interval_seconds`, `pending_insights`, `prompt_snapshots`, `history_index`, `retention_days`, event-log days | configured | Already policy | Existing `[limits]`/`[vcs]` knobs with documented defaults |
 | `PREVIEW_BYTES`, `READ_PAGE_CHARS`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 8,192 chars / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
 | `MAX_WEB_WORKER_INPUT_BYTES` (`web_worker.py`) | 3 MiB | Stays fixed | Covers 2x canonical expansion of the 1 MiB TOML budget plus escaped valid probe input; parent and child reject overflow before parsing |
-| Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media, restore `--max-bytes` | 1 s+5 s / 32 / 8+32+1 MiB / 3 / 1 GiB | Stays fixed | Termination, fan-out, recursion, and archive-bomb safety floors |
+| Sandbox termination, `MAX_VERIFY_COMMANDS`, include depth/files/bytes, web redirect/media | 1 s+5 s / 32 / 8+32+1 MiB / 3 | Stays fixed | Termination, fan-out, recursion, and transport safety floors |
+| Restore `--max-bytes` / `--max-members` defaults | 1 GiB / 100,000 members | Explicit per-restore policy override | Separate finite archive-byte and archive-work budgets; defaults preserve the safe refusal behavior, while an operator may raise a reviewed restore invocation explicitly |
 | Usage summary bounds (`[usage]`) | 5000 runs / 200 recent entries / 200 affinity runs / 200 rows / 20 unknown keys | Moves to policy | Defaults preserve existing scan/sample behavior; settings only reduce work or displayed rows/keys |
 | Usage record JSON read cap | 1 MiB | Stays fixed | Records stay bounded and complete on disk |
 

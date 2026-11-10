@@ -867,7 +867,8 @@ mizu status demo-restored
 ```
 
 - 復元先には新しいプロジェクト名を指定します（常に unarmed かつ paused で初期化）。
-- パストラバーサル、危険なリンク、1 GiB（既定値）超の展開は安全対策として拒否されます（大容量時は `--max-bytes` を指定）。
+- `mizu backup --verify` はアーカイブのメンバー数 (`members`) と既定の復元メンバー上限 (`default_restore_member_limit`) を報告します。メンバー数が既定の 100,000 件を超える場合は、内容を確認したうえで `mizu restore NAME --archive FILE --max-members N` を明示してください。
+- 展開バイト数は独立した 1 GiB 既定値で制限され、大容量時は `--max-bytes` を別途指定します。パストラバーサルや危険なリンクは上限を変更しても拒否されます。
 - バックアップ対象は `storage.py` の `MEMBERS`（目標、設定、スナップショット、提案、成果物、役割ごとの現行研究状態等）です。`role-state/<role>.json` は raw record として保存し、role lock と `.new-*` 一時ファイルは含めません。Git の完全な履歴、運用者共通設定（`config.toml`）、認証情報、共有日次予算は含まれません。復元内容をレビュー後、`mizu arm` で承認します。
 - `insight-archive.sqlite3` も対象です。バックアップは静止境界で SQLite の未完了 rollback journal を復旧してから DB 本体を保存します。`retention_days` は決定済み Insight の inbox 滞在期間であり、本文・証拠の削除期限ではありません。`insight list` は live inbox のみ、ID 読み取りはアーカイブも参照します。全件列挙には `insight page --scope live|archive` を使います（前述）。
 

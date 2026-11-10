@@ -33,10 +33,10 @@ from .project import (Project, _check_project_paths, _directory_identity,
                       _discard_project_stage, _project_parents, check_project_settings, read_goal)
 from .snapshot import open_store
 
-#: Fixed archive-member read chunk; restore(max_bytes) separately limits total bytes.
+#: Fixed archive-member read chunk; restore(max_bytes, max_members) separately bound totals/work.
 RESTORE_CHUNK_BYTES = 1048576
-#: Maximum member count for untrusted restore archives; byte totals have their own cap.
-RESTORE_MEMBER_COUNT_MAX = 100000
+#: Default per-restore archive-work budget; --max-members explicitly overrides it.
+DEFAULT_RESTORE_MEMBER_COUNT = 100000
 
 #: Project members covered by backup/restore (plus backup.json on restore).
 #: operator-record-index is derived and deliberately rebuilt, not backed up.
@@ -213,13 +213,14 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
             sync_dir(destination.parent)
             if verify:
                 with tarfile.open(destination, "r:gz") as archive:
-                    members = [m.name for m in archive]
+                    member_count = sum(1 for _ in archive)
         finally:
             temporary.unlink(missing_ok=True)
     result = {"archive": str(destination), "checkpoint": checkpoint["id"],
               "note": "Contains private code and model conversations. Credentials/configuration excluded. Protect this archive."}
     if verify:
-        result["members"] = len(members)
+        result["members"] = member_count
+        result["default_restore_member_limit"] = DEFAULT_RESTORE_MEMBER_COUNT
     return result
 
 
@@ -1499,7 +1500,8 @@ def artifact_candidates(project: Project, keep: int) -> list[Path]:
     return [child for _, child in dated[:drop]]
 
 
-def restore(config, name: str, archive_path: Path, *, max_bytes: int = 1073741824) -> dict:
+def restore(config, name: str, archive_path: Path, *, max_bytes: int = 1073741824,
+            max_members: int = DEFAULT_RESTORE_MEMBER_COUNT) -> dict:
     """Restore a checkpoint into a NEW, unarmed project without extracting links.
 
     Backups carry code and evidence, not Git history, credentials, global policy,
@@ -1508,6 +1510,8 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
     identifier(name)
     if max_bytes < 1:
         raise Denied("Restore byte limit must be positive")
+    if max_members < 1:
+        raise Denied("Restore member limit must be positive")
     parent, staging, identities = _project_parents(config)
     destination = parent / name
     allowed = set(MEMBERS) | {"backup.json"}
@@ -1546,7 +1550,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
                     seen.add(member.name)
                     count += 1
                     total += member.size
-                    if count > RESTORE_MEMBER_COUNT_MAX or member.size < 0 or total > max_bytes:
+                    if count > max_members or member.size < 0 or total > max_bytes:
                         raise Denied("Backup exceeds restore limits")
                     target = stage / relative
                     if member.isdir():

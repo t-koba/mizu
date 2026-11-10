@@ -20,8 +20,14 @@ class RestoreTests(Fixture):
         self.project.set_control(paused=True)
         (self.project.workspace / 'app.py').write_text('VALUE = 7\n')
         archive = self.root / 'saved.tar.gz'
-        backup(self.project, archive)
-        result = restore(self.config, 'restored', archive)
+        verified = backup(self.project, archive, verify=True)
+        self.assertGreater(verified["members"], 0)
+        self.assertEqual(verified["default_restore_member_limit"], storage.DEFAULT_RESTORE_MEMBER_COUNT)
+        from mizu.cli import execute, parser
+        argv = ["--config", str(self.file), "restore", "restored", "--archive", str(archive)]
+        self.assertEqual(parser().parse_args(argv).max_members, storage.DEFAULT_RESTORE_MEMBER_COUNT)
+        args = parser().parse_args([*argv, "--max-members", str(verified["members"])])
+        result = execute(args)
         restored = Project(self.config, 'restored')
         self.assertFalse(result['armed'])
         self.assertTrue(restored.control()['paused'])
@@ -567,6 +573,11 @@ class RestoreTests(Fixture):
         with self.assertRaises(Denied):
             restore(self.config, 'restored', self.malicious('backup.json'), max_bytes=2)
 
+    def test_restore_rejects_nonpositive_member_budget(self):
+        with self.assertRaisesRegex(Denied, "member limit"):
+            restore(self.config, "restored", self.root / "unused.tar.gz", max_members=0)
+        self.assertFalse((self.config.data / "projects/restored").exists())
+
     def test_restore_member_count_is_bounded_independently_of_total_bytes(self):
         archive = self.root / 'many-members.tar.gz'
         with tarfile.open(archive, 'w:gz') as saved:
@@ -574,9 +585,8 @@ class RestoreTests(Fixture):
                 info = tarfile.TarInfo(name)
                 info.size = 0
                 saved.addfile(info, io.BytesIO())
-        with patch.object(storage, 'RESTORE_MEMBER_COUNT_MAX', 1):
-            with self.assertRaises(Denied):
-                restore(self.config, 'restored', archive, max_bytes=1024)
+        with self.assertRaises(Denied):
+            restore(self.config, 'restored', archive, max_bytes=1024, max_members=1)
         self.assertFalse((self.config.data / 'projects/restored').exists())
 
     def test_refuses_unexpected_top_level(self):

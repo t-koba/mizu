@@ -191,11 +191,15 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backup", help="Write a paused checkpoint archive outside the tree")
     p.add_argument("project", help="Managed project name")
     p.add_argument("destination", type=Path, help="New archive file")
-    p.add_argument("--verify", action="store_true", help="Re-list archive members after writing")
+    p.add_argument("--verify", action="store_true",
+                    help="Re-list archive members and report count versus the default restore limit")
     p = sub.add_parser("restore", help="Restore a private checkpoint into a new, unarmed project")
     p.add_argument("project", help="New project name")
     p.add_argument("--archive", type=Path, required=True, help="Backup archive")
     p.add_argument("--max-bytes", type=int, default=1073741824, help="Restore byte limit")
+    from .storage import DEFAULT_RESTORE_MEMBER_COUNT
+    p.add_argument("--max-members", type=int, default=DEFAULT_RESTORE_MEMBER_COUNT,
+                   help=f"Restore archive-member limit (default: {DEFAULT_RESTORE_MEMBER_COUNT})")
     p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
@@ -701,7 +705,8 @@ def _execute(config, args):
         return project.status()
     if args.command == "restore":
         from .storage import restore
-        return restore(config, args.project, args.archive, max_bytes=args.max_bytes)
+        return restore(config, args.project, args.archive, max_bytes=args.max_bytes,
+                       max_members=args.max_members)
     if args.command == "budget":
         # Per-project usage plus the shared day total; the name is
         # validated but the project need not exist (counts are keyed by name).
