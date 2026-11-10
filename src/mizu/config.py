@@ -733,8 +733,8 @@ class Sandbox:
     check_input_bytes: int = 8589934592
     temporary_mb: int = 256
     file_mb: int = 128
-    #: Host/runtime-dependent cleanup walls, in seconds per OCI CLI call.
-    #: Defaults preserve the 15s per-call and 30s bulk-removal limits.
+    #: Host/runtime-dependent OCI CLI walls. The per-call cleanup timeout
+    #: also bounds delegation identity reads; bulk cleanup has its own wall.
     cleanup_timeout_seconds: int = 15
     bulk_cleanup_timeout_seconds: int = 30
     #: Host/runtime-dependent wall for the checkpoint-image preflight inspect.

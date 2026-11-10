@@ -1079,12 +1079,25 @@ mocked systemctl/busctl outputs and local socket fixtures exercise address
 parsing, identity-change refusal, bounded reads, exact-unit stop and
 re-observation; manager-local job IDs remain diagnostic only. These prove parsing
 and control flow of the fence protocol, not settlement on a supported host.
-Use the existing sandbox, service-manager, lock and output bounds; the current
-`sandbox.cleanup_timeout_seconds` is documented for cleanup calls, so its scope
-must be explicitly updated before it also bounds create/start, rather than
-adding a literal timeout or an unreviewed default. Add no model grants or config
-defaults; keep synchronous delegation, runner integration and fan-out unchanged
-(the latter two remain disabled). No release path is added until bounded tests
+Use the existing sandbox, service-manager, lock and output bounds. Each current
+systemd command uses `services.systemd_verify_timeout_seconds` and
+`limits.output_bytes`; `systemd_stop_timeout_seconds` configures generated-unit
+`TimeoutStopSec`, not the systemctl client deadline. The Podman identity adapter
+uses the per-call `sandbox.cleanup_timeout_seconds` for its single `info` read;
+cleanup commands use that same timeout, while `bulk_cleanup_timeout_seconds`
+remains project-wide removal policy. Both adapters cap each command with
+`limits.output_bytes`. Document the expanded cleanup-timeout scope before using
+it for create/start; do not add a literal or unreviewed default.
+`runner_effect` runs its caller operation under `store.lock` with no outer
+timeout, so each callback must provide bounded subprocess operations;
+`process.run` bounds one child, not an aggregate callback or settlement poll.
+A future helper callback must keep a finite command sequence and bound each
+subprocess; these settings impose per-call walls, not a callback-level deadline.
+Repeated settlement polling additionally needs an explicit configured total
+deadline/cadence or an explicitly broadened existing policy; do not hard-code
+retries or add an unreviewed default. Add no model grants or config defaults;
+keep synchronous delegation, runner integration and fan-out unchanged (the
+latter two remain disabled). No release path is added until bounded tests
 cover pause-before/during create and start, crash/recovery, same-boot manager
 replacement, a pending or late start job, a post-fence start attempt,
 changed/remote Podman stores, and exact cgroup/container cleanup on a real

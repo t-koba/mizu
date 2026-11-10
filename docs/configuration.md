@@ -1249,7 +1249,7 @@ The container interior is always Linux. The runtime must support standard flags 
 | `entrypoint_args` | `[]` | Ordered runner arguments appended after the image and before the harness-managed `-c` script arguments; at most 32 nonempty argv items, each at most 4096 characters and without NUL or LF. Never shell-split or exported. Empty keeps the existing command. Example: `entrypoint = "/bin/bash"` with `entrypoint_args = ["-o", "pipefail"]` keeps `pipefail` out of child shells (unlike exported `SHELLOPTS`) |
 | `memory_mb`, `cpus`, `pids` | `2048`, `2`, `256` | Container resource limits |
 | `temporary_mb`, `file_mb` | `256`, `128` | Temporary storage size and per-file write limit (`RLIMIT_FSIZE`); `file_mb` is converted as MiB to bytes |
-| `cleanup_timeout_seconds` | `15` | Per-OCI-call deadline for leftover listing/removal, project-container listing, and post-command removal; positive TOML integer seconds |
+| `cleanup_timeout_seconds` | `15` | Per-OCI-call deadline for leftover listing/removal, project-container listing, post-command removal, and delegation Podman identity-info reads; positive TOML integer seconds |
 | `bulk_cleanup_timeout_seconds` | `30` | Per-OCI-call deadline for project-wide container removal; positive TOML integer seconds |
 | `checkpoint_inspect_timeout_seconds` | `15` | Per-OCI-call deadline for the fail-closed checkpoint-image preflight inspect; positive TOML integer seconds |
 | `selinux_label` | `true` | Linux-only `:z` volume relabeling |

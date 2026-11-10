@@ -523,26 +523,32 @@ class OperationsTests(Fixture):
                                                        "syntax-pass; native registration not_run"))
 
     def test_service_install_verification_branches(self):
-        import subprocess
         import tempfile
         import unittest.mock
         from pathlib import Path
         from mizu.errors import Denied
+        from mizu.process import Result
         from mizu.services import install
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
-            run = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            passed = Result(0, "", "", "exited", 0.01)
             services = dataclasses.replace(self.config.services, systemd_verify_timeout_seconds=7)
             config = dataclasses.replace(self.config, services=services)
             with unittest.mock.patch("mizu.services.shutil.which", return_value="/usr/bin/systemd-analyze"), \
-                 unittest.mock.patch("mizu.services.subprocess.run", return_value=run) as runner:
+                 unittest.mock.patch("mizu.services.process.run", return_value=passed) as runner:
                 result = install(config, self.project, ROOT / "bin/mizu", directory, system="linux")
                 self.assertEqual(result["verification"], "pass")
                 self.assertEqual(runner.call_args.kwargs["timeout"], 7)
-            failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="bad unit")
+                self.assertEqual(runner.call_args.kwargs["maximum"], self.config.limits.output_bytes)
+            failed = Result(1, "", "bad unit", "exited", 0.01)
             with unittest.mock.patch("mizu.services.shutil.which", return_value="/usr/bin/systemd-analyze"), \
-                 unittest.mock.patch("mizu.services.subprocess.run", return_value=failed):
+                 unittest.mock.patch("mizu.services.process.run", return_value=failed):
                 with self.assertRaises(Denied):
+                    install(self.config, self.project, ROOT / "bin/mizu", directory, system="linux")
+            limited = Result(None, "partial", "", "output_limit", 0.01)
+            with unittest.mock.patch("mizu.services.shutil.which", return_value="/usr/bin/systemd-analyze"), \
+                 unittest.mock.patch("mizu.services.process.run", return_value=limited):
+                with self.assertRaisesRegex(Denied, "output_limit"):
                     install(self.config, self.project, ROOT / "bin/mizu", directory, system="linux")
 
     def test_promote_mode_change_needs_explicit_path(self):

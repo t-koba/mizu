@@ -91,11 +91,12 @@ character-count and maximum suffixes match the read-page and script-input names,
 so they are ordinary declarations; `EXTRA_CANDIDATES` holds the probe
 header-pair count, model-catalog provider-command output ceiling, and runtime
 wrap-up allowance defaults, whose names fall outside the pattern.
-MCP and persistent-exec cleanup walls use `[sandbox].cleanup_timeout_seconds`;
-project-wide cleanup uses `[sandbox].bulk_cleanup_timeout_seconds`.
+MCP/persistent-exec cleanup and delegation Podman identity-info reads use
+`[sandbox].cleanup_timeout_seconds`; project-wide cleanup uses
+`[sandbox].bulk_cleanup_timeout_seconds`.
 Checkpoint-image inspection uses `[sandbox].checkpoint_inspect_timeout_seconds`;
-Systemd-analyze verification uses `[services].systemd_verify_timeout_seconds`.
-Their output reads are safety.
+systemd-analyze verification uses `[services].systemd_verify_timeout_seconds`
+and captures at most `[limits].output_bytes` per command.
 The `delegation_jobs.py` byte ceilings are private format/safety limits for the
 not-yet-wired single-child runner pilot. Its 1024-job history cap is shared
 project-state capacity policy: exhaustion refuses new starts rather than
@@ -4106,7 +4107,7 @@ def no_defaults(limit, /, count, *, size):
         expected = {
             'cleanup_timeout_seconds': (
                 '15', 'configured policy',
-                'sandbox / OCI listing, exact-name, post-command and MCP-container cleanup deadline'),
+                'sandbox / per-OCI-call deadline for cleanup and delegation identity-info reads'),
             'bulk_cleanup_timeout_seconds': (
                 '30', 'configured policy',
                 'sandbox / per-OCI-call project-wide removal deadline'),

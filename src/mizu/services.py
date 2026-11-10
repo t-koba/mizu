@@ -40,7 +40,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape as _escape
 
-from . import platform as _platform
+from . import platform as _platform, process
 from .config import (
     Config,
     role_event_poll_seconds,
@@ -487,13 +487,16 @@ def install(config: Config, project: Project, executable: Path, destination: Pat
                 analyzer = shutil.which("systemd-analyze")
                 if analyzer:
                     try:
-                        result = subprocess.run([analyzer, "verify", *(str(stage / u) for u in sorted(units))],
-                                                capture_output=True, text=True,
-                                                timeout=config.services.systemd_verify_timeout_seconds,
-                                                stdin=subprocess.DEVNULL)
+                        result = process.run(
+                            [analyzer, "verify", *(str(stage / u) for u in sorted(units))],
+                            timeout=config.services.systemd_verify_timeout_seconds,
+                            maximum=config.limits.output_bytes)
                     except (OSError, subprocess.SubprocessError) as exc:
                         raise Denied(f"Unit verification could not run: {exc}") from exc
-                    if result.returncode:
+                    if (result.reason != "exited" or type(result.exit_code) is not int
+                            or result.survivors):
+                        raise Denied(f"Unit verification did not complete: {result.reason}")
+                    if result.exit_code:
                         raise Denied("Generated units failed verification: " + result.stderr[-2000:])
                     verification = "pass"
             else:
