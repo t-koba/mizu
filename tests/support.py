@@ -70,6 +70,32 @@ def bind_delegation_fixture(store):
     return {'binding': binding, 'scope_clean': True, 'containers_absent': []}
 
 
+def seed_terminal_delegation_fixture(store, job_id, token, result):
+    """Seed terminal ledger state, NOT a supported handback or cleanup proof.
+
+    Only tests use this to exercise terminal reads, retention and access gates;
+    production runner_quiescent and runner_prepared_quiescent must refuse even
+    fabricated positive evidence. For a fenced prepared recovery (recovering
+    intent, cancel-requested, no execution) the TEST seed records a failed
+    outcome; for post-execution it retains the reported execution outcome.
+    The TEST seed is explicit test-only state, never product handback evidence.
+    """
+    from mizu.delegation_jobs import MAX_RESULT_BYTES, _text
+    _text(result, MAX_RESULT_BYTES)
+    with store._locked():
+        state = store._load()
+        job = store._runner(state, job_id, token)
+        if job['execution'] is None:
+            intent = job['intent']
+            assert intent is not None and intent['recovering'] and intent['id'] is not None
+            assert not intent['claimed'] and job['status'] == 'cancel-requested'
+            outcome = 'failed'
+        else:
+            outcome = job['execution']
+        store._terminal(state, job, result, outcome)
+        store._save(state)
+
+
 def bind_delivery(project, item_id, snapshot_id, *, expected_rev=1):
     """Record the two explicit lifecycle revisions needed by completion fixtures."""
     store = project.work_items

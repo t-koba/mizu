@@ -2,7 +2,7 @@
 
 Covers stable run identities and supervisor-only execution bindings: durable
 retry/reconstruction, owner-view hiding, tombstone retention, exact directory
-identity, complete cleanup proofs, and fail-closed invalid/older state."""
+identity, refusal of caller cleanup assertions, and fail-closed invalid/older state."""
 import concurrent.futures
 import copy
 import os
@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from support import seed_terminal_delegation_fixture
 from mizu import delegation_jobs as jobs
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical, digest, loads_finite
@@ -44,7 +45,7 @@ class DelegationJobTests(unittest.TestCase):
                 'containers_absent': [c['id'] for c in binding['containers']]}
 
     def assert_tombstone(self, tombstone):
-        # Cleanup proves the binding is no longer referenced; retain only the
+        # Seeded terminal state no longer references the binding; retain only the
         # bounded idempotency and execution-outcome tombstone.
         self.assertIsNone(tombstone['binding'])
         self.assertIsNone(tombstone['intent'])
@@ -58,7 +59,7 @@ class DelegationJobTests(unittest.TestCase):
         job_id, token = self.runner()
         self.store.runner_started(job_id, token, authority_digest='b' * 64)
         self.store.runner_finished(job_id, token, 'succeeded')
-        self.store.runner_quiescent(job_id, token, text, cleanup=self.cleanup())
+        seed_terminal_delegation_fixture(self.store, job_id, token, text)
 
     def test_exact_and_conflicting_replay_across_all_transitions(self):
         job_id = self.start()
@@ -72,14 +73,14 @@ class DelegationJobTests(unittest.TestCase):
                 elif transition == 'finished':
                     self.store.runner_finished(*self.runner(), 'cancelled')
                 elif transition == 'terminal':
-                    self.store.runner_quiescent(*self.runner(), 'Stopped and cleaned', cleanup=self.cleanup())
+                    seed_terminal_delegation_fixture(self.store, *self.runner(), 'Seeded terminal state')
                 self.assertEqual(self.start(), job_id)
                 for field, value in [('role', 'other'), ('task', 'Different task'),
                                      ('profile', 'fast'), ('source_snapshot', 'b' * 64),
                                      ('authority_digest', 'c' * 64)]:
                     with self.subTest(field=field), self.assertRaises(Denied):
                         self.store.start('worker', 'first', {**self.request, field: value})
-        self.assertEqual(self.store.result('worker', job_id)['result'], 'Stopped and cleaned')
+        self.assertEqual(self.store.result('worker', job_id)['result'], 'Seeded terminal state')
         self.assertIsNone(self.store.reservation())
         self.assertNotIn('token', self.store.status('worker', job_id))
         self.assertNotIn('request', self.store.start('worker', 'first', self.request))
@@ -120,7 +121,7 @@ class DelegationJobTests(unittest.TestCase):
             jobs.DelegationJobs.guard(self.root)
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_legacy_bound_record_is_preserved_recoverable_but_cannot_launch(self):
+    def test_legacy_bound_record_stays_held_and_cannot_launch(self):
         self.start()
         credentials = self.runner()
         cleanup = self.cleanup()
@@ -149,9 +150,9 @@ class DelegationJobTests(unittest.TestCase):
             store.start('worker', 'first', self.request)
         store.cancel('worker', credentials[0])
         store.runner_finished(*credentials, 'cancelled')
-        store.runner_quiescent(*credentials, 'Legacy resources independently cleaned', cleanup=cleanup)
-        self.assertIsNone(store.reservation())
-        self.assertEqual(store.start('worker', 'first', legacy_request)['status'], 'terminal')
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            store.runner_quiescent(*credentials, 'Claimed cleanup', cleanup=cleanup)
+        self.assertIsNotNone(store.reservation())
 
     def test_one_active_job_for_entire_project_and_independent_owner_keys(self):
         first = self.start()
@@ -193,9 +194,11 @@ class DelegationJobTests(unittest.TestCase):
         self.assertEqual(self.runner(), binding)
         with self.assertRaises(Denied):
             self.start('second')
-        self.store.runner_quiescent(*binding, 'No child launched; teardown verified', cleanup=self.cleanup())
-        self.assertFalse(self.store.status('worker', job_id)['reserved'])
-        self.start('second')
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_quiescent(*binding, 'No child launched; claimed cleanup', cleanup=self.cleanup())
+        self.assertTrue(self.store.status('worker', job_id)['reserved'])
+        with self.assertRaises(Denied):
+            self.start('second')
 
     def test_runner_failure_requires_explicit_quiescence_and_cannot_replay(self):
         job_id = self.start()
@@ -225,13 +228,13 @@ class DelegationJobTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.result('worker', job_id)
         self.assertTrue(self.store.status('worker', job_id)['reserved'])
-        self.store.runner_quiescent(*binding, 'Dead runner reconciled; no live descendants', cleanup=self.cleanup())
-        self.assertIsNone(self.store.reservation())
-        # A lost completion acknowledgement is resolved by inspection, not replay.
-        self.assertEqual(self.store.result('worker', job_id)['execution'], 'failed')
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_quiescent(*binding, 'Claimed cleanup', cleanup=self.cleanup())
+        self.assertIsNotNone(self.store.reservation())
         with self.assertRaises(Denied):
-            self.store.runner_started(*binding, authority_digest='b' * 64)
-        self.start('second')  # the next run becomes eligible only after proof commits
+            self.store.result('worker', job_id)
+        with self.assertRaises(Denied):
+            self.start('second')
 
     def test_runner_binding_checks_and_queued_failure(self):
         self.start()
@@ -252,7 +255,9 @@ class DelegationJobTests(unittest.TestCase):
         self.assertEqual(before, self.path.read_bytes())
         self.store.runner_finished(job_id, token, 'failed')
         self.assertIsNotNone(self.store.reservation())
-        self.store.runner_quiescent(job_id, token, 'Launch failed; teardown verified', cleanup=self.cleanup())
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_quiescent(job_id, token, 'Launch failed; teardown verified', cleanup=self.cleanup())
+        self.assertIsNotNone(self.store.reservation())
 
     def test_result_bound_and_eviction_leave_idempotency_tombstones(self):
         first = self.start()
@@ -263,7 +268,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_quiescent(*binding, 'é' * (jobs.MAX_RESULT_BYTES // 2 + 1), cleanup=self.cleanup())
         self.assertIsNotNone(self.store.reservation())
         result = 'é' * (jobs.MAX_RESULT_BYTES // 2)
-        self.store.runner_quiescent(*binding, result, cleanup=self.cleanup())
+        seed_terminal_delegation_fixture(self.store, *binding, result)
         self.assertEqual(self.store.result('worker', first)['result'], result)
         second = self.start('second')
         self.complete('Second result')
@@ -456,7 +461,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store = jobs.DelegationJobs(self.root)
             self.assertEqual(self.store.reservation()['run_id'], run_id)
             self.assertEqual(self.store.reservation()['id'], job_id)
-        self.store.runner_quiescent(*self.runner(), 'evidence', cleanup=self.cleanup())
+        seed_terminal_delegation_fixture(self.store, *self.runner(), 'evidence')
         # Tombstone retains the identity for audit after reconstruction.
         self.store = jobs.DelegationJobs(self.root)
         state = loads_finite(self.path.read_bytes())
@@ -584,7 +589,7 @@ class DelegationJobTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.runner_started(*credentials, authority_digest='b' * 64)
 
-    def test_cancel_before_binding_can_reconcile_no_launch_without_replay(self):
+    def test_cancel_before_binding_cannot_infer_safe_handback(self):
         job_id = self.start()
         reservation = self.store.reservation()
         credentials = reservation['id'], reservation['token']
@@ -597,10 +602,9 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_started(*credentials, authority_digest='b' * 64)
         self.store.runner_finished(*credentials, 'cancelled')
         cleanup = {'binding': binding, 'scope_clean': True, 'containers_absent': []}
-        self.store.runner_quiescent(*credentials, 'Cancelled before launch; no OCI resources',
-                                    cleanup=cleanup)
-        self.assertIsNone(self.store.reservation())
-        self.assertEqual(self.store.status('worker', job_id)['status'], 'terminal')
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_quiescent(*credentials, 'Claimed no launch', cleanup=cleanup)
+        self.assertIsNotNone(self.store.reservation())
 
     def test_missing_binding_and_incomplete_or_mismatched_proofs_keep_reservation(self):
         self.start()
@@ -620,7 +624,7 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_quiescent(*credentials, 'Not terminal', cleanup=self.cleanup())
         self.store.runner_finished(*credentials, 'failed')
         proof = self.cleanup()
-        variants = [None, {}, {**proof, 'scope_clean': 1}, {**proof, 'scope_clean': None},
+        variants = [proof, None, {}, {**proof, 'scope_clean': 1}, {**proof, 'scope_clean': None},
                     {**proof, 'containers_absent': ['c' * 64]},
                     {**proof, 'containers_absent': ['c' * 64, 'c' * 64]},
                     {**proof, 'extra': True}]
@@ -636,8 +640,7 @@ class DelegationJobTests(unittest.TestCase):
                 self.store.runner_quiescent(*credentials, 'Evidence', cleanup=evidence)
             self.assertEqual(self.path.read_bytes(), before)
             self.assertIsNotNone(jobs.DelegationJobs.existing_reservation(self.root))
-        self.store.runner_quiescent(*credentials, 'Both scopes independently clean', cleanup=proof)
-        self.assertIsNone(self.store.reservation())
+        seed_terminal_delegation_fixture(self.store, *credentials, 'Seed next fixture')
         # Terminal execution without a binding is still held, even if a
         # supervisor supplies an apparently positive but unrelated proof.
         self.start('unbound')
@@ -670,7 +673,9 @@ class DelegationJobTests(unittest.TestCase):
         self.assertIsNotNone(self.store.reservation())
         directory.rmdir()
         moved.rename(directory)
-        self.store.runner_quiescent(*credentials, 'Restored exact directory', cleanup=proof)
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_quiescent(*credentials, 'Restored exact directory', cleanup=proof)
+        self.assertIsNotNone(self.store.reservation())
 
     def test_malformed_ambiguous_oversized_bindings_and_corruption_fail_closed(self):
         self.start()
@@ -823,10 +828,20 @@ class DelegationJobTests(unittest.TestCase):
                 self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup=wrong)
         with self.assertRaises(Denied):
             self.store.runner_recover_prepared(*credentials, container_id='e' * 64)
-        self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup=proof)
-        self.assertIsNone(self.store.reservation())
-        self.assert_tombstone(loads_finite(self.path.read_bytes())['jobs'][credentials[0]])
-        self.assertEqual(self.start(), credentials[0])
+        # Even exact fabricated cleanup assertions cannot authorize product handback.
+        before = self.path.read_bytes()
+        saved_reservation = self.store.reservation()
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_prepared_quiescent(*credentials, 'clean', cleanup=proof)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.store.reservation(), saved_reservation)
+        self.assertIsNotNone(self.store.reservation())
+        # The durable fence remains: bind/claim/finish still refuse without clearing.
+        for operation in (bind, lambda: self.store.runner_started(*credentials, authority_digest='b' * 64),
+                          lambda: self.store.runner_finished(*credentials, 'failed')):
+            with self.assertRaises(Denied):
+                operation()
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_intent_accepts_any_bounded_safe_name_but_pins_marker(self):
         # Names are persisted in the intent, not reconstructed during recovery;
@@ -913,8 +928,9 @@ class DelegationJobTests(unittest.TestCase):
             self.store.runner_recover_prepared(*credentials)
         self.assertIsNotNone(self.store.reservation())
         self.store.runner_finished(*credentials, 'cancelled')
-        self.store.runner_quiescent(*credentials, 'normal bound teardown', cleanup=self.cleanup())
-        self.assert_tombstone(loads_finite(self.path.read_bytes())['jobs'][credentials[0]])
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            self.store.runner_quiescent(*credentials, 'Claimed teardown', cleanup=self.cleanup())
+        self.assertIsNotNone(self.store.reservation())
 
 
 if __name__ == '__main__':

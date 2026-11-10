@@ -8,7 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from support import Fixture, bind_delegation_fixture
+from support import Fixture, bind_delegation_fixture, seed_terminal_delegation_fixture
 from mizu import runtime, storage, workspace_cache
 from mizu.config import WorkspaceCache
 from mizu.delegation_jobs import DelegationJobs
@@ -31,8 +31,7 @@ class ReservationGateTests(Fixture):
         reservation = store.reservation()
         binding = reservation['id'], reservation['token']
         store.runner_finished(*binding, 'cancelled')
-        store.runner_quiescent(*binding, 'Test state only; no child launched',
-                               cleanup=bind_delegation_fixture(store))
+        seed_terminal_delegation_fixture(store, *binding, 'Test state only; no child launched')
 
     def admit(self):
         with contextlib.ExitStack() as stack:

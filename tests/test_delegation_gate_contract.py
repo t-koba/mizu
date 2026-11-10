@@ -4,7 +4,7 @@ import json
 import tomllib
 from unittest.mock import Mock, patch
 
-from support import Fixture, bind_delegation_fixture
+from support import Fixture, bind_delegation_fixture, seed_terminal_delegation_fixture
 from mizu import delegation_gates, delegation_jobs
 from mizu.errors import Denied
 from mizu.runtime import Context, Engine
@@ -330,7 +330,7 @@ class DelegationGateContractTests(Fixture):
         with self.assertRaises(Denied):
             ctx.handle("diff", {"reservation_view": self.view})
 
-    def test_job_store_view_keeps_gate_until_proven_quiescence(self):
+    def test_job_store_view_keeps_gate_until_terminal_state(self):
         store = delegation_jobs.DelegationJobs(self.project.root)
         request = {"role": "helper", "task": "test reservation gating", "profile": "fixture", "authority_digest": "b" * 64,
                    "source_snapshot": self.ctx.snapshot["id"]}
@@ -346,7 +346,10 @@ class DelegationGateContractTests(Fixture):
             self.assertIn(self.ctx._reservation_view["status"], MATRIX["reserved_statuses"])
             self.assertIsInstance(self.ctx.handle("work_items_read", {}), dict)
             self.assert_refused_without_effects("exec", {})
-        store.runner_quiescent(job_id, token, "Fixture proof only", cleanup=cleanup)
+        with self.assertRaisesRegex(Denied, 'handback unsupported'):
+            store.runner_quiescent(job_id, token, "Fabricated proof", cleanup=cleanup)
+        self.assertIsNotNone(store.reservation())
+        seed_terminal_delegation_fixture(store, job_id, token, "Seed terminal gate fixture")
         self.ctx._reservation_view = store.reservation()
         self.assertIsNone(self.ctx._reservation_view)
         self.assertIsInstance(self.ctx.handle("files", {}), dict)

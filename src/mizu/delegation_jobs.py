@@ -24,8 +24,8 @@ creation; the marker must equal run_id while the name is any bounded safe name,
 and only the persisted intent is recovery authority. Intent
 and binding share the 8 KiB inventory allowance and clear at terminal handback.
 Recovery fences bind/claim/finish before inspection and persists a validated ID
-before removal. Independent unstarted-scope and name/ID/marker absence proofs
-are required. A durable claim bit survives cancellation: uncertain binds can be
+before removal in the test-only fixture. Even independent unstarted-scope and
+name/ID/marker absence observations never authorize product handback. A durable claim bit survives cancellation: uncertain binds can be
 recovered, but claimed runners never take this prelaunch path. Neither record
 is launch authority. Older ledger versions are refused, never migrated or reset.
 V4 requests are {role, task, profile, source_snapshot}, optionally extended with
@@ -61,11 +61,16 @@ new directory exists without a ledger. Never delete state to recover a job.
 
 queued -> running (one successful runner claim only), queued/running ->
 cancel-requested, and any nonterminal state -> terminal only after two reports:
-terminal child execution, THEN quiescent driver/bridge/process teardown. Even a
+terminal child execution, THEN Mizu-proven driver/bridge/process teardown.
+Post-execution handback is currently refused: no integrated lifecycle owner
+enforces a durable launch fence and verifies supervisor settlement. Caller
+cleanup assertions cannot release the reservation. Even a
 queued cancellation or failed/dead runner retains the reservation until the
-supervisor proves no child can still access the tree. The synthetic prepared
-path instead seals a failed outcome atomically after fencing all claims and
-proving the scope unstarted and the intended container absent. Cancellation is
+supervisor proves no child can still access the tree. The prepared path also
+refuses handback: no product-owned process/container verifier or runner
+integration exists, so caller scope/container assertions cannot authorize
+handback either. `runner_recover_prepared` still durably fences bind/claim/finish
+before inspection. Cancellation is
 a durable request, not a kill acknowledgement. Recovery is inspection only: running jobs
 are NEVER requeued, claimed twice, or automatically replayed. A supervisor must
 reconcile uncertain execution and prove quiescence before handback. Result
@@ -639,11 +644,16 @@ class DelegationJobs:
             return intent
 
     def runner_prepared_quiescent(self, job_id, token, result, *, cleanup):
-        """Seal only fenced, never-claimed provisioning after independent proof.
+        """Refuse handback until Mizu owns fencing and supervisor settlement.
 
-        The supervisor proves scope never started and name, exact saved ID and
-        marker all absent in the pinned UID's namespace. This is synthetic
-        fixture evidence, not production execution/driver quiescence.
+        Caller-provided cleanup dictionaries are not OS/lifecycle proof, even
+        with the exact persisted recovering intent, saved container ID and
+        positive scope/container booleans. Validate the active token, exact
+        persisted recovering intent, container ID and directory identity, but
+        never clear the reservation on these assertions. No substrate is
+        currently supported. An interrupted/retried call leaves the same
+        durable reservation held. `runner_recover_prepared` remains the durable
+        fence against bind/claim/finish.
         """
         _text(result, MAX_RESULT_BYTES)
         with self._locked():
@@ -660,8 +670,7 @@ class DelegationJobs:
                     or cleanup['container_absent'] != intent['id']
                     or cleanup['scope_unstarted'] is not True):
                 raise Denied('Delegation provisioning cleanup proof missing or mismatched')
-            self._terminal(state, job, result, 'failed')
-            self._save(state)
+            raise Denied('Delegation handback unsupported: no Mizu-owned launch fence and supervisor settlement')
 
     def runner_bind(self, job_id, token, run_directory, scope, containers, *, authority_digest=None):
         """Persist exact execution identities before launch; never launch or discover.
@@ -758,24 +767,13 @@ class DelegationJobs:
             self._save(state)
 
     def runner_quiescent(self, job_id, token, result, *, cleanup=None):
-        """Seal bounded evidence and hand back tree ONLY after proven teardown.
+        """Refuse handback until Mizu owns fencing and supervisor settlement.
 
-        The trusted supervisor supplies independent positive teardown evidence:
-        cleanup is exactly {binding: the saved binding, scope_clean: True,
-        containers_absent: [every saved container ID in inventory order]}.
-        scope_clean covers child, driver, bridge and ALL descendants. The
-        supervisor must inspect each exact OCI name AND ID in the local default
-        rootless-Podman namespace for the saved uid. A different runtime/store,
-        renamed/mismatched or unobservable resource is unknown, never absent;
-        the supervisor must not query a substitute namespace. This module
-        checks evidence identity, not the OS.
-        Directory identity is independently rechecked here. Missing binding or
-        any unknown proof retains the reservation, including a queued failure.
-        No PID/timeout/owner cancellation implies quiescence.
-        An uncertain acknowledgement is resolved by owner status/result, not by
-        rerunning the child. Oversized evidence refuses handback; submit a bounded
-        summary after teardown instead. Old retained result text is evicted in
-        this same commit, but identity/outcome/digest tombstones are never removed.
+        Caller-provided cleanup dictionaries are not OS/lifecycle proof, even
+        with the exact saved binding and every container ID. Validate the active
+        token, terminal execution and directory identity, but never clear the
+        reservation on these assertions. No substrate is currently supported.
+        An interrupted/retried call leaves the same durable reservation held.
         """
         _text(result, MAX_RESULT_BYTES)
         with self._locked():
@@ -783,15 +781,8 @@ class DelegationJobs:
             job = self._runner(state, job_id, token)
             if job['execution'] is None:
                 raise Denied('Delegation execution is not terminal')
-            binding = _bound(job)
-            if (type(cleanup) is not dict
-                    or set(cleanup) != {'binding', 'scope_clean', 'containers_absent'}
-                    or canonical(cleanup['binding']) != canonical(binding)
-                    or cleanup['scope_clean'] is not True
-                    or cleanup['containers_absent'] != [c['id'] for c in binding['containers']]):
-                raise Denied('Delegation cleanup proof missing or mismatched')
-            self._terminal(state, job, result, job['execution'])
-            self._save(state)
+            _bound(job)
+            raise Denied('Delegation handback unsupported: no Mizu-owned launch fence and supervisor settlement')
 
     @staticmethod
     def _terminal(state, job, result, outcome):
