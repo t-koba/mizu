@@ -1002,9 +1002,26 @@ cancel-requested, execution outcome, recovery, stale authority/intent/directory
 or out-of-order/unclaimed/mismatched admission. Exceptions, process death, or
 an invalid/uncommitted result leave the durable issued marker. The callable is
 external work, not a cleanup callback, settlement assertion or release proof.
-This primitive is not a concrete runtime launcher: its future internal helper
-must use the pinned intent and configured command bounds and must not leave
-background submitters. It is not available to models or Engine runners.
+This primitive is not a concrete runtime launcher. There is no production
+helper caller or trusted launch-request builder: `_reserve_delegation` is only
+a private reservation hook and `Engine.delegate` remains synchronous. The
+persisted `container.config` is bounded JSON, not a typed launch authority;
+`CreateCommand` and similar fields must not be executed as supplied. Adding a
+helper around them would turn fixture-shaped state into arbitrary execution.
+
+If a fixed helper is implemented later, its identity inputs are limited to
+the configured project, job ID and run ID; it receives no secret token,
+command argv, unit name or caller-controlled environment. It derives the
+exact run-specific unit, validates the current reservation and intent identity
+from the protected store, and rechecks current authority and request identity.
+A trusted Mizu-owned request builder must convert that intent into a typed
+create/start specification. The helper issues one bounded operation through
+`runner_effect`, persists the exact result, and leaves ambiguous issued work
+non-retryable. The helper must remain in its exact user unit/cgroup, with no
+background submitter outliving it. None of this helper contract is implemented
+or exposed to models or Engine runners; until the trusted request builder and
+supported-host lifecycle proof exist, no effectful helper or handback is
+permitted.
 
 `cancel-requested` is the existing durable fence: owner cancellation and
 prepared recovery serialize with admission on `store.lock`.
