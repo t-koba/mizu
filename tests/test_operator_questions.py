@@ -8,7 +8,7 @@ from support import Fixture
 from mizu import fs, host_records, operator_records as records
 from mizu.cli import execute, parser
 from mizu.config import load
-from mizu.errors import ConfigError, Denied
+from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import ATOMIC_WRITE_TEMP_PREFIX, canonical
 from mizu.project import Project
 from mizu.shared_records import SharedRecords
@@ -57,11 +57,12 @@ class OperatorQuestionTests(Fixture):
         question = self.question()
         subject = self.subject(question)
         page = self.cli('record-questions', 'sample', '--limit', '1', '--scan-limit', '10')
-        self.assertEqual(page, dict(questions=[dict(subject=subject, **question)], scanned=1, truncated=False))
+        self.assertEqual(page, dict(questions=[dict(subject=subject, closed=False, **question)], scanned=1, truncated=False))
         argv = ['record', 'sample', 'publish', '--id', 'answer1', '--kind', 'answer',
                 '--body', 'Use option A', '--subject-kind', subject['kind'],
                 '--subject-id', subject['id'], '--subject-digest', subject['digest']]
         answer = self.cli(*argv)
+        self.assertTrue(records.questions(self.project, limit=20, scan_limit=1000)['questions'][0]['closed'])
         self.assertEqual(answer['record']['payload']['addressee'], 'worker')
         self.assertEqual(answer['record']['subject'], subject)
         with patch('mizu.shared_records.atomic_write') as write:
@@ -82,9 +83,107 @@ class OperatorQuestionTests(Fixture):
         self.assertEqual(records.pending(self.project, self.config.roles['worker'])[0]['pending_count'], 1)
         records.acknowledge(context, [manifest[0].ack_token])
         self.assertEqual(records.pending(self.project, self.config.roles['worker'])[0]['pending_count'], 0)
-        # Answering/acknowledging never closes, supersedes or acknowledges the question.
-        self.assertEqual(records.questions(self.project, limit=20, scan_limit=1000)['questions'][0]['subject'], subject)
+        # The answer closes the question, independently of its explicit receipt.
+        row = records.questions(self.project, limit=20, scan_limit=1000)['questions'][0]
+        self.assertEqual(row['subject'], subject)
+        self.assertTrue(row['closed'])
         self.assertFalse(self.shared().received('worker', subject['id'], subject['digest']))
+
+    def test_closure_is_exact_and_distinct_answers_remain_immutable_messages(self):
+        first = self.question()
+        second = self.question(id='question2')
+        self.config.record_kinds['other.question'] = dict(self.config.record_kinds['role.question'])
+        third = self.question(kind='other.question')
+        self.context().handle('record_read', {'kind': 'role.question', 'id': 'question1'})
+        subjects = [self.subject(row) for row in (first, second, third)]
+
+        def closed():
+            return {row['subject']['id']: row['closed'] for row in
+                    records.questions(self.project, limit=20, scan_limit=1000)['questions']}
+
+        self.assertFalse(any(closed().values()), 'reading a question does not close it')
+        legacy = self.project.insights.submit(source='worker', title='Legacy question',
+            body='Q: Which?', base_snapshot=None, kind='question', addressee='operator')
+        records.write(self.project, event_id='legacy', kind='answer', body='Legacy answer',
+                      subject=dict(type='insight', id=legacy['id'], rev=1))
+        records.write(self.project, event_id='notice', kind='operator.notice', body='Answer in prose',
+                      addressee='worker')
+        self.assertFalse(any(closed().values()))
+        first_answer = self.answer(subjects[0])
+        self.assertEqual(closed(), {subjects[0]['id']: True, subjects[1]['id']: False,
+                                    subjects[2]['id']: False})
+        # Same event is idempotent; a different event is another immutable
+        # message, not ambiguous closure evidence or a reopening operation.
+        self.assertEqual(self.answer(subjects[0]), first_answer)
+        second_answer = records.write(self.project, event_id='answer2', kind='answer',
+                                      body='Further detail', subject=subjects[0])
+        self.assertTrue(closed()[subjects[0]['id']])
+        page, _ = records.pending(self.project, self.config.roles['worker'])
+        self.assertEqual(page['pending_count'], 4)
+        self.assertEqual(records.store(self.project).get(first_answer['record']['id'])[0], first_answer['record'])
+        self.assertEqual(records.store(self.project).get(second_answer['record']['id'])[0], second_answer['record'])
+        self.assertFalse(self.shared().received('worker', subjects[0]['id'], subjects[0]['digest']))
+        # Disabling future answers does not erase an existing explicit closure.
+        self.config.operator_records['answer']['enabled'] = False
+        self.assertTrue(closed()[subjects[0]['id']])
+
+    def test_stale_or_wrong_subject_never_closes_and_invalid_evidence_refuses(self):
+        subject = self.subject(self.question())
+        shared = records.store(self.project)
+        # Trusted low-level fixtures model stale/misrouted historical evidence;
+        # the public write route already refuses these subjects.
+        template = self.answer(subject)['record']
+        path = shared.root / shared._record_name(template['id'])
+        ref = shared.root / 'operator-record-index' / path.name
+        path.unlink()
+        ref.unlink()
+        for change in ({'kind': 'other.question'}, {'id': subject['id'] + '/other'},
+                       {'digest': '0' * 64}):
+            envelope = copy.deepcopy(template)
+            envelope['subject'].update(change)
+            shared.put(envelope, writer=records.WRITER)
+            row = records.questions(self.project, limit=20, scan_limit=1000)['questions'][0]
+            self.assertFalse(row['closed'])
+            self.assertFalse(ref.exists(), 'closure projection must not repair metadata')
+            path.unlink()
+        # Exact subject with the wrong recipient is not authenticated closure.
+        envelope = copy.deepcopy(template)
+        envelope['payload']['addressee'] = 'reviewer'
+        shared.put(envelope, writer=records.WRITER)
+        with self.assertRaises(Denied):
+            records.questions(self.project, limit=20, scan_limit=1000)
+        path.unlink()
+        self.answer(subject)
+        ref.unlink()
+        self.assertTrue(records.questions(self.project, limit=20, scan_limit=1000)['questions'][0]['closed'])
+        self.assertFalse(ref.exists(), 'even a matching answer must not repair metadata')
+        self.answer(subject)  # Exact write retries still repair their own ref.
+        ref.write_bytes(b'{}')
+        with self.assertRaises(Denied):
+            records.questions(self.project, limit=20, scan_limit=1000)
+        path.unlink()
+        with self.assertRaises(Denied):
+            records.questions(self.project, limit=20, scan_limit=1000)
+
+    def test_closure_catalog_budget_bounds_all_directory_enumeration(self):
+        subject = self.subject(self.question())
+        self.answer(subject)
+        shared = records.store(self.project)
+        with patch.object(shared, '_read', wraps=shared._read) as read, \
+                patch('mizu.operator_records.store', return_value=shared), \
+                patch.object(Path, 'iterdir', side_effect=AssertionError('must use bounded enumeration')):
+            with self.assertRaises(LimitExceeded):
+                records.questions(self.project, limit=20, scan_limit=1)
+            self.assertEqual(read.call_count, 0, 'exhausted enumeration must not read an unbounded catalog')
+        self.assertTrue(records.questions(self.project, limit=20, scan_limit=10)['questions'][0]['closed'])
+        # Even unpublished index scratch consumes budget; it cannot turn this
+        # projection into an unbounded scan hidden behind a small question page.
+        index = shared.root / 'operator-record-index'
+        for suffix in ('abcdefgh', 'abcdefgi', 'abcdefgj'):
+            (index / f'.new-{suffix}').write_bytes(b'unpublished')
+        with self.assertRaises(LimitExceeded):
+            records.questions(self.project, limit=20, scan_limit=5)
+        self.assertTrue(records.questions(self.project, limit=20, scan_limit=10)['questions'][0]['closed'])
 
     def test_bounded_listing_and_disabled_route_performs_no_scan(self):
         for index in range(4):
@@ -95,7 +194,8 @@ class OperatorQuestionTests(Fixture):
             page = records.questions(self.project, limit=1, scan_limit=2)
         self.assertEqual((len(page['questions']), page['scanned'], page['truncated']), (1, 2, True))
         self.assertEqual(read.call_count, 2)
-        self.assertEqual(records.questions(self.project, limit=10, scan_limit=1)['scanned'], 1)
+        with self.assertRaises(LimitExceeded):
+            records.questions(self.project, limit=10, scan_limit=1)
         full = records.questions(self.project, limit=10, scan_limit=10)
         self.assertEqual((len(full['questions']), full['truncated']), (4, False))
         self.assertEqual(full, records.questions(self.project, limit=10, scan_limit=10))
@@ -142,7 +242,7 @@ class OperatorQuestionTests(Fixture):
 
         self.assertEqual(observed, [{'questions': [], 'scanned': 0, 'truncated': True}])
         self.assertEqual(records.questions(self.project, limit=20, scan_limit=10), {
-            'questions': [dict(subject=self.subject(question), **question)],
+            'questions': [dict(subject=self.subject(question), closed=False, **question)],
             'scanned': 1, 'truncated': False})
 
     def test_listing_skips_orphan_atomic_stages_and_counts_them_in_scan_budget(self):
@@ -155,11 +255,11 @@ class OperatorQuestionTests(Fixture):
 
         one_budget_short = records.questions(self.project, limit=20, scan_limit=2)
         self.assertEqual(one_budget_short, {
-            'questions': [dict(subject=self.subject(question), **question)],
+            'questions': [dict(subject=self.subject(question), closed=False, **question)],
             'scanned': 1, 'truncated': True})
         enough_budget = records.questions(self.project, limit=20, scan_limit=3)
         self.assertEqual(enough_budget, {
-            'questions': [dict(subject=self.subject(question), **question)],
+            'questions': [dict(subject=self.subject(question), closed=False, **question)],
             'scanned': 1, 'truncated': False})
 
         # The staging exception is narrow; an unrelated unexpected entry still

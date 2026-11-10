@@ -121,7 +121,7 @@ def validate_progress(value: dict) -> dict:
                     conversion.get("reason") != "ready_work_with_pending_structured_wait"
                     or conversion.get("wait_kind") not in {
                         "deadline", "code_change", "insight_decided", "dependency",
-                        "ci", "publication_ci", "proposal_merged"}))
+                        "ci", "publication_ci", "proposal_merged", "record_closed"}))
                 or (schema == 7 and (
                     conversion.get("reason") != "ready_work_without_proven_structured_wait"
                     or conversion.get("wait_kind") is not None))

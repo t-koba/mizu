@@ -1162,6 +1162,11 @@ CONFIGURED_SETTINGS = {
 }
 # Request-local retention only: cache misses repeat normal validation, so these
 # memory-versus-I/O choices are policy, not fixed correctness/safety ceilings.
+WORK_ITEM_RECORD_WAIT_SCAN = {
+    'operator_record_catalog_scan_entries': (
+        '2048', 'configured policy',
+        'Limits / bounded exact-record closure catalog entry budget'),
+}
 WORK_ITEM_READ_VIEW_CACHE = {
     'work_item_read_view_snapshot_cache_bytes': (
         '32 * 1024 * 1024', 'configured policy', 'Limits / request-local validated snapshot records'),
@@ -3444,6 +3449,25 @@ def sibling():
         self.assertIn('size > limits.work_item_read_view_item_cache_bytes', comparisons)
         self.assertIn('len(items) >= limits.work_item_read_view_item_cache_entries', comparisons)
         self.assertIn('item_bytes + size > limits.work_item_read_view_item_cache_bytes', comparisons)
+
+    def test_record_wait_catalog_scan_bound_is_declared_and_used(self):
+        from mizu.config import TOML_INTEGER_MAX, _LIMIT_RANGES
+
+        config_tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in config_tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        defaults = {node.target.id: ast.unparse(node.value) for node in limits.body
+                    if isinstance(node, ast.AnnAssign)}
+        for name, (expression, category, rationale) in WORK_ITEM_RECORD_WAIT_SCAN.items():
+            self.assertEqual(defaults[name], expression)
+            self.assertEqual(_LIMIT_RANGES[name], (1, TOML_INTEGER_MAX))
+            self.assertEqual(category, 'configured policy')
+            self.assertTrue(rationale.strip())
+        source = ast.parse((ROOT / 'operator_records.py').read_text(encoding='utf-8'))
+        lookup = next(node for node in source.body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'record_question_lookup')
+        attrs = {node.attr for node in ast.walk(lookup) if isinstance(node, ast.Attribute)}
+        self.assertIn('operator_record_catalog_scan_entries', attrs)
 
     def test_wait_event_limit_is_configured_and_used_by_prompt_projections(self):
         from mizu.config import _LIMIT_RANGES

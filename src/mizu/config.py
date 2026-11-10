@@ -605,6 +605,8 @@ class Limits:
     work_items_stale_seconds: int = 86400
     #: Lifetime of blocked waits without an explicit deadline.
     work_items_blocked_max_age_seconds: int = 604800
+    #: Directory-entry budget for work-item record-question closure catalogs only.
+    operator_record_catalog_scan_entries: int = 2048
     #: Request-local retention policy: smaller budgets repeat validated reads;
     #: oversized records bypass caching without changing projection semantics.
     work_item_read_view_snapshot_cache_bytes: int = 32 * 1024 * 1024
@@ -672,6 +674,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000),
                  "work_items_blocked_max_age_seconds": (1, TOML_INTEGER_MAX),
+                 "operator_record_catalog_scan_entries": (1, TOML_INTEGER_MAX),
                  "work_item_read_view_snapshot_cache_bytes": (1, TOML_INTEGER_MAX),
                  "work_item_read_view_file_cache_bytes": (1, TOML_INTEGER_MAX),
                  "work_item_read_view_item_cache_bytes": (1, TOML_INTEGER_MAX),

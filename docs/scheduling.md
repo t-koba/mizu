@@ -446,7 +446,14 @@ an `unknown` item is skipped while known ready rows are still returned, with
 live view; admission and prompt reads are not a frozen transaction.
 
 New transitions to `blocked` require a supported observable wait; historical
-no-wait events remain readable and replayable, without rewriting history.
+no-wait events remain readable and replayable, without rewriting history. A
+work-item-only `record_closed` wait pins an exact role-question record and makes
+the item due only after a complete bounded catalog finds an authenticated answer
+to its writer. Registration requires the question writer to hold the item and
+the operator answer route to be enabled. Unknown or unsafe catalog evidence does
+not become due; the holder must explicitly transition under CAS. This wait adds
+no receipt, acknowledgement, wake or status mutation; see [SharedRecords question
+closure](shared-records.md#opt-in-role-questions-to-the-operator).
 CI/proposal notifications remain separate holder-routed wakes; validated terminal
 evidence also keeps the blocked item ready after notification acknowledgement.
 A run-level `wait` does not block unrelated ready ledger work: record a work

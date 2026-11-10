@@ -235,6 +235,7 @@ class IdleWithOpenWorkTests(Fixture):
     def test_writer_wait_conversion_schema_is_bounded_and_projected(self):
         for schema, reason, kind in (
                 (6, "ready_work_with_pending_structured_wait", "ci"),
+                (6, "ready_work_with_pending_structured_wait", "record_closed"),
                 (7, "ready_work_without_proven_structured_wait", None)):
             conversion = {"status": "converted", "reason": reason,
                           "wait_kind": kind, "backoff_seconds": 300}

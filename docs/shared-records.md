@@ -113,13 +113,16 @@ mizu record-questions PROJECT --limit 20 --scan-limit 1000
 ```
 
 This operator-only command returns `{questions, scanned, truncated}`. Each row
-contains the canonical `record`, its recomputed `record_digest`, and a ready-to-use
-answer `subject = {type:"record", kind, id, digest}`. Only currently declared
-`operator_question` kinds with valid authenticated writer/ID bindings are shown;
+contains the canonical `record`, its recomputed `record_digest`, a ready-to-use
+answer `subject = {type:"record", kind, id, digest}`, and `closed` (a boolean).
+Only currently declared `operator_question` kinds with valid authenticated
+writer/ID bindings are shown;
 ordinary role notes and other source namespaces are not questions. With no such
 route, listing returns an empty complete result without scanning. The view reads
 the existing `shared-records/role` partition, not chronological or pending order.
-It creates no index, cursor, receipt or queue.
+It creates no index, cursor, receipt or queue. Closure is derived read-only from
+canonical operator answers through the existing authenticated
+`operator_record_index` catalog, not a question-specific receipt store.
 
 Both command-line bounds are required positive per-invocation integers:
 `--limit` bounds returned rows and `--scan-limit` bounds role-partition filenames
@@ -139,6 +142,18 @@ corrupt, undeclared, other unexpected non-record, or identity-mismatched entries
 in the bounded slice fail the command, never a successful empty/completeness
 claim. Work is proportional to the explicit per-call bounds, not the total
 number of stored role records.
+
+When at least one question is returned, closure validation additionally uses
+`--scan-limit` as a separate budget across operator-partition, legacy-root and
+operator-index directory entries. All entries count, including unrelated entries
+and atomic stages; enumeration is bounded before sorting, and each canonical
+file/ref read retains the existing byte bounds. `scanned` still counts only role
+envelopes. An exhausted closure budget raises `LimitExceeded` for the whole call,
+even if exhaustion happened at EOF; it never yields guessed `closed = false` or
+partial closure evidence. Increase the explicit bound to retry. Corrupt,
+unavailable or conflicting canonical/index evidence also refuses the view.
+Missing index refs are checked in memory, never repaired by listing. An empty
+question page needs no answer catalog scan.
 
 `wake = false` performs no wake operation. Explicit `true` requests only the
 existing best-effort host `waits` directory modification hint after a committed
@@ -172,11 +187,48 @@ Replies retain the existing authenticated `operator.cli` writer, stable event-ID
 replay, answer enablement/wake policy, frozen role delivery, manifest-bound reads
 and explicit `finish.ack_events` acknowledgements. Default role kind policy stays
 closed; this route adds no operator write authority to a model. Answers and
-questions remain permanent audit records: listing includes answered questions,
-and neither answering nor acknowledging a reply closes, supersedes or implicitly
-acknowledges a question. No closure/supersession semantics are added here. Existing
-Insight `{type:"insight", id, rev}` answer routing remains unchanged and separate;
-record-bound answers do not satisfy Insight-revision wait liveness.
+questions remain permanent immutable audit records, and listing includes closed
+questions. A validated operator `answer` closes only the exact record question
+named by all four subject fields, addressed to that question's authenticated
+writer. `closed = true` means at least one such answer exists, regardless of
+whether future answer publishing is currently enabled. Distinct answer IDs remain
+separate immutable messages; additional answers do not reopen a question or make
+its closure ambiguous, and exact event-ID retries stay idempotent. No envelope is
+deleted or mutated by closure.
+
+Reads, prose, answer acknowledgement and unit finish do not close or implicitly
+acknowledge a question. Closure itself selects no answer/question receipt, changes
+no work-item status and registers no wait automatically. Existing Insight
+`{type:"insight", id, rev}` answer routing and decision authority remain unchanged
+and separate; Insight answers cannot close record questions, and record-bound
+answers do not satisfy Insight-revision wait liveness.
+
+A holder may explicitly register a work-item-only wait:
+
+```json
+{"kind":"record_closed","subject":{"type":"record","kind":"role.question","id":"role/worker/role.question/question1","digest":"<exact 64-hex record digest>"}}
+```
+
+Registration requires the exact current immutable question under a declared
+`operator_question` kind, its authenticated writer equal to the current item
+holder (who makes the CAS transition), and an enabled `operator_records.answer`
+route. Historical wait reads validate the normalized subject without requiring
+that publishing still be enabled. Closure uses the same canonical SharedRecords
+and disposable operator catalog authority as listing, through a distinct lazy
+read-only lookup cached once per work-item projection. It does not use or change
+the existing Insight `answer_lookup` route. `[limits].operator_record_catalog_scan_entries`
+(default 2048 positive TOML integer) bounds catalog directory entries, not answers.
+Exhaustion, corrupt or unavailable evidence is `unknown`; a complete catalog with
+no exact authenticated answer is `pending`. At least one exact answer to the
+question writer makes liveness `due`, even if publishing is later disabled or
+multiple distinct answers exist. Non-deadline blocked-age policy still applies
+to pending waits; unknown evidence never becomes due or expired.
+
+This is read-only replanning evidence: the item remains blocked until its holder
+explicitly transitions it under CAS. No additional wake, wait receipt, assignment,
+status mutation, raw answer-body projection or acknowledgement is introduced.
+Answer delivery and explicit acknowledgement remain on their existing path.
+No existing questions or other sources are migrated by this route.
 
 ## Declared host publisher outcomes
 

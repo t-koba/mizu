@@ -836,9 +836,12 @@ Actor is trusted internal attribution, not a new authorization grant. `doing`
 assigns the actor as holder, `blocked` preserves the holder or assigns the
 actor, and other statuses clear it. New transitions to `blocked` require a
 supported structured wait: an Insights-style wait (stored only, no scheduler
-wake), or a work-item-only `ci` wait pinned to a completed immutable publication
+wake), a work-item-only `record_closed` wait on an exact declared operator
+question from its current holder (bounded read-only closure evidence; unknown
+stays unknown), or a `ci` wait pinned to a completed immutable publication
 receipt. Historical blocked records without waits remain readable and are never
-rewritten or released automatically. The latter wait wakes only
+rewritten or released automatically. These waits never assign work or change
+status by becoming due. The CI wait wakes only
 its current holder on retained terminal evidence, without changing item status.
 Dropping requires a nonempty reason. A new completion revalidates the
 immutable snapshot manifest named by its earlier delivery binding; it need not
@@ -934,8 +937,9 @@ on a doing-to-doing transition with unchanged scope (the binding event stores
 `snapshot_id` exactly equal to that binding and valid embedded or retained
 acceptance proof. The live workspace may have advanced independently.
 `dropped` requires a reason, and new `blocked` transitions require the same
-structured wait schema and normalization semantics as `decide`, or a
-work-item-only CI wait (`{kind:"ci", publication_id, checks}` or
+structured wait schema and normalization semantics as `decide`, a work-item-only
+record closure wait (`{kind:"record_closed", subject:{type:"record", kind, id, digest}}`),
+or a work-item-only CI wait (`{kind:"ci", publication_id, checks}` or
 `{kind:"publication_ci", snapshot_id, checks}`). Historical blocked
 records without waits remain readable and are not rewritten. CI wait results use
 the host event path only to wake the holder; they never change item status.

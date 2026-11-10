@@ -46,7 +46,7 @@ from pathlib import Path
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import insight_archive, work_item_retirement
-from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age
+from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, normalize_record_wait
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      PublicationEvidence, TOML_INTEGER_MAX)
@@ -218,10 +218,13 @@ class WorkItems:
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  blocked_max_age_seconds=604800,
                  effective_verification_projection=None, operator_answer_lookup=None,
+                 record_question_lookup=None, register_question_wait=None,
                  publication_evidence: PublicationEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.operator_answer_lookup = operator_answer_lookup
+        self.record_question_lookup = record_question_lookup
+        self.register_question_wait = register_question_wait
         self.vcs = vcs or {}
         self.publication_evidence = (publication_evidence if publication_evidence is not None
                                      else PublicationEvidence())
@@ -2743,6 +2746,7 @@ class WorkItems:
         """
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
+        record_question = self.record_question_lookup() if self.record_question_lookup is not None else None
         if operator_answer is None and writer_roles is not None and self.operator_answer_lookup is not None:
             operator_answer = self.operator_answer_lookup()
         cursor_key = _open_cursor_key(cursor)
@@ -2905,7 +2909,8 @@ class WorkItems:
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
                 state = liveness(self, wait, published_snapshot,
-                                 item=item, writer_roles=writer_roles, operator_answer=operator_answer)
+                                 item=item, writer_roles=writer_roles, operator_answer=operator_answer,
+                                 record_question=record_question)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
@@ -3258,6 +3263,11 @@ class WorkItems:
                                       if wait["kind"] == "proposal_merged" else normalize(self.root, raw_wait))
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
+                elif isinstance(wait, dict) and wait.get("kind") == "record_closed":
+                    registered = normalize_record_wait(wait)
+                    if self.register_question_wait is None or current["holder"] != actor:
+                        raise Denied("Record waits require the current work-item holder and declared route")
+                    self.register_question_wait(registered["subject"], current["holder"])
                 else:
                     registered = self.insights._normalize_wait(wait, "defer")
             verification = None

@@ -277,6 +277,7 @@ class ContextTests(Fixture):
         self.assertIn("new transitions to blocked require a supported observable wait", description)
         self.assertIn("receipt-bound work-item-only CI wait", description)
         self.assertIn("work-item-only wait {kind:proposal_merged", description)
+        self.assertIn("work-item-only wait {kind:record_closed", description)
         item_id = "wi_" + "a" * 32
         validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
         validate({"id": item_id, "expected_rev": 1, "status": "blocked",
@@ -287,18 +288,23 @@ class ContextTests(Fixture):
         insight_schema = DEFINITIONS["decide"][1]
         insight_wait = insight_schema["properties"]["wait"]["properties"]
         self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] +
-                         ["ci", "publication_ci", "proposal_merged"])
+                         ["ci", "publication_ci", "proposal_merged", "record_closed"])
         for field in insight_wait.keys() - {"kind"}:
             self.assertEqual(work_wait[field], insight_wait[field])
         self.assertEqual(work_wait.keys() - insight_wait.keys(),
-                         {"publication_id", "snapshot_id", "proposal_id", "checks"})
+                         {"publication_id", "snapshot_id", "proposal_id", "checks", "subject"})
         proposal_wait = {"kind": "proposal_merged", "publication_id": "a" * 64,
                          "proposal_id": "forge:owner/repo#1"}
         validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": proposal_wait}, schema)
-        with self.assertRaises(Denied):
-            validate({"action": "defer", "id": "i" * 32, "rev": 1,
-                      "reason": "Need evidence", "revisit": "When evidence arrives",
-                      "wait": proposal_wait}, insight_schema)
+        record_wait = {"kind": "record_closed", "subject": {
+            "type": "record", "kind": "role.question",
+            "id": "role/worker/role.question/question1", "digest": "b" * 64}}
+        validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": record_wait}, schema)
+        for work_only_wait in (proposal_wait, record_wait):
+            with self.assertRaises(Denied):
+                validate({"action": "defer", "id": "i" * 32, "rev": 1,
+                          "reason": "Need evidence", "revisit": "When evidence arrives",
+                          "wait": work_only_wait}, insight_schema)
         bad_arguments = (
             {},
             {"id": item_id, "status": "doing"},

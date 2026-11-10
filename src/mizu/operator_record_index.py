@@ -7,10 +7,11 @@ Legacy flat files (including other source families) are covered too. This cache
 is outside shared-records and the backup member list; restore rebuilds it.
 """
 from copy import deepcopy
+import os
 import re
 import stat
 
-from .errors import Denied
+from .errors import Denied, LimitExceeded
 from .fs import DIGEST, atomic_write, canonical, digest, loads_finite
 from .shared_records import RECORD_BYTES, _ENVELOPE, _name, _namespace, _time
 
@@ -19,11 +20,11 @@ _FILE = re.compile(r'[0-9a-f]{64}\.json\Z')
 _TEMP = re.compile(r'\.new-[a-z0-9_]{8}\Z')
 
 
-def _files(shared, directory):
+def _files(shared, directory, entries):
     if not shared._parents(f'{directory}/probe'):
         return {}
     result = {}
-    for path in sorted((shared.root / directory).iterdir()):
+    for path in sorted(entries(directory)):
         info = path.lstat()
         if (_TEMP.fullmatch(path.name) and stat.S_ISREG(info.st_mode)
                 and info.st_nlink == 1 and not getattr(info, 'st_file_attributes', 0) & 0x400):
@@ -136,23 +137,43 @@ def remember(shared, envelope):
     _reference(shared, shared._record_name(envelope['id']), canonical(envelope), operator=True)
 
 
-def catalog(shared, *, readonly=False):
+def catalog(shared, *, readonly=False, scan_limit=None):
     """Return checked compact operator envelopes; repair missing refs only.
 
     All canonical bytes are hashed, including unrelated recipients and disabled
     kinds. No mtime trust, mutable cursor or per-recipient canonical identity.
     Identical legacy/sharded duplicates share a ref; conflicting copies refuse.
     Read-only projections validate missing refs in memory without repairing them.
+    Optional scan_limit bounds entries across canonical, legacy and index
+    directories, including staging/unrelated entries. Exhaustion refuses the
+    entire catalog, even at EOF, without an unbounded sort or lookahead.
     """
-    files = _files(shared, 'shared-records/operator')
+    if scan_limit is not None and (type(scan_limit) is not int or scan_limit < 1):
+        raise Denied('Operator catalog scan bound must be a positive integer')
+    remaining = scan_limit
+
+    def entries(directory):
+        nonlocal remaining
+        with os.scandir(shared.root / directory) as paths:
+            while True:
+                if remaining == 0:
+                    raise LimitExceeded('Operator catalog scan bound exhausted')
+                entry = next(paths, None)
+                if entry is None:
+                    return
+                if remaining is not None:
+                    remaining -= 1
+                yield shared.root / directory / entry.name
+
+    files = _files(shared, 'shared-records/operator', entries)
     legacy = {}
     if shared._parents('shared-records/probe'):
-        for path in (shared.root / 'shared-records').iterdir():
+        for path in entries('shared-records'):
             if path.name.endswith('.json'):
                 if not _FILE.fullmatch(path.name):
                     raise Denied('Unsafe legacy shared record filename')
                 legacy[path.name] = f'shared-records/{path.name}'
-    refs = _files(shared, DIRECTORY)
+    refs = _files(shared, DIRECTORY, entries)
     if refs.keys() - (files.keys() | legacy.keys()):
         raise Denied('Dangling operator record index reference')
     result = {}

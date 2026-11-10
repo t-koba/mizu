@@ -150,16 +150,17 @@ def questions(project, *, limit, scan_limit):
     The caller supplies positive per-request row and scan bounds. A full scan
     budget is reported as incomplete without a lookahead read, even if it
     happened to reach EOF; directory enumeration and record reads stay within
-    that requested budget.
+    that requested budget. Closure validation uses a separate catalog budget
+    of the same size; exhaustion refuses the view rather than guessing open.
     """
-    from .host_records import configuration, store
+    from .host_records import configuration, store as role_store
     if (type(limit) is not int or limit < 1
             or type(scan_limit) is not int or scan_limit < 1):
         raise Denied('Question listing bounds must be positive integers')
     policies = configuration(project.config.record_kinds)
     if not any(row['route'] == 'operator_question' for row in policies.values()):
         return {'questions': [], 'scanned': 0, 'truncated': False}
-    shared = store(project.root, project.snapshots, policies)
+    shared = role_store(project.root, project.snapshots, policies)
     rows, scanned, truncated = [], 0, False
     scan_progress = ScanProgress()
     records = shared.records(namespace='role', scan_limit=scan_limit,
@@ -174,9 +175,26 @@ def questions(project, *, limit, scan_limit):
             if len(rows) == limit:
                 truncated = True
                 break
-            rows.append({'subject': subject, 'record': envelope, 'record_digest': computed})
+            rows.append({'subject': subject, 'record': envelope,
+                         'record_digest': computed, 'closed': False})
     finally:
         records.close()
+    if rows:
+        # Canonical answers are the closure events, not receipts. Validate the
+        # existing compact authority once, read-only and within a caller bound.
+        with lock(project.root / 'locks' / 'operator-records.lock'):
+            indexed = catalog(store(project), readonly=True, scan_limit=scan_limit)
+        by_subject = {(row['subject']['kind'], row['subject']['id'], row['subject']['digest']): row
+                      for row in rows}
+        for answer, _ in indexed.values():
+            subject = answer['subject']
+            if answer['kind'] != 'answer' or subject['type'] != 'record':
+                continue
+            row = by_subject.get((subject['kind'], subject['id'], subject['digest']))
+            if row is not None:
+                if answer['payload']['addressee'] != row['record']['writer'][5:]:
+                    raise Denied('Answer must address the authenticated asking role')
+                row['closed'] = True
     return {'questions': rows, 'scanned': scanned,
             'truncated': truncated or scan_progress.entries_examined == scan_limit}
 
@@ -300,6 +318,62 @@ def _pending(project, role):
               for entry, row in zip(manifest, eligible)]
     return {'events': events, 'pending_count': count, 'truncated': count > len(events),
             'wake_pending': wake_pending}, manifest
+
+
+def register_question_wait(project, subject, holder):
+    """Registration authority only; closure observation never gates on enablement."""
+    if not configuration(project.config.operator_records)['answer']['enabled']:
+        raise Denied('Record waits require the operator answer route')
+    if _record_question(project, subject) != holder:
+        raise Denied('Record question writer must be the current work-item holder')
+
+
+def record_question_lookup(project):
+    """Lazy bounded, read-only closure evidence, cached once per projection.
+
+    None means unavailable/unsafe, False means a complete catalog has no exact
+    answer, True means at least one authenticated answer. No receipt is selected.
+    Publishing policy does not revoke an already authenticated answer.
+    """
+    answers = None
+    loaded = False
+    questions = {}
+
+    def closed(subject):
+        nonlocal answers, loaded
+        try:
+            _subject(subject)
+            if subject['type'] != 'record':
+                raise Denied('Expected an exact record question')
+            key = (subject['kind'], subject['id'], subject['digest'])
+            if key not in questions:
+                questions[key] = None
+                questions[key] = _record_question(project, subject)
+            if questions[key] is None:
+                return None
+            if not loaded:
+                loaded = True  # A failed scan is not retried within this projection.
+                with lock(project.root / 'locks' / 'operator-records.lock'):
+                    indexed = catalog(store(project), readonly=True,
+                        scan_limit=project.config.limits.operator_record_catalog_scan_entries)
+                found = {}
+                for envelope, _ in indexed.values():
+                    target = envelope['subject']
+                    if envelope['kind'] == 'answer' and target['type'] == 'record':
+                        subject_key = (target['kind'], target['id'], target['digest'])
+                        found.setdefault(subject_key, set()).add(envelope['payload']['addressee'])
+                answers = found
+            if answers is None:
+                return None
+            recipients = answers.get(key, set())
+            if any(recipient != questions[key] for recipient in recipients):
+                return None
+            return bool(recipients)
+        except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError,
+                TypeError, AttributeError, KeyError):
+            return None
+
+    return closed
 
 
 def answer_lookup(project):

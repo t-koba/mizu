@@ -73,11 +73,29 @@ def _normalize_wait(wait, action: str, baseline=None) -> dict | None:
 
 
 
+def normalize_record_wait(wait):
+    """Exact immutable subject; this wait is deliberately work-item-only."""
+    from .operator_records import _subject
+    if (type(wait) is not dict or wait.get('kind') != 'record_closed'
+            or set(wait) - {'smoke_refs'} != {'kind', 'subject'}):
+        raise Denied('A record_closed wait requires only an exact record subject')
+    subject = wait['subject']
+    _subject(subject)
+    if subject['type'] != 'record':
+        raise Denied('A record_closed wait needs a record subject')
+    result = {'kind': 'record_closed', 'subject': dict(subject)}
+    if 'smoke_refs' in wait:
+        result['smoke_refs'] = validate_refs(wait['smoke_refs'])
+    return result
+
+
 def _stored_wait(value) -> dict:
     """Validate normalized observable waits without rebasing code evidence."""
     if not isinstance(value, dict):
         raise Denied("Blocked work items require a structured wait")
     kind = value.get("kind")
+    if kind == "record_closed":
+        return normalize_record_wait(value)
     if kind == "code_change":
         baseline = value.get("digest")
         if set(value) != {"kind", "digest"} or not isinstance(baseline, str) or not DIGEST.fullmatch(baseline):
@@ -130,9 +148,9 @@ def blocked_age(store, item):
             "blocked_max_age_seconds": None if wait.get("kind") == "deadline" else store.blocked_max_age_seconds}
 
 
-def liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None):
+def liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None, record_question=None):
     observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
-                         operator_answer=operator_answer)
+                         operator_answer=operator_answer, record_question=record_question)
     if item is None:
         return observed
     age = blocked_age(store, item)
@@ -146,7 +164,7 @@ def liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_an
     return {**observed, **age}
 
 
-def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None) -> dict:
+def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None, record_question=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Insight-decided waits follow the current revision; dependency waits bind an
@@ -186,6 +204,17 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                        event["outcome"]["outcome"])
             return {**result("terminal", "receipt_route_terminal"), "outcome": outcome,
                     "evidence": {"record_digest": computed or digest(canonical(envelope))}}
+        if kind == "record_closed":
+            if record_question is None:
+                factory = store.record_question_lookup
+                if factory is None:
+                    return result("unknown", "record_question_unavailable")
+                record_question = factory()
+            closed = record_question(wait["subject"])
+            if closed is None:
+                return result("unknown", "record_question_unavailable")
+            return result("due" if closed else "pending",
+                          "record_closed" if closed else "record_answer_pending")
         if kind == "deadline":
             due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])
         elif kind == "code_change":
