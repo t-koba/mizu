@@ -244,7 +244,10 @@ class HostRecordTests(CiWaitFixture):
             path.write_bytes(canonical({**result['record'], **change}))
             self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
         path.write_bytes(b'{')
-        self.assertEqual(audit(self.project)['reference_records_skipped'], 1)
+        corrupt = audit(self.project)
+        self.assertEqual(corrupt['reference_records_skipped'], 1)
+        self.assertTrue(any(reference.startswith('shared-records/host')
+                            for reference in corrupt['reference_records_skipped_sample']))
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
         path.write_bytes(original)
         self.assertEqual(len(ci_waits.pending(self.store, 'worker')), 1)
@@ -266,10 +269,12 @@ class HostRecordTests(CiWaitFixture):
         with patch.object(self.project, 'config', config):
             report = audit(self.project)
             self.assertGreater(report['reference_records_skipped'], 0)
+            self.assertIn('shared-records/host', report['reference_records_skipped_sample'])
             self.assertEqual(report['references']['host_record_snapshots'], 0)
             preview = reclaim(self.project)
             self.assertGreater(preview['reference_records_skipped'], 0)
-            with self.assertRaisesRegex(Denied, 'Skipped reference records'):
+            self.assertIn('shared-records/host', preview['reference_records_skipped_sample'])
+            with self.assertRaisesRegex(Denied, r'Skipped reference records \(shared-records/host'):
                 reclaim(self.project, apply=True)
 
     def test_invalid_payload_snapshot_reference_is_an_incomplete_scan(self):
@@ -287,9 +292,11 @@ class HostRecordTests(CiWaitFixture):
         with patch.object(self.project, 'config', config):
             report = audit(self.project)
             self.assertGreater(report['reference_records_skipped'], 0)
+            self.assertIn('shared-records/host', report['reference_records_skipped_sample'])
             preview = reclaim(self.project)
             self.assertGreater(preview['reference_records_skipped'], 0)
-            with self.assertRaisesRegex(Denied, 'Skipped reference records'):
+            self.assertIn('shared-records/host', preview['reference_records_skipped_sample'])
+            with self.assertRaisesRegex(Denied, r'Skipped reference records \(shared-records/host'):
                 reclaim(self.project, apply=True)
 
     def test_disabled_wake_and_stale_ack_remain_pending(self):

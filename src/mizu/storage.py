@@ -1205,6 +1205,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         "host_record_ids": host_record_ids,
         "work_item_events_skipped": work_item_events_skipped,
         "reference_records_skipped": len(skipped_references),
+        "skipped_references": skipped_references,
         "generations": generations,
         "histories_bytes": histories_bytes,
         "expired_histories": expired_histories,
@@ -1215,6 +1216,17 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         "objects_skipped": objects_skipped,
         "orphan": orphan,
     }
+
+
+def _skipped_reference_paths(project: Project, collected: dict) -> list[str]:
+    """Sorted root-relative paths behind ``reference_records_skipped``."""
+    paths = []
+    for path in collected["skipped_references"]:
+        try:
+            paths.append(path.relative_to(project.root).as_posix())
+        except ValueError:
+            paths.append(str(path))
+    return sorted(paths)
 
 
 def audit(project: Project) -> dict:
@@ -1230,7 +1242,8 @@ def audit(project: Project) -> dict:
     orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
     references: {history_snapshots, run_snapshots, artifact_snapshots,
     insight_snapshots, work_item_snapshots, host_record_snapshots}, work_item_events_skipped,
-    reference_records_skipped, preview_only: True}``. Counts and byte totals
+    reference_records_skipped, reference_records_skipped_sample,
+    reference_records_skipped_truncated, preview_only: True}``. Counts and byte totals
     are exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
     truncation flag.
     Bounds: reference JSON files above ``_AUDIT_JSON_BYTES`` are skipped
@@ -1265,6 +1278,7 @@ def audit(project: Project) -> dict:
     live_objects = collected["live_objects"]
     object_sizes = collected["object_sizes"]
     orphan = collected["orphan"]
+    skipped_reference_paths = _skipped_reference_paths(project, collected)
     try:
         sessions = _session_accounting(project)
     except (OSError, ValueError):
@@ -1312,6 +1326,8 @@ def audit(project: Project) -> dict:
         },
         "work_item_events_skipped": collected["work_item_events_skipped"],
         "reference_records_skipped": collected["reference_records_skipped"],
+        "reference_records_skipped_sample": skipped_reference_paths[:_AUDIT_SAMPLE],
+        "reference_records_skipped_truncated": len(skipped_reference_paths) > _AUDIT_SAMPLE,
         "preview_only": True,
         "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories are retained; this preview removes nothing. "
                     "Web-cache entries expired past cache_seconds are disposable (see sessions/web_cache); "
@@ -1325,6 +1341,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     Schema: ``{applied, snapshots: [relative manifest paths], objects:
     [relative object paths], unreferenced_bytes, orphan_bytes,
     manifest_skipped, work_item_events_skipped, reference_records_skipped,
+    reference_records_skipped_sample, reference_records_skipped_truncated,
     audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
     outside every durable reference (live/history/run/artifact/insight/work-item/host-record)
@@ -1356,6 +1373,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     """
     if not apply:
         collected = _audit_collect(project)
+        skipped_reference_paths = _skipped_reference_paths(project, collected)
         return {
             "applied": False,
             "snapshots": [f"snapshots/{sid}.json" for sid in collected["unreferenced"]],
@@ -1368,13 +1386,17 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "work_item_events_skipped": collected["work_item_events_skipped"],
             "reference_records_skipped": collected["reference_records_skipped"],
+            "reference_records_skipped_sample": skipped_reference_paths[:_AUDIT_SAMPLE],
+            "reference_records_skipped_truncated": len(skipped_reference_paths) > _AUDIT_SAMPLE,
         }
     with quiescent(project):
         collected = _audit_collect(project)
         if collected["manifest_skipped"]:
             raise Denied("Skipped snapshot manifest; cannot safely determine object references")
         if collected["reference_records_skipped"]:
-            raise Denied("Skipped reference records; cannot safely reclaim snapshot references")
+            raise Denied(
+                "Skipped reference records (%s); cannot safely reclaim snapshot references"
+                % ", ".join(_skipped_reference_paths(project, collected)[:3]))
         if collected["work_item_events_skipped"]:
             raise Denied("Unreadable work-item history; cannot safely reclaim snapshot references")
         for directory in (project.root / "snapshots", project.root / "objects"):
