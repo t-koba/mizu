@@ -2932,9 +2932,10 @@ class WorkItems:
                 if not readonly and history_key is not None:
                     self._sidecar_tried[seed["id"]] = history_key
                 if sidecar is not None and not readonly and (
-                        sidecar[0]["status"] in ("done", "dropped") and not sidecar[2]
-                        or sidecar[0]["status"] not in ("done", "dropped")
-                        and sidecar[0].get("delivery") is not None):
+                        sidecar[0].get("delivery") is not None
+                        or sidecar[0]["status"] in ("done", "dropped")):
+                    # Locked scans keep exact proof; only read-only scans
+                    # trust a witnessed sidecar for terminal items.
                     sidecar = None
                 if (sidecar is not None
                         and self._history_identity(seed["id"]) != history_key):

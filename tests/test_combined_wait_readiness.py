@@ -102,6 +102,9 @@ class CombinedWaitReadinessTests(CombinedFixture):
     def test_readiness_cache_behavior_matches_platform_and_invalidates_on_change(self):
         self._delivered_ci_wait("warm-proof")
         self.store._projection_cache.clear()
+        # The per-process binding memo already verified this manifest when the
+        # delivery was bound; start the cold replay from an empty memo.
+        self.project.snapshots._binding_cache.clear()
         with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay, \
              patch.object(self.project.snapshots, "validate_manifest",
                           wraps=self.project.snapshots.validate_manifest) as manifest:
@@ -120,6 +123,7 @@ class CombinedWaitReadinessTests(CombinedFixture):
                 self.assertEqual(manifest.call_count, 0)
 
             self._delivered_ci_wait("changed-proof")
+            self.project.snapshots._binding_cache.clear()
             replay.reset_mock()
             manifest.reset_mock()
             self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))

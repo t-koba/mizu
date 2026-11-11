@@ -16,6 +16,7 @@ from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, LimitExceeded,
 from mizu.fs import canonical, digest, lock, read_json, write_json
 from mizu.runtime import Engine, _role_events_due, prompt_for, prompt_delta_for
 from mizu.services import event_watches, render
+from mizu.platform import IS_WINDOWS
 from mizu.work_items import _timestamp_order
 
 
@@ -99,15 +100,19 @@ class WorkItemEventTests(Fixture):
             self.assertEqual(closed["total"], 1)
             self.assertEqual(closed["items"][0]["id"], seed["id"])
             self.assertEqual(closed["items"][0]["snapshot_id"], current["id"])
-            # The sidecar's witnessed manifest is unchanged: not re-read.
-            self.assertEqual(get.call_args_list, [])
+            # POSIX sidecars witness the unchanged manifest and do not re-read
+            # it; Windows bypasses sidecars and validates the current proof.
+            self.assertEqual([call.args[0] for call in get.call_args_list],
+                             [current["id"]] if IS_WINDOWS else [])
 
         with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
             events_page = events.closed_page(self.store, self.subscribed_config().roles)
             self.assertEqual(events_page["total"], 1)
             self.assertEqual(events_page["items"][0]["id"], seed["id"])
-            # The sidecar's witnessed manifest is unchanged: not re-read.
-            self.assertEqual(get.call_args_list, [])
+            # POSIX sidecars witness the unchanged manifest and do not re-read
+            # it; Windows bypasses sidecars and validates the current proof.
+            self.assertEqual([call.args[0] for call in get.call_args_list],
+                             [current["id"]] if IS_WINDOWS else [])
 
         # An unavailable current manifest breaks its witness: the exact
         # validation runs again and fails closed.

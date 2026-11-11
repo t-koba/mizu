@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from mizu import platform as _platform
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, write_json
 from mizu.snapshot import Snapshots, _PATH_VALIDATION_CACHE_LIMIT
@@ -85,6 +86,7 @@ class SnapshotBindingTests(unittest.TestCase):
         write_json(snapshot_store.root / "snapshots" / f"{record['id']}.json", record)
         return snapshot_store.root / "snapshots" / f"{record['id']}.json"
 
+    @unittest.skipIf(_platform.IS_WINDOWS, "POSIX-only binding memo and relaxed path policy")
     def test_binding_skips_path_policy_but_get_still_applies_it(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot_store = store(directory, excludes=("src",))
@@ -115,6 +117,7 @@ class SnapshotBindingTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 snapshot_store.binding(digest(b"missing"))
 
+    @unittest.skipIf(_platform.IS_WINDOWS, "POSIX-only binding memo and relaxed path policy")
     def test_binding_is_memoized_until_the_manifest_file_is_replaced(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot_store = store(directory)
@@ -129,6 +132,7 @@ class SnapshotBindingTests(unittest.TestCase):
                     snapshot_store.binding(record["id"])
                 self.assertEqual(read.call_count, 2)
 
+    @unittest.skipIf(_platform.IS_WINDOWS, "POSIX-only binding memo and relaxed path policy")
     def test_binding_memo_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot_store = store(directory)

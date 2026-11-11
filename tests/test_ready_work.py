@@ -400,10 +400,14 @@ class ReadyProjectionTests(Fixture):
              patch.object(snapshots, "validate_manifest", wraps=snapshots.validate_manifest) as manifest, \
              patch.object(store, "_origin_projection_impl", wraps=store._origin_projection_impl) as origin, \
              patch.object(work_items_module, "liveness", wraps=work_items_module.liveness) as live:
+            snapshots._binding_cache.clear()
             cold = store.page_ready(limit=item_count)
             cold_counts = (replay.call_count, validate.call_count, manifest.call_count)
             self.assertEqual(cold_counts[:2], (item_count, item_count * 3))
-            self.assertEqual(cold_counts[2], terminal_count)
+            # All terminal items share one delivery: POSIX verifies that
+            # manifest once per process (binding memo); Windows validates each.
+            self.assertEqual(cold_counts[2],
+                             terminal_count if work_items_module.IS_WINDOWS else 1)
             self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
             for spy in (replay, validate, manifest, origin, live):
                 spy.reset_mock()

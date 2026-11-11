@@ -805,11 +805,21 @@ class Snapshots:
         ``id``, ``code_digest``, ``parent`` and, when recorded, ``verification``. Results are memoized per
         process, keyed by snapshot ID and the manifest file's stat identity,
         so a replaced or modified file misses and is read and verified again.
+        On Windows it is exactly :meth:`get`.
         """
         if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
             raise Denied("Invalid snapshot ID")
+        if _platform.IS_WINDOWS:
+            # File metadata is not a trustworthy witness there: keep the exact
+            # full read, with no memo and no relaxed path policy.
+            record = self.get(snapshot_id)
+            facts = {"id": record["id"], "code_digest": record["code_digest"],
+                     "parent": record.get("parent")}
+            if "verification" in record:
+                facts["verification"] = record["verification"]
+            return deepcopy(facts)
         path = self.root / "snapshots" / f"{snapshot_id}.json"
-        identity = None if _platform.IS_WINDOWS else self._manifest_identity(path)
+        identity = self._manifest_identity(path)
         if identity is not None:
             with self._path_validation_lock:
                 cached = self._binding_cache.get(snapshot_id)

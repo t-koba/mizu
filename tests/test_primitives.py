@@ -23,6 +23,7 @@ from mizu.fs import (_open_read, _rename_exclusive_posix, _replace_windows, atom
                      write_json)
 from mizu.pi import credentials
 from mizu.process import environment, run
+from mizu import platform as fs_platform
 
 
 class WindowsReplaceTests(unittest.TestCase):
@@ -395,7 +396,10 @@ class FileTests(unittest.TestCase):
             parts = tuple(path.split("/"))
             drive = path[1:2] == ":" and PureWindowsPath(path).drive
             bad = (not path or path.startswith("/") or bool(drive)
-                   or any(p in ("", ".", "..") for p in parts))
+                   or any(p in ("", ".", "..") for p in parts)
+                   or (fs_platform.IS_WINDOWS and any(
+                       ":" in p or p.endswith((" ", ".")) or PureWindowsPath(p).is_reserved()
+                       for p in parts)))
             with self.subTest(path=path):
                 if bad:
                     with self.assertRaises(Denied):
