@@ -8,7 +8,7 @@ from mizu import ci_waits, host_records
 from mizu.cli import parser, execute
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
-from mizu.fs import PREVIEW_BYTES, canonical
+from mizu.fs import PREVIEW_BYTES, canonical, now
 from mizu.project import Project
 from mizu.runtime import should_run
 from mizu.storage import audit, reclaim
@@ -29,6 +29,16 @@ maximum = 1024
 type = "newer_snapshot"
 '''
 KIND = 'publisher.outcome'
+ROLE_DECLARATION = '''
+[record_kinds."probe.note"]
+writer = "role.worker"
+route = "none"
+wake = false
+retention = "permanent"
+acknowledgement = "explicit"
+subject = "object"
+maximum = 1024
+'''
 
 
 class HostRecordTests(CiWaitFixture):
@@ -241,6 +251,26 @@ class HostRecordTests(CiWaitFixture):
         legacy = self.project.root / self.shared()._legacy_record_name(result['record']['id'])
         legacy.write_bytes(b'{}')
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
+
+    def test_foreign_kind_record_in_host_partition_is_an_incomplete_reference(self):
+        # A canonically stored record of another declared family can sit in the
+        # host partition. Its subject names no snapshot, so the scan must report
+        # an incomplete reference source instead of aborting maintenance.
+        self.file.write_text(self.file.read_text() + ROLE_DECLARATION)
+        loaded = load(self.file)
+        config = dataclasses.replace(self.config, record_kinds=loaded.record_kinds)
+        shared = host_records.store(self.project.root, self.project.snapshots, config.record_kinds)
+        shared.put(dict(schema=1, id='host/probe/x', kind='probe.note', writer='role.worker',
+                        created_at=now(), subject={}, payload={}), writer='role.worker')
+        self.project.set_control(paused=True)
+        with patch.object(self.project, 'config', config):
+            report = audit(self.project)
+            self.assertGreater(report['reference_records_skipped'], 0)
+            self.assertEqual(report['references']['host_record_snapshots'], 0)
+            preview = reclaim(self.project)
+            self.assertGreater(preview['reference_records_skipped'], 0)
+            with self.assertRaisesRegex(Denied, 'Skipped reference records'):
+                reclaim(self.project, apply=True)
 
     def test_disabled_wake_and_stale_ack_remain_pending(self):
         item = self.block()

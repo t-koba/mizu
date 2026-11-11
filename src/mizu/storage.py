@@ -1129,7 +1129,13 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                 scan_progress=host_record_scan, include_legacy=True)
         try:
             for envelope, _ in records:
-                host_record_ids.add(envelope["subject"]["snapshot_id"])
+                # The host partition may hold a canonically stored record of
+                # another declared family; only a validated snapshot subject
+                # proves which snapshot the outcome retains.
+                subject = envelope["subject"].get("snapshot_id")
+                if not isinstance(subject, str) or DIGEST.fullmatch(subject) is None:
+                    raise Denied("Invalid host record snapshot reference")
+                host_record_ids.add(subject)
                 for value in envelope["payload"].values():
                     if isinstance(value, dict) and "snapshot_id" in value:
                         host_record_ids.add(value["snapshot_id"])
