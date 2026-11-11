@@ -1,5 +1,5 @@
 """Offline gate preflight and structured, privacy-safe unittest diagnostics."""
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stderr
 from functools import partial
 import importlib.util
 import io
@@ -1566,6 +1566,49 @@ class GateReceiptOutputBudgetTests(unittest.TestCase):
 
 class UnittestTimingEvidenceTests(unittest.TestCase):
     """Per-test runtime evidence only; never a timeout policy or gate."""
+
+    def test_log_summary_is_bounded_and_names_the_slowest_tests(self):
+        tests = [{'test': f'sample.Suite.test_{index:04}', 'duration_seconds': index / 10,
+                  'completed': True} for index in range(40)]
+        tests.append({'test': 'sample.Suite.test_unfinished', 'duration_seconds': 2.5,
+                      'completed': False})
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / 'test-timings.json'
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                CHECK.write_timings_artifact(artifact, tests=tests, status='pass',
+                                             exit_code=0, elapsed_seconds=7.5, phases=[])
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        self.assertIn('test timings (complete): 40/41 tests completed in 7.500s', line)
+        self.assertIn('in 7.500s; p50=1.900s p95=3.700s', line)
+        self.assertIn('sample.Suite.test_0039 3.900s', line)
+        self.assertIn('sample.Suite.test_0035 3.500s', line)
+        self.assertNotIn('sample.Suite.test_0034', line)
+        self.assertLessEqual(len(line), CHECK.TIMING_LOG_MAX_CHARS)
+
+    def test_log_summary_truncates_at_the_character_bound(self):
+        tests = [{'test': 'sample.Suite.test_slow_' + 'x' * 470 + str(index),
+                  'duration_seconds': 10.0 - index, 'completed': True} for index in range(6)]
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / 'test-timings.json'
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                CHECK.write_timings_artifact(artifact, tests=tests, status='pass',
+                                             exit_code=0, elapsed_seconds=10.0, phases=[])
+        line = stderr.getvalue().strip()
+        self.assertLessEqual(len(line), CHECK.TIMING_LOG_MAX_CHARS)
+        self.assertTrue(line.endswith('... (truncated)'))
+
+    def test_log_summary_ignores_malformed_payloads(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            CHECK._log_timing_summary({'summary': {'tests_recorded': 'x'}})
+            CHECK._log_timing_summary({})
+            CHECK._log_timing_summary({'summary': {'tests_recorded': True,
+                                                   'tests_completed': 1}})
+        self.assertEqual(stderr.getvalue(), '')
 
     def detail_tests(self, artifact, payload):
         self.assertEqual(payload['schema_version'], 2)

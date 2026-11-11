@@ -835,6 +835,65 @@ def _timing_artifact_summary(tests: list) -> dict:
             'unfinished_tests': [item['test'] for item in unfinished][:TIMING_SUMMARY_MAX_UNFINISHED]}
 
 
+TIMING_LOG_MAX_CHARS = 2000
+TIMING_LOG_MAX_SLOWEST = 5
+
+
+def _timing_log_summary(payload: dict) -> str:
+    """Return one bounded, sanitized summary line for the log stream.
+
+    The uploaded ``test-timings`` artifact carries the full per-test rows, but
+    the job log is the channel that survives where artifact retrieval is
+    unavailable. Only data already computed for the sanitized artifact summary
+    is printed: counts, elapsed/percentile seconds and a few slowest test IDs.
+    """
+    summary = payload.get('summary')
+    if not isinstance(summary, dict):
+        return ''
+    collection = payload.get('collection_state')
+    collection = collection if collection in ('partial', 'complete') else 'unknown'
+
+    def seconds(value):
+        return f'{value:.3f}s' if _valid_timing_seconds(value) else 'n/a'
+
+    recorded = summary.get('tests_recorded')
+    completed = summary.get('tests_completed')
+    if type(recorded) is not int or type(completed) is not int:
+        return ''
+    percentiles = summary.get('completed_duration_percentiles_seconds')
+    if not isinstance(percentiles, dict):
+        percentiles = {}
+    parts = [f'test timings ({collection}): {completed}/{recorded} tests completed'
+             f" in {seconds(payload.get('unittest_elapsed_seconds'))}",
+             f"p50={seconds(percentiles.get('p50'))} p95={seconds(percentiles.get('p95'))}"]
+    rows = []
+    slowest = summary.get('slowest_tests')
+    if isinstance(slowest, list):
+        for item in slowest[:TIMING_LOG_MAX_SLOWEST]:
+            if not isinstance(item, dict):
+                continue
+            test = item.get('test')
+            duration = item.get('duration_seconds')
+            if _valid_timing_test(test) and _valid_timing_seconds(duration):
+                rows.append(f'{test} {duration:.3f}s')
+    if rows:
+        parts.append('slowest: ' + ', '.join(rows))
+    line = '; '.join(parts)
+    if len(line) > TIMING_LOG_MAX_CHARS:
+        line = line[:TIMING_LOG_MAX_CHARS - len(' ... (truncated)')] + ' ... (truncated)'
+    return line
+
+
+def _log_timing_summary(payload: dict) -> None:
+    """Best-effort stderr summary; a log failure never changes the gate."""
+    try:
+        line = _timing_log_summary(payload)
+        if line:
+            print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+
+
 TIMING_PHASE_MAX_ENTRIES = 200
 TIMING_PHASE_MAX_NAME_LEN = 500
 TIMING_COUNTS_MAX = 1000000
@@ -972,6 +1031,7 @@ def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: i
                    'artifact_status': ('overflow' if phases_expected > TIMING_PHASE_MAX_ENTRIES
                                        else 'complete'), 'pages': []}
         payload['phases_expected'] = phases_expected
+        _log_timing_summary(payload)
         directory = path.with_name(path.name + '.d')
         page = {'suite': 'test-timing-details', 'schema_version': 1,
                 'source_sha256': source_sha, 'tests': []}

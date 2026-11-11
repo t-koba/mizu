@@ -267,6 +267,16 @@ phase results (name, status, duration, safe test counts, and the known reasons `
 more than 200 sets `artifact_status: "overflow"`, never complete evidence. There are no failure details, output
 tails or diagnostics. Do not substitute the general `offline.json` receipt.
 
+Whenever the timing payload is built, the gate also writes one bounded diagnostic line
+to stderr, for example `test timings (complete): 2176/2180 tests completed in
+963.209s; p50=0.031s p95=0.402s; slowest: <id> <seconds>s, ...`. It repeats the
+sanitized counts, elapsed/percentile seconds and at most five slowest test IDs, capped
+at 2,000 characters with an explicit truncation marker, and appears once for the early
+partial write and once for the final complete write. The log line exists because job
+logs are the channel that survives when artifact retrieval is unavailable; it is
+diagnostic only and never changes the gate outcome.
+
+
 Detail pages contain `suite: "test-timing-details"`, `schema_version: 1`, the
 same `source_sha256`, and `tests` as positional rows in the summary's
 `test_fields` order: `[test, duration_seconds, completed]`. Every valid parsed
