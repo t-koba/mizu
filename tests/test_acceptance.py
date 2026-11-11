@@ -881,6 +881,36 @@ class AcceptanceTests(Fixture):
         write_json(path, job)
         return job, path
 
+    def test_settled_jobs_are_not_reinspected_but_unfinished_ones_are(self):
+        if not acceptance._job_read_reuse():
+            self.skipTest('Identity reuse unavailable')
+        job, path = self.terminal_experiment()
+        jobs = {}
+        self.assertEqual(acceptance.recover_producers(self.project, jobs=jobs), {})
+        self.assertTrue((path.parent / 'settled.json').exists())
+        with patch.object(acceptance, 'recover_job', side_effect=AssertionError('reinspected')):
+            again = {}
+            self.assertEqual(acceptance.recover_producers(self.project, jobs=again), {})
+        self.assertEqual(again, jobs)
+        # Any rewrite of job.json (reopen, acknowledgement) invalidates the marker.
+        write_json(path, {**job, 'status': 'queued'})
+        with patch.object(acceptance, 'recover_job') as spy:
+            acceptance.recover_producers(self.project, jobs={})
+        spy.assert_called_once()
+        write_json(path, {**job, 'extra': 1})
+        with patch.object(acceptance, 'recover_job') as spy:
+            acceptance.recover_producers(self.project, jobs={})
+        spy.assert_called_once()
+        # A malformed marker fails closed: the job is inspected again.
+        (path.parent / 'settled.json').write_bytes(b'{')
+        with patch.object(acceptance, 'recover_job') as spy:
+            acceptance.recover_producers(self.project, jobs={})
+        spy.assert_called_once()
+        # A stale marker never hides a job that became invalid.
+        acceptance.recover_producers(self.project, jobs={})
+        path.write_bytes(b'not json')
+        self.assertEqual(acceptance.recover_producers(self.project, jobs={}), {job['id']: 'job_json'})
+
     def test_recovery_cache_retains_only_scheduling_fields_and_identity(self):
         job, path = self.terminal_experiment()
         for fields in ({}, {'created_at': '2026-01-01T00:00:00+00:00',
@@ -904,15 +934,18 @@ class AcceptanceTests(Fixture):
                 else:
                     self.assertEqual(jobs, {})
 
-    def test_runner_reuses_only_this_invocations_validated_terminal_read(self):
+    def test_runner_reuses_validated_terminal_read_only_while_file_identity_matches(self):
         self.terminal_experiment()
         reads_per_pass = 1 if acceptance._job_read_reuse() else 2
         with patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as parsed, \
                 patch('mizu.acceptance.safe_read_info', wraps=acceptance.safe_read_info) as read:
             for invocation in (1, 2):
                 self.assertEqual(self.run_job(), {'status': 'idle'})
-                self.assertEqual(parsed.call_count, invocation * reads_per_pass)
-                self.assertEqual(read.call_count, invocation * reads_per_pass)
+                # A settled marker bound to the unchanged job.json identity
+                # spares later invocations the lock and re-parse.
+                passes = 1 if acceptance._job_read_reuse() else invocation
+                self.assertEqual(parsed.call_count, passes * reads_per_pass)
+                self.assertEqual(read.call_count, passes * reads_per_pass)
         self.assertFalse(FakeSandbox.calls)
 
     def test_runner_rereads_changed_status_after_recovery(self):

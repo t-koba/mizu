@@ -202,6 +202,11 @@ one-day maximum caps the configured fallback cadence; a runner that is still
 active can extend the effective recovery time. Operators may choose a faster
 whole-second interval when appropriate. Changing this service policy does not change daemon
 readiness or claim lower idle cost; the default preserves the existing cadence.
+Runner recovery inspects a terminal job once: it then writes `settled.json`
+in the job directory, bound to the exact `job.json` file identity and holding
+only the scheduling projection. Later passes skip a job whose marker matches;
+any rewrite of `job.json`, or a missing or malformed marker, inspects it in full.
+The marker is removed with the job directory on eviction.
 Install and enable those units before
 enabling model use of the capability. Other platforms can invoke the same
 bounded command from an operator-managed runner; they do not yet have generated

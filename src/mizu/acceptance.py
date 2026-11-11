@@ -655,6 +655,30 @@ def recover_run(project, run_id):
     return None
 
 
+_SETTLED = 'settled.json'
+_CANDIDATE_KEYS = ('created_at', 'shared_job', 'status')
+
+
+def _settled_candidate(project, job_id, identity):
+    """Scheduling projection of a job recovery already settled, else None.
+
+    The marker binds the exact job.json file identity, so any rewrite (reopen,
+    acknowledgement, receipt binding) invalidates it. Any missing, unreadable or
+    malformed marker means the job is inspected in full.
+    """
+    try:
+        value = json.loads(safe_read(project.root, f'check-jobs/{job_id}/{_SETTLED}', 4096))
+    except (Denied, LimitExceeded, ValueError, UnicodeError, RecursionError):
+        return None
+    candidate = value.get('candidate') if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or set(value) != {'identity', 'candidate'}
+            or value['identity'] != list(identity) or not isinstance(candidate, dict) or set(candidate) != set(_CANDIDATE_KEYS)
+            or any(item is not None and not isinstance(item, str) for item in candidate.values())
+            or candidate['status'] in (None, 'queued', 'running')):
+        return None
+    return candidate
+
+
 def recover_job(project, job_id, *, jobs=None):
     # Snapshot the producer under its own lock, then release BEFORE retaining.
     if not _digest(job_id):
@@ -681,7 +705,14 @@ def recover_job(project, job_id, *, jobs=None):
             return None
         if existing is not None or value is None:
             if identity is not None:
-                jobs[job_id] = (identity[0], job_candidate(job))
+                candidate = job_candidate(job)
+                jobs[job_id] = (identity[0], candidate)
+                if candidate['status'] not in ('', 'queued', 'running'):
+                    # Nothing is left for recovery to repair until job.json is
+                    # rewritten. The marker lives in the job directory and ends
+                    # with it when the job is evicted.
+                    atomic_write(project.root / f'check-jobs/{job_id}/{_SETTLED}',
+                                 canonical({'identity': list(identity[0]), 'candidate': candidate}))
             return existing
     receipt_id = _retain(project.root, value)
     # Separate acquisitions: never acceptance.lock -> check-jobs.lock while
@@ -714,9 +745,16 @@ def recover_producers(project, *, include_runs=False, jobs=None):
     if include_runs:
         recover(project.root)
     invalid = {}
+    identities = {} if jobs is not None and _job_read_reuse() else None
     with lock(project.root / 'locks/check-jobs.lock'):
-        paths = job_paths(project, invalid)
+        paths = job_paths(project, invalid, identities=identities)
     for path in paths:
+        if identities is not None and path.parent.name in identities:
+            # Unchanged settled jobs cost one small read: no lock, no revalidation.
+            candidate = _settled_candidate(project, path.parent.name, identities[path.parent.name])
+            if candidate is not None:
+                jobs[path.parent.name] = (identities[path.parent.name], candidate)
+                continue
         try:
             recover_job(project, path.parent.name, jobs=jobs)
         except InvalidProducer as exc:
