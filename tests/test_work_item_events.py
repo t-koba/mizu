@@ -86,35 +86,35 @@ class WorkItemEventTests(Fixture):
                               snapshot_id=current["id"])
         completed = self.store.transition(seed["id"], expected_rev=4, status="done", actor="worker",
                                           reason="Verified", snapshot_id=current["id"])
-        original_get = self.project.snapshots.get
+        original_get = self.project.snapshots.binding
 
-        with patch.object(self.project.snapshots, "get", wraps=original_get) as get:
+        with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
             strict = self.store.get(seed["id"])
             self.assertEqual(strict, completed)
             self.assertEqual([call.args[0] for call in get.call_args_list],
                              [historical["id"], current["id"], current["id"]])
 
-        with patch.object(self.project.snapshots, "get", wraps=original_get) as get:
+        with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
             closed = self.store.page_closed_readonly(limit=10)
             self.assertEqual(closed["total"], 1)
             self.assertEqual(closed["items"][0]["id"], seed["id"])
             self.assertEqual(closed["items"][0]["snapshot_id"], current["id"])
             self.assertEqual([call.args[0] for call in get.call_args_list], [current["id"]])
 
-        with patch.object(self.project.snapshots, "get", wraps=original_get) as get:
+        with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
             events_page = events.closed_page(self.store, self.subscribed_config().roles)
             self.assertEqual(events_page["total"], 1)
             self.assertEqual(events_page["items"][0]["id"], seed["id"])
             self.assertEqual([call.args[0] for call in get.call_args_list], [current["id"]])
 
-        with patch.object(self.project.snapshots, "get", side_effect=Denied("current snapshot unavailable")) as get:
+        with patch.object(self.project.snapshots, "binding", side_effect=Denied("current snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "current snapshot unavailable"):
                 self.store.page_closed_readonly(limit=10)
             # A terminal sidecar hit may retry the exact validation after the
             # unavailable snapshot; both attempts name only the current proof.
             self.assertGreaterEqual(get.call_count, 1)
             self.assertEqual({call.args[0] for call in get.call_args_list}, {current["id"]})
-        with patch.object(self.project.snapshots, "get", side_effect=Denied("current snapshot unavailable")) as get:
+        with patch.object(self.project.snapshots, "binding", side_effect=Denied("current snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "current snapshot unavailable"):
                 events.closed_page(self.store, self.subscribed_config().roles)
             self.assertGreaterEqual(get.call_count, 1)
@@ -125,7 +125,7 @@ class WorkItemEventTests(Fixture):
         binding = read_json(binding_path)
         binding["title"] = "Tampered history"
         write_json(binding_path, binding)
-        with patch.object(self.project.snapshots, "get", side_effect=AssertionError("unused snapshot")) as get:
+        with patch.object(self.project.snapshots, "binding", side_effect=AssertionError("unused snapshot")) as get:
             with self.assertRaises(Denied):
                 self.store.page_closed_readonly(limit=10)
             get.assert_not_called()

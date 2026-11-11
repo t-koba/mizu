@@ -89,7 +89,7 @@ def validate(store, previous, record):
     if (not isinstance(evidence, dict) or set(evidence) != fields
             or not all(_digest(v) for v in evidence.values())):
         raise Denied('Invalid wait resolution evidence')
-    snapshot = store.snapshots.get(evidence['snapshot_id'])
+    snapshot = store.snapshots.binding(evidence['snapshot_id'])
     if snapshot['code_digest'] != evidence['code_digest']:
         raise Denied('Wait resolution snapshot digest mismatch')
     if wait['kind'] == 'code_change':

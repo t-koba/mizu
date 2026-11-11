@@ -1884,7 +1884,7 @@ class WorkItems:
                     or not DIGEST.fullmatch(delivery["code_digest"])):
                 raise Denied("Invalid delivery snapshot")
             if verify_snapshots:
-                snapshot = self.snapshots.get(delivery["snapshot_id"])
+                snapshot = self.snapshots.binding(delivery["snapshot_id"])
                 if (snapshot.get("id") != delivery["snapshot_id"]
                         or snapshot.get("code_digest") != delivery["code_digest"]):
                     raise Denied("Delivery does not match its immutable snapshot")
@@ -2004,7 +2004,7 @@ class WorkItems:
                     or not isinstance(verification.get("code_digest"), str)
                     or not DIGEST.fullmatch(verification["code_digest"])):
                 raise Denied("Completion requires verified snapshot evidence")
-            snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.get(sid)
+            snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.binding(sid)
             code_digest = snapshot["code_digest"]
             if verification["code_digest"] != code_digest:
                 raise Denied("Completion evidence does not match its delivery")
@@ -2297,7 +2297,7 @@ class WorkItems:
                     continue
                 snapshot_id = delivery["snapshot_id"]
                 if snapshot_id not in verified_snapshots:
-                    snapshot = self.snapshots.get(snapshot_id)
+                    snapshot = self.snapshots.binding(snapshot_id)
                     if snapshot.get("id") != snapshot_id:
                         raise Denied("Delivery does not match its immutable snapshot")
                     verified_snapshots[snapshot_id] = snapshot.get("code_digest")

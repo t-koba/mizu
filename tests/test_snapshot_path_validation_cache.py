@@ -78,3 +78,62 @@ class SnapshotPathValidationCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SnapshotBindingTests(unittest.TestCase):
+    def publish(self, snapshot_store, record):
+        write_json(snapshot_store.root / "snapshots" / f"{record['id']}.json", record)
+        return snapshot_store.root / "snapshots" / f"{record['id']}.json"
+
+    def test_binding_skips_path_policy_but_get_still_applies_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_store = store(directory, excludes=("src",))
+            record = manifest({"src/a.py": file_entry()})
+            self.publish(snapshot_store, record)
+            facts = snapshot_store.binding(record["id"])
+            self.assertEqual((facts["id"], facts["code_digest"]),
+                             (record["id"], record["code_digest"]))
+            with self.assertRaises(Denied):
+                snapshot_store.get(record["id"])
+
+    def test_binding_rejects_tampered_and_mismatched_manifests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_store = store(directory)
+            record = manifest({"src/a.py": file_entry()})
+            path = self.publish(snapshot_store, record)
+            tampered = {**record, "goal": "other"}
+            write_json(path, tampered)
+            with self.assertRaises(Denied):
+                snapshot_store.binding(record["id"])
+            body = {"files": record["files"], "code_digest": digest(b"wrong"),
+                    "goal": "snapshot path cache test",
+                    "goal_digest": digest(b"snapshot path cache test")}
+            wrong = {**body, "id": digest(canonical(body))}
+            self.publish(snapshot_store, wrong)
+            with self.assertRaisesRegex(Denied, "code digest"):
+                snapshot_store.binding(wrong["id"])
+            with self.assertRaises(Denied):
+                snapshot_store.binding(digest(b"missing"))
+
+    def test_binding_is_memoized_until_the_manifest_file_is_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_store = store(directory)
+            record = manifest({"src/a.py": file_entry()})
+            path = self.publish(snapshot_store, record)
+            with patch("mizu.snapshot.read_json", wraps=__import__("mizu.snapshot").snapshot.read_json) as read:
+                for _ in range(3):
+                    snapshot_store.binding(record["id"])
+                self.assertEqual(read.call_count, 1)
+                write_json(path, {**record, "goal": "replaced"})
+                with self.assertRaises(Denied):
+                    snapshot_store.binding(record["id"])
+                self.assertEqual(read.call_count, 2)
+
+    def test_binding_memo_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_store = store(directory)
+            for index in range(_PATH_VALIDATION_CACHE_LIMIT + 2):
+                record = manifest({f"src/file-{index}.py": file_entry()})
+                self.publish(snapshot_store, record)
+                snapshot_store.binding(record["id"])
+            self.assertLessEqual(len(snapshot_store._binding_cache), _PATH_VALIDATION_CACHE_LIMIT)

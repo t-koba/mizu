@@ -276,14 +276,14 @@ class WorkItemTests(Fixture):
             self.assertTrue({"delivery", "snapshot_id", "verification"}.isdisjoint(row))
         self.assertEqual(expected[4]["items"][0]["wait_liveness"]["state"], "due")
         self.assertEqual(expected[5]["items"][0]["state"], "due")
-        get_snapshot = self.store.snapshots.get
+        get_snapshot = self.store.snapshots.binding
 
         def current_only(snapshot_id):
             self.assertEqual(snapshot_id, current_snapshot["id"])
             return get_snapshot(snapshot_id)
 
         with patch("mizu.work_item_waits.now", return_value="2030-01-01T00:00:00+00:00"), \
-                patch.object(self.store.snapshots, "get", side_effect=current_only) as get:
+                patch.object(self.store.snapshots, "binding", side_effect=current_only) as get:
             for reader, result in zip(readers, expected):
                 with self.subTest(reader=reader.__name__):
                     self.assertEqual(reader(), result)
@@ -301,12 +301,12 @@ class WorkItemTests(Fixture):
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
         sidecar.unlink(missing_ok=True)
         fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
-        with patch.object(fresh.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+        with patch.object(fresh.snapshots, "binding", side_effect=Denied("snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
                 fresh.page_open_readonly(limit=100)
             get.assert_called_once_with(current_snapshot["id"])
 
-        with patch.object(self.store.snapshots, "get", side_effect=Denied("snapshot unavailable")) as get:
+        with patch.object(self.store.snapshots, "binding", side_effect=Denied("snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
                 self.change("done", expected_rev=5, snapshot_id=current_snapshot["id"])
             get.assert_called_once_with(historical["id"])
@@ -388,8 +388,8 @@ class WorkItemTests(Fixture):
         # Legacy events remain valid through the manifest-backed path.
         fresh._validate_transition(self.seed, legacy)
         if not work_items_module.IS_WINDOWS:
-            with patch.object(fresh.snapshots, "get",
-                              wraps=fresh.snapshots.get) as get, \
+            with patch.object(fresh.snapshots, "binding",
+                              wraps=fresh.snapshots.binding) as get, \
                     patch.object(fresh, "_current_hold",
                                  side_effect=AssertionError("done sidecar replayed history")):
                 self.assertEqual(fresh.page_open_readonly()["total"], 0)
@@ -399,7 +399,7 @@ class WorkItemTests(Fixture):
         # Missing/corrupt current proof must fail closed, even after valid reads.
         manifest = self.project.root / "snapshots" / f"{snapshot['id']}.json"
         self.assert_done_proof_required(fresh, manifest, {**snapshot, "summary": "tampered"})
-        with patch.object(fresh.snapshots, "get", side_effect=Denied("snapshot unavailable")):
+        with patch.object(fresh.snapshots, "binding", side_effect=Denied("snapshot unavailable")):
             # A miss still performs exact replay, including current done evidence.
             (self.project.root / "work-item-state" / f"{self.item_id}.json").unlink(missing_ok=True)
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
@@ -470,12 +470,12 @@ class WorkItemTests(Fixture):
                                       expected_rev=current["rev"])
             for reader in (self.store.count_open_readonly, self.store.page_open_for_order):
                 with self.subTest(revision=revision, reader=reader.__name__), \
-                        patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get, \
+                        patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get, \
                         patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as validate:
                     reader()
                     get.assert_called_once_with(snapshot_id)
                     self.assertEqual(validate.call_count, revision - 1)
-            with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+            with patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get:
                 self.assertEqual(self.store.get(self.item_id), current)
                 self.assertEqual(get.call_count, revision - 2)
 
@@ -536,21 +536,21 @@ class WorkItemTests(Fixture):
             current = self.change("open" if current["status"] == "doing" else "doing",
                                   expected_rev=current["rev"])
 
-        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get, \
+        with patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get, \
                 patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as validate:
             first = self.store.explain(self.item_id, after_rev=0, limit=1)
             self.assertEqual([row["rev"] for row in first["history"]], [1])
             get.assert_called_once_with(snapshots[2]["id"])
             self.assertEqual(validate.call_count, 16)
 
-        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+        with patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get:
             selected = self.store.explain(self.item_id, after_rev=2, limit=2)
             self.assertEqual([row["rev"] for row in selected["history"]], [3, 4])
             self.assertEqual(get.call_count, 3)
             self.assertEqual({call.args[0] for call in get.call_args_list},
                              {snapshot["id"] for snapshot in snapshots})
 
-        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+        with patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get:
             repeated = self.store.explain(self.item_id, after_rev=4, limit=3)
             self.assertEqual([row["rev"] for row in repeated["history"]], [5, 6, 7])
             get.assert_called_once_with(snapshots[2]["id"])
@@ -562,7 +562,7 @@ class WorkItemTests(Fixture):
         old_snapshot = json.loads(old_snapshot_path.read_text())
         corrupt_snapshot = dict(old_snapshot, summary="tampered")
         write_json(old_snapshot_path, corrupt_snapshot)
-        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+        with patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get:
             page = self.store.explain(self.item_id, after_rev=3, limit=1)
             self.assertEqual([row["rev"] for row in page["history"]], [4])
             self.assertNotIn(snapshots[0]["id"], {call.args[0] for call in get.call_args_list})
@@ -576,7 +576,7 @@ class WorkItemTests(Fixture):
         old = json.loads(old_path.read_text())
         old["delivery"]["code_digest"] = "0" * 64
         write_json(old_path, old)
-        with patch.object(self.store.snapshots, "get", wraps=self.store.snapshots.get) as get:
+        with patch.object(self.store.snapshots, "binding", wraps=self.store.snapshots.binding) as get:
             page = self.store.explain(self.item_id, after_rev=3, limit=1)
             self.assertEqual([row["rev"] for row in page["history"]], [4])
             self.assertEqual({call.args[0] for call in get.call_args_list},

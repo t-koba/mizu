@@ -50,10 +50,12 @@ class ReadViewTests(Fixture):
         calls = []
         original = Snapshots.validate_manifest
 
-        def validate(store, snapshot_id, record):
+        def validate(store, snapshot_id, record, **kwargs):
             calls.append(snapshot_id)
-            return original(store, snapshot_id, record)
+            return original(store, snapshot_id, record, **kwargs)
 
+        # Binding checks are memoized per process; start from a cold memo.
+        self.project.snapshots._binding_cache.clear()
         with patch.object(Snapshots, "validate_manifest", validate):
             self.assertEqual(self.render(readonly_view(self.project.work_items)), expected)
         self.assertEqual(len(calls), 1)
@@ -63,10 +65,11 @@ class ReadViewTests(Fixture):
         calls = []
         original = Snapshots.validate_manifest
 
-        def validate(store, snapshot_id, record):
+        def validate(store, snapshot_id, record, **kwargs):
             calls.append(snapshot_id)
-            return original(store, snapshot_id, record)
+            return original(store, snapshot_id, record, **kwargs)
 
+        self.project.snapshots._binding_cache.clear()
         with patch.object(Snapshots, "validate_manifest", validate):
             result = _cmd_work_items(self.config, self.project,
                                      SimpleNamespace(cursor=None, limit=100, closed=100))
@@ -330,14 +333,15 @@ class ReadViewTests(Fixture):
         original = Snapshots.validate_manifest
         calls = []
 
-        def validate(store, snapshot_id, record):
+        def validate(store, snapshot_id, record, **kwargs):
             calls.append(snapshot_id)
-            return original(store, snapshot_id, record)
+            return original(store, snapshot_id, record, **kwargs)
 
         store = self.project.work_items
         snapshots = store.snapshots
         for event_trigger, continuation in ((True, False), (False, False), (True, True)):
             with self.subTest(event_trigger=event_trigger, continuation=continuation):
+                self.project.snapshots._binding_cache.clear()
                 with patch.object(Snapshots, "validate_manifest", validate):
                     with patch("mizu.runtime.readonly_view", side_effect=lambda value, **kwargs: value):
                         expected = self.dispatch(event_trigger=event_trigger, continuation=continuation)
@@ -346,7 +350,7 @@ class ReadViewTests(Fixture):
                     actual = self.dispatch(event_trigger=event_trigger, continuation=continuation)
                     self.assertEqual(actual, expected)
                     self.assertEqual(len(actual["terminal_events"]), 3)
-                    expected_validations = 5 if work_items_module.IS_WINDOWS else 2
+                    expected_validations = 5 if work_items_module.IS_WINDOWS else 1
                     self.assertEqual(len(calls), expected_validations)
                     self.assertLess(len(calls), uncached)
                     calls.clear()
@@ -414,7 +418,10 @@ class ReadViewTests(Fixture):
             work_item_read_view_file_cache_bytes=1,
             work_item_read_view_item_cache_bytes=1,
             work_item_read_view_item_cache_entries=1)
-        with patch.object(Snapshots, "validate_manifest", autospec=True,
+        # The per-process binding memo would hide the repeats; disable it.
+        self.project.snapshots._binding_cache.clear()
+        with patch("mizu.snapshot._PATH_VALIDATION_CACHE_LIMIT", 0), \
+                patch.object(Snapshots, "validate_manifest", autospec=True,
                           side_effect=Snapshots.validate_manifest) as validate:
             self.assertEqual(self.render(readonly_view(self.project.work_items, limits=limits)),
                              expected)

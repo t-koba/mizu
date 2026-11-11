@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import datetime as dt
+from copy import deepcopy
 import difflib
 import fnmatch
 from functools import lru_cache
@@ -324,6 +325,9 @@ class Snapshots:
         # the full manifest on every access before consulting this bounded cache.
         self._path_validation_cache = OrderedDict()
         self._path_validation_lock = threading.Lock()
+        # Binding checks (id + code digest) are witnessed by the manifest
+        # file's stat identity and bounded like the path-validation cache.
+        self._binding_cache = OrderedDict()
         if create_dirs:
             mkdir(root / "objects")
             mkdir(root / "snapshots")
@@ -778,11 +782,62 @@ class Snapshots:
             raise Denied("Snapshot not found")
         return self.validate_manifest(snapshot_id, record)
 
-    def validate_manifest(self, snapshot_id: str, record: dict) -> dict:
+    @staticmethod
+    def _manifest_identity(path: Path):
+        """No-follow stat witness of one regular, singly linked manifest file."""
+        try:
+            info = path.lstat()
+        except OSError:
+            return None
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or getattr(info, "st_file_attributes", 0) & 0x400):
+            return None
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def binding(self, snapshot_id: str) -> dict:
+        """Verify that a snapshot exists and is intact; return its binding facts.
+
+        Same integrity, goal-digest, code-digest, parent, progress and entry
+        checks as :meth:`get`, but without the host path policy (excluded and
+        colliding paths), which matters when a tree is materialized or
+        published, not when a digest binding is checked. Returns only
+        ``id``, ``code_digest``, ``parent`` and, when recorded, ``verification``. Results are memoized per
+        process, keyed by snapshot ID and the manifest file's stat identity,
+        so a replaced or modified file misses and is read and verified again.
+        """
+        if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
+            raise Denied("Invalid snapshot ID")
+        path = self.root / "snapshots" / f"{snapshot_id}.json"
+        identity = None if _platform.IS_WINDOWS else self._manifest_identity(path)
+        if identity is not None:
+            with self._path_validation_lock:
+                cached = self._binding_cache.get(snapshot_id)
+                if cached is not None and cached[0] == identity:
+                    self._binding_cache.move_to_end(snapshot_id)
+                    return deepcopy(cached[1])
+        record = read_json(path)
+        if record is None:
+            raise Denied("Snapshot not found")
+        self.validate_manifest(snapshot_id, record, paths=False)
+        facts = {"id": record["id"], "code_digest": record["code_digest"],
+                 "parent": record.get("parent")}
+        if "verification" in record:
+            facts["verification"] = record["verification"]
+        if identity is not None and self._manifest_identity(path) == identity:
+            with self._path_validation_lock:
+                self._binding_cache[snapshot_id] = (identity, facts)
+                self._binding_cache.move_to_end(snapshot_id)
+                while len(self._binding_cache) > _PATH_VALIDATION_CACHE_LIMIT:
+                    self._binding_cache.popitem(last=False)
+        return deepcopy(facts)
+
+    def validate_manifest(self, snapshot_id: str, record: dict, *, paths: bool = True) -> dict:
         """Validate an already-read manifest against its content-addressed ID.
 
         Uses this store's path policy and file bounds without reading disk.
         Callers are responsible for bounding and safely reading the record.
+        ``paths=False`` skips only the host path policy.
         """
         if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
             raise Denied("Invalid snapshot ID")
@@ -793,7 +848,7 @@ class Snapshots:
             raise Denied("Snapshot integrity failure")
         if not isinstance(record.get("goal"), str) or digest(record["goal"].encode()) != record.get("goal_digest"):
             raise Denied("Snapshot goal digest mismatch")
-        return self._validate_manifest_fields(snapshot_id, record)
+        return self._validate_manifest_fields(snapshot_id, record, paths=paths)
 
     def audit_manifest(self, snapshot_id: str, *, metadata_bytes: int, maximum: int) -> dict:
         """Validate historical content without loading a serialized file map.
@@ -846,7 +901,7 @@ class Snapshots:
         record.pop("file_names")
         return record
 
-    def _validate_manifest_fields(self, snapshot_id: str, record: dict) -> dict:
+    def _validate_manifest_fields(self, snapshot_id: str, record: dict, *, paths: bool = True) -> dict:
         """Shared structural validation, only after content identity is proven."""
         if "parent" in record and record["parent"] is not None and (not isinstance(record["parent"], str) or not DIGEST.fullmatch(record["parent"])):
             raise Denied("Invalid parent snapshot ID")
@@ -856,7 +911,8 @@ class Snapshots:
             validate_progress(record["progress"])
         if digest(canonical(record["files"])) != record.get("code_digest"):
             raise Denied("Snapshot code digest mismatch")
-        self._validate_paths_once(snapshot_id, record["files"])
+        if paths:
+            self._validate_paths_once(snapshot_id, record["files"])
         for entry in record["files"].values():
             if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str) or not DIGEST.fullmatch(entry["sha256"]) or type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= self.max_file or type(entry.get("executable")) is not bool:
                 raise Denied("Invalid snapshot file metadata")

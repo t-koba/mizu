@@ -58,7 +58,7 @@ def normalize_publication(value, *, snapshots, branch=None, stored=False):
             or value.get("kind") != "publication_ci"):
         raise Denied("Invalid work-item publication CI wait fields")
     _check_names(value["checks"])
-    snapshot = snapshots.get(value["snapshot_id"])
+    snapshot = snapshots.binding(value["snapshot_id"])
     if not stored and snapshot["id"] not in snapshots._history_ids():
         raise Denied("Publication CI wait requires retained published history")
     from .vcs import check_branch

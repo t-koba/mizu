@@ -2006,6 +2006,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('snapshot.py', 'validate_progress', 2, 0): (
         '101', 'mechanism',
         'snapshot progress / saturate the no-progress streak one above the maximum configured allowance of 100'),
+    ('snapshot.py', 'Snapshots._manifest_identity', 1, 0): (
+        '1', 'format',
+        'snapshot binding memo / witnessed manifest file has exactly one link'),
     ('snapshot.py', 'Snapshots._capture_openat', 1, 0): (
         '1', 'safety', 'snapshot capture / regular file handle must report exactly one hardlink'),
     ('snapshot.py', 'Snapshots._capture_portable', 1, 0): (

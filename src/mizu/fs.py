@@ -577,7 +577,10 @@ def relative_parts(name: str) -> tuple[str, ...]:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise Denied("Invalid relative path")
     parts = tuple(name.split("/"))
-    if PurePosixPath(name).is_absolute() or PureWindowsPath(name).drive or any(p in ("", ".", "..") for p in parts):
+    # A leading "/" yields an empty first component and a Windows drive needs
+    # ":" in the second position (backslashes were refused above), so pathlib
+    # runs only for the one shape it can still decide.
+    if (name[1:2] == ":" and PureWindowsPath(name).drive) or any(p in ("", ".", "..") for p in parts):
         raise Denied("Path must be relative, without empty, '.' or '..' components")
     if _platform.IS_WINDOWS and any(':' in p or p.endswith((' ', '.')) or
             PureWindowsPath(p).is_reserved() for p in parts):
