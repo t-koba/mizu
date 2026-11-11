@@ -1138,7 +1138,11 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                 host_record_ids.add(subject)
                 for value in envelope["payload"].values():
                     if isinstance(value, dict) and "snapshot_id" in value:
-                        host_record_ids.add(value["snapshot_id"])
+                        reference = value["snapshot_id"]
+                        if (not isinstance(reference, str)
+                                or DIGEST.fullmatch(reference) is None):
+                            raise Denied("Invalid host record snapshot reference")
+                        host_record_ids.add(reference)
         finally:
             records.close()
         # SharedRecords deliberately avoids a lookahead read at the requested

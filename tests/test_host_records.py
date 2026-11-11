@@ -272,6 +272,26 @@ class HostRecordTests(CiWaitFixture):
             with self.assertRaisesRegex(Denied, 'Skipped reference records'):
                 reclaim(self.project, apply=True)
 
+    def test_invalid_payload_snapshot_reference_is_an_incomplete_scan(self):
+        # Role payloads are data-only, so a nested snapshot reference can be
+        # malformed; it must count as a skipped source, not crash the audit.
+        self.file.write_text(self.file.read_text() + ROLE_DECLARATION)
+        loaded = load(self.file)
+        config = dataclasses.replace(self.config, record_kinds=loaded.record_kinds)
+        shared = host_records.store(self.project.root, self.project.snapshots, config.record_kinds)
+        shared.put(dict(schema=1, id='host/probe/y', kind='probe.note', writer='role.worker',
+                        created_at=now(), subject={'snapshot_id': 'a' * 64},
+                        payload={'probe': {'snapshot_id': ['not-a-digest']}}),
+                   writer='role.worker')
+        self.project.set_control(paused=True)
+        with patch.object(self.project, 'config', config):
+            report = audit(self.project)
+            self.assertGreater(report['reference_records_skipped'], 0)
+            preview = reclaim(self.project)
+            self.assertGreater(preview['reference_records_skipped'], 0)
+            with self.assertRaisesRegex(Denied, 'Skipped reference records'):
+                reclaim(self.project, apply=True)
+
     def test_disabled_wake_and_stale_ack_remain_pending(self):
         item = self.block()
         self.write()
