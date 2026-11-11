@@ -739,7 +739,7 @@ when its timezone-aware `created_at` is strictly older than the same cutoff;
 mtime does not determine manifest age. Missing/malformed creation times refuse
 the entire snapshot pass, rather than assuming old age. Objects are deleted only
 when no retained manifest uses them, including recent unreferenced manifests.
-A regular `.new-*` atomic-write staging file left in `objects/` by a crash is never
+A regular single-link `.new-*` atomic-write staging file left in `objects/` by a crash is never
 referenced or deleted and does not make the scan incomplete; any other
 unrecognized object entry still refuses the pass.
 

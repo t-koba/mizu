@@ -324,7 +324,7 @@ submissions, every historical work-item delivery/done binding, and exact
 snapshot citations in declared host publisher-outcome records). Superseded
 history generations use immutable file mtime; manifests use timezone-aware
 `created_at`. Only strictly older, unreferenced entries expire. Objects are removed
-only if no retained manifest uses them. A regular `.new-*` atomic-write staging file
+only if no retained manifest uses them. A regular single-link `.new-*` atomic-write staging file
 left in `objects/` by a crash is never referenced or removed and does not
 make the scan incomplete; any other unrecognized entry still refuses it. The
 manual `storage` preview/apply still does not expire history generations and

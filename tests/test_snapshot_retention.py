@@ -432,6 +432,19 @@ class SnapshotRetentionTests(Fixture):
         self.assertEqual(self.collect()['status'], 'refused')
         self.assertTrue(self.path(old).exists())
 
+    def test_staging_prefixed_hard_link_still_refuses(self):
+        old = self.snapshot()
+        target = self.project.root / 'staging-target'
+        target.write_bytes(b'x')
+        link = self.project.root / 'objects' / (ATOMIC_WRITE_TEMP_PREFIX + 'hard')
+        try:
+            os.link(target, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Hard links unavailable: ' + str(exc))
+        self.assertEqual(storage.audit(self.project)['objects']['skipped'], 1)
+        self.assertEqual(self.collect()['status'], 'refused')
+        self.assertTrue(self.path(old).exists())
+
     def test_oversized_records_invalid_times_and_item_history_refuse_gc(self):
         old = self.snapshot()
         bad = self.project.root / 'inbox/bad.json'
