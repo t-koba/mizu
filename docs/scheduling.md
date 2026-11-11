@@ -60,6 +60,13 @@ not ordinary schedules or admission; those can still deliver inputs earlier.
 Daemon roles reject this setting. See [configuration](configuration.md) for the
 separate `event_poll_seconds` policy and unchanged delivery/acknowledgement rules.
 
+`roles.<name>.event_wakes` narrows which wake kinds (operator record, decision,
+work item, wait, CI, operator wake, ready work, code change) may admit a
+standalone `--event` dispatch of a role; the default is all kinds. The runtime
+masks unlisted kinds in the facts passed to `evaluate_dispatch`, so a masked
+wake exits as `no-event` and consumes nothing, and a role with an empty list
+gets no event units. Continuations, schedules and daemon loops are unaffected.
+
 ## Wake sources versus delivered inputs
 
 `should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It

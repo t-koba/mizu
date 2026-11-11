@@ -789,6 +789,12 @@ class ServiceSettings:
     check_recovery_interval_seconds: int = 30
 
 
+#: Wake kinds that may admit a standalone ``mizu run --event`` dispatch of a
+#: role; ``roles.<name>.event_wakes`` selects a subset (default: all).
+EVENT_WAKE_KINDS = ("operator_record", "decision", "work_item", "wait", "ci",
+                    "operator", "ready_work", "code")
+
+
 @dataclasses.dataclass(frozen=True)
 class Role:
     name: str
@@ -870,6 +876,10 @@ class Role:
     #: scheduled roles. None preserves file triggers/recovery defaults; set
     #: values replace immediate file triggers, not ordinary schedules.
     event_batch_seconds: int | None = None
+    #: Wake kinds that may admit a standalone ``--event`` dispatch of this
+    #: role (subset of EVENT_WAKE_KINDS). Default is every kind; an empty
+    #: tuple means only schedules, daemons and continuations start the role.
+    event_wakes: tuple[str, ...] = EVENT_WAKE_KINDS
     #: Explicit daemon scheduling policy: ``signals`` consults the
     #: role-aware ``should_run`` readiness gate, ``periodic`` runs at the
     #: ordinary cadence while the project is armed and neither paused nor
@@ -1726,7 +1736,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1909,6 +1919,13 @@ def load(file: Path) -> Config:
                    EVENT_POLL_SECONDS_MIN, EVENT_POLL_SECONDS_MAX)
             if daemon:
                 raise ConfigError(f"roles.{name}.event_batch_seconds cannot be used with daemon")
+        raw_event_wakes = role.get("event_wakes")
+        if raw_event_wakes is None:
+            event_wakes = EVENT_WAKE_KINDS
+        else:
+            event_wakes = tuple(strings(raw_event_wakes, f"roles.{name}.event_wakes"))
+            if len(set(event_wakes)) != len(event_wakes) or any(w not in EVENT_WAKE_KINDS for w in event_wakes):
+                raise ConfigError(f"roles.{name}.event_wakes must contain unique supported wake kinds")
         raw_daemon_policy = role.get("daemon_policy")
         if raw_daemon_policy is None:
             daemon_policy = "signals" if workspace == "write" else "periodic"
@@ -1943,6 +1960,7 @@ def load(file: Path) -> Config:
                            progress_signals=role_progress,
                            event_poll_seconds=role_event_poll,
                            event_batch_seconds=role_event_batch,
+                           event_wakes=event_wakes,
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing,
                            scheduled_inputs=scheduled_inputs, **evidence_sources)

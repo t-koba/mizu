@@ -2832,6 +2832,19 @@ class Engine:
         # operator wakes independently, even when no new code is published.
         wake_base = snapshot if role.workspace == "write" else cursor
         operator_woke = _operator_woke(project.control(), wake_base, observer=role.workspace != "write")
+        # ``roles.<name>.event_wakes``: a standalone event dispatch sees only the
+        # listed wake kinds. Masking the facts here leaves nothing consumed:
+        # a skipped attempt acknowledges no event, record or cursor.
+        def wakes(kind):
+            return not event_trigger or kind in role.event_wakes
+        has_code_event = has_code_event and wakes("code")
+        ready_work_changed = ready_work_changed and wakes("ready_work")
+        operator_woke = operator_woke and wakes("operator")
+        has_wait = has_wait and wakes("wait")
+        ci_failures_wake = bool(ci_failures) and wakes("ci")
+        record_wake = bool(record_state[0]["wake_pending"]) and wakes("operator_record")
+        decision_wake = bool(substantive_events or substantive_diagnostics) and wakes("decision")
+        work_item_wake = bool(terminal_events) and wakes("work_item")
         if event_trigger:
             event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=True,
@@ -2842,11 +2855,11 @@ class Engine:
                 operator_woke=operator_woke and role.workspace != "write",
                 explicit_wake=operator_woke and role.workspace != "write",
                 ready_work_changed=ready_work_changed,
-                has_record=bool(record_state[0]["wake_pending"]),
-                has_decision=bool(substantive_events or substantive_diagnostics),
-                has_work_item=bool(terminal_events),
+                has_record=record_wake,
+                has_decision=decision_wake,
+                has_work_item=work_item_wake,
                 has_wait=has_wait,
-                has_ci=bool(ci_failures),
+                has_ci=ci_failures_wake,
             ))
             if event_gate.skipped == "no-event":
                 return {"skip": {"skipped": "no-event", "snapshot": snapshot["id"],
@@ -2874,11 +2887,11 @@ class Engine:
             has_code_event=bool(has_code_event),
             explicit_wake=bool(explicit_wake),
             ready_work_changed=ready_work_changed,
-            has_record=bool(record_state[0]["wake_pending"]),
-            has_decision=bool(substantive_events or substantive_diagnostics),
-            has_work_item=bool(terminal_events),
+            has_record=record_wake,
+            has_decision=decision_wake,
+            has_work_item=work_item_wake,
             has_wait=has_wait,
-            has_ci=bool(ci_failures),
+            has_ci=ci_failures_wake,
             operator_woke=bool(operator_woke and role.workspace != "write"),
             progress_self_admits=bool(progress_self_admits),
             has_next_task=bool(next_task),

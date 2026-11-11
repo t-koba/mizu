@@ -1194,6 +1194,25 @@ Rendering does not install or enable units; replacing existing installed file
 triggers is an operator deployment step. There is no new retry or cancellation
 mechanism; periodic triggers simply re-evaluate existing pending state.
 
+`roles.<name>.event_wakes` lists the wake kinds that may admit a standalone
+`mizu run --event` dispatch of that role: `operator_record`, `decision`,
+`work_item`, `wait` (due waits and owned check-result waits), `ci`, `operator`
+(a role-cursored operator wake), `ready_work` and `code` (an unobserved
+published code change for an unscheduled `on_change` role). Unset admits every
+kind, which is the behavior without the key. Names must be unique known kinds;
+anything else, or a non-array, is refused at load. A kind that is not listed is
+masked before the dispatch gate: an `--event` run for that wake exits with
+`no-event` before any run directory, slot or model use, and acknowledges
+nothing, so the record, event, wait, CI failure or cursor stays pending for
+whichever role or run may consume it. An empty list means no wake starts the
+role standalone, and `mizu service` renders no event service, path or timer
+unit (and no Windows poll task) for it. The list is an additional gate on
+top of `ci_wake`, `check_result_wake`, `decision_events` and
+`work_item_events`, which keep their meaning. Interval/calendar timers, daemon
+loops, explicit `mizu run`, saved continuations and delegated or consulted
+children do not pass through this gate; a run that starts for such a reason
+still delivers the pending inputs it would deliver today.
+
 The optional `[services]` table controls systemd deployment and validation
 policy only. `systemd_restart_delay_seconds` (default 15) sets `RestartSec` for
 daemon units; `systemd_stop_timeout_seconds` (default 45) sets `TimeoutStopSec`
