@@ -25,9 +25,9 @@ from .delegation_jobs import DelegationJobs
 from .admission import check_slot_exclusions, role_exclusions
 from .config import DEFAULT_WEB_CACHE_SECONDS, MAX_PROJECT_GOAL_BYTES, MEBIBYTE_BYTES
 from .errors import Busy, Denied, LimitExceeded
-from .fs import (DIGEST, PREVIEW_BYTES, atomic_write, canonical, digest,
-                 identifier, lock, mkdir, now, read_json, safe_read,
-                 sync_dir, write_json, relative_parts)
+from .fs import (ATOMIC_WRITE_TEMP_PREFIX, DIGEST, PREVIEW_BYTES, atomic_write,
+                 canonical, digest, identifier, lock, mkdir, now, read_json,
+                 safe_read, sync_dir, write_json, relative_parts)
 from . import acceptance, insight_archive, lock_diagnostics
 from .project import (Project, _check_project_paths, _directory_identity,
                       _discard_project_stage, _project_parents, check_project_settings, read_goal)
@@ -1178,6 +1178,13 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     objects_skipped = int(objects_scan_skipped)
     for child in object_paths:
         try:
+            if child.name.startswith(ATOMIC_WRITE_TEMP_PREFIX):
+                # A crash between staging and rename leaves product-owned
+                # incomplete data. It can never be referenced (the name is not
+                # a digest) and neither audit nor reclamation deletes it, so it
+                # must not make an otherwise complete scan look incomplete and
+                # silently disable reference-aware retention.
+                continue
             if child.is_symlink() or not child.is_file() or not DIGEST.fullmatch(child.name):
                 objects_skipped += 1
                 continue

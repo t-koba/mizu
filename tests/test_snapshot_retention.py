@@ -15,7 +15,7 @@ from mizu import cli, continuations, storage
 from mizu.admission import check_slot_exclusion
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied
-from mizu.fs import canonical, digest, lock, read_json, write_json
+from mizu.fs import ATOMIC_WRITE_TEMP_PREFIX, canonical, digest, lock, read_json, write_json
 
 DAY = 86400
 CLOCK = 2_000_000_000
@@ -395,6 +395,24 @@ class SnapshotRetentionTests(Fixture):
         with mock.patch.object(storage.insight_archive, 'snapshot_references', side_effect=ValueError):
             self.assertEqual(self.collect()['status'], 'refused')
         self.assertTrue(self.path(old).exists())
+
+    def test_product_staging_leftover_never_disables_retention(self):
+        old = self.snapshot()
+        objects = self.project.root / 'objects'
+        staging = objects / (ATOMIC_WRITE_TEMP_PREFIX + 'abcdefgh')
+        staging.write_bytes(b'staged')
+        self.assertEqual(storage.audit(self.project)['objects']['skipped'], 0)
+        result = self.collect()
+        self.assertEqual(result['status'], 'collected', result)
+        self.assertFalse(self.path(old).exists())
+        self.assertEqual(staging.read_bytes(), b'staged')
+        # An unrecognized foreign entry still makes the inventory incomplete.
+        newer = self.snapshot()
+        foreign = objects / 'README'
+        foreign.write_bytes(b'x')
+        self.assertEqual(storage.audit(self.project)['objects']['skipped'], 1)
+        self.assertEqual(self.collect()['status'], 'refused')
+        self.assertTrue(self.path(newer).exists())
 
     def test_oversized_records_invalid_times_and_item_history_refuse_gc(self):
         old = self.snapshot()
