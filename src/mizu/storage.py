@@ -1118,13 +1118,28 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     # Permanent declared host records retain exact candidate/replacement manifests.
     # A malformed source cannot authorize reclamation by hiding its references.
     from .host_records import store as host_record_store
+    from .shared_records import ScanProgress
     host_record_ids: set[str] = set()
+    host_record_scan_limit = project.config.limits.host_record_reference_scan_entries
+    host_record_scan = ScanProgress()
     try:
-        for envelope, _ in host_record_store(root, project.snapshots, project.config.record_kinds).records(namespace="host"):
-            host_record_ids.add(envelope["subject"]["snapshot_id"])
-            for value in envelope["payload"].values():
-                if isinstance(value, dict) and "snapshot_id" in value:
-                    host_record_ids.add(value["snapshot_id"])
+        records = host_record_store(
+            root, project.snapshots, project.config.record_kinds).records(
+                namespace="host", scan_limit=host_record_scan_limit,
+                scan_progress=host_record_scan, include_legacy=True)
+        try:
+            for envelope, _ in records:
+                host_record_ids.add(envelope["subject"]["snapshot_id"])
+                for value in envelope["payload"].values():
+                    if isinstance(value, dict) and "snapshot_id" in value:
+                        host_record_ids.add(value["snapshot_id"])
+        finally:
+            records.close()
+        # SharedRecords deliberately avoids a lookahead read at the requested
+        # entry limit. Exact EOF at the limit is therefore incomplete too:
+        # never let omitted host outcomes prove that a snapshot is unreferenced.
+        if host_record_scan.entries_examined == host_record_scan_limit:
+            skipped_references.add(root / "shared-records" / "host")
     except (Denied, LimitExceeded, OSError, ValueError):
         skipped_references.add(root / "shared-records" / "host")
     referenced_ids = (set(history_ids) | set(run_ids) | set(artifact_ids)

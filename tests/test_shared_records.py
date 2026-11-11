@@ -372,9 +372,11 @@ class SharedRecordsTests(unittest.TestCase):
         self.assertFalse((self.root / self.store._record_name(record["id"])).exists())
         self.assertEqual(legacy.read_bytes(), raw)
         self.assertEqual({row[0]["id"] for row in self.store.records()}, {record["id"]})
-        # Namespace scans cover only the sharded partition; the flat legacy
-        # stays retrievable by exact get and by the unfiltered scan.
+        # Namespace scans cover only the sharded partition by default; the
+        # explicit compatibility option includes matching flat legacy files.
         self.assertEqual(list(self.store.records(namespace="project")), [])
+        self.assertEqual(list(self.store.records(namespace="project", include_legacy=True)),
+                         [(record, digest(raw))])
         with self.assertRaises(Denied):
             self.store.put(dict(record, payload={"text": "different"}), writer="host.test")
         self.assertEqual(legacy.read_bytes(), raw)

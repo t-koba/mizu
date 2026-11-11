@@ -11,7 +11,7 @@ from mizu.errors import ConfigError, Denied
 from mizu.fs import PREVIEW_BYTES, canonical
 from mizu.project import Project
 from mizu.runtime import should_run
-from mizu.storage import audit
+from mizu.storage import audit, reclaim
 
 DECLARATION = '''
 [record_kinds."publisher.outcome"]
@@ -175,6 +175,49 @@ class HostRecordTests(CiWaitFixture):
         path.unlink()
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
         path.write_bytes(original)
+
+    def test_host_reference_scan_budget_is_incomplete_and_blocks_reclaim(self):
+        (self.project.workspace / "host-record-one.txt").write_text("first")
+        legacy_candidate = self.newer(publish=False)
+        first = self.write(subject=legacy_candidate)
+        legacy_name = self.shared()._legacy_record_name(first["record"]["id"])
+        canonical_path = self.project.root / self.shared()._record_name(first["record"]["id"])
+        legacy_path = self.project.root / legacy_name
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        canonical_path.replace(legacy_path)
+        (self.project.workspace / "host-record-two.txt").write_text("second")
+        referenced_candidate = self.newer(publish=False)
+        self.write(subject=referenced_candidate)
+        (self.project.workspace / "host-record-orphan.txt").write_text("orphan")
+        unreferenced = self.newer(publish=False)
+        orphan_object = self.project.root / "objects" / ("f" * 64)
+        orphan_object.write_bytes(b"orphan")
+        self.project.set_control(paused=True)
+
+        for budget, should_be_incomplete in ((4, False), (3, True), (2, True)):
+            limits = dataclasses.replace(
+                self.config.limits, host_record_reference_scan_entries=budget)
+            config = dataclasses.replace(self.config, limits=limits)
+            with self.subTest(budget=budget), patch.object(self.project, "config", config):
+                report = audit(self.project)
+                if should_be_incomplete:
+                    self.assertGreater(report["reference_records_skipped"], 0)
+                    preview = reclaim(self.project)
+                    self.assertGreater(preview["reference_records_skipped"], 0)
+                    with self.assertRaisesRegex(Denied, "Skipped reference records"):
+                        reclaim(self.project, apply=True)
+                    self.assertTrue((self.project.root / "snapshots" /
+                                     (referenced_candidate["snapshot_id"] + ".json")).is_file())
+                    self.assertTrue((self.project.root / "snapshots" /
+                                     (unreferenced["snapshot_id"] + ".json")).is_file())
+                    self.assertTrue(orphan_object.is_file())
+                else:
+                    self.assertEqual(report["reference_records_skipped"], 0)
+                    self.assertEqual(report["references"]["host_record_snapshots"], 2)
+                    complete = reclaim(self.project)["snapshots"]
+                    self.assertNotIn(f"snapshots/{legacy_candidate['snapshot_id']}.json", complete)
+                    self.assertNotIn(f"snapshots/{referenced_candidate['snapshot_id']}.json", complete)
+                    self.assertIn(f"snapshots/{unreferenced['snapshot_id']}.json", complete)
 
     def test_missing_unknown_mismatched_and_corrupt_source_remains_pending(self):
         self.block()

@@ -441,6 +441,27 @@ class RunRetentionScanConfigTests(Fixture):
                         load(self.file)
 
 
+class HostRecordReferenceScanLimitTests(Fixture):
+    def test_default_and_toml_integer_range(self):
+        key = "host_record_reference_scan_entries"
+        self.assertEqual(Limits().host_record_reference_scan_entries, 5000)
+        self.assertEqual(_LIMIT_RANGES[key], (1, TOML_INTEGER_MAX))
+        original = re.sub(rf'(?m)^{key} = .*\n', '', self.file.read_text())
+        self.file.write_text(original)
+        self.assertEqual(load(self.file).limits.host_record_reference_scan_entries, 5000)
+        for value in ('1', '5000', str(TOML_INTEGER_MAX), '0', '-1',
+                      str(TOML_INTEGER_MAX + 1), 'true', '1.5', '"1"', '[]', '{}'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(
+                    '\n[limits]\n',
+                    f'\n[limits]\nhost_record_reference_scan_entries = {value}\n'))
+                if value in ('1', '5000', str(TOML_INTEGER_MAX)):
+                    self.assertEqual(load(self.file).limits.host_record_reference_scan_entries, int(value))
+                else:
+                    with self.assertRaisesRegex(ConfigError, f'limits.{key}'):
+                        load(self.file)
+
+
 class HistoryTemporariesConfigTests(Fixture):
     def test_default_and_absolute_range(self):
         self.assertEqual(MAX_HISTORY_TEMPORARIES, 4096)

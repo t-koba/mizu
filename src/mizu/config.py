@@ -547,6 +547,9 @@ class Limits:
     run_retention_days: int = 31
     #: Physical-run retention scan budget, independent of usage reports (1–100000).
     run_retention_scan_runs: int = 5000
+    #: Host SharedRecords entries read for snapshot references; reaching the
+    #: budget makes the audit incomplete and refuses snapshot reclamation.
+    host_record_reference_scan_entries: int = 5000
     #: Unreferenced snapshot/history retention; 0 disables automatic GC (0–3650).
     snapshot_retention_days: int = 31
     #: Opt-out cadence (seconds) for automatic application of the configured
@@ -662,6 +665,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "insight_history_entries": (1, MAX_INSIGHT_HISTORY_ENTRIES),
                  "insight_cursor_ttl_seconds": (60, 604800),
                  "run_retention_scan_runs": (1, MAX_STORAGE_RUN_ENTRIES),
+                 "host_record_reference_scan_entries": (1, TOML_INTEGER_MAX),
                  "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
                  "smoke_retention_projects": (1, TOML_INTEGER_MAX),
                  "smoke_retention_pairs": (1, TOML_INTEGER_MAX),

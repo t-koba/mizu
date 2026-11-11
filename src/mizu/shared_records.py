@@ -302,23 +302,26 @@ class SharedRecords:
         return envelope, computed
 
     def records(self, *, namespace: str | None = None, scan_limit: int | None = None,
-                scan_progress: ScanProgress | None = None):
+                scan_progress: ScanProgress | None = None, include_legacy: bool = False):
         """Scan this store's declared kinds only, without a second index/queue.
 
         Other source families retain their own validators and lifecycle. Unsafe
         files, malformed JSON and mismatched canonical identities fail closed.
         Each enumerated envelope is validated once from its scanned bytes; no
         second read is issued. ``namespace`` restricts the scan to a single
-        ``shared-records/<namespace>/`` partition (for example ``"operator"``);
-        the unfiltered scan covers both sharded partitions and pre-partition
-        flat legacy files, deduplicating identical bytes and refusing
-        conflicting duplicates for one ID. An optional ``scan_limit`` is only
-        valid for a single namespace; it bounds directory entries examined and
-        deliberately preserves filesystem enumeration order rather than sorting
-        the complete partition. Reserved ``fs.atomic_write`` staging names
+        ``shared-records/<namespace>/`` partition (for example ``"operator"``).
+        ``include_legacy`` also checks pre-partition flat files for that namespace;
+        the unfiltered scan covers both sharded partitions and legacy files,
+        deduplicating identical bytes and refusing conflicting duplicates for one ID.
+        An optional ``scan_limit`` is only valid for a single namespace; with
+        ``include_legacy`` it bounds entries across the namespace partition and
+        shared-record root. It preserves filesystem enumeration order rather than
+        sorting complete directories. Reserved ``fs.atomic_write`` staging names
         are skipped but still consume an entry; optional ``scan_progress``
         reports the number of raw entries examined.
         """
+        if type(include_legacy) is not bool or (include_legacy and namespace is None):
+            raise Denied("Invalid shared record legacy scan")
         if (scan_limit is not None
                 and (namespace is None or type(scan_limit) is not int or scan_limit < 1)):
             raise Denied("Invalid shared record scan limit")
@@ -330,18 +333,28 @@ class SharedRecords:
             scan_progress.entries_examined = 0
         if namespace is not None:
             partition = _partition(namespace)
-            if not self._parents(f"shared-records/{partition}/entry.json"):
-                return
-            prefix = f"shared-records/{partition}/"
-            directory = self.root / "shared-records" / partition
-            if scan_limit is None:
-                paths = iter(sorted(directory.glob("*.json")))
-            else:
+            partition_prefix = f"shared-records/{partition}/"
+            directories = [(self.root / "shared-records" / partition,
+                            partition_prefix, False)]
+            if include_legacy:
+                directories.append((self.root / "shared-records", "shared-records/", True))
+            remaining = scan_limit
+            seen: dict[str, bytes] = {}
+
+            def paths_for(directory: Path, *, legacy_root: bool):
+                nonlocal remaining
+                if scan_limit is None:
+                    return iter(sorted(directory.glob("*.json")))
+
                 def bounded_paths():
+                    nonlocal remaining
+                    if remaining is None or remaining <= 0:
+                        return
                     with os.scandir(directory) as entries:
-                        for entry in islice(entries, scan_limit):
+                        for entry in islice(entries, remaining):
                             if scan_progress is not None:
                                 scan_progress.entries_examined += 1
+                            remaining -= 1
                             if entry.name.startswith(ATOMIC_WRITE_TEMP_PREFIX):
                                 try:
                                     info = os.stat(entry.path, follow_symlinks=False)
@@ -352,36 +365,57 @@ class SharedRecords:
                                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                                     raise Denied("Invalid shared record filename")
                                 continue
-                            if not entry.name.endswith(".json"):
+                            if legacy_root:
+                                # The flat root also contains namespace directories;
+                                # only flat JSON files can be legacy records.
+                                if not entry.name.endswith(".json"):
+                                    continue
+                            elif not entry.name.endswith(".json"):
                                 raise Denied("Invalid shared record filename")
                             yield directory / entry.name
-                paths = bounded_paths()
-            try:
-                for path in paths:
-                    raw = self._read(f"{prefix}{path.name}", RECORD_BYTES)
-                    if raw is None:
-                        raise Denied("Shared record is unavailable")
-                    try:
-                        envelope = loads_finite(raw)
-                    except (ValueError, TypeError, UnicodeError) as exc:
-                        raise Denied("Corrupt shared record JSON") from exc
-                    if type(envelope) is not dict or set(envelope) != _ENVELOPE:
-                        raise Denied("Invalid shared record envelope")
-                    _name(envelope["kind"], kind=True)
-                    record_id = _name(envelope["id"])
-                    if _namespace(record_id) != namespace:
-                        raise Denied("Shared record filename identity mismatch")
-                    if self._record_name(record_id) != f"{prefix}{path.name}":
-                        raise Denied("Shared record filename identity mismatch")
-                    if envelope["kind"] not in self.policies:
-                        raise Denied("Undeclared kind in shared record namespace")
-                    if self._validate(envelope) != raw:
-                        raise Denied("Shared record canonical identity mismatch")
-                    yield envelope, digest(raw)
-            finally:
-                close = getattr(paths, "close", None)
-                if callable(close):
-                    close()
+                return bounded_paths()
+
+            for directory, prefix, legacy_root in directories:
+                if not self._parents(f"{prefix}entry.json"):
+                    continue
+                paths = paths_for(directory, legacy_root=legacy_root)
+                try:
+                    for path in paths:
+                        name = f"{prefix}{path.name}"
+                        raw = self._read(name, RECORD_BYTES)
+                        if raw is None:
+                            raise Denied("Shared record is unavailable")
+                        try:
+                            envelope = loads_finite(raw)
+                        except (ValueError, TypeError, UnicodeError) as exc:
+                            raise Denied("Corrupt shared record JSON") from exc
+                        if type(envelope) is not dict or set(envelope) != _ENVELOPE:
+                            raise Denied("Invalid shared record envelope")
+                        _name(envelope["kind"], kind=True)
+                        record_id = _name(envelope["id"])
+                        canonical, legacy = self._record_names(record_id)
+                        if legacy_root:
+                            if name != legacy:
+                                raise Denied("Shared record filename identity mismatch")
+                            if _namespace(record_id) != namespace:
+                                continue
+                        elif (_namespace(record_id) != namespace or name != canonical):
+                            raise Denied("Shared record filename identity mismatch")
+                        previous = seen.get(record_id)
+                        if previous is not None:
+                            if previous != raw:
+                                raise Denied("Shared record identity conflict")
+                            continue
+                        seen[record_id] = raw
+                        if envelope["kind"] not in self.policies:
+                            raise Denied("Undeclared kind in shared record namespace")
+                        if self._validate(envelope) != raw:
+                            raise Denied("Shared record canonical identity mismatch")
+                        yield envelope, digest(raw)
+                finally:
+                    close = getattr(paths, "close", None)
+                    if callable(close):
+                        close()
             return
         if not self._parents("shared-records/entry.json"):
             return
