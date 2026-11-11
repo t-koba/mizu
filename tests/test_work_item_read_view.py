@@ -72,7 +72,7 @@ class ReadViewTests(Fixture):
 
         # Witnessed current-state sidecars would skip validation entirely;
         # measure the exact replay they stand in for.
-        shutil.rmtree(self.project.root / "work-item-state")
+        shutil.rmtree(self.project.root / "work-item-state", ignore_errors=True)  # absent where sidecars are unsupported
         self.project.snapshots._binding_cache.clear()
         with patch.object(Snapshots, "validate_manifest", validate):
             result = _cmd_work_items(self.config, self.project,
