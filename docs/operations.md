@@ -185,8 +185,9 @@ mizu cleanup demo
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
 - `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
 - `work-item-state/`: 現在状態の検証済みプロジェクションを保持する派生キャッシュ
-  （backup対象外：`mizu work-items --backfill` で再構築。Windows では作成・
-  バックフィルせず、常に元の記録を厳密に読みます）
+  （backup対象外：ロック付きの ready scan が再構築し、`mizu work-items --backfill`
+  でも再構築できます。Windows では作成・バックフィルせず、常に元の記録を厳密に
+  読みます）
 - `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
   snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
   ます。実行の `error.json` にも同じ原因が記録され、次の実行の context に

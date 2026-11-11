@@ -634,12 +634,22 @@ a retired item also compares the exact retirement file. The exact source
 records are revalidated with the same seed/transition checks as a status-only
 read, including the recorded delivery and scope fields. For a nonterminal
 item, a valid sidecar hit does not reopen the referenced snapshot manifest;
-the delivery relationship was checked when the binding was written. A
-completed sidecar hit still revalidates its exact current delivery manifest
-and any retained acceptance receipt before the item is treated as closed;
-transitions to done also validate the exact snapshot and completion proof. A
+the delivery relationship was checked when the binding was written. The
+sidecar also stores the proof witnesses of the validation that produced it:
+the relative path and no-follow stat identity (inode, size, mtime, ctime,
+single link, ancestors) of every external immutable file that proof read, such
+as delivery manifests and retained acceptance receipts, the same witness the
+in-memory proof cache uses. A done or dropped sidecar whose witnesses all still
+match is accepted without reopening those files, which also serves closures
+recorded before the delivery schema; if any witness is missing, changed or
+malformed, a completed sidecar revalidates its exact current delivery manifest
+and any retained acceptance receipt, and a legacy closure takes exact replay.
+Transitions to done also validate the exact snapshot and completion proof. A
 miss or stale sidecar takes exact replay, which rechecks the current delivery
-against the snapshot. The returned
+against the snapshot. A sidecar of an older schema version is a miss. Delivery
+bindings are checked by snapshot ID, integrity and code digest without the host
+path policy, which applies when a snapshot is materialized or published, and
+each verified manifest is memoized per process by its file identity. The returned
 item is derived via the existing retirement projection. Normal terminal and retired
 items retain their sidecar, so both the open/status scan and the closed page
 classify them without replaying closed history. Origin staleness and hold
@@ -654,11 +664,12 @@ source records, so the page stays on exact replay rather than inventing a
 doing age. The locked recovery path never uses this read-only
 sidecar. Direct-seed reuse likewise rechecks the legacy sidecar and the
 decision-history ID collision on every lookup, so a conflicting source added
-after a cache warm still fails closed. Legacy items without a sidecar keep
-using exact replay; the read-only CLI default never writes, while the explicit
-`mizu work-items --backfill N` maintenance variant takes the record lock and
-builds at most N missing terminal or nonterminal sidecars from their exact
-source records.
+after a cache warm still fails closed. Items without a current sidecar use
+exact replay; the read-only CLI default never writes. A locked ready scan that
+replays such an item writes its sidecar, so no operator action is needed, and
+the explicit `mizu work-items --backfill N` maintenance variant takes the
+record lock and builds at most N missing, outdated or unwitnessed sidecars from
+their exact source records.
 
 On Windows the bypass is deliberate, not a missing cache: directory metadata
 is not a trustworthy invalidation witness there, so every current-state reader

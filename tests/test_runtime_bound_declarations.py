@@ -2579,10 +2579,10 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format', 'sidecar predecessor / revision one is the immutable seed record'),
     ('work_items.py', 'WorkItems.backfill_current_states', 0, 0): (
         '1', 'mechanism', 'sidecar backfill / a bounded scan page must request at least one item'),
-    ('work_items.py', 'WorkItems.backfill_current_states', 1, 0): (
-        '1', 'format', 'sidecar backfill / revision one uses the seed as current state'),
-    ('work_items.py', 'WorkItems.backfill_current_states', 1, 1): (
-        '2', 'format', 'sidecar backfill / revision two has the seed as its sole predecessor'),
+    ('work_items.py', 'WorkItems._sidecar_publish', 1, 0): (
+        '1', 'format', 'sidecar publication / revision one uses the seed as current state'),
+    ('work_items.py', 'WorkItems._sidecar_publish', 1, 1): (
+        '2', 'format', 'sidecar publication / revision two has the seed as its sole predecessor'),
     ('work_items.py', 'WorkItems._legacy_source', 1, 0): (
         '1', 'format', 'legacy decision origin / referenced revision is positive'),
     ('work_items.py', 'WorkItems._validate_decision_key', 1, 0): (

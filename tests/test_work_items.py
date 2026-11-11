@@ -394,8 +394,8 @@ class WorkItemTests(Fixture):
                                  side_effect=AssertionError("done sidecar replayed history")):
                 self.assertEqual(fresh.page_open_readonly()["total"], 0)
                 self.assertEqual(fresh.blocked_liveness_readonly()["total"], 0)
-                self.assertEqual(get.call_count, 2)
-                self.assertTrue(all(call.args == (snapshot["id"],) for call in get.call_args_list))
+                # The sidecar's witnessed manifest is unchanged: not re-read.
+                self.assertEqual(get.call_count, 0)
         # Missing/corrupt current proof must fail closed, even after valid reads.
         manifest = self.project.root / "snapshots" / f"{snapshot['id']}.json"
         self.assert_done_proof_required(fresh, manifest, {**snapshot, "summary": "tampered"})
@@ -411,6 +411,114 @@ class WorkItemTests(Fixture):
         write_json(path, done)
         with self.assertRaisesRegex(Denied, "Completion evidence"):
             fresh.page_open_readonly()
+
+    def done_with_sidecar(self):
+        self.change("doing")
+        snapshot = self.snapshot("valid")
+        self.bind(snapshot)
+        done = self.change("done", expected_rev=3, snapshot_id=snapshot["id"])
+        sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
+        return snapshot, done, sidecar
+
+    def fresh_load(self):
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        return fresh, fresh._sidecar_load(self.item_id, self.seed,
+                                          fresh._history_identity(self.item_id))
+
+    def test_witnessed_done_sidecar_skips_validation_until_a_witness_changes(self):
+        self.require_posix_read_cache()
+        snapshot, done, sidecar = self.done_with_sidecar()
+        payload = json.loads(sidecar.read_text())
+        self.assertEqual(payload["schema"], 2)
+        self.assertIn(f"snapshots/{snapshot['id']}.json", {w["path"] for w in payload["witnesses"]})
+        fresh, loaded = self.fresh_load()
+        self.assertEqual(loaded, (done, None, True))
+        with patch.object(fresh, "_validate_transition", side_effect=AssertionError("revalidated")), \
+                patch.object(fresh.snapshots, "binding", side_effect=AssertionError("manifest read")):
+            self.assertEqual(fresh._sidecar_load(self.item_id, self.seed,
+                                                 fresh._history_identity(self.item_id)),
+                             (done, None, True))
+        # A touched witness is not trusted: the exact validation runs again.
+        manifest = self.project.root / "snapshots" / f"{snapshot['id']}.json"
+        os.utime(manifest, ns=(1, 1))
+        fresh, loaded = self.fresh_load()
+        self.assertEqual(loaded, (done, None, False))
+        with patch.object(fresh, "_validate_transition",
+                          wraps=fresh._validate_transition) as validate:
+            fresh._sidecar_load(self.item_id, self.seed, fresh._history_identity(self.item_id))
+        self.assertEqual(validate.call_count, 1)
+
+    def test_sidecar_rejects_changed_history_old_schema_and_malformed_witnesses(self):
+        self.require_posix_read_cache()
+        snapshot, done, sidecar = self.done_with_sidecar()
+        payload = json.loads(sidecar.read_text())
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        identity = fresh._history_identity(self.item_id)
+        self.assertEqual(fresh._sidecar_load(self.item_id, self.seed, identity)[2], True)
+        witness = payload["witnesses"][0]
+        for name, changed in (
+                ("schema", {"schema": 1}),
+                ("history", {"history_identity": [None]}),
+                ("not a list", {"witnesses": {"x": 1}}),
+                ("extra field", {"witnesses": [{**witness, "extra": 1}]}),
+                ("unsafe path", {"witnesses": [{**witness, "path": "../state"}]}),
+                ("absolute path", {"witnesses": [{**witness, "path": "/etc/passwd"}]}),
+                ("unknown root", {"witnesses": [{**witness, "root": "elsewhere"}]}),
+                ("wrong identity", {"witnesses": [{**witness, "identity": [[1, 2, 3]]}]})):
+            with self.subTest(name):
+                write_json(sidecar, {**payload, **changed})
+                loaded = fresh._sidecar_load(self.item_id, self.seed, identity)
+                if name in ("schema", "history"):
+                    self.assertIsNone(loaded)
+                else:
+                    self.assertEqual(loaded, (done, None, False))
+        missing = {key: value for key, value in payload.items() if key != "witnesses"}
+        write_json(sidecar, missing)
+        self.assertIsNone(fresh._sidecar_load(self.item_id, self.seed, identity))
+
+    def test_legacy_done_item_is_served_by_a_witnessed_sidecar(self):
+        self.require_posix_read_cache()
+        snapshot, done, sidecar = self.done_with_sidecar()
+        legacy = copy.deepcopy(done)
+        for key in ("delivered_tree", "delivery_schema", "delivery", "verification_scope"):
+            legacy.pop(key, None)
+        legacy["rev"] = 2
+        legacy["transition"] = {"from": "open", "to": "done"}
+        for revision in (2, 3, 4):
+            (self.directory / f"{revision}.json").unlink()
+        write_json(self.directory / "2.json", legacy)
+        sidecar.unlink()
+        self.assertEqual(self.store.backfill_current_states(limit=10)["backfilled"], 1)
+        fresh, loaded = self.fresh_load()
+        self.assertIsNotNone(loaded)
+        self.assertTrue(loaded[2])
+        self.assertEqual(loaded[0]["status"], "done")
+        with patch.object(fresh, "_current_hold", side_effect=AssertionError("history replay")):
+            self.assertEqual(fresh.page_closed_readonly(limit=10)["total"], 1)
+        # Without a witness a legacy closure still needs the full replay.
+        payload = json.loads(sidecar.read_text())
+        write_json(sidecar, {**payload, "witnesses": None})
+        self.assertIsNone(fresh._sidecar_load(self.item_id, self.seed,
+                                              fresh._history_identity(self.item_id)))
+
+    def test_locked_scan_writes_missing_sidecars_but_read_only_scans_do_not(self):
+        self.require_posix_read_cache()
+        snapshot, done, sidecar = self.done_with_sidecar()
+        sidecar.unlink()
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh.page_open_readonly(limit=100)
+        fresh.count_open_readonly()
+        self.assertFalse(sidecar.exists())
+        fresh.page_ready()
+        self.assertTrue(sidecar.exists())
+        stored = json.loads(sidecar.read_text())
+        self.assertEqual(stored["current"]["rev"], 4)
+        self.assertIsNotNone(stored["witnesses"])
+        # An old-schema sidecar is replaced by the next locked scan, never read.
+        write_json(sidecar, {**stored, "schema": 1})
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh.page_ready()
+        self.assertEqual(json.loads(sidecar.read_text())["schema"], 2)
 
     def test_done_sidecar_validates_exact_retained_receipt(self):
         self.require_posix_read_cache()
@@ -435,9 +543,8 @@ class WorkItemTests(Fixture):
                 patch("mizu.acceptance.get", wraps=acceptance.get) as get:
             self.assertEqual(fresh.page_open_readonly()["total"], 0)
             self.assertEqual(fresh.blocked_liveness_readonly()["total"], 0)
-            self.assertEqual(get.call_count, 2)
-            self.assertTrue(all(call.args == (self.project.root, receipt_id)
-                                for call in get.call_args_list))
+            # The sidecar witnesses the retained receipt: not re-read.
+            self.assertEqual(get.call_count, 0)
         receipt_path = self.project.root / "evidence/acceptance/objects" / f"{receipt_id}.json"
         receipt = acceptance.get(self.project.root, receipt_id)
         self.assert_done_proof_required(fresh, receipt_path, {**receipt, "code_digest": "0" * 64})

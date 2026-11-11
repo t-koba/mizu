@@ -1351,7 +1351,7 @@ replacement insight without implying rejected substance.
                             if not isinstance(seed_id, str):
                                 continue
                             identity = store._history_identity(seed_id)
-                            store._sidecar_store(seed_id, seed, identity, None, seed, None)
+                            store._sidecar_store(seed_id, seed, identity, None, seed, None, witnesses=[])
                         except (OSError, ValueError, TypeError, Denied, LimitExceeded,
                                 UnicodeError, AttributeError):
                             pass

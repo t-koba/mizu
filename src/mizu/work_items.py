@@ -51,8 +51,8 @@ from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      PublicationEvidence, TOML_INTEGER_MAX)
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
-from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
-                 sync_dir, text_preview, write_json)
+from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, read_json,
+                 relative_parts, safe_read, sync_dir, text_preview, write_json)
 from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
 from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
@@ -93,7 +93,7 @@ _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 _HISTORY_UNSET = object()
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
-_SIDECAR_SCHEMA = 1
+_SIDECAR_SCHEMA = 2
 _SIDECAR_DIR = "work-item-state"
 _SIDECAR_MAX_BYTES = PREVIEW_BYTES * 2 + 4096
 
@@ -242,6 +242,10 @@ class WorkItems:
         self._direct_cache: dict[str, tuple] = {}
         self._history_cache: dict[str, tuple] = {}
         self._projection_cache: dict[str, tuple] = {}
+        # Item -> history identity whose sidecar a locked scan already loaded
+        # or tried to publish; it keeps warm in-memory proofs from hiding a
+        # missing sidecar without re-reading it on every scan.
+        self._sidecar_tried: dict[str, tuple] = {}
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
                for value in (doing_limit, *self.doing_limits.values())):
             raise Denied("Work-item doing limit must be an integer in [1, 100]")
@@ -578,8 +582,54 @@ class WorkItems:
     def _sidecar_path(self, item_id: str) -> Path:
         return self.root / _SIDECAR_DIR / f"{item_id}.json"
 
+    def _sidecar_witnesses(self, sources):
+        """Serialize sampled proof sources for a sidecar, or None when unwitnessable.
+
+        Callers pass sources sampled before the validation they describe and
+        have already confirmed them unchanged afterwards (``_proof_unchanged``);
+        a source without a safe identity makes the whole proof unwitnessable.
+        """
+        try:
+            entries = []
+            for root, relative, identity in dict.fromkeys(sources):
+                if identity is None or relative is None:
+                    return None
+                tag = ("snapshots" if root == self.snapshots.root
+                       else "state" if root == self.root else None)
+                if tag is None:
+                    return None
+                entries.append({"root": tag, "path": relative,
+                                "identity": json.loads(canonical(identity))})
+            return entries
+        except (OSError, ValueError, TypeError, UnicodeError, AttributeError):
+            return None
+
+    def _sidecar_witnessed(self, witnesses) -> bool:
+        """Whether every stored proof source still has its recorded file identity.
+
+        Same no-follow stat witness as the in-memory proof cache; a malformed
+        list, unsafe path or any changed, missing or replaced file is False.
+        """
+        try:
+            if not isinstance(witnesses, list):
+                return False
+            roots = {"state": self.root, "snapshots": self.snapshots.root}
+            for entry in witnesses:
+                if not isinstance(entry, dict) or set(entry) != {"root", "path", "identity"}:
+                    return False
+                root, path = roots.get(entry["root"]), entry["path"]
+                if root is None or not isinstance(path, str):
+                    return False
+                relative_parts(path)
+                identity = self._proof_identity(root, path)
+                if identity is None or json.loads(canonical(identity)) != entry["identity"]:
+                    return False
+            return True
+        except (OSError, ValueError, TypeError, Denied, UnicodeError, AttributeError):
+            return False
+
     def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since,
-                       retirement=None) -> bool:
+                       retirement=None, witnesses=None) -> bool:
         """Best-effort write of exact source records; never fails a commit.
 
         Cache boundary: any failure here falls back to exact replay and never
@@ -609,7 +659,8 @@ class WorkItems:
                        "seed_sha256": digest(canonical(seed)),
                        "history_identity": identity_json,
                        "previous": previous, "current": current,
-                       "doing_since": since, "retirement": retirement}
+                       "doing_since": since, "retirement": retirement,
+                       "witnesses": witnesses}
             if len(canonical(payload)) > _SIDECAR_MAX_BYTES:
                 return False
             path = self._sidecar_path(item_id)
@@ -624,6 +675,9 @@ class WorkItems:
                         or getattr(info, "st_file_attributes", 0) & 0x400
                         or info.st_nlink != 1):
                     return False
+                with contextlib.suppress(Denied, LimitExceeded, OSError, ValueError, UnicodeError):
+                    if read_json(path) == json.loads(canonical(payload)):
+                        return True
             write_json(path, payload, exclusive=False)
             return True
         except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
@@ -686,7 +740,7 @@ class WorkItems:
             return False
 
     def _sidecar_load(self, item_id: str, seed: dict, history_key):
-        """Return (item, since) from a source-backed sidecar, else None to replay exactly.
+        """Return (item, since, witnessed) from a source-backed sidecar, else None to replay exactly.
 
         Cache boundary: any missing/malformed/unsafe/mismatched sidecar or source
         read falls back to exact replay; sidecar content alone is never trusted.
@@ -734,7 +788,7 @@ class WorkItems:
             except (ValueError, UnicodeError):
                 return None
             base_fields = {"schema", "id", "seed_sha256", "history_identity",
-                           "previous", "current", "doing_since"}
+                           "previous", "current", "doing_since", "witnesses"}
             if not isinstance(payload, dict) or set(payload) not in (base_fields,
                                                                      base_fields | {"retirement"}):
                 return None
@@ -747,6 +801,9 @@ class WorkItems:
                     return None
             except (ValueError, TypeError, UnicodeError, AttributeError):
                 return None
+            # Terminal facts validated when this sidecar was written stay
+            # trusted while every external file they depended on is unchanged.
+            witnessed = self._sidecar_witnessed(payload.get("witnesses"))
             previous = payload.get("previous")
             current_raw = payload.get("current")
             since_stored = payload.get("doing_since")
@@ -824,17 +881,20 @@ class WorkItems:
                                           decision_task="wait" in exact_previous)
                         if exact_current.get("status") == "done":
                             # Legacy closures lack a source-bound delivery;
-                            # keep their full-history fallback.
+                            # only a witnessed replay result may serve them.
                             if "delivery_schema" not in exact_current:
-                                return None
-                            delivery = exact_current.get("delivery")
-                            if (not isinstance(delivery, dict)
-                                    or set(delivery) != {"snapshot_id", "code_digest", "scope_digest", "binding_rev"}
-                                    or type(delivery["binding_rev"]) is not int
-                                    or not 3 <= delivery["binding_rev"] <= exact_previous["rev"]):
-                                return None
-                        self._validate_transition(
-                            exact_previous, exact_current, verify_snapshots=False)
+                                if not witnessed:
+                                    return None
+                            else:
+                                delivery = exact_current.get("delivery")
+                                if (not isinstance(delivery, dict)
+                                        or set(delivery) != {"snapshot_id", "code_digest", "scope_digest", "binding_rev"}
+                                        or type(delivery["binding_rev"]) is not int
+                                        or not 3 <= delivery["binding_rev"] <= exact_previous["rev"]):
+                                    return None
+                        if not (witnessed and exact_current.get("status") in ("done", "dropped")):
+                            self._validate_transition(
+                                exact_previous, exact_current, verify_snapshots=False)
                     except (Denied, LimitExceeded):
                         return None
                     except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
@@ -885,7 +945,7 @@ class WorkItems:
                     return None
                 if since_stored is not None:
                     return None
-                return item, None
+                return item, None, witnessed
             try:
                 item = work_item_retirement.project(exact_current, None)
             except (Denied, LimitExceeded):
@@ -898,7 +958,7 @@ class WorkItems:
             if item_status in ("done", "dropped"):
                 if since_stored is not None:
                     return None
-                return item, None
+                return item, None, witnessed
             if "blocked_since" not in item:
                 if item["status"] != "open" and item["rev"] != 1:
                     return None
@@ -913,12 +973,56 @@ class WorkItems:
                     return None
             elif since_stored is not None:
                 return None
-            return item, since_stored
+            return item, since_stored, witnessed
         except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
                 AttributeError):
             # Cache boundary: any sidecar/source failure falls back to exact
             # replay, never fails the read.
             return None
+
+    def _sidecar_publish(self, seed: dict, identity, item: dict, since, history_flags,
+                         proof_sources) -> bool:
+        """Persist the current state of a chain the caller just replayed and validated.
+
+        The caller holds the record lock and passes the history identity it
+        sampled before the replay and the proof sources the replay collected.
+        Only the disposable sidecar is written, and only while the history is
+        unchanged; items the exact-only rules exclude have their sidecar
+        removed. Returns whether a sidecar now exists for this replay.
+        """
+        item_id = seed["id"]
+        if IS_WINDOWS or identity is None:
+            return False
+        if "wait_resolution" in history_flags or "wait_resolution" in item:
+            self._sidecar_remove(item_id)
+            return False
+        revision = item["rev"]
+        if revision == 1:
+            previous, current = None, seed
+        elif revision == 2:
+            previous = seed
+            current = self._read(f"work-items/{item_id}/{revision}.json")
+        else:
+            previous = self._read(f"work-items/{item_id}/{revision - 1}.json")
+            current = self._read(f"work-items/{item_id}/{revision}.json")
+        retirement = None
+        if item["status"] in ("done", "dropped"):
+            if current.get("status") not in ("done", "dropped"):
+                retirement = self._read(f"work-items/{item_id}/retirement.json")
+            since = None
+        elif (item["status"] == "doing" and previous is not None
+                and previous.get("status") == "doing"):
+            # The earlier doing_since is not recoverable from only the current
+            # and previous records; keep this item exact-only.
+            self._sidecar_remove(item_id)
+            return False
+        if self._history_identity(item_id) != identity:
+            return False
+        sources = tuple(dict.fromkeys(proof_sources))
+        witnesses = (self._sidecar_witnesses(sources)
+                     if self._proof_unchanged(sources) else None)
+        return self._sidecar_store(item_id, seed, identity, previous, current, since,
+                                   retirement=retirement, witnesses=witnesses)
 
     def backfill_current_states(self, *, limit=MAX_OPEN_PAGE_ROWS) -> dict:
         """Build at most ``limit`` missing or invalid current-state sidecars.
@@ -952,39 +1056,18 @@ class WorkItems:
                 identity = self._history_identity(seed["id"])
                 if identity is None:
                     continue
-                if self._sidecar_load(seed["id"], seed, identity) is not None:
+                loaded = self._sidecar_load(seed["id"], seed, identity)
+                if loaded is not None and (
+                        loaded[2] or loaded[0]["status"] not in ("done", "dropped")):
                     continue
+                proof_sources = []
                 history_flags = set()
                 item, since = self._current_hold(
                     seed["id"], seed_event=event, history_revisions=revisions,
                     verify_snapshots=False, verify_current_delivery=True,
-                    history_flags=history_flags)
-                if "wait_resolution" in history_flags:
-                    self._sidecar_remove(seed["id"])
-                    continue
-                revision = item["rev"]
-                if revision == 1:
-                    previous, current = None, seed
-                elif revision == 2:
-                    previous = seed
-                    current = self._read(f"work-items/{seed['id']}/{revision}.json")
-                else:
-                    previous = self._read(f"work-items/{seed['id']}/{revision - 1}.json")
-                    current = self._read(f"work-items/{seed['id']}/{revision}.json")
-                retirement = None
-                if item["status"] in ("done", "dropped"):
-                    if current.get("status") not in ("done", "dropped"):
-                        retirement = self._read(
-                            f"work-items/{seed['id']}/retirement.json")
-                    since = None
-                elif (item["status"] == "doing" and previous is not None
-                        and previous.get("status") == "doing"):
-                    # The earlier doing_since is not recoverable from only the
-                    # current and previous records; keep this item exact-only.
-                    self._sidecar_remove(seed["id"])
-                    continue
-                if self._sidecar_store(seed["id"], seed, self._history_identity(seed["id"]),
-                                       previous, current, since, retirement=retirement):
+                    history_flags=history_flags, proof_sources=proof_sources)
+                if self._sidecar_publish(seed, identity, item, since,
+                                         history_flags, proof_sources):
                     backfilled += 1
                 if backfilled >= limit:
                     break
@@ -1141,7 +1224,7 @@ class WorkItems:
                 # Cache boundary: best-effort seed sidecar (previous None,
                 # current exact immutable seed); never fails the commit.
                 identity = self._history_identity(item_id)
-                self._sidecar_store(item_id, seed, identity, None, seed, None)
+                self._sidecar_store(item_id, seed, identity, None, seed, None, witnesses=[])
             except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
                     AttributeError):
                 pass
@@ -2830,7 +2913,8 @@ class WorkItems:
                     valid = reuse_projection and (readonly or (
                         cached[1].get("delivery") is None
                         and cached[1]["status"] in OPEN_STATUS_ORDER))
-            if not valid:
+            if not valid or (not readonly and history_key is not None
+                             and self._sidecar_tried.get(seed["id"]) != history_key):
                 cached = None
             full = (self._peek_full_item(seed["id"], seed_event=event,
                                          history_revisions=history_revisions) if readonly else None)
@@ -2844,25 +2928,37 @@ class WorkItems:
                 self._projection_cache.pop(seed["id"], None)
                 sidecar = (self._sidecar_load(seed["id"], seed, history_key)
                            if reuse_projection else None)
+                had_sidecar = sidecar is not None
+                if not readonly and history_key is not None:
+                    self._sidecar_tried[seed["id"]] = history_key
                 if sidecar is not None and not readonly and (
-                        sidecar[0].get("delivery") is not None
-                        or sidecar[0]["status"] in ("done", "dropped")):
+                        sidecar[0]["status"] in ("done", "dropped") and not sidecar[2]
+                        or sidecar[0]["status"] not in ("done", "dropped")
+                        and sidecar[0].get("delivery") is not None):
                     sidecar = None
                 if (sidecar is not None
                         and self._history_identity(seed["id"]) != history_key):
                     sidecar = None
                 if sidecar is not None:
-                    item, since = sidecar
+                    item, since, _ = sidecar
                     if (item.get("delivery") is None and "wait_resolution" not in item
                             and item["status"] in OPEN_STATUS_ORDER):
                         self._projection_cache[seed["id"]] = (cache_key, item, since)
                 else:
                     proof_sources = []
+                    history_flags = set()
                     item, since = self._current_hold(
                         seed["id"], seed_event=event,
                         history_revisions=history_revisions,
                         verify_snapshots=False, verify_current_delivery=True,
-                        proof_sources=proof_sources if cacheable else None)
+                        proof_sources=proof_sources if cacheable or not readonly else None,
+                        history_flags=history_flags)
+                    if not readonly and not had_sidecar and history_key is not None:
+                        # The locked replay just validated this chain: leave
+                        # the current state for later reads instead of
+                        # waiting for an operator backfill.
+                        self._sidecar_publish(seed, history_key, item, since,
+                                              history_flags, proof_sources)
                     stable = (cacheable and history_key is not None
                               and self._history_identity(seed["id"]) == history_key)
                     if stable and (item["status"] in ("done", "dropped")
@@ -3350,6 +3446,9 @@ class WorkItems:
                 record["smoke_refs"] = effective_smoke_refs
             if registered is not None:
                 require_pairs(self.root, registered.get("smoke_refs", []))
+            # Sample the external proof sources before validating them, so the
+            # sidecar written after the commit witnesses exactly what was proven.
+            proof_sources = self._validation_sources(record, current)
             self._validate_transition(current, record)
             # A same-status doing revision by another role transfers the
             # holder, so it is a new claim against that role's active slots.
@@ -3394,8 +3493,11 @@ class WorkItems:
                     previous_source = seed
                 else:
                     previous_source = self._read(f"work-items/{item_id}/{prev_rev}.json")
+                sources = tuple(dict.fromkeys(proof_sources))
                 self._sidecar_store(item_id, seed, identity, previous_source, record,
-                                    new_since, retirement=None)
+                                    new_since, retirement=None,
+                                    witnesses=(self._sidecar_witnesses(sources)
+                                               if self._proof_unchanged(sources) else None))
             except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
                     AttributeError):
                 pass

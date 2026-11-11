@@ -99,26 +99,28 @@ class WorkItemEventTests(Fixture):
             self.assertEqual(closed["total"], 1)
             self.assertEqual(closed["items"][0]["id"], seed["id"])
             self.assertEqual(closed["items"][0]["snapshot_id"], current["id"])
-            self.assertEqual([call.args[0] for call in get.call_args_list], [current["id"]])
+            # The sidecar's witnessed manifest is unchanged: not re-read.
+            self.assertEqual(get.call_args_list, [])
 
         with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
             events_page = events.closed_page(self.store, self.subscribed_config().roles)
             self.assertEqual(events_page["total"], 1)
             self.assertEqual(events_page["items"][0]["id"], seed["id"])
-            self.assertEqual([call.args[0] for call in get.call_args_list], [current["id"]])
+            # The sidecar's witnessed manifest is unchanged: not re-read.
+            self.assertEqual(get.call_args_list, [])
 
-        with patch.object(self.project.snapshots, "binding", side_effect=Denied("current snapshot unavailable")) as get:
-            with self.assertRaisesRegex(Denied, "current snapshot unavailable"):
+        # An unavailable current manifest breaks its witness: the exact
+        # validation runs again and fails closed.
+        manifest = self.project.root / "snapshots" / f"{current['id']}.json"
+        hidden = manifest.with_name("hidden.json")
+        manifest.rename(hidden)
+        try:
+            with self.assertRaisesRegex(Denied, "Snapshot not found"):
                 self.store.page_closed_readonly(limit=10)
-            # A terminal sidecar hit may retry the exact validation after the
-            # unavailable snapshot; both attempts name only the current proof.
-            self.assertGreaterEqual(get.call_count, 1)
-            self.assertEqual({call.args[0] for call in get.call_args_list}, {current["id"]})
-        with patch.object(self.project.snapshots, "binding", side_effect=Denied("current snapshot unavailable")) as get:
-            with self.assertRaisesRegex(Denied, "current snapshot unavailable"):
+            with self.assertRaisesRegex(Denied, "Snapshot not found"):
                 events.closed_page(self.store, self.subscribed_config().roles)
-            self.assertGreaterEqual(get.call_count, 1)
-            self.assertEqual({call.args[0] for call in get.call_args_list}, {current["id"]})
+        finally:
+            hidden.rename(manifest)
 
         # Unused snapshot reads do not weaken the complete structural replay.
         binding_path = self.project.root / "work-items" / seed["id"] / "3.json"
