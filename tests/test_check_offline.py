@@ -1588,6 +1588,26 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertNotIn('sample.Suite.test_0034', line)
         self.assertLessEqual(len(line), CHECK.TIMING_LOG_MAX_CHARS)
 
+    def test_log_summary_marks_a_fail_fast_stop(self):
+        tests = [{'test': 'sample.Suite.test_fail', 'duration_seconds': 1.5,
+                  'completed': True}]
+
+        def line_for(stopped_early):
+            with tempfile.TemporaryDirectory() as temporary:
+                artifact = Path(temporary) / 'test-timings.json'
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    CHECK.write_timings_artifact(
+                        artifact, tests=tests, status='fail', exit_code=1,
+                        elapsed_seconds=2.0, phases=[], stopped_early=stopped_early)
+            return stderr.getvalue().splitlines()[0]
+
+        marked = line_for(True)
+        self.assertTrue(marked.startswith(
+            'test timings (stopped after failure): 1/1 tests completed in 2.000s'))
+        self.assertLessEqual(len(marked), CHECK.TIMING_LOG_MAX_CHARS)
+        self.assertTrue(line_for(False).startswith('test timings (complete): '))
+
     def test_log_summary_truncates_at_the_character_bound(self):
         tests = [{'test': 'sample.Suite.test_slow_' + 'x' * 470 + str(index),
                   'duration_seconds': 10.0 - index, 'completed': True} for index in range(6)]

@@ -839,19 +839,24 @@ TIMING_LOG_MAX_CHARS = 2000
 TIMING_LOG_SLOWEST_LIMIT = 5
 
 
-def _timing_log_summary(payload: dict) -> str:
+def _timing_log_summary(payload: dict, *, stopped_early: bool = False) -> str:
     """Return one bounded, sanitized summary line for the log stream.
 
     The uploaded ``test-timings`` artifact carries the full per-test rows, but
     the job log is the channel that survives where artifact retrieval is
     unavailable. Only data already computed for the sanitized artifact summary
     is printed: counts, elapsed/percentile seconds and a few slowest test IDs.
+    ``stopped_early`` says a failing fail-fast child ended the run before its
+    selection finished, so the counts describe executed tests, not the shard.
     """
     summary = payload.get('summary')
     if not isinstance(summary, dict):
         return ''
     collection = payload.get('collection_state')
     collection = collection if collection in ('partial', 'complete') else 'unknown'
+    state = collection
+    if stopped_early and collection == 'complete' and payload.get('unittest_status') == 'fail':
+        state = 'stopped after failure'
 
     def seconds(value):
         return f'{value:.3f}s' if _valid_timing_seconds(value) else 'n/a'
@@ -863,7 +868,7 @@ def _timing_log_summary(payload: dict) -> str:
     percentiles = summary.get('completed_duration_percentiles_seconds')
     if not isinstance(percentiles, dict):
         percentiles = {}
-    parts = [f'test timings ({collection}): {completed}/{recorded} tests completed'
+    parts = [f'test timings ({state}): {completed}/{recorded} tests completed'
              f" in {seconds(payload.get('unittest_elapsed_seconds'))}",
              f"p50={seconds(percentiles.get('p50'))} p95={seconds(percentiles.get('p95'))}"]
     rows = []
@@ -884,10 +889,10 @@ def _timing_log_summary(payload: dict) -> str:
     return line
 
 
-def _log_timing_summary(payload: dict) -> None:
+def _log_timing_summary(payload: dict, *, stopped_early: bool = False) -> None:
     """Best-effort stderr summary; a log failure never changes the gate."""
     try:
-        line = _timing_log_summary(payload)
+        line = _timing_log_summary(payload, stopped_early=stopped_early)
         if line:
             print(line, file=sys.stderr, flush=True)
     except (OSError, ValueError, TypeError, RuntimeError):
@@ -997,7 +1002,8 @@ def _write_bounded_timing_json(path: Path, data: bytes) -> None:
 def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: int | None,
                            elapsed_seconds: float, phases=(), source_sha=None,
                            reason=None, collection_state='complete',
-                           timeout_seconds: int | None = None) -> None:
+                           timeout_seconds: int | None = None,
+                           stopped_early: bool = False) -> None:
     """Best-effort versioned summary and byte-bounded, hash-bound detail pages.
 
     Only internal manifest identity is used, never CI environment/branch IDs.
@@ -1031,7 +1037,7 @@ def write_timings_artifact(path: Path, *, tests: list, status: str, exit_code: i
                    'artifact_status': ('overflow' if phases_expected > TIMING_PHASE_MAX_ENTRIES
                                        else 'complete'), 'pages': []}
         payload['phases_expected'] = phases_expected
-        _log_timing_summary(payload)
+        _log_timing_summary(payload, stopped_early=stopped_early)
         directory = path.with_name(path.name + '.d')
         page = {'suite': 'test-timing-details', 'schema_version': 1,
                 'source_sha256': source_sha, 'tests': []}
@@ -1772,7 +1778,9 @@ def main():
                                elapsed_seconds=pending_unittest_elapsed,
                                phases=checks, source_sha=source_sha,
                                reason=pending_unittest_reason,
-                               timeout_seconds=args.suite_child_timeout)
+                               timeout_seconds=args.suite_child_timeout,
+                               stopped_early=(args.fail_fast and pending_unittest_status == 'fail'
+                                              and pending_unittest_reason != 'timeout'))
     receipt = {'suite': 'offline' if args.test_shard is None else 'offline-shard',
                'report_version': OFFLINE_REPORT_VERSION,
                'mizu_version': __version__, 'source_sha256': source_sha,
