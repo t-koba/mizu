@@ -1178,12 +1178,15 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     objects_skipped = int(objects_scan_skipped)
     for child in object_paths:
         try:
-            if child.name.startswith(ATOMIC_WRITE_TEMP_PREFIX):
-                # A crash between staging and rename leaves product-owned
-                # incomplete data. It can never be referenced (the name is not
-                # a digest) and neither audit nor reclamation deletes it, so it
+            if (child.name.startswith(ATOMIC_WRITE_TEMP_PREFIX)
+                    and not child.is_symlink() and child.is_file()):
+                # A crash between staging and rename leaves a product-owned
+                # regular file. It can never be referenced (the name is not a
+                # digest) and neither audit nor reclamation deletes it, so it
                 # must not make an otherwise complete scan look incomplete and
-                # silently disable reference-aware retention.
+                # silently disable reference-aware retention. A symlink or
+                # directory with that prefix is not product staging and still
+                # counts as an unrecognized entry.
                 continue
             if child.is_symlink() or not child.is_file() or not DIGEST.fullmatch(child.name):
                 objects_skipped += 1

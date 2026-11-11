@@ -414,6 +414,24 @@ class SnapshotRetentionTests(Fixture):
         self.assertEqual(self.collect()['status'], 'refused')
         self.assertTrue(self.path(newer).exists())
 
+    def test_staging_prefixed_symlink_still_refuses(self):
+        old = self.snapshot()
+        link = self.project.root / 'objects' / (ATOMIC_WRITE_TEMP_PREFIX + 'link')
+        try:
+            os.symlink(self.project.root / 'objects' / 'missing', link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Symlink creation unavailable: ' + str(exc))
+        self.assertEqual(storage.audit(self.project)['objects']['skipped'], 1)
+        self.assertEqual(self.collect()['status'], 'refused')
+        self.assertTrue(self.path(old).exists())
+
+    def test_staging_prefixed_directory_still_refuses(self):
+        old = self.snapshot()
+        (self.project.root / 'objects' / (ATOMIC_WRITE_TEMP_PREFIX + 'directory')).mkdir()
+        self.assertEqual(storage.audit(self.project)['objects']['skipped'], 1)
+        self.assertEqual(self.collect()['status'], 'refused')
+        self.assertTrue(self.path(old).exists())
+
     def test_oversized_records_invalid_times_and_item_history_refuse_gc(self):
         old = self.snapshot()
         bad = self.project.root / 'inbox/bad.json'
