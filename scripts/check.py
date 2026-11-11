@@ -836,7 +836,7 @@ def _timing_artifact_summary(tests: list) -> dict:
 
 
 TIMING_LOG_MAX_CHARS = 2000
-TIMING_LOG_MAX_SLOWEST = 5
+TIMING_LOG_SLOWEST_LIMIT = 5
 
 
 def _timing_log_summary(payload: dict) -> str:
@@ -869,7 +869,7 @@ def _timing_log_summary(payload: dict) -> str:
     rows = []
     slowest = summary.get('slowest_tests')
     if isinstance(slowest, list):
-        for item in slowest[:TIMING_LOG_MAX_SLOWEST]:
+        for item in slowest[:TIMING_LOG_SLOWEST_LIMIT]:
             if not isinstance(item, dict):
                 continue
             test = item.get('test')

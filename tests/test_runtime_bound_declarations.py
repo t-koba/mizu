@@ -1129,6 +1129,10 @@ GATE_DECLARATIONS = {
             '1000000', 'safety', 'gate timing artifact / bounded sidecar read'),
         'TIMING_MAX_SECONDS': (
             '100000.0', 'safety', 'gate timing artifact / accepted timestamp range'),
+        'TIMING_LOG_MAX_CHARS': (
+            '2000', 'safety', 'gate timing log / bounded diagnostic summary line'),
+        'TIMING_LOG_SLOWEST_LIMIT': (
+            '5', 'safety', 'gate timing log / bounded slowest-test sample'),
         'TIMING_PHASE_MAX_ENTRIES': (
             '200', 'safety', 'gate timing artifact / bounded phase entries'),
         'TIMING_COUNTS_MAX': (
