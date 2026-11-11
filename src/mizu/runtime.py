@@ -2913,6 +2913,9 @@ class Engine:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
+        control = project.control()
+        if not control.get("armed") or control.get("paused"):
+            raise Denied("Project is unarmed or paused")  # Before any maintenance, probe or inbox read.
         DelegationJobs.guard(project.root)
         from .workspace_cache import maintain
         maintain(project)  # Before probes/admission take any execution locks.
@@ -5194,30 +5197,34 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     lock_scope.close()
                     lock_scope.enter_context(config.runtime_policy())
                     from .probes import service_due, next_deadline
-                    probe = service_due(config, name, stop)
-                    if probe is not None:
-                        print(json.dumps(probe, ensure_ascii=False), flush=True)
                     # Retain process-local history caches across unchanged reloads,
                     # but revalidate mutable project settings on every daemon poll.
                     if project is None or project.config != config:
                         project = Project(config, name)
                     else:
                         project.refresh_settings()
-                    project.insights.ingest_editor(keep_days=config.limits.retention_days)
-                    if vcs_poll_enabled(config):
-                        interval = vcs_poll_interval(config)
-                        for event in poll_project_vcs(config, project, upstream_state,
-                                                      now=time.time(), interval=interval):
-                            print(json.dumps(event, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
                     policy = getattr(role, "daemon_policy", None)
                     if policy not in DAEMON_POLICIES:
                         raise ConfigError("Invalid daemon_policy; reload validated configuration")
-                    if policy == "signals":
-                        ready = should_run(project, project.snapshots.get(), role_name=role_name)
-                    else:
-                        ready = (project.control().get("armed") and not project.control().get("paused")
-                                 and not project.control().get("draining"))
+                    control = project.control()
+                    ready = False
+                    # An unarmed or paused project has no work: probes, editor
+                    # ingestion, VCS polling and readiness are skipped entirely.
+                    if control.get("armed") and not control.get("paused"):
+                        probe = service_due(config, name, stop)
+                        if probe is not None:
+                            print(json.dumps(probe, ensure_ascii=False), flush=True)
+                        project.insights.ingest_editor(keep_days=config.limits.retention_days)
+                        if vcs_poll_enabled(config):
+                            interval = vcs_poll_interval(config)
+                            for event in poll_project_vcs(config, project, upstream_state,
+                                                          now=time.time(), interval=interval):
+                                print(json.dumps(event, ensure_ascii=False), flush=True)
+                        if policy == "signals":
+                            ready = should_run(project, project.snapshots.get(), role_name=role_name)
+                        else:
+                            ready = not control.get("draining")
                     if ready and time.monotonic() >= ordinary_after:
                         result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True,
                                         enqueue_busy=True)
