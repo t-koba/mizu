@@ -852,28 +852,28 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     acceptance_receipts = acceptance.audit(root, blocking=history_cutoff is None)
     manifests: dict[str, dict] = {}
     manifest_bytes = 0
-    manifest_skipped = 0
+    manifest_skipped_paths: set[Path] = set()
     manifest_objects: dict[str, set[str]] = {}
     snapshots_dir = root / "snapshots"
     snapshot_paths, snapshots_scan_skipped = _audit_list_dir(snapshots_dir, required=True)
     if snapshots_scan_skipped:
-        manifest_skipped += 1
+        manifest_skipped_paths.add(snapshots_dir)
         snapshot_paths = []
     else:
         snapshot_paths = [child for child in snapshot_paths if child.suffix == ".json"]
     for child in snapshot_paths:
         try:
             if child.is_symlink():
-                manifest_skipped += 1
+                manifest_skipped_paths.add(child)
                 continue
             sid = child.stem
             if not DIGEST.fullmatch(sid):
-                manifest_skipped += 1
+                manifest_skipped_paths.add(child)
                 continue
             try:
                 manifest_bytes += child.stat().st_size
             except OSError:
-                manifest_skipped += 1
+                manifest_skipped_paths.add(child)
                 continue
             record = project.snapshots.audit_manifest(
                 sid, metadata_bytes=_AUDIT_JSON_BYTES, maximum=_SNAPSHOT_AUDIT_BYTES)
@@ -885,7 +885,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
             manifest_objects[sid] = set(record["file_shas"])
             del record
         except (OSError, Denied, LimitExceeded, ValueError, TypeError, RecursionError):
-            manifest_skipped += 1
+            manifest_skipped_paths.add(child)
     # Count unique record/scan paths, including a generation checked both as
     # a durable reference source and as the active publication history.
     skipped_references: set[Path] = set()
@@ -1067,7 +1067,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         elif reference is not None:
             skipped_references.add(root / "insight-archive.sqlite3")
     work_item_ids: set[str] = set()
-    work_item_events_skipped = 0
+    work_item_skipped_paths: set[Path] = set()
     work_items_dir = root / "work-items"
     try:
         try:
@@ -1077,13 +1077,13 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         if work_items_info is not None:
             if (stat.S_ISLNK(work_items_info.st_mode)
                     or not stat.S_ISDIR(work_items_info.st_mode)):
-                work_item_events_skipped += 1
+                work_item_skipped_paths.add(work_items_dir)
             else:
                 with os.scandir(work_items_dir) as item_directories:
                     for item_entry in item_directories:
                         if (item_entry.is_symlink()
                                 or not item_entry.is_dir(follow_symlinks=False)):
-                            work_item_events_skipped += 1
+                            work_item_skipped_paths.add(work_items_dir / item_entry.name)
                             continue
                         try:
                             # A drop-only legacy sidecar is covered evidence,
@@ -1110,11 +1110,11 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                                         raise Denied("Invalid completed snapshot reference")
                                     item_references.add(digest_id)
                         except (Denied, LimitExceeded, OSError, ValueError):
-                            work_item_events_skipped += 1
+                            work_item_skipped_paths.add(work_items_dir / item_entry.name)
                             continue
                         work_item_ids.update(item_references)
     except OSError:
-        work_item_events_skipped += 1
+        work_item_skipped_paths.add(work_items_dir)
     # Permanent declared host records retain exact candidate/replacement manifests.
     # A malformed source cannot authorize reclamation by hiding its references.
     from .host_records import store as host_record_store
@@ -1191,7 +1191,8 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     return {
         "manifests": manifests,
         "manifest_bytes": manifest_bytes,
-        "manifest_skipped": manifest_skipped,
+        "manifest_skipped": len(manifest_skipped_paths),
+        "manifest_skipped_paths": manifest_skipped_paths,
         "manifest_objects": manifest_objects,
         "live_ids": live_ids,
         "referenced_ids": referenced_ids,
@@ -1203,7 +1204,8 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         "insight_ids": insight_ids,
         "work_item_ids": work_item_ids,
         "host_record_ids": host_record_ids,
-        "work_item_events_skipped": work_item_events_skipped,
+        "work_item_events_skipped": len(work_item_skipped_paths),
+        "work_item_skipped_paths": work_item_skipped_paths,
         "reference_records_skipped": len(skipped_references),
         "skipped_references": skipped_references,
         "generations": generations,
@@ -1218,10 +1220,10 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     }
 
 
-def _skipped_reference_paths(project: Project, collected: dict) -> list[str]:
-    """Sorted root-relative paths behind ``reference_records_skipped``."""
+def _skipped_paths(project: Project, skipped: set[Path]) -> list[str]:
+    """Sorted root-relative display paths for skipped audit sources."""
     paths = []
-    for path in collected["skipped_references"]:
+    for path in skipped:
         try:
             paths.append(path.relative_to(project.root).as_posix())
         except ValueError:
@@ -1237,11 +1239,13 @@ def audit(project: Project) -> dict:
     expired_truncated, skipped, cache_seconds},
     snapshots: {manifests, bytes, live, referenced,
     unreferenced, unreferenced_bytes, unreferenced_sample,
-    unreferenced_truncated, skipped}, histories: {generations, bytes},
+    unreferenced_truncated, skipped, skipped_sample, skipped_truncated},
+    histories: {generations, bytes},
     objects: {count, bytes, referenced_count, referenced_bytes,
     orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
     references: {history_snapshots, run_snapshots, artifact_snapshots,
     insight_snapshots, work_item_snapshots, host_record_snapshots}, work_item_events_skipped,
+    work_item_events_skipped_sample, work_item_events_skipped_truncated,
     reference_records_skipped, reference_records_skipped_sample,
     reference_records_skipped_truncated, preview_only: True}``. Counts and byte totals
     are exact; sample lists hold at most ``_AUDIT_SAMPLE`` sorted IDs with a
@@ -1278,7 +1282,9 @@ def audit(project: Project) -> dict:
     live_objects = collected["live_objects"]
     object_sizes = collected["object_sizes"]
     orphan = collected["orphan"]
-    skipped_reference_paths = _skipped_reference_paths(project, collected)
+    skipped_reference_paths = _skipped_paths(project, collected["skipped_references"])
+    skipped_manifest_paths = _skipped_paths(project, collected["manifest_skipped_paths"])
+    skipped_work_item_paths = _skipped_paths(project, collected["work_item_skipped_paths"])
     try:
         sessions = _session_accounting(project)
     except (OSError, ValueError):
@@ -1303,6 +1309,8 @@ def audit(project: Project) -> dict:
             "unreferenced_sample": unreferenced[:_AUDIT_SAMPLE],
             "unreferenced_truncated": len(unreferenced) > _AUDIT_SAMPLE,
             "skipped": collected["manifest_skipped"],
+            "skipped_sample": skipped_manifest_paths[:_AUDIT_SAMPLE],
+            "skipped_truncated": len(skipped_manifest_paths) > _AUDIT_SAMPLE,
         },
         "histories": {"generations": collected["generations"], "bytes": collected["histories_bytes"]},
         "objects": {
@@ -1325,6 +1333,8 @@ def audit(project: Project) -> dict:
             "host_record_snapshots": len(collected["host_record_ids"]),
         },
         "work_item_events_skipped": collected["work_item_events_skipped"],
+        "work_item_events_skipped_sample": skipped_work_item_paths[:_AUDIT_SAMPLE],
+        "work_item_events_skipped_truncated": len(skipped_work_item_paths) > _AUDIT_SAMPLE,
         "reference_records_skipped": collected["reference_records_skipped"],
         "reference_records_skipped_sample": skipped_reference_paths[:_AUDIT_SAMPLE],
         "reference_records_skipped_truncated": len(skipped_reference_paths) > _AUDIT_SAMPLE,
@@ -1373,7 +1383,9 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     """
     if not apply:
         collected = _audit_collect(project)
-        skipped_reference_paths = _skipped_reference_paths(project, collected)
+        skipped_reference_paths = _skipped_paths(project, collected["skipped_references"])
+        skipped_manifest_paths = _skipped_paths(project, collected["manifest_skipped_paths"])
+        skipped_work_item_paths = _skipped_paths(project, collected["work_item_skipped_paths"])
         return {
             "applied": False,
             "snapshots": [f"snapshots/{sid}.json" for sid in collected["unreferenced"]],
@@ -1381,10 +1393,14 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "unreferenced_bytes": collected["unreferenced_bytes"],
             "orphan_bytes": sum(collected["object_sizes"][name] for name in collected["orphan"]),
             "manifest_skipped": collected["manifest_skipped"],
+            "manifest_skipped_sample": skipped_manifest_paths[:_AUDIT_SAMPLE],
+            "manifest_skipped_truncated": len(skipped_manifest_paths) > _AUDIT_SAMPLE,
             "retained": "All live/history/run/artifact/insight/work-item/host-record-referenced manifests, history generations, "
                         "runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "work_item_events_skipped": collected["work_item_events_skipped"],
+            "work_item_events_skipped_sample": skipped_work_item_paths[:_AUDIT_SAMPLE],
+            "work_item_events_skipped_truncated": len(skipped_work_item_paths) > _AUDIT_SAMPLE,
             "reference_records_skipped": collected["reference_records_skipped"],
             "reference_records_skipped_sample": skipped_reference_paths[:_AUDIT_SAMPLE],
             "reference_records_skipped_truncated": len(skipped_reference_paths) > _AUDIT_SAMPLE,
@@ -1392,13 +1408,17 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     with quiescent(project):
         collected = _audit_collect(project)
         if collected["manifest_skipped"]:
-            raise Denied("Skipped snapshot manifest; cannot safely determine object references")
+            raise Denied(
+                "Skipped snapshot manifests (%s); cannot safely determine object references"
+                % ", ".join(_skipped_paths(project, collected["manifest_skipped_paths"])[:3]))
         if collected["reference_records_skipped"]:
             raise Denied(
                 "Skipped reference records (%s); cannot safely reclaim snapshot references"
-                % ", ".join(_skipped_reference_paths(project, collected)[:3]))
+                % ", ".join(_skipped_paths(project, collected["skipped_references"])[:3]))
         if collected["work_item_events_skipped"]:
-            raise Denied("Unreadable work-item history; cannot safely reclaim snapshot references")
+            raise Denied(
+                "Unreadable work-item history (%s); cannot safely reclaim snapshot references"
+                % ", ".join(_skipped_paths(project, collected["work_item_skipped_paths"])[:3]))
         for directory in (project.root / "snapshots", project.root / "objects"):
             try:
                 info = directory.lstat()

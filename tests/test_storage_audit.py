@@ -195,6 +195,11 @@ class StorageAuditTests(Fixture):
         self.project.set_control(paused=True)
         report = audit(self.project)
         self.assertGreaterEqual(report["work_item_events_skipped"], 3)
+        self.assertEqual(len(report["work_item_events_skipped_sample"]),
+                         report["work_item_events_skipped"])
+        self.assertEqual(report["work_item_events_skipped_sample"],
+                         sorted(report["work_item_events_skipped_sample"]))
+        self.assertFalse(report["work_item_events_skipped_truncated"])
         with self.assertRaises(Denied):
             reclaim(self.project, apply=True)
         self.assertTrue((self.project.root / "snapshots" / f"{snapshot['id']}.json").exists())
@@ -261,10 +266,16 @@ class StorageAuditTests(Fixture):
         item_path.parent.mkdir(parents=True)
         item_path.write_bytes(b"{not-json")
         self.project.set_control(paused=True)
+        item = f"work-items/{decision['work_item']['id']}"
         report = audit(self.project)
         self.assertGreater(report["work_item_events_skipped"], 0)
-        with self.assertRaises(Denied):
+        self.assertEqual(report["work_item_events_skipped_sample"], [item])
+        self.assertFalse(report["work_item_events_skipped_truncated"])
+        preview = reclaim(self.project)
+        self.assertEqual(preview["work_item_events_skipped_sample"], [item])
+        with self.assertRaises(Denied) as refused:
             reclaim(self.project, apply=True)
+        self.assertIn(item, str(refused.exception))
 
     def test_run_reference_protects_snapshot(self):
         from mizu.fs import write_json
@@ -319,12 +330,17 @@ class StorageReclaimTests(Fixture):
             self.project.snapshots.get(live)
         self.project.set_control(paused=True)
         preview = reclaim(self.project)
+        manifest_name = f"snapshots/{live}.json"
         self.assertEqual(preview["manifest_skipped"], 1)
+        self.assertEqual(preview["manifest_skipped_sample"], [manifest_name])
+        self.assertFalse(preview["manifest_skipped_truncated"])
         self.assertEqual(audit(self.project)["snapshots"]["skipped"], 1)
+        self.assertEqual(audit(self.project)["snapshots"]["skipped_sample"], [manifest_name])
         for sha in original_objects:
             self.assertIn(f"objects/{sha}", preview["objects"])
-        with self.assertRaisesRegex(Denied, "snapshot manifest"):
+        with self.assertRaises(Denied) as refused:
             reclaim(self.project, apply=True)
+        self.assertIn(manifest_name, str(refused.exception))
         self.assertTrue(manifest_path.is_file())
         for sha, data in original_objects.items():
             self.assertEqual((self.project.root / "objects" / sha).read_bytes(), data)
