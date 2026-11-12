@@ -2,10 +2,8 @@
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -129,71 +127,19 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.jobs = dict(re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
                                    self.workflow, re.M | re.S))
 
-    def test_only_windows_311_through_314_are_excluded_and_sharded_with_distinct_artifacts(self):
+    def test_windows_runs_the_full_suite_once_as_two_shards_of_one_cell(self):
         core = self.jobs['core']
         self.assertTrue(self.workflow.startswith('name: Offline checks\n'))
         self.assertIn('    runs-on: ${{ matrix.os }}\n', core)
-        self.assertNotRegex(core, r'(?m)^    name:')  # Keep all other automatic matrix names.
-        self.assertIn('        os: [ubuntu-24.04, macos-latest, windows-latest]\n', core)
-        self.assertIn('        python: ["3.11", "3.12", "3.13", "3.14"]\n', core)
+        self.assertNotRegex(core, r'(?m)^    name:')
         matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
-        self.assertEqual(matrix.split('        exclude:\n')[1],
-                         '          - os: windows-latest\n            python: "3.11"\n'
-                         '          - os: windows-latest\n            python: "3.12"\n'
-                         '          - os: windows-latest\n            python: "3.13"\n'
-                         '          - os: windows-latest\n            python: "3.14"\n')
-        self.assertNotIn('--test-shard', core)
+        windows = re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
+                             r'            shard: "(\d)"\n', matrix)
+        self.assertEqual(windows, [('3.11', '0'), ('3.11', '1')])
+        self.assertEqual(matrix.count('windows-latest'), 2)
         self.assertNotIn('--suite-child-timeout', core)
-        self.assertEqual(self.workflow.count('--test-shard'), 4)
-        for python, short in (("3.11", "311"), ("3.12", "312"),
-                              ("3.13", "313"), ("3.14", "314")):
-            with self.subTest(python=python):
-                shards = self.jobs[f'windows-{short}-shards']
-                self.assertIn(f'    name: windows-{short}-shard (${{{{ matrix.shard }}}})\n', shards)
-                self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', shards)
-                self.assertIn('      fail-fast: false\n      matrix:\n        shard: [0, 1]\n', shards)
-                self.assertIn(f'          python-version: "{python}"\n', shards)
-                core_command = re.search(r'        run: (python scripts/check.py .+)', core).group(1)
-                self.assertIn('        run: ' + core_command.replace('check.py ',
-                              'check.py --test-shard ${{ matrix.shard }} ', 1) + '\n', shards)
-                self.assertEqual(re.findall(r'uses: (.+)', core), re.findall(r'uses: (.+)', shards))
-                self.assertEqual(re.findall(r'uses: (actions/upload-artifact@.+)', core),
-                                 re.findall(r'uses: (actions/upload-artifact@.+)', shards))
-                for prefix in ('test-timings', 'project-import-diagnostic'):
-                    self.assertIn(f'          name: {prefix}-windows-latest-{python}-shard-${{{{ matrix.shard }}}}\n', shards)
-                self.assertIn('            private-validation/test-timings.json.d/*.json\n', shards)
-                self.assertEqual(shards.count('        if: always()\n'), 2)
-                self.assertNotIn('continue-on-error', shards)
-                self.assertNotIn('--suite-child-timeout', shards)
-                self.assertNotRegex(shards, r'(?m)^    if:')
-
-    def test_exact_old_check_names_and_fail_closed_matrix_dependencies(self):
-        for python, short in (("3.11", "311"), ("3.12", "312"),
-                              ("3.13", "313"), ("3.14", "314")):
-            with self.subTest(python=python):
-                aggregate = self.jobs[f'windows-{short}-core']
-                shards = self.jobs[f'windows-{short}-shards']
-                name = f'    name: core (windows-latest, {python})\n'
-                self.assertEqual(self.workflow.count(name), 1)
-                self.assertIn(name, aggregate)
-                self.assertIn(f'    needs: [windows-{short}-shards]\n', aggregate)
-                self.assertIn('    if: ${{ always() }}\n', aggregate)
-                self.assertNotIn('timeout-minutes:', aggregate)
-                result_ref = f'          SHARDS_RESULT: ${{{{ needs.windows-{short}-shards.result }}}}\n'
-                self.assertIn(result_ref, aggregate)
-                self.assertNotIn('continue-on-error', aggregate)
-                self.assertEqual(aggregate.count('      - name:'), 1)
-                command = re.search(r'        run: (.+)', aggregate).group(1)
-                argv = shlex.split(command)
-                self.assertEqual(argv[:2], ['python', '-c'])
-                self.assertIn('    runs-on: windows-latest\n    timeout-minutes: 60\n', shards)
-                # Execute the exact workflow predicate, not a reimplementation of it.
-                for result in ('success', 'failure', 'cancelled', 'skipped', '', None):
-                    with self.subTest(python=python, result=result):
-                        env = dict(os.environ)
-                        env.pop('SHARDS_RESULT', None)
-                        if result is not None:
-                            env['SHARDS_RESULT'] = result
-                        child = subprocess.run([sys.executable, *argv[1:]], env=env,
-                                               capture_output=True, timeout=10)
-                        self.assertEqual(child.returncode, 0 if result == 'success' else 1)
+        # The shard flag exists only where a cell declares a shard, and the
+        # two shards of the one cell publish distinct artifacts.
+        self.assertEqual(self.workflow.count('matrix.shard && format('), 3)
+        self.assertIn("format('--test-shard {0} ', matrix.shard)", core)
+        self.assertNotIn('continue-on-error', core)
