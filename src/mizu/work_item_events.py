@@ -40,7 +40,7 @@ def _origin_source(store, origin):
 
 
 def _payload(store, item):
-    _, row = store._closed_row(item)
+    _, row = store.closed_row(item)
     row.update(event=_identity(item), source=SOURCE, type=item["status"],
                terminal_at=item["updated_at"], transition=item["transition"],
                origin_source=_origin_source(store, item["origin"]),
@@ -149,14 +149,8 @@ def _pending_pages(store, subscriptions, limit):
         raise Denied("Work-item event limit must be in [1, 100]")
     unseeded = 0
     if any(page.actions for page in pages):
-        for event_id, event in store._iter_item_events(recover=False):
-            kind, seed = store._seed_for_event(event_id, event, readonly=True)
-            if kind == "unseeded":
-                unseeded += 1
-            if kind != "seed":
-                continue
-            item = store._get(seed["id"], seed_event=event,
-                              history_revisions=store._history_revisions(seed["id"], recover=False))
+        unseeded = store.unseeded_decisions()
+        for item in store.current_items(statuses=("done", "dropped")):
             matching = [page for page in pages if item["status"] in page.actions]
             if matching:
                 row = _payload(store, item)
@@ -191,7 +185,7 @@ def _validate_payload(store, event):
         raise Denied("Invalid work-item acknowledgement event")
     item_id = event.get("id")
     # Reuse full seed/chain validation, never trust a delivered mutable id.
-    item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
+    item = store.current(item_id)
     if item["status"] not in ("done", "dropped") or event != _payload(store, item):
         raise Denied("Work-item acknowledgement differs from terminal event")
     return item
@@ -284,7 +278,7 @@ def closed_page(store, roles, *, limit=10):
     Every matching role is included in sorted order, or the entire read fails
     closed at the existing row/page byte bounds. No locks or recovery.
     """
-    page, items = store._page_closed_impl(limit=limit, readonly=True, include_items=True)
+    page, items = store.closed_items(limit=limit)
     for row, item in zip(page["items"], items):
         payload = _payload(store, item)
         acknowledgements = {}

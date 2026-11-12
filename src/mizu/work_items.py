@@ -2248,6 +2248,51 @@ class WorkItems:
             item = {**item, "blocked_since": blocked_since}
         return item, None if terminal else since
 
+    # Public seams for other modules: current state, history and audit.
+
+    def current(self, item_id: str) -> dict:
+        """Current record of one item, without locks or recovery."""
+        return self._get(item_id, history_revisions=self._history_revisions(item_id, recover=False))
+
+    def current_items(self, *, statuses=None):
+        """Yield the current record of every seeded item, optionally by status."""
+        for event_id, event in self._iter_item_events(recover=False):
+            kind, seed = self._seed_for_event(event_id, event, readonly=True)
+            if kind != "seed":
+                continue
+            item = self._get(seed["id"], seed_event=event,
+                             history_revisions=self._history_revisions(seed["id"], recover=False))
+            if statuses is None or item["status"] in statuses:
+                yield item
+
+    def unseeded_decisions(self) -> int:
+        """Count legacy accept/modify decisions that no reconciliation resolved."""
+        return sum(self._seed_for_event(event_id, event, readonly=True)[0] == "unseeded"
+                   for event_id, event in self._iter_item_events(recover=False))
+
+    def readiness_items(self):
+        """Yield every seeded item's current record for wait readiness; caller holds the lock."""
+        for event_id, event, history_revisions, history_key in self._iter_item_events_with_revisions(
+                recover=False, cache=True, with_identity=True):
+            kind, seed = self._seed_for_event(event_id, event, readonly=True)
+            if kind != "seed":
+                continue
+            if history_revisions is None:
+                history_revisions, history_key = self._history_revisions_readonly(seed["id"])
+            yield self._readiness_item(seed, event, history_revisions, history_key)
+
+    def closed_items(self, *, limit: int):
+        """Return the closed page and the current records of its rows."""
+        return self._page_closed_impl(limit=limit, readonly=True, include_items=True)
+
+    def history(self, item_id: str):
+        """Replay and validate one item's committed chain from its revision files."""
+        return self._iter_chain(item_id)
+
+    def is_drop_only(self, item_id: str) -> bool:
+        """Whether an item directory holds only a valid legacy drop resolution."""
+        return self._audit_drop_only(item_id)
+
     def get(self, item_id: str) -> dict:
         """Read one seed and at most 255 bounded full-state events under lock.
 
@@ -2772,7 +2817,7 @@ class WorkItems:
         return sort_key, row
 
     @staticmethod
-    def _closed_row(item: dict) -> tuple:
+    def closed_row(item: dict) -> tuple:
         """Build one bounded closed-page row and its newest-first key."""
         sort_key = (-_timestamp_order(item["updated_at"]), int(item["id"][3:], 16))
         row = {key: item[key] for key in ("id", "title", "status", "origin", "rev", "updated_at")}
@@ -3171,7 +3216,7 @@ class WorkItems:
             total += 1
             if limit == 0:
                 continue
-            sort_key, row = self._closed_row(item)
+            sort_key, row = self.closed_row(item)
             candidate = (_ReverseKey(sort_key), sort_key, row, item if include_items else None)
             if len(selected) < limit:
                 heapq.heappush(selected, candidate)

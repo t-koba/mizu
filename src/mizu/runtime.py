@@ -4748,14 +4748,7 @@ def _receipt_wait_due(store, role, *, limit=1) -> bool:
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
     proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
     with lock(store.root / "locks" / "insights.lock"):
-        for event_id, event, history_revisions, history_key in store._iter_item_events_with_revisions(
-                recover=False, cache=True, with_identity=True):
-            kind, seed = store._seed_for_event(event_id, event, readonly=True)
-            if kind != "seed":
-                continue
-            if history_revisions is None:
-                history_revisions, history_key = store._history_revisions_readonly(seed["id"])
-            item = store._readiness_item(seed, event, history_revisions, history_key)
+        for item in store.readiness_items():
             ci_waits.readiness_feed(ci_state, store, item)
             proposal_waits.readiness_feed(proposal_state, store, item)
         if ci_waits.readiness_events(ci_state):

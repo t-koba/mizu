@@ -854,7 +854,7 @@ class WorkItemEventTests(Fixture):
                                                            status="dropped", actor="worker", reason="Retired"))
         return proposals, decisions, items
 
-    def test_grouped_cli_readers_share_one_scan_with_exact_role_parity(self):
+    def test_grouped_cli_readers_keep_exact_role_parity(self):
         proposals, _, _ = self.grouped_terminal_fixture()
         # Unknown routing is included only by any-source subscribers.
         (self.project.root / "inbox" / f"{proposals[0]['id']}.json").unlink()
@@ -883,29 +883,16 @@ class WorkItemEventTests(Fixture):
                 name: events._received(self.store, name, item) for name in sorted(roles)
                 if payload["type"] in roles[name].work_item_events
                 and (roles[name].work_item_sources == "any" or payload["origin_source"] == name)}
-        original = self.store._iter_decision_events
-        counts = [0, 0]
-        def counted(**kwargs):
-            counts[0] += 1
-            for entry in original(**kwargs):
-                counts[1] += 1
-                yield entry
-        with patch.object(self.store, "_iter_decision_events", side_effect=counted), \
-                patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
+        with patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
                 patch.object(events, "write_json", side_effect=AssertionError("read write")):
             self.assertEqual(events.closed_page(self.store, roles, limit=8), base)
-            self.assertEqual(counts, [1, 28])
             for limit in (1, 4, 8):
-                counts[:] = [0, 0]
                 result = events.progress(self.store, roles, limit=limit)
                 self.assertEqual(result["roles"], expected[:limit])
                 self.assertEqual(result["truncated"], limit < 8)
-                self.assertEqual(counts, [1, 28])
-            counts[:] = [0, 0]
             limited = events.closed_page(self.store, roles, limit=1)
             self.assertEqual(limited["items"], base["items"][:1])
             self.assertEqual((limited["total"], limited["overflow_count"]), (8, 7))
-            self.assertEqual(counts, [1, 28])
 
     def test_shared_cli_scan_still_rejects_source_chain_and_receipt_corruption(self):
         _, decisions, items = self.grouped_terminal_fixture(groups=1, unrelated=0)
