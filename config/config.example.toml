@@ -239,11 +239,6 @@ scheduled_input_scan_items = 1000 # Maximum inbox entries opened per opted-in ti
 work_items_doing = 1             # Per-role active doing slots (1-100); blocked waits excluded.
 work_items_stale_seconds = 86400 # Doing-age review visibility only (1-31536000); never expires a hold.
 work_items_blocked_max_age_seconds = 604800 # Non-deadline blocked waits expire for review after seven days (positive TOML integer).
-# Request-local retention budgets: positive TOML integers; eviction repeats validation/I/O.
-work_item_read_view_snapshot_cache_bytes = 33554432 # Validated snapshot records.
-work_item_read_view_file_cache_bytes = 8388608 # File records.
-work_item_read_view_item_cache_bytes = 8388608 # Parsed-item records.
-work_item_read_view_item_cache_entries = 1024 # Parsed-item entries.
 work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow and incomplete legacy coverage are explicit).
 session_delta_details = "elide"  # full|elide: full/delta previews use exact read references only with that grant; shared-check details and row/liveness metadata stay explicit.
 decision_events_limit = 10  # Decision events per dispatch per role (1-100; default 10). Bound stays 100; value is policy.

@@ -80,7 +80,6 @@ from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
 from . import work_item_operations
-from .work_item_read_view import readonly_view
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
@@ -2749,8 +2748,7 @@ class Engine:
         waits_reconciled, pending_resolution = (
             _reconcile_work_item_waits(project, role, self.config) if reconcile_waits
             else (False, prior_wait_resolution_pending))
-        # Reuse validated records only within this dispatch, never across rechecks.
-        work_items = readonly_view(project.work_items, limits=self.config.limits)
+        work_items = project.work_items
         terminal_page = work_item_events.pending(
             work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))
@@ -4732,14 +4730,11 @@ def _decision_delivery_state(project, role_name, role):
 def _receipt_wait_due(store, role, *, limit=1) -> bool:
     """Share one authoritative work-item traversal for CI/proposal readiness.
 
-    Holds ``insights.lock`` once and reconstructs each item from the
-    ``recover=False``/``readonly=True`` scan. A strict full-chain proof is
-    reused only while its exact history identity, snapshot policy, and every
-    referenced evidence-file identity remain unchanged; misses replay fully.
-    CI/proposal evidence and time-dependent readiness are still reevaluated
-    by the route-owned read-only accumulators each poll. Retains only O(limit)
-    candidates plus the first deferred proposal
-    failure; iterator, seed and full-chain failures abort even after an
+    Holds ``insights.lock`` once and feeds every blocked item from the
+    current-state index to both accumulators; CI/proposal evidence and
+    time-dependent readiness are reevaluated by the route-owned read-only
+    accumulators each poll. Retains only O(limit) candidates plus the first
+    deferred proposal failure; index failures abort even after an
     earlier candidate. Finalizes CI first: a CI event returns True and
     discards the deferred proposal failure, otherwise the deferred failure
     propagates or the proposal accumulator finalizes. No recovery, writes,
@@ -4748,7 +4743,7 @@ def _receipt_wait_due(store, role, *, limit=1) -> bool:
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
     proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
     with lock(store.root / "locks" / "insights.lock"):
-        for item in store.readiness_items():
+        for item in store.current_items(statuses=("blocked",)):
             ci_waits.readiness_feed(ci_state, store, item)
             proposal_waits.readiness_feed(proposal_state, store, item)
         if ci_waits.readiness_events(ci_state):

@@ -611,12 +611,6 @@ class Limits:
     work_items_stale_seconds: int = 86400
     #: Lifetime of blocked waits without an explicit deadline.
     work_items_blocked_max_age_seconds: int = 604800
-    #: Request-local retention policy: smaller budgets repeat validated reads;
-    #: oversized records bypass caching without changing projection semantics.
-    work_item_read_view_snapshot_cache_bytes: int = 32 * 1024 * 1024
-    work_item_read_view_file_cache_bytes: int = 8 * 1024 * 1024
-    work_item_read_view_item_cache_bytes: int = 8 * 1024 * 1024
-    work_item_read_view_item_cache_entries: int = 1024
     #: Operator-selected decision-event window per dispatch (1-100;
     #: default 10). The 100-event cap stays fixed mechanism; the value is
     #: policy: with rotation, a role with many deferrals sees each one
@@ -678,10 +672,6 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000),
                  "work_items_blocked_max_age_seconds": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_snapshot_cache_bytes": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_file_cache_bytes": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_item_cache_bytes": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_item_cache_entries": (1, TOML_INTEGER_MAX),
                  "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),
                  "wait_events_limit": (1, 100),
