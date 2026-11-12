@@ -442,6 +442,12 @@ def lock_policy(seconds: float, *,
         _lock_retry_interval_ms.reset(retry_token)
 
 
+def lock_timeout() -> float:
+    """The execution's lock wait policy in seconds, as used by :func:`lock`."""
+    timeout = _lock_timeout.get()
+    return _LOCAL_BLOCKING_TIMEOUT if timeout is None else timeout
+
+
 def _local_key(path: Path) -> str:
     # Canonicalize through the filesystem so aliased paths (symlinked
     # parent, `.`/`..`, case variants on Windows) share one guard entry.
