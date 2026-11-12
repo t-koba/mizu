@@ -23,7 +23,7 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
-                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read"})
+                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read", "result_read"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -1762,6 +1762,10 @@ def load(file: Path) -> Config:
         caps = strings(role.get("capabilities", []), "capabilities")
         if set(caps) - CAPABILITIES or len(set(caps)) != len(caps):
             raise ConfigError(f"Invalid or duplicate capability in role {name}")
+        # The one continuation tool for oversized results (tool_results) goes to
+        # every role that holds any tool a result can come from.
+        if set(caps) - {"finish", "result_read"} and "result_read" not in caps:
+            caps = type(caps)((*caps, "result_read"))
         if "withdraw_decided" in caps and "withdraw_insight" not in caps:
             raise ConfigError(f"Role {name}: withdraw_decided requires withdraw_insight")
         engine_tools = strings(role.get("engine_tools", []), "engine_tools")

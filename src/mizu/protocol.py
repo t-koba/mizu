@@ -6,7 +6,6 @@ import re
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
-from . import tool_results
 from .work_item_seed import MAX_DECISION_TASKS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
@@ -310,6 +309,9 @@ DEFINITIONS = {
                     "rationale": text(1024),
                     "expected_rev": {"type": "integer", "minimum": 0},
                     "expected_generation": text(64)}, ("items", "rationale", "expected_rev", "expected_generation"))),
+    "result_read": ("Read the next page of an oversized tool result, as the truncated response's continue field directs.",
+                    obj({"cursor": text(32), "offset": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}},
+                        ("cursor", "offset"))),
     "finish": (WRITER_CONTINUATION_CONTRACT + " End this work unit and release its model slot and workspace lock. Call after all other tools. For a timed external wait on a writable role, use outcome=wait and wait_seconds=N; the host persists the wake deadline instead of keeping a command running. Independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. Use outcome=wait and wait_for_check=<id> when no independent work remains; release the unit and resume on completion or new input. 'done' on writable roles requires successful verification. "
                "ack_events optionally selects unique delivered operator record, decision or pending-insight event, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. Proposal merge waits share wait_events and require explicit identity-bound ack_events selections. CI wait rows share wait_events and always use explicit, identity-bound ack_tokens under the same successful-finish receipt boundary. CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
                "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent.",
@@ -322,14 +324,6 @@ DEFINITIONS = {
                     "next_profile": text(63), "next_reason": text(256)},
                    ("outcome", "summary"))),
 }
-
-
-# Every tool but the unit seal accepts the continuation fields of an oversized
-# result (see tool_results). Schemas are copied: several share property tables.
-for _name, (_description, _schema) in list(DEFINITIONS.items()):
-    if _name not in tool_results.UNPAGED:
-        DEFINITIONS[_name] = (_description, {**_schema, "properties": {
-            **_schema["properties"], **tool_results.schema_fields()}})
 
 
 def tool_definitions(capabilities: tuple[str, ...]) -> list[dict]:

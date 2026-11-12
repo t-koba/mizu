@@ -199,6 +199,7 @@ WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidenc
 OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
+    "result_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
 
@@ -1129,10 +1130,6 @@ class Context:
             self._activity_change(lambda: setattr(self, "_activity_operation", operation),
                                   count="tool_call:" + operation)
             try:
-                paged = tool_results.continuation(self, operation, arguments)
-                if paged is not None:
-                    self.tool_admission_exception = None
-                    return paged
                 result = self.dispatch(operation, arguments)
                 idempotent_replay = (operation in ("work_items_create", "work_items_reconcile")
                                      and isinstance(result, dict)
@@ -1162,6 +1159,9 @@ class Context:
             if handler is None:
                 raise Denied("Unknown operation")
             return handler(self, args)
+
+    def _op_result_read(self, args: dict) -> dict:
+        return tool_results.read(self, args)
 
     def _op_diff(self, args: dict) -> dict:
         return workspace_reads.op_diff(self, args)
@@ -2048,7 +2048,7 @@ class Context:
         return self._op_exec_experiment("experiment", args)
 
     _DISPATCH = {
-        "diff": _op_diff, "files": _op_files, "read": _op_read,
+        "diff": _op_diff, "files": _op_files, "read": _op_read, "result_read": _op_result_read,
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,

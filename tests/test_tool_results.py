@@ -20,9 +20,7 @@ class ToolResultTests(Fixture):
         first = tool_results.bounded(ctx, operation, arguments, result)
         out = [first]
         while out[-1]["next_offset"] is not None:
-            out.append(tool_results.continuation(ctx, operation, {
-                **arguments, "result_cursor": first["result_cursor"],
-                "result_offset": out[-1]["next_offset"]}))
+            out.append(tool_results.read(ctx, {"cursor": first["cursor"], "offset": out[-1]["next_offset"]}))
         return out
 
     def test_small_results_are_unchanged(self):
@@ -47,24 +45,25 @@ class ToolResultTests(Fixture):
 
     def test_invalid_continuations_are_refused(self):
         ctx = self.ctx()
-        args = {"limit": 5}
-        first = tool_results.bounded(ctx, "search", args, {"r": "x" * 20000})
-        cursor = first["result_cursor"]
-        good = {**args, "result_cursor": cursor, "result_offset": first["next_offset"]}
-        self.assertEqual(tool_results.continuation(ctx, "search", good)["offset"], first["next_offset"])
-        for bad in ({**good, "result_cursor": "0" * 32}, {**good, "result_cursor": "zz"},
-                    {**good, "result_offset": 10 ** 7}, {**good, "limit": 6},
-                    {"result_offset": 1}):
+        first = tool_results.bounded(ctx, "search", {}, {"r": "x" * 20000})
+        cursor = first["cursor"]
+        self.assertEqual(first["continue"], {"tool": "mizu_result_read", "cursor": cursor,
+                                             "offset": first["next_offset"]})
+        good = {"cursor": cursor, "offset": first["next_offset"]}
+        self.assertEqual(tool_results.read(ctx, good)["offset"], first["next_offset"])
+        for bad in ({**good, "cursor": "0" * 32}, {**good, "cursor": "zz"}, {**good, "offset": 10 ** 7}):
             with self.assertRaises(Denied):
-                tool_results.continuation(ctx, "search", bad)
-        with self.assertRaises(Denied):
-            tool_results.continuation(ctx, "vcs_read", good)
-        # Offset inside a multi-byte character is refused.
+                tool_results.read(ctx, bad)
         wide = tool_results.bounded(ctx, "search", {}, {"r": "雪" * 5000})
         with self.assertRaises(Denied):
-            tool_results.continuation(ctx, "search", {"result_cursor": wide["result_cursor"],
-                                                      "result_offset": 7})
-        self.assertIsNone(tool_results.continuation(ctx, "search", args))
+            tool_results.read(ctx, {"cursor": wide["cursor"], "offset": 7})
+        # A cursor is valid only for the role that received it, and only in its run.
+        other = self.context("reviewer")
+        with self.assertRaises(Denied):
+            tool_results.read(other, good)
+        ctx.role = dataclasses.replace(ctx.role, name="reviewer")
+        with self.assertRaises(Denied):
+            tool_results.read(ctx, good)
 
     def test_handle_pages_through_the_broker_without_repeating_the_tool(self):
         ctx = self.ctx(4096)
@@ -83,20 +82,26 @@ class ToolResultTests(Fixture):
             self.assertTrue(first["truncated"])
             text, page = first["page"], first
             while page["next_offset"] is not None:
-                page = ctx.handle("files", {"result_cursor": first["result_cursor"],
-                                            "result_offset": page["next_offset"]})
+                self.assertEqual(page["continue"]["tool"], "mizu_result_read")
+                page = ctx.handle("result_read", {"cursor": page["continue"]["cursor"],
+                                                  "offset": page["continue"]["offset"]})
+                self.assertLessEqual(len(canonical(page)), 4096)
                 text += page["page"]
         finally:
             Context._DISPATCH["files"] = original
         self.assertEqual(len(calls), 1)
         self.assertEqual(json.loads(text), big)
 
-    def test_schema_accepts_the_continuation_everywhere_but_finish(self):
+    def test_only_the_one_continuation_tool_knows_cursors_and_it_is_tiny(self):
         for name, (_, schema) in DEFINITIONS.items():
             with self.subTest(tool=name):
-                has = "result_cursor" in schema["properties"]
-                self.assertEqual(has, name != "finish")
-        self.assertEqual(self.config.limits.tool_response_bytes, 32768)
+                self.assertNotIn("result_cursor", json.dumps(schema))
+                self.assertNotIn("result_offset", json.dumps(schema))
+        size = len(json.dumps(tool_definitions(("result_read",))[0]))
+        self.assertLess(size, 450)
+        for role in self.config.roles.values():
+            self.assertIn("result_read", role.capabilities)
+        self.assertEqual(self.config.roles["worker"].capabilities.count("finish"), 1)
 
     def test_paged_artifact_reads_keep_their_own_bound(self):
         ctx = self.ctx()
@@ -105,6 +110,7 @@ class ToolResultTests(Fixture):
         self.assertIs(tool_results.bounded(ctx, "vcs_read", args, big), big)
         whole = {k: v for k, v in args.items() if k not in ("offset", "limit")}
         self.assertTrue(tool_results.bounded(ctx, "vcs_read", whole, big)["truncated"])
+        self.assertIs(tool_results.bounded(ctx, "result_read", {}, big), big)
 
     def test_limit_is_configuration_validated_at_load(self):
         from mizu.config import load
