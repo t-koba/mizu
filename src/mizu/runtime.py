@@ -25,7 +25,7 @@ from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
 from .admission import admission, has_live_demand, role_exclusion
-from . import check_jobs
+from . import check_jobs, tool_results
 from . import wait_events as structured_wait_events
 from . import proposal_waits, ci_waits, dispatch_evidence, safe_point, work_item_events
 from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
@@ -1129,6 +1129,10 @@ class Context:
             self._activity_change(lambda: setattr(self, "_activity_operation", operation),
                                   count="tool_call:" + operation)
             try:
+                paged = tool_results.continuation(self, operation, arguments)
+                if paged is not None:
+                    self.tool_admission_exception = None
+                    return paged
                 result = self.dispatch(operation, arguments)
                 idempotent_replay = (operation in ("work_items_create", "work_items_reconcile")
                                      and isinstance(result, dict)
@@ -1141,7 +1145,7 @@ class Context:
                 if operation in {"submit_insight", "revise_insight", "withdraw_insight", "attach_evidence"}:
                     self.progress_insight = True
                 self.tool_admission_exception = None
-                return result
+                return tool_results.bounded(self, operation, arguments, result)
             finally:
                 # Completion of actual admitted work is not a heartbeat and
                 # never resets an active request (Claude query / Codex turn).

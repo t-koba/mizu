@@ -542,6 +542,8 @@ class Limits:
     #: prompt (1-64 KiB; default 4 KiB). Records over the bound inject
     #: status/generation/sizes only, never partial content.
     role_state_prompt_bytes: int = 4096
+    #: Canonical-JSON bytes of one model-facing tool response; larger results page.
+    tool_response_bytes: int = 32768
     free_disk_mb: int = 1024
     #: Operator-selected retention window (days) for budget day-files and
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
@@ -687,6 +689,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "event_stream_bytes": (1048576, 268435456),
                  "role_state_bytes": (1024, 65536),
                  "role_state_prompt_bytes": (1, 65536),
+                 "tool_response_bytes": (4096, 1048576),
                  "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
                  "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                  "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),

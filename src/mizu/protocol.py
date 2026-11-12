@@ -6,6 +6,7 @@ import re
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
+from . import tool_results
 from .work_item_seed import MAX_DECISION_TASKS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
@@ -321,6 +322,14 @@ DEFINITIONS = {
                     "next_profile": text(63), "next_reason": text(256)},
                    ("outcome", "summary"))),
 }
+
+
+# Every tool but the unit seal accepts the continuation fields of an oversized
+# result (see tool_results). Schemas are copied: several share property tables.
+for _name, (_description, _schema) in list(DEFINITIONS.items()):
+    if _name not in tool_results.UNPAGED:
+        DEFINITIONS[_name] = (_description, {**_schema, "properties": {
+            **_schema["properties"], **tool_results.schema_fields()}})
 
 
 def tool_definitions(capabilities: tuple[str, ...]) -> list[dict]:
