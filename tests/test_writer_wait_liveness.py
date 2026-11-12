@@ -3,12 +3,13 @@ import dataclasses
 import datetime as dt
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, forget_ledger
 from test_ci_waits import CiWaitFixture, SHA
 from mizu import operator_records as records
 from mizu.ci_requests import CiRequests, request_id
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.fs import canonical, now, read_json, write_json
+from mizu.fs import canonical, now, read_json
+from support import history_write_json as write_json
 from mizu.runtime import (Engine, _writer_progress_fallback, _writer_wait_liveness,
                            _writer_wait_sources, should_run)
 
@@ -419,6 +420,7 @@ class WriterWaitTests(Fixture):
         for item in (code, answer):
             self.assertEqual(store.get(item['id'])['rev'], item['rev'])
         (self.project.root / 'work-items' / code['id'] / 'broken.json').write_text('{')
+        forget_ledger(self.project.root)
         unavailable = self.project.status()['blocked_work']
         self.assertFalse(unavailable['coverage_complete'])
         self.assertIsNone(unavailable['total'])

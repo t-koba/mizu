@@ -13,7 +13,8 @@ from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, LimitExceeded, MissingFinish
-from mizu.fs import canonical, digest, lock, read_json, write_json
+from mizu.fs import canonical, digest, lock, read_json
+from support import history_write_json as write_json
 from mizu.runtime import Engine, _role_events_due, prompt_for, prompt_delta_for
 from mizu.services import event_watches, render
 from mizu.platform import IS_WINDOWS
@@ -67,75 +68,6 @@ class WorkItemEventTests(Fixture):
     def finish(self, ctx, **kwargs):
         return ctx.handle("finish", {"outcome": "wait", "summary": "Handled selected events",
                                      "state": "Continue remaining work", **kwargs})
-
-    def test_closed_pages_validate_current_done_snapshot_not_older_delivery_manifests(self):
-        _, seed = self.seed()
-
-        def published_snapshot(label):
-            captured = self.project.snapshots.capture_files(self.project.workspace)
-            verification = {"passed": True, "code_digest": captured["code_digest"], "run": label}
-            snapshot = self.project.snapshots.create(
-                captured, goal="Goal", state="State", run=label, outcome="done",
-                summary=f"{label} delivery", verification=verification)
-            self.project.snapshots.publish(snapshot)
-            return snapshot
-
-        historical = published_snapshot("historical")
-        bind_delivery(self.project, seed["id"], historical["id"])
-        current = published_snapshot("current")
-        self.store.transition(seed["id"], expected_rev=3, status="doing", actor="worker",
-                              snapshot_id=current["id"])
-        completed = self.store.transition(seed["id"], expected_rev=4, status="done", actor="worker",
-                                          reason="Verified", snapshot_id=current["id"])
-        original_get = self.project.snapshots.binding
-
-        with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
-            strict = self.store.get(seed["id"])
-            self.assertEqual(strict, completed)
-            self.assertEqual([call.args[0] for call in get.call_args_list],
-                             [historical["id"], current["id"], current["id"]])
-
-        with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
-            closed = self.store.page_closed_readonly(limit=10)
-            self.assertEqual(closed["total"], 1)
-            self.assertEqual(closed["items"][0]["id"], seed["id"])
-            self.assertEqual(closed["items"][0]["snapshot_id"], current["id"])
-            # POSIX sidecars witness the unchanged manifest and do not re-read
-            # it; Windows bypasses sidecars and validates the current proof.
-            self.assertEqual([call.args[0] for call in get.call_args_list],
-                             [current["id"]] if IS_WINDOWS else [])
-
-        with patch.object(self.project.snapshots, "binding", wraps=original_get) as get:
-            events_page = events.closed_page(self.store, self.subscribed_config().roles)
-            self.assertEqual(events_page["total"], 1)
-            self.assertEqual(events_page["items"][0]["id"], seed["id"])
-            # POSIX sidecars witness the unchanged manifest and do not re-read
-            # it; Windows bypasses sidecars and validates the current proof.
-            self.assertEqual([call.args[0] for call in get.call_args_list],
-                             [current["id"]] if IS_WINDOWS else [])
-
-        # An unavailable current manifest breaks its witness: the exact
-        # validation runs again and fails closed.
-        manifest = self.project.root / "snapshots" / f"{current['id']}.json"
-        hidden = manifest.with_name("hidden.json")
-        manifest.rename(hidden)
-        try:
-            with self.assertRaisesRegex(Denied, "Snapshot not found"):
-                self.store.page_closed_readonly(limit=10)
-            with self.assertRaisesRegex(Denied, "Snapshot not found"):
-                events.closed_page(self.store, self.subscribed_config().roles)
-        finally:
-            hidden.rename(manifest)
-
-        # Unused snapshot reads do not weaken the complete structural replay.
-        binding_path = self.project.root / "work-items" / seed["id"] / "3.json"
-        binding = read_json(binding_path)
-        binding["title"] = "Tampered history"
-        write_json(binding_path, binding)
-        with patch.object(self.project.snapshots, "binding", side_effect=AssertionError("unused snapshot")) as get:
-            with self.assertRaises(Denied):
-                self.store.page_closed_readonly(limit=10)
-            get.assert_not_called()
 
     def test_explicit_partial_empty_omitted_and_restart_receipts(self):
         from mizu.project import Project

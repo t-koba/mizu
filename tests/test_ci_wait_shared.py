@@ -4,7 +4,7 @@ from pathlib import Path as _Path
 from unittest.mock import patch
 
 from test_ci_waits import CiWaitFixture, SHA
-from support import ScriptDriver
+from support import ScriptDriver, forget_ledger
 from mizu import ci_waits, protocol, shared_records
 from mizu.config import load
 from mizu.errors import ConfigError, Denied, LimitExceeded
@@ -174,12 +174,13 @@ class SharedCiWaitTests(CiWaitFixture):
         context = self.context()
         tokens = [e["ack_token"] for e in context.wait_events]
         self.publication.path("receipt").unlink()
+        forget_ledger(self.project.root)  # The wait's receipt is validated on rebuild.
         with self.assertRaises(Denied):
             self.page()
         with self.assertRaises(Denied):
             self.complete(context, tokens)
         for error in (Denied("history corrupt"), OSError("history unavailable")):
-            with patch.object(self.store, "_history_revisions", side_effect=error):
+            with patch("mizu.ledger.Ledger.read", side_effect=error):
                 with self.assertRaises(type(error)):
                     self.page()
                 with self.assertRaises(type(error)):

@@ -155,34 +155,6 @@ class WaitEventsLimitConfigTests(Fixture):
                         load(self.file)
 
 
-class WorkItemReadViewCacheConfigTests(Fixture):
-    def test_defaults_exact_overrides_and_refusals(self):
-        defaults = {
-            "work_item_read_view_snapshot_cache_bytes": 33554432,
-            "work_item_read_view_file_cache_bytes": 8388608,
-            "work_item_read_view_item_cache_bytes": 8388608,
-            "work_item_read_view_item_cache_entries": 1024,
-        }
-        base = re.sub(r'(?m)^work_item_read_view_.*\n', '', self.file.read_text())
-        self.file.write_text(base)
-        default_limits = load(self.file).limits
-        for name, default in defaults.items():
-            self.assertEqual(getattr(default_limits, name), default)
-            self.assertEqual(getattr(Limits(), name), default)
-            self.assertEqual(_LIMIT_RANGES[name], (1, TOML_INTEGER_MAX))
-            for value in ("1", "37", str(TOML_INTEGER_MAX), "0", "-1",
-                          str(TOML_INTEGER_MAX + 1), "true", "false", "1.0",
-                          '"1"', "[]", "{}"):
-                with self.subTest(name=name, value=value):
-                    self.file.write_text(base.replace(
-                        "\n[limits]\n", f"\n[limits]\n{name} = {value}\n"))
-                    if value in ("1", "37", str(TOML_INTEGER_MAX)):
-                        self.assertEqual(getattr(load(self.file).limits, name), int(value))
-                    else:
-                        with self.assertRaisesRegex(ConfigError, f"limits.{name}"):
-                            load(self.file)
-
-
 class SessionDeltaDetailConfigTests(Fixture):
     def test_default_override_and_invalid_values(self):
         base = re.sub(r'(?m)^session_delta_details = .*\n', '', self.file.read_text())
