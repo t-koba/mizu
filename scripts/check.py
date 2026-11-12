@@ -545,7 +545,6 @@ def core_cell_scope_seconds(child_timeout: int, staging_timeout: int,
 
 #: The wall-clock bound the gate holds the Python suite child to; the default
 #: for --suite-child-timeout. Changing it or the CI job scopes is a separate decision.
-#: job scope is a separate decision.
 SUITE_CHILD_TIMEOUT_SECONDS = 1800
 
 
