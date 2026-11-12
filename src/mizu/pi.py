@@ -1,6 +1,7 @@
 """Managed Pi SDK driver, using the shared bounded duplex channel."""
 from __future__ import annotations
 import contextlib
+import json
 import re
 import time
 from pathlib import Path
@@ -12,7 +13,7 @@ from .engine_channel import Channel
 from .engine_config import effective, connected_servers, session_record, save_session, session_token_total, MAX_SESSION_TOKENS
 from .errors import RequestYieldExceeded
 from .errors import ConfigError, DeadlineWrapUp, ProtocolError, ModelFailure
-from .fs import atomic_write, mkdir, write_json
+from .fs import atomic_write, canonical, digest, mkdir, write_json
 from .pi_reselection import Reselection
 from .process import environment
 from .protocol import tool_definitions
@@ -35,6 +36,39 @@ def authority_sections(role: Role, goal: str) -> dict[str, str]:
     return {**{f"mizu_authority_policy_{i}": text
                for i, text in enumerate(role_policy_parts(role))},
             "mizu_authority_charter": goal}
+
+
+#: Value of the engine's working-directory system section. Commands run in the
+#: sandbox where this is the workspace mount; the controller directory that
+#: really is the engine's cwd is per-run host state the model never uses, and
+#: its path would put the run id ahead of every standing instruction.
+PROMPT_CWD = "/workspace"
+
+
+def cache_key(project: str, role: str, profile: str, model: dict) -> str:
+    """Provider prompt-cache routing key, stable per (project, role, profile, model).
+
+    Schema: 32 lowercase hex characters (a digest, so no names leave the
+    host and the value is a valid Pi session id). Bounds: fixed length. Trust:
+    local identifiers only. Units of one role share a standing prefix, so
+    they share the key; the provider still matches by prefix content, so a
+    changed policy or tool list only misses its own cache. Failure: none.
+    """
+    return digest(canonical({"project": project, "role": role, "profile": profile,
+                             "provider": model["provider"], "model": model["model"]}))[:32]
+
+
+def request_prefix(effective_config: dict, tools: list) -> str:
+    """Model-visible prefix up to the unit prompt, in the engine's request order.
+
+    Order: tool definitions, then the system prompt (preamble, working
+    directory, host authority sections: role policy parts and charter). Every
+    element is configuration or policy bytes, never per-unit data; the unit
+    prompt (run id, clock, inventories) follows it as the first user message.
+    """
+    sections = "".join(f"\n<{name}>\n{text}\n</{name}>" for name, text in effective_config["authority_sections"])
+    return (json.dumps(tools, sort_keys=True, ensure_ascii=False) + "\n" + effective_config["systemPrompt"]
+            + f"\n<cwd>\n{effective_config['promptCwd']}\n</cwd>" + sections)
 
 
 def authority_projection(sections: dict[str, str]) -> str:
@@ -67,8 +101,9 @@ class PiDriver:
         agent_dir = self.config.agent_dir("pi")
         mkdir(agent_dir)
         write_json(context.run_dir / "pi-effective.json", {**settings, "mcp_servers": connected_servers(context, settings),
-                   "agentDir": str(agent_dir), "cwd": str(cwd), "sessionDir": str(path.parent),
+                   "agentDir": str(agent_dir), "cwd": str(cwd), "promptCwd": PROMPT_CWD, "sessionDir": str(path.parent),
                    "resume": saved["id"] if saved else None, "systemPrompt": BASE_SYSTEM_PROMPT,
+                   "cacheKey": cache_key(context.project.name, context.role.name, profile, model),
                    "authority_sections": list(sections.items()),  # JSON object key sorting must not reorder sources.
                    **({"reselection": True} if reselection.enabled else {})})
         session_file = None

@@ -533,10 +533,10 @@ def prompt_for(context: Context) -> str:
         ci_branch = None
     ci_failures = opening["ci_failures"]
     ci_failures_may_be_truncated = opening["ci_truncated"]
-    return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
-                       "unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
+                       **({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
@@ -627,11 +627,11 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     open_backlog = opening["open_backlog"]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
-    return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
-                       "unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps({"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
-                       **(grant_transition or {}),
                        "goal_digest": context.goal_digest,
+                       **({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
+                       **(grant_transition or {}),
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],

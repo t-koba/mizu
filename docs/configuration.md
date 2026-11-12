@@ -1360,6 +1360,18 @@ any effective change outside their live keys. The explicit fresh start is
 and durable stores (refused while the role has an active run); usage and age rotation
 bounds still apply to every engine.
 
+Request prefix and cache partition (Pi, no configuration key). The request
+prefix is the tool definitions, then the system prompt (fixed preamble, a
+working-directory section holding the constant `/workspace`, the role policy
+parts, the charter), then the unit prompt as the first user message; the
+prefix is byte-identical across units of one role while configuration and
+policy files are unchanged, and the run id, clock, snapshots and inventories
+appear only in the unit prompt. The ephemeral Pi engine names its provider
+session after a digest stable per project, role, profile and model, so the
+provider prompt-cache key is shared by those units; each unit keeps its own
+session directory and transcript. A resumed session keeps the id of its file.
+`cacheRetention` above is the retention knob; unset keeps today's behaviour.
+
 For a durable work unit, the persisted grant must exactly equal the current
 configured authority (minus effort-only live keys, which ride the live conversation)
 even when the host narrows a continuation's turn role. A mid-run authority
