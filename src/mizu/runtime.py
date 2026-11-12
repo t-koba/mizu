@@ -3337,13 +3337,14 @@ class Engine:
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
                 decoded = json.loads(prompt)
-                work_items_page = decoded["open_work_items"]
+                work_items_page = decoded.get("open_work_items")
                 write_json(run_dir / "prompt_projection.json",
                            {"run": run_id, "role": role_name, "profile": role.profile, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
                             "open_insights": (decoded.get("open_insights") or {}).get("total", 0),
-                            "open_work_items": {
+                            # None: this role's prompt carries no work-item inventory.
+                            "open_work_items": None if work_items_page is None else {
                                 "shown": len(work_items_page["items"]),
                                 "total": work_items_page["total"],
                                 "overflow_count": work_items_page["overflow_count"],

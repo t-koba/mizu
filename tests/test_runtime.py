@@ -890,9 +890,11 @@ class PromptProjectionTests(Fixture):
             self.config.limits, work_items_prompt=2))
         ctx = self.context("consult")
         ctx.config = small
-        # No capability is needed for the project-wide prompt projection.
+        # Without a work-item capability the inventory is offered only on explicit
+        # configuration; the projection itself needs no capability.
         ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(
-            capability for capability in ctx.role.capabilities if capability != "work_items_read"))
+            capability for capability in ctx.role.capabilities if capability != "work_items_read"),
+            context_include=("open_work_items",))
         self.assertNotIn("work_items_read", ctx.role.capabilities)
         full = json.loads(prompt_for(ctx))
         delta = json.loads(prompt_delta_for(ctx, []))

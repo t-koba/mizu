@@ -230,9 +230,9 @@ class ReadyWorkTests(Fixture):
             self.assertIn("Ready candidate", row["title"])
             self.assertEqual(row["age_seconds"], 42)
 
-    def test_empty_ready_projection_is_present_without_capabilities(self):
+    def test_empty_ready_projection_is_present_when_the_section_is_included_without_capabilities(self):
         ctx = self.context("consult")
-        ctx.role = dataclasses.replace(ctx.role, capabilities=())
+        ctx.role = dataclasses.replace(ctx.role, capabilities=(), context_include=("ready_work",))
         for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
             self.assertEqual(json.loads(prompt)["ready_work"], {
                 "items": [], "total": 0, "overflow_count": 0, "truncated": False,

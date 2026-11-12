@@ -898,6 +898,10 @@ class Role:
     #: ordinary daemon spacing only, never deferred re-evaluation or the
     #: ``cooldown_seconds`` retry policy.
     daemon_spacing_seconds: int | None = None
+    #: Optional context sections restored/removed against the capability
+    #: default (see prompt_sections); validated at load.
+    context_include: tuple[str, ...] = ()
+    context_exclude: tuple[str, ...] = ()
     #: Opt-in input gate for platform timers only; empty keeps open-ended runs.
     scheduled_inputs: tuple[str, ...] = ()
 
@@ -1741,7 +1745,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1947,6 +1951,8 @@ def load(file: Path) -> Config:
             if value not in ("own", "any"):
                 raise ConfigError(f"roles.{name}.{field} must be own or any")
             evidence_sources[field] = value
+        from .prompt_sections import validate as _validate_sections
+        context_include, context_exclude = _validate_sections(name, role.get("context_sections", {}))
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1968,7 +1974,8 @@ def load(file: Path) -> Config:
                            event_wakes=event_wakes,
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing,
-                           scheduled_inputs=scheduled_inputs, **evidence_sources)
+                           scheduled_inputs=scheduled_inputs, context_include=context_include,
+                           context_exclude=context_exclude, **evidence_sources)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

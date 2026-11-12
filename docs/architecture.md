@@ -1541,13 +1541,13 @@ command blindly, run `git reset --hard`, or manufacture a successful observation
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
 references, capability-gated pending insights and acceptance commands, the
-always-present bounded `open_work_items` page, then trailing volatile `run`,
+bounded `open_work_items` page for roles holding a work-item capability (`roles.<name>.context_sections` restores or removes optional sections), then trailing volatile `run`,
 `now`, and `timezone` fields so repeated stable content forms a longer cacheable
 prefix); sealing
 is directed by the `finish` tool contract. Each run
 records `prompt_projection.json` with the sent counts (`recent_snapshots`,
 `pending_insights`, `acceptance_commands`) and `prompt_bytes` as evidence for
-reliability review. Its `open_work_items` metadata records only `shown`, `total`,
+reliability review. Its `open_work_items` metadata (null when the role's prompt carries no inventory) records only `shown`, `total`,
 `overflow_count`, `unseeded_decisions`, and `coverage_complete`, never item text.
 All work judgment lives in the role policies under `policies/`. Likewise the `report`
 fallback document (used by `mizu report` with no LLM) and the smoke probe goal
