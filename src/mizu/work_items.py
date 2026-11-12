@@ -242,6 +242,10 @@ class WorkItems:
         self._direct_cache: dict[str, tuple] = {}
         self._history_cache: dict[str, tuple] = {}
         self._projection_cache: dict[str, tuple] = {}
+        # Strict full-history proofs live apart from status projections: in one
+        # slot the two scans of a readiness evaluation evict each other and
+        # replay every terminal chain on every poll.
+        self._readiness_cache: dict[str, tuple] = {}
         # Item -> history identity whose sidecar a locked scan already loaded
         # or tried to publish; it keeps warm in-memory proofs from hiding a
         # missing sidecar without re-reading it on every scan.
@@ -2185,20 +2189,18 @@ class WorkItems:
                              history_revisions=history_revisions)
         self._seed(item_id, event, history_revisions=history_revisions)
         key = self._projection_key(seed, history_key, "readiness-full-history")
-        cached = self._projection_cache.get(item_id)
-        if cached is not None and cached[0] == key:
-            if len(cached) == 4 and self._proof_unchanged(cached[3]):
-                return cached[1]
-        self._projection_cache.pop(item_id, None)
+        cached = self._readiness_cache.get(item_id)
+        if cached is not None and cached[0] == key and self._proof_unchanged(cached[3]):
+            return cached[1]
+        self._readiness_cache.pop(item_id, None)
         proof_sources = []
         item, since = self._current_hold(
             item_id, seed_event=event, history_revisions=history_revisions,
             verify_snapshots=True, derive_blocked=True, proof_sources=proof_sources)
-        if (item["status"] in OPEN_STATUS_ORDER
-                and self._history_identity(item_id) == history_key):
+        if self._history_identity(item_id) == history_key:
             proof_sources = tuple(dict.fromkeys(proof_sources))
             if self._proof_unchanged(proof_sources):
-                self._projection_cache[item_id] = (key, item, since, proof_sources)
+                self._readiness_cache[item_id] = (key, item, since, proof_sources)
         return item
 
     def _current_hold(self, item_id: str, *, seed_event=None,
@@ -2905,6 +2907,11 @@ class WorkItems:
             # delivery. Reuse it in this weaker status scan, but never use a
             # status-only projection to satisfy readiness validation.
             readiness_key = self._projection_key(seed, history_key, "readiness-full-history")
+            if (cacheable and history_key is not None
+                    and (cached is None or cached[0] != cache_key)):
+                proof = self._readiness_cache.get(seed["id"])
+                if proof is not None and proof[0] == readiness_key:
+                    cached = proof
             valid = cached is not None and cached[0] in (cache_key, readiness_key)
             if valid:
                 if len(cached) == 4:

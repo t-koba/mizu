@@ -2645,8 +2645,6 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format', 'work-item transition / revision-one predecessor is the immutable seed'),
     ('work_items.py', 'WorkItems._page_open_impl', 1, 0): (
         '4', 'mechanism', 'work items / cached projection tuple shape includes its proof witness'),
-    ('work_items.py', 'WorkItems._readiness_item', 1, 0): (
-        '4', 'mechanism', 'work items / readiness projection tuple shape includes its source-proof identities'),
     ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
         '4096', 'safety',
         'Pi reselection / bound session-file identity text before retaining it in family state'),

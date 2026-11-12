@@ -148,7 +148,7 @@ class CombinedWaitReadinessTests(CombinedFixture):
         writers = {name for name in self.project.roles
                    if self.project.config.roles[name].workspace == "write"}
         self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-        cached = self.store._projection_cache[item["id"]]
+        cached = self.store._readiness_cache[item["id"]]
         self.assertEqual(cached[0][2], "readiness-full-history")
         with patch.object(self.store, "_sidecar_load", wraps=self.store._sidecar_load) as sidecar:
             status = self.store.open_state_readonly(limit=10, writer_roles=writers)
@@ -161,6 +161,43 @@ class CombinedWaitReadinessTests(CombinedFixture):
         status = self.store.open_state_readonly(limit=10, writer_roles=writers)
         self.assertFalse(status["blocked_work"]["coverage_complete"])
         self.assertEqual(status["blocked_work"]["diagnostic"], "unreadable")
+
+    def test_terminal_chains_replay_once_across_status_scan_and_readiness(self):
+        if IS_WINDOWS:
+            self.skipTest("POSIX metadata cache")
+        snapshot = self.project.snapshots.get()
+        done = []
+        for key in ("terminal-a", "terminal-b", "terminal-c"):
+            seed = self.seed(key)
+            bind_delivery(self.project, seed["id"], snapshot["id"])
+            done.append(self.store.transition(
+                seed["id"], expected_rev=3, status="dropped", actor="worker",
+                reason="obsolete")["id"])
+        self.store._projection_cache.clear()
+        self.store._readiness_cache.clear()
+        self.project.snapshots._binding_cache.clear()
+        writers = {name for name in self.project.roles
+                   if self.project.config.roles[name].workspace == "write"}
+
+        def evaluate():
+            self.store.open_state_readonly(limit=10, writer_roles=writers)
+            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
+
+        with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay:
+            evaluate()
+            evaluate()
+            # Each terminal chain is replayed at most once in total, not once per
+            # scan per poll.
+            self.assertLessEqual(replay.call_count, len(done))
+            replay.reset_mock()
+            # A proof source changed in place is detected on the next use.
+            manifest = self.project.root / "snapshots" / f"{snapshot['id']}.json"
+            text = manifest.read_bytes()
+            replacement = manifest.with_name(manifest.name + ".new")
+            replacement.write_bytes(text)
+            replacement.replace(manifest)
+            evaluate()
+            self.assertGreaterEqual(replay.call_count, len(done))
 
     def test_readiness_reuse_preserves_legacy_blocked_wait_age(self):
         item = self.block_ci("legacy-blocked-age")
