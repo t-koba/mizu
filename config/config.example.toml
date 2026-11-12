@@ -164,6 +164,7 @@ run_seconds = 1200
 model_request_seconds = 1200     # Positive logical-request/query/turn deadline.
 command_seconds = 300
 idle_seconds = 15
+readiness_recheck_seconds = 0 # Resident signals daemon: reuse a negative readiness result while the state tree is unchanged, for at most this long (0-86400; 0 evaluates every idle tick).
 cooldown_seconds = 5
 progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.
 no_progress_continuations = 0 # Immediate no-progress self-admissions (0-100); writers require role-eligible ready work.

@@ -464,6 +464,10 @@ class Limits:
     model_request_seconds: int = 1200
     command_seconds: int = 300
     idle_seconds: int = 15
+    #: Resident signals daemon: reuse a negative readiness result while the
+    #: project state tree is unchanged, re-evaluating at most this many seconds
+    #: later (0 evaluates on every idle tick).
+    readiness_recheck_seconds: int = 0
     cooldown_seconds: int = 5
     progress_signals: tuple[str, ...] = DEFAULT_PROGRESS_SIGNALS
     no_progress_continuations: int = 0
@@ -706,6 +710,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "model_request_seconds": (1, 1073741824),
                  "command_seconds": (1, 1073741824),
                  "idle_seconds": (1, 1073741824),
+                 "readiness_recheck_seconds": (0, 86400),
                  "cooldown_seconds": (1, 1073741824),
                  "parallel_runs": (1, 1073741824),
                  "admission_queue_capacity": (1, 1073741824),

@@ -359,6 +359,30 @@ else the policy default: `signals` uses the role-effective `cooldown_seconds`
 deferred `next_evaluation_at` re-entry or the `cooldown_seconds` retry policy.
 Ready work does not accelerate it.
 
+### Readiness reuse while idle
+
+Every `idle_seconds` the resident `signals` daemon evaluates readiness, which
+enumerates work-item history, check jobs and the inbox. With
+`[limits] readiness_recheck_seconds` above 0 (default 0: evaluate on every
+tick), a negative result is reused while a witness of the project state tree is
+unchanged and for at most that many seconds. The witness
+(`src/mizu/readiness_witness.py`) records inode, device and `st_mtime_ns` of every
+directory under the project root and size/identity of its top-level files,
+skipping `workspace`, `runs`, `objects`, `sessions`, `locks`, `check-cache` and
+`spool`, which readiness never reads. Mizu replaces files atomically, which
+changes the containing directory's identity, so any state write (a decision,
+inbox record, work-item revision, check-job result, control change) causes the
+next tick to evaluate. The result is stored only if the witness is identical
+before and after the evaluation and no entry is newer than 50 ms at that
+moment (timestamp granularity); an evaluation that writes state therefore costs
+one extra evaluation. A positive result, an error, a pause or disarm, and a
+configuration change always clear it. Readiness that depends on time (wait
+deadlines, CI re-wake seconds, no-progress backoff, retry-after) or on inputs
+outside the project tree (shared budget, slot and selection state under the
+data directory) is observed only at the periodic re-evaluation, so the
+configured value is the maximum added wake latency for those. Event dispatch
+(`--event`) and the other daemon policies are unchanged.
+
 ### Read-only completion cursors
 
 After successful completion (excluding a deferred check wait), a read-only
