@@ -184,10 +184,8 @@ mizu cleanup demo
 - `role-state/`: 各役割の現行研究状態の JSON レコード ★（role lock と `.new-*` 一時ファイルは除外。安全に読める不正 JSON は raw のまま保存し、復元後も `unavailable` として扱います）
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
 - `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
-- `work-item-state/`: 現在状態の検証済みプロジェクションを保持する派生キャッシュ
-  （backup対象外：ロック付きの ready scan が再構築し、`mizu work-items --backfill`
-  でも再構築できます。Windows では作成・バックフィルせず、常に元の記録を厳密に
-  読みます）
+- `ledger.sqlite3`: 作業項目の現在状態インデックス（backup対象外：履歴から導出され、
+  restore 後や欠落・旧スキーマ時はレコードロックを取る最初の処理が自動で再構築します）
 - `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
   snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
   ます。実行の `error.json` にも同じ原因が記録され、次の実行の context に
@@ -616,50 +614,32 @@ live pages and routine model context remain live-only.
 
 ### Work-item view (read-only)
 
-The CLI is the canonical task-list reader, including for dashboards. Within one
-invocation it reuses validated snapshots and task records across the open,
-closed and delivery sections. Runtime dispatch uses the same request-local
-facade. The `[limits]` cache budgets are
-`work_item_read_view_snapshot_cache_bytes` (default 32 MiB),
-`work_item_read_view_file_cache_bytes` (8 MiB),
-`work_item_read_view_item_cache_bytes` (8 MiB), and
-`work_item_read_view_item_cache_entries` (1,024 entries). Each accepts a positive
-exact TOML integer through 9,223,372,036,854,775,807; zero does not disable caching.
-The byte budgets measure serialized retained records, with additional Python
-object overhead. Path validation still retains at most 8192 names.
-
-These settings trade memory against repeat validation and I/O, not correctness:
-oversized records are read and validated normally without retention, and eviction
-only causes another validated read. Snapshot/file caches evict oldest-used
-records; the parsed-item cache clears when its byte or entry budget would be
-exceeded. All caches are discarded after the response or dispatch. The next
-request reads again, so changes and corruption remain visible. No persistent
-cache, writer lock, recovery operation or release-specific alternate reader is
-used.
-
+The CLI is the canonical task-list reader, including for dashboards. Its pages
+come from the current-state index ([architecture](architecture.md#current-state-index)).
 
 ```sh
 mizu work-items demo
 mizu work-items demo --limit 25 --cursor '<next_cursor>' --closed 10
 mizu work-items demo --limit 2 --closed 0
+mizu work-items demo --audit [--repair]
 ```
 
 `mizu work-items PROJECT [--limit N] [--cursor TOKEN] [--closed N]` prints one JSON
-document with `open`, `closed`, and `event_delivery` fields and never
-writes, locks, recovers or deletes. The project is opened with
-`Project(..., read_only=True)`. Adding `--backfill N` is an explicit writable
-maintenance variant: before reading, it takes the record lock and builds up to
-N missing or invalid current-state sidecars from their exact source records. The
-response then also has a `backfill` object: `checked`
-counts eligible items examined, and `backfilled` counts sidecars installed or
-rebuilt. It is bounded to 1-100 writes and does not scan or recover a source
-without the existing validation.
+document with `open`, `closed`, and `event_delivery` fields. It never takes
+the record lock and never changes, recovers or deletes records or the index
+(SQLite may create its WAL shared-memory files to read). The project is opened with
+`Project(..., read_only=True)`. `--audit` instead takes the record lock,
+replays every work-item history with full validation and compares it with the
+index; it prints `items`, `unseeded_decisions`, `index` (`complete`,
+`partial`, `interrupted`, `outdated` or `missing`), `consistent`,
+`repaired`, and bounded `corrupt`, `divergent` and `divergent_unseeded` lists
+with their counts. It changes nothing unless `--repair` is also given, which
+rebuilds the index when every history validates. Writers wait for the audit.
 
 - Options and defaults: `--limit` is the open page size (default 25, exact int
   1–100); `--cursor` is the opaque open-page continuation (default none);
   `--closed` is the number of newest closed items to include (default 10, exact
-  int 0–100, where 0 reports the closed `total` with no rows); `--backfill` is
-  the optional writable maintenance write count (exact int 1–100). Invalid
+  int 0–100, where 0 reports the closed `total` with no rows). Invalid
   limits/cursors fail closed with no partial page.
 - `open` is the exact `page_open` shape: items ordered by status
   (doing, blocked, open), then oldest `created_at` and ID; the exclusive input
