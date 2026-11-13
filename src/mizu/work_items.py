@@ -36,7 +36,9 @@ from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now
                  safe_read, sync_dir, text_preview, write_json)
 from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
-from .ledger import Ledger, rows as _rows
+from .ledger import rows as _rows
+from . import insight_index
+from .work_item_index import ITEMS
 from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
                              task_id, task_seeds, validate_origin, validate_scope, validate_seed,
                              validate_tasks)
@@ -74,6 +76,10 @@ _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 _HISTORY_UNSET = object()
+_ORIGIN_COLUMNS = "n.id, n.valid, n.rev, d.insight_id, d.rev, d.action, d.linked"
+_ORIGIN_SELECT = "SELECT " + _ORIGIN_COLUMNS
+_ORIGIN_JOIN = ("LEFT JOIN insights n ON n.id = {key} "
+                "LEFT JOIN decisions d ON d.insight_id = {key}")
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 
 
@@ -218,7 +224,8 @@ class WorkItems:
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
         self.history_temporaries = history_temporaries
-        self._ledger = Ledger(root, self)
+        self._ledger = insights.ledger
+        self._ledger.attach(ITEMS, self)
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
                for value in (doing_limit, *self.doing_limits.values())):
             raise Denied("Work-item doing limit must be an integer in [1, 100]")
@@ -228,7 +235,7 @@ class WorkItems:
     def _require_doing_capacity(self, actor: str) -> None:
         """Count the actor's doing items in the index; caller holds insights.lock."""
         limit = self.doing_limits.get(actor, self.doing_limit)
-        with self._ledger.read(locked=True) as db:
+        with self._ledger.read("items", locked=True) as db:
             count = _rows(db, "SELECT COUNT(*) FROM items WHERE status='doing' AND holder=?",
                           (actor,))[0][0]
         if count >= limit:
@@ -257,7 +264,7 @@ class WorkItems:
                                     requested_delta=requested_delta)
 
     def _count_open(self, *, locked: bool) -> int:
-        with self._ledger.read(locked=locked) as db:
+        with self._ledger.read("items", locked=locked) as db:
             return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('open', 'doing', 'blocked')")[0][0]
 
     def count_open(self) -> int:
@@ -903,21 +910,20 @@ class WorkItems:
             raise Denied("Unsafe work-item origin record")
         return self._read(name)
 
-    def _origin_revision(self, insight_id: str, *, readonly: bool = False) -> int | None:
-        current = self._optional_record(f"inbox/{insight_id}.json")
-        if current is None:
-            if readonly:
-                current = insight_archive.read_immutable(self.root, insight_id,
-                                                         include_unavailable=True)
-            else:
-                current = insight_archive.read(self.root, insight_id, include_unavailable=True)
-        if current is None:
-            return None
-        if current.get("body_unavailable") is True:
-            revision = current.get("rev")
-            return revision if type(revision) is int and revision >= 1 else None
-        revision = current.get("rev", 1)
-        if (current.get("id") != insight_id or type(revision) is not int or revision < 1):
+    def _origin_lookup(self, insight_id: str, *, locked: bool = True) -> tuple:
+        """Index columns of one origin insight: its row, then its current decision."""
+        with self._ledger.read("insights", locked=locked) as db:
+            return _rows(db, _ORIGIN_SELECT + " FROM (SELECT ? AS k) " + _ORIGIN_JOIN.format(key="k"),
+                         (insight_id,))[0]
+
+    def _origin_revision(self, insight_id: str) -> int | None:
+        """Current revision of an origin insight; None when it is unknown."""
+        return self._origin_rev(self._origin_lookup(insight_id))
+
+    @staticmethod
+    def _origin_rev(origin: tuple) -> int | None:
+        known, valid, revision = origin[:3]
+        if known is not None and not valid:
             raise Denied("Invalid current work-item origin insight")
         return revision
 
@@ -967,12 +973,16 @@ class WorkItems:
             raise Denied("Malformed current work-item origin decision")
         return action, revision
 
-    def _resolve_current_work_item(self, decision: dict, *, readonly: bool):
+    def _resolve_current_work_item(self, decision: dict, *, readonly: bool, events=None,
+                                   resolve: bool = True):
         """Resolve the work-item ID (or ordered task IDs) for a current decision.
 
         The keyed ``work_item`` branch reuses the immutable seed validator,
         which never recovers; only the legacy no-event-ID branch needs the
         history scan, recovered when locked and validated read-only otherwise.
+        ``events`` supplies the scanned history for callers that resolve many
+        decisions; without ``resolve`` the legacy branch only proves the
+        decision equals one immutable event.
         """
         action = decision.get("action")
         if action == "withdraw":
@@ -1002,13 +1012,16 @@ class WorkItems:
             # old-schema record against one immutable history event rather than
             # trusting a well-shaped mutable pointer by itself.
             match = None
-            for event_id, event in self._iter_decision_events(recover=not readonly):
+            for event_id, event in (events() if events is not None
+                                    else self._iter_decision_events(recover=not readonly)):
                 if event == decision:
                     if match is not None:
                         raise Denied("Ambiguous current legacy decision history")
                     match = (event_id, event)
             if match is None:
                 raise Denied("Current legacy decision has no immutable history event")
+            if not resolve:
+                return None
             if readonly:
                 revisions = self._history_revisions(f"wi_{match[0]}", recover=False)
                 resolution = self._legacy_resolution(*match, history_revisions=revisions)
@@ -1019,13 +1032,13 @@ class WorkItems:
             return None
         return None
 
-    def _current_decision_impl(self, insight_id: str, *, include_work_item: bool, readonly: bool) -> dict | None:
-        """Shared current-decision read with an explicit recovery mode."""
+    def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
+        """Validated current decision of one insight with its work-item IDs, read from files."""
         decision = self._optional_record(f"decisions/{insight_id}.json")
         if decision is None:
             return None
         action, revision = self._validate_current_decision_shape(decision, insight_id)
-        work_item_id = self._resolve_current_work_item(decision, readonly=readonly)
+        work_item_id = self._resolve_current_work_item(decision, readonly=False)
         result = {"rev": revision, "action": action}
         if include_work_item:
             if isinstance(work_item_id, list):
@@ -1033,9 +1046,6 @@ class WorkItems:
             else:
                 result["work_item_id"] = work_item_id
         return result
-
-    def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
-        return self._current_decision_impl(insight_id, include_work_item=include_work_item, readonly=False)
 
     def _history_revisions(self, item_id: str, *, recover: bool, require_clean=False) -> set[int] | None:
         """Validate per-item history names, optionally recovering leftovers.
@@ -1489,7 +1499,7 @@ class WorkItems:
 
     def committing(self, item_ids, *, source_event=None):
         """Bracket a revision-file commit for ``item_ids``; caller holds the record lock."""
-        return self._ledger.write(item_ids, source_event=source_event)
+        return self._ledger.write("items", item_ids, hint=source_event)
 
     # Current state: every read below comes from the index, never from history.
 
@@ -1504,7 +1514,7 @@ class WorkItems:
         """Return (item, doing start) with any derived blocked start, or raise."""
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        with self._ledger.read(locked=locked) as db:
+        with self._ledger.read("items", locked=locked) as db:
             found = _rows(db, "SELECT item, doing_since, blocked_since FROM items WHERE id=?",
                           (item_id,))
         if not found:
@@ -1518,7 +1528,7 @@ class WorkItems:
     def _plain(self, item_id: str, *, locked: bool = False) -> dict:
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        with self._ledger.read(locked=locked) as db:
+        with self._ledger.read("items", locked=locked) as db:
             found = _rows(db, "SELECT item FROM items WHERE id=?", (item_id,))
         if not found:
             raise Denied("Work item has no immutable seed")
@@ -1531,13 +1541,13 @@ class WorkItems:
             if not statuses or any(status not in STATUSES for status in statuses):
                 raise Denied("Invalid work-item status filter")
             query += f" WHERE status IN ({', '.join('?' * len(statuses))})"
-        with self._ledger.read(locked=False) as db:
+        with self._ledger.read("items", locked=False) as db:
             found = _rows(db, query + " ORDER BY id", tuple(statuses or ()))
         return [json.loads(raw) for (raw,) in found]
 
     def unseeded_decisions(self) -> int:
         """Count legacy accept/modify decisions that no reconciliation resolved."""
-        with self._ledger.read(locked=False) as db:
+        with self._ledger.read("items", locked=False) as db:
             return _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
 
     def closed_items(self, *, limit: int):
@@ -1556,9 +1566,11 @@ class WorkItems:
         """Replay every chain strictly and compare it with the index.
 
         Holds the record lock for the whole run. Reports corrupt chains and
-        index divergence (at most MAX_OPEN_PAGE_ROWS IDs each, with counts);
-        ``repair`` then rebuilds the index from the files, which requires
-        every chain to validate. The audit itself never changes files.
+        index divergence (at most MAX_OPEN_PAGE_ROWS IDs each, with counts),
+        for work items and, under ``insights``, for the insight and decision
+        records; ``repair`` then rebuilds a diverged index from the files
+        (work items require every chain to validate). The audit itself never
+        changes files.
         """
         with lock_diagnostics.operation("write"), record_lock(self.root):
             errors = []
@@ -1569,11 +1581,11 @@ class WorkItems:
                     files[value[0]] = value
                 else:
                     unseeded.add(value)
-            index = self._ledger.snapshot()
+            index = self._ledger.snapshot("items")
             if index is None:
                 state, indexed, indexed_unseeded = "missing", {}, set()
             else:
-                state, indexed, indexed_unseeded = index
+                state, (indexed, indexed_unseeded) = index
             divergent = sorted(item_id for item_id in set(files) | set(indexed)
                                if files.get(item_id) != indexed.get(item_id)
                                and item_id not in dict(errors))
@@ -1581,10 +1593,12 @@ class WorkItems:
             consistent = not errors and not divergent and not divergent_unseeded and state == "complete"
             repaired = False
             if repair and not errors and not consistent:
-                self._ledger.rebuild()
+                self._ledger.rebuild("items")
                 repaired = True
+            insights = insight_index.audit(self.insights, repair=repair)
             return {"items": len(files) + len(errors), "unseeded_decisions": len(unseeded),
-                    "index": state, "consistent": consistent, "repaired": repaired,
+                    "index": state, "consistent": consistent and insights["consistent"],
+                    "repaired": repaired or insights["repaired"], "insights": insights,
                     "corrupt": [{"id": item_id, "error": str(exc)}
                                 for item_id, exc in errors[:MAX_OPEN_PAGE_ROWS]],
                     "corrupt_count": len(errors),
@@ -1597,13 +1611,28 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._plain(item_id, locked=True)
 
-    def _origin_projection_impl(self, item: dict, *, readonly: bool, current_decision=_HISTORY_UNSET) -> dict:
-        """Project origin staleness with an explicit decision-recovery mode."""
+    @staticmethod
+    def _origin_decision(origin: tuple) -> dict | None:
+        """Current decision of an origin insight from its index columns."""
+        known, rev, action, linked = origin[3:]
+        if known is None:
+            return None
+        if not linked:
+            raise Denied("Malformed current work-item origin decision")
+        return {"rev": rev, "action": action}
+
+    def _origin_projection(self, item: dict, origin=None, *, current_decision=_HISTORY_UNSET) -> dict:
+        """Project origin staleness from the item's origin and the insight index.
+
+        ``origin`` holds the joined index columns (see ``_ORIGIN_SELECT``);
+        without it the lookup runs under the record lock the callers hold.
+        """
         if item["origin"] is None or "work_item_id" in item["origin"]:
             return {"current_origin_rev": None, "stale": False, "redecision": None}
-        origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
-        current_rev = self._origin_revision(origin_id, readonly=readonly)
+        if origin is None:
+            origin = self._origin_lookup(item["origin"]["insight_id"])
+        current_rev = self._origin_rev(origin)
         redecision = None
         if current_rev is None:
             stale = True
@@ -1612,10 +1641,8 @@ class WorkItems:
         elif current_rev == origin_rev:
             stale = False
         else:
-            if current_decision is _HISTORY_UNSET:
-                decision = self._current_decision_impl(origin_id, include_work_item=False, readonly=readonly)
-            else:
-                decision = current_decision
+            decision = (self._origin_decision(origin) if current_decision is _HISTORY_UNSET
+                        else current_decision)
             if decision is not None and decision["rev"] > current_rev:
                 raise Denied("Origin decision revision is ahead of its insight")
             redecision = (decision if decision is not None and decision["rev"] == current_rev
@@ -1624,10 +1651,6 @@ class WorkItems:
             stale = redecision is None
         return {"current_origin_rev": current_rev, "stale": stale,
                 "redecision": redecision}
-
-    def _origin_projection(self, item: dict, *, current_decision=_HISTORY_UNSET) -> dict:
-        """Project current origin staleness from the immutable item's origin."""
-        return self._origin_projection_impl(item, readonly=False, current_decision=current_decision)
 
     def _projection_unlocked(self, item_id: str) -> dict:
         """Build a bounded projection while the caller holds insights.lock."""
@@ -2134,10 +2157,12 @@ class WorkItems:
 
     def _active_rows(self, *, locked: bool):
         """Yield the unseeded count, then stream every active row in ID order."""
-        with self._ledger.read(locked=locked) as db:
+        with self._ledger.read("items", "insights", locked=locked) as db:
             yield _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
-            yield from db.execute("SELECT item, doing_since, blocked_since FROM items "
-                                  "WHERE status IN ('open', 'doing', 'blocked') ORDER BY id")
+            yield from db.execute(
+                f"SELECT i.item, i.doing_since, i.blocked_since, {_ORIGIN_COLUMNS} FROM items i "
+                + _ORIGIN_JOIN.format(key="i.origin_insight")
+                + " WHERE i.status IN ('open', 'doing', 'blocked') ORDER BY i.id")
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
@@ -2195,7 +2220,7 @@ class WorkItems:
         resolution_max = None
         order_sum = 0
         for entry in active:
-            item, since = self._decode(*entry)
+            item, since = self._decode(*entry[:3])
             if _active_transform is not None:
                 transformed = _active_transform(item)
                 if transformed is not item:
@@ -2205,7 +2230,7 @@ class WorkItems:
             if (wait_resolution_role is not None and item["status"] == "open"
                     and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
                 wait_resolution_pending = True
-            view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
+            view = {"item": item, **self._origin_projection(item, entry[3:]),
                     **self._hold_projection(since), **blocked_age(self, item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
@@ -2343,7 +2368,7 @@ class WorkItems:
         """
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
-        with self._ledger.read(locked=not readonly) as db:
+        with self._ledger.read("items", locked=not readonly) as db:
             total = _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('done', 'dropped')")[0][0]
             newest = _rows(db, "SELECT item FROM items WHERE status IN ('done', 'dropped') "
                                "ORDER BY updated_key DESC, id LIMIT ?", (limit,))

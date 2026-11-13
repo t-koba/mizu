@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from support import ROOT, Fixture, forget_ledger
 from mizu import ledger as ledger_module
+from mizu.work_item_index import COLUMNS, ITEMS
 from mizu.errors import Denied
 from mizu.fs import write_json
 from mizu.work_items import MAX_REVISIONS, WorkItems
@@ -20,10 +21,13 @@ from mizu.work_items import MAX_REVISIONS, WorkItems
 def index_rows(root):
     """The complete derived contents of an index file, for equality checks."""
     with contextlib.closing(sqlite3.connect(Path(root) / ledger_module.NAME)) as db, db:
-        items = db.execute(f"SELECT {', '.join(ledger_module.COLUMNS)} FROM items ORDER BY id").fetchall()
+        items = db.execute(f"SELECT {', '.join(COLUMNS)} FROM items ORDER BY id").fetchall()
         unseeded = db.execute("SELECT event_id FROM unseeded ORDER BY event_id").fetchall()
-        intents = db.execute("SELECT item_id FROM intents").fetchall()
-    return items, unseeded, intents
+        intents = db.execute("SELECT key FROM intents").fetchall()
+        insights = db.execute("SELECT * FROM insights ORDER BY id").fetchall() if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='insights'").fetchone() else []
+        decisions = db.execute("SELECT * FROM decisions ORDER BY insight_id").fetchall() if insights else []
+    return items, unseeded, intents, insights, decisions
 
 
 class LedgerTests(Fixture):
@@ -48,6 +52,7 @@ class LedgerTests(Fixture):
         expected = index_rows(self.project.root)
         forget_ledger(self.project.root)
         WorkItems(self.project.root, self.project.snapshots, self.project.insights).count_open()
+        self.project.insights.unresolved_counts([])
         return expected, index_rows(self.project.root)
 
     def test_rebuild_equals_incremental_index_on_random_history(self):
@@ -109,14 +114,14 @@ class LedgerTests(Fixture):
         self.assertEqual(self.store.page_open(), expected)
         self.assertTrue((self.project.root / ledger_module.NAME).exists())
         with contextlib.closing(sqlite3.connect(self.project.root / ledger_module.NAME)) as db, db:
-            db.execute("UPDATE meta SET value=? WHERE key='schema'", (ledger_module.SCHEMA - 1,))
+            db.execute("UPDATE meta SET value=? WHERE key='items.schema'", (ITEMS.schema - 1,))
             db.execute("DELETE FROM items")
         self.assertEqual(self.store.page_open_readonly(), expected)
         self.assertEqual(self.store.page_open(), expected)
         # An interrupted build resumes from the rows it already committed.
         other = self.item("Other")
         with contextlib.closing(sqlite3.connect(self.project.root / ledger_module.NAME)) as db, db:
-            db.execute("UPDATE meta SET value=0 WHERE key='complete'")
+            db.execute("UPDATE meta SET value=0 WHERE key='items.complete'")
             db.execute("DELETE FROM items WHERE id=?", (other["id"],))
         replayed = []
         original = self.store._ledger_row
@@ -142,11 +147,11 @@ from mizu import ledger
 config = load(Path({str(self.file)!r}))
 project = Project(config, {self.project.name!r})
 original = ledger.Ledger._repair
-def crash(self, db, *, recover):
+def crash(self, db, names, *, recover):
     if db.execute("SELECT 1 FROM intents").fetchone() and os.path.exists(
             {str(self.project.root / 'work-items' / item_id / f'{rev}.json')!r}):
         os._exit(17)
-    return original(self, db, recover=recover)
+    return original(self, db, names, recover=recover)
 ledger.Ledger._repair = crash
 project.work_items.transition({item_id!r}, expected_rev={rev - 1}, status="doing", actor="worker")
 """
@@ -258,7 +263,10 @@ for _ in range(12):
         self.assertEqual(self.store.audit(), {
             "items": 2, "unseeded_decisions": 0, "index": "complete", "consistent": True,
             "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
-            "divergent_count": 0, "divergent_unseeded": [], "divergent_unseeded_count": 0})
+            "divergent_count": 0, "divergent_unseeded": [], "divergent_unseeded_count": 0,
+            "insights": {"insights": 1, "decisions": 1, "index": "complete", "consistent": True,
+                         "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
+                         "divergent_count": 0}})
         revision = self.project.root / "work-items" / item["id"] / "2.json"
         create = self.project.root / "work-items" / item["id"] / "create.json"
         seed = self.project.root / "decision-history" / f"{decided['id'][3:]}.json"

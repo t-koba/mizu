@@ -2990,8 +2990,7 @@ class Engine:
                                  if role.workspace == "write" else None)
                     empty = False
                     if role.scheduled_inputs == ("deferred_insights",):
-                        has_deferred = project.insights.has_current_defer(
-                            max_entries=self.config.limits.scheduled_input_scan_items)
+                        has_deferred = project.insights.has_current_defer()
                         empty = has_deferred is False
                     if empty and not explicit_wake and not next_task:
                         try:

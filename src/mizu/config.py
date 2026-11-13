@@ -595,8 +595,6 @@ class Limits:
     #: Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
-    #: Maximum inbox directory entries inspected to prove a scheduled deferral set empty.
-    scheduled_input_scan_items: int = 1000
     #: Operator-selected exact revision read/output bound for explicit insight history (1-1000).
     insight_history_entries: int = DEFAULT_INSIGHT_HISTORY_ENTRIES
     #: Absolute lifetime of an explicit insight enumeration cursor (seconds).
@@ -668,7 +666,6 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "smoke_retention_metadata_bytes": (1, TOML_INTEGER_MAX),
                  "smoke_retention_report_bytes": (1, TOML_INTEGER_MAX),
                  "pending_insights": (1, 1000),
-                 "scheduled_input_scan_items": (1, TOML_INTEGER_MAX),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000),
                  "work_items_blocked_max_age_seconds": (1, TOML_INTEGER_MAX),

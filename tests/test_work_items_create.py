@@ -357,6 +357,7 @@ class SharedSeedCreationTests(Fixture):
         outside.mkdir()
         decisions = self.project.root / "decisions"
         saved = self.root / "saved-decisions"
+        self.project.insights.unresolved_count("worker")  # The index exists; only a rebuild reads the swap.
         if saved.exists():
             shutil.rmtree(saved)
         try:

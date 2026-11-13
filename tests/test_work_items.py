@@ -430,6 +430,7 @@ class WorkItemTests(Fixture):
 
     def test_projection_treats_missing_origin_as_stale(self):
         (self.project.root / "inbox" / f"{self.proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         view = self.store.projection(self.item_id)
         self.assertIsNone(view["current_origin_rev"])
         self.assertTrue(view["stale"])
@@ -447,6 +448,7 @@ class WorkItemTests(Fixture):
         target = self.project.root / "saved-decision.json"
         path.rename(target)
         self.symlink(target, path)
+        forget_ledger(self.project.root)  # The pointer is validated when the index is rebuilt.
         with self.assertRaises(Denied):
             self.store.projection(self.item_id)
 
@@ -455,6 +457,7 @@ class WorkItemTests(Fixture):
         target = self.project.root / "saved-origin.json"
         path.rename(target)
         self.symlink(target, path)
+        forget_ledger(self.project.root)  # The pointer is validated when the index is rebuilt.
         with self.assertRaises(Denied):
             self.store.projection(self.item_id)
 

@@ -500,7 +500,6 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `insight_history_entries` | Per-page exact prior-revision reads and output rows for `mizu insight history` (1–1,000; default 1,000). Positive caller `--limit` defaults to and is capped by this value. Exclusive `--after-rev` (default 0) advances across missing/invalid files too. Returns `records`, input `cursor`, `next_cursor` and `complete`: true at the known current revision's prior-history end, false before it, null when no current revision is known. Only true has no next cursor. One separate exact current lookup; unsafe/corrupt current state is refused; no revision-directory scan. See operations.md for continuation semantics |
 | `insight_cursor_ttl_seconds` | Absolute lifetime of `insight page` continuation cursors (60–604,800 seconds; default 86,400). Continuations never extend expiry. Expired cursors fail explicitly; restart enumeration. This is not archive retention |
 | `pending_insights` | Newest pending proposals offered in prompts (1–1,000; default 30). `mizu insight list` uses 1,000 |
-| `scheduled_input_scan_items` | Maximum inbox entries opened by an opted-in timer to prove no current deferral (positive TOML signed-64-bit integer; default 1,000, matching the insight-list page ceiling). Finding one current defer stops early; one unopened lookahead detects overflow, which falls through to ordinary scheduling. This bounds work, not the delivered insight window |
 | `decision_events_limit` | Decision events delivered per dispatch per role (1–100; default 10; 100-event cap stays fixed mechanism). Prompt-size bound only; unacknowledged decisions replay globally oldest-first, including deferrals |
 | `decision_projection_records` | Per-scan retention bound for one combined window of current routed decisions and addressed pending attention (1–512; default 512). History policy, not a format limit: the shared page keeps the oldest unacknowledged rows up to this bound and delivers the next window after acknowledgements; explicit `project_decision_records` reconciliation still refuses overflow instead of returning an incomplete result. The page retains full source-bounded envelopes; a synthetic 512-row scan with 64 KiB bodies held 32.6 MiB, so the validated ceiling is the default rather than an unmeasured larger retained set. At the 1 MiB source bound the existing default can retain up to 512 MiB; raising the ceiling would multiply that exposure |
 | `decision_receipt_diagnostics` | Malformed per-token decision-receipt diagnostics reported alongside one decision page (0–100; default 10). Each diagnostic is the fixed identity/reason shape; zero hides the sample without hiding valid events or changing acknowledgement. This is an operator-selected output sample, not a history or delivery bound |
@@ -1906,12 +1905,10 @@ existing `insights` capability. For example, add
 that capability. The platform timer command for an opted-in role carries the
 internal `--scheduled` marker: only those invocations may return
 `{"skipped":"no-scheduled-input","snapshot":"…","code_digest":"…"}` before
-model/run-slot admission. A strict locked insight-store scan opens at most
-`limits.scheduled_input_scan_items` inbox entries (default 1,000) and stops on
-the first exact current `defer` decision across **all** live sources, including
-sources no longer configured and already-acknowledged decisions. One unopened
-entry is used only as an overflow sentinel; if the bound is exhausted before
-emptiness is proven, ordinary scheduling proceeds. Undecided, resolved and
+model/run-slot admission. A strict locked read of the insight index finds
+whether any exact current `defer` decision exists across **all** live sources,
+including sources no longer configured and already-acknowledged decisions.
+Undecided, resolved and
 stale-decision revisions do not count as deferrals. A proven-empty source
 alone is not enough to skip: the authoritative pre-admission projection must
 also show no other scheduled input (a subscribed decision, terminal work-item
