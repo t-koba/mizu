@@ -157,7 +157,9 @@ class InsightSource:
         except _ERRORS:
             return bad
         try:
-            WorkItems._validate_current_decision_shape(decision, stem)
+            # A decision written before revisions existed omits ``rev``: revision 1.
+            WorkItems._validate_current_decision_shape(
+                decision if "rev" in decision else {**decision, "rev": 1}, stem)
             self.insights._work_item_store()._resolve_current_work_item(
                 decision, readonly=not recover, events=lambda: self._history(recover),
                 resolve=False)
