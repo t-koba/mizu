@@ -16,7 +16,7 @@ from . import platform as _platform
 from .config import MAX_CHECK_INPUT_BOUND
 from .errors import Denied, LimitExceeded
 from .check_job_index import entry_key
-from .fs import DIGEST, _file_identity, atomic_write, canonical, digest, lock, safe_read
+from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
 
 MAX_BYTES = 1048576
 # Reserve half the receipt envelope for scope; full receipts still use MAX_BYTES.
@@ -251,11 +251,7 @@ def _directory(root, relative):
     return path
 
 
-def _present(root, relative, *, stable=False):
-    # Identity-only reuse requires unchanged, non-aliased parents around lstat.
-    parents = [(root, root.lstat())] if stable else []
-    if stable and not stat.S_ISDIR(parents[0][1].st_mode):
-        raise Denied('Unsafe acceptance evidence path')
+def _present(root, relative):
     path = root
     parts = Path(relative).parts
     for index, part in enumerate(parts):
@@ -266,11 +262,6 @@ def _present(root, relative, *, stable=False):
             return False
         if stat.S_ISLNK(info.st_mode) or (index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode)):
             raise Denied('Unsafe acceptance evidence path')
-        if stable and index < len(parts) - 1:
-            parents.append((path, info))
-    for parent, before in reversed(parents):
-        if _file_identity(before) != _file_identity(parent.lstat()):
-            raise Denied('Acceptance evidence path changed while inspecting')
     return info
 
 

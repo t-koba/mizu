@@ -1903,10 +1903,6 @@ class WorkItems:
             sync_dir(history)
         return True
 
-    def prepare_decision_history(self) -> bool:
-        """Screen the event directory before writes, with insights.lock held."""
-        return self._recover_decision_history_temporaries(self.root / "decision-history")
-
     def prepare_decision_write(self, *, need_wait: bool = False) -> bool:
         """Screen every decision-transaction parent before any write, lock held.
 

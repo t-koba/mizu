@@ -567,13 +567,6 @@ def publish_pointer(root: Path, pointer: dict, *, name: str = "latest.json") -> 
     write_json(root / name, pointer)
 
 
-def publish_entry(root: Path, name: str, payload: bytes, pointer: dict) -> None:
-    """Complete an entry file first, then atomically move the latest pointer."""
-    mkdir(root)
-    atomic_write(root / name, payload)
-    publish_pointer(root, pointer)
-
-
 def relative_parts(name: str) -> tuple[str, ...]:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise Denied("Invalid relative path")
