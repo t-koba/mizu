@@ -137,6 +137,18 @@ def set_project_target(fixture, target):
 
 
 class Fixture(unittest.TestCase):
+    @contextlib.contextmanager
+    def capped(self, retained=1):
+        """Run with the retained check-job cap lowered, so eviction is needed."""
+        import dataclasses
+        original = self.project.config
+        self.project.config = dataclasses.replace(
+            original, limits=dataclasses.replace(original.limits, check_retained=retained))
+        try:
+            yield
+        finally:
+            self.project.config = original
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="mizu-test-")
         self.addCleanup(self.temporary.cleanup)

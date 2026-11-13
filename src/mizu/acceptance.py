@@ -15,7 +15,8 @@ from pathlib import Path
 from . import platform as _platform
 from .config import MAX_CHECK_INPUT_BOUND
 from .errors import Denied, LimitExceeded
-from .fs import DIGEST, _file_identity, atomic_write, canonical, digest, lock, safe_read, safe_read_info
+from .check_job_index import entry_key
+from .fs import DIGEST, _file_identity, atomic_write, canonical, digest, lock, safe_read
 
 MAX_BYTES = 1048576
 # Reserve half the receipt envelope for scope; full receipts still use MAX_BYTES.
@@ -57,12 +58,10 @@ def producer_diagnostics(invalid):
                                   'coverage_complete': False}}
 
 
-def _producer_read(project, job_id, name, identity=None):
+def _producer_read(project, job_id, name):
     # safe_read failures are NOT content failures. In particular, never catch
     # Denied here: it includes unsafe links, changing files and shared paths.
-    raw, info = safe_read_info(project.root, f'check-jobs/{job_id}/{name}.json', project.config.limits.file_bytes)
-    if identity is not None:
-        identity.append(_file_identity(info))
+    raw = safe_read(project.root, f'check-jobs/{job_id}/{name}.json', project.config.limits.file_bytes)
     try:
         return json.loads(raw)
     except (ValueError, UnicodeError, RecursionError) as exc:
@@ -84,10 +83,10 @@ def valid_cache_diagnostics(diagnostics):
                     for item in diagnostics))
 
 
-def read_job(project, job_id, *, identity=None):
+def read_job(project, job_id):
     if not _digest(job_id):
         raise Denied('Invalid acceptance job ID')
-    job = _producer_read(project, job_id, 'job', identity)
+    job = _producer_read(project, job_id, 'job')
     # Validate every field consumed by sorting, filtering, summaries and the
     # one-hop subscription overlay. Missing legacy fields retain their defaults.
     strings = ('role', 'run', 'kind', 'status', 'created_at', 'finished_at', 'error',
@@ -148,58 +147,6 @@ def read_job(project, job_id, *, identity=None):
     return job
 
 
-def job_candidate(job):
-    """Retain only ordering/eligibility fields, never execution payloads."""
-    return {key: job.get(key, '') for key in ('created_at', 'shared_job', 'status')}
-
-
-def _job_read_reuse():
-    return (_platform.IS_POSIX and not _platform.IS_WINDOWS
-            and _platform.HAS_OPENAT and _platform.HAS_DIR_FD)
-
-
-def job_paths(project, invalid=None, *, identities=None):
-    """Enumerate under check-jobs.lock; unsafe paths and I/O always refuse.
-
-    A non-producer name is classified only after safely opening its ordinary
-    job leaf. The digest is domain-separated and never a usable job identity.
-    Callers without a diagnostic sink retain strict refusal. Optional POSIX
-    identities reuse the path checks, with stable parents, for one runner pass.
-    """
-    reuse = identities is not None and _job_read_reuse()
-    base = project.root / 'check-jobs'
-    if not _present(project.root, 'check-jobs'):
-        return []
-    if not stat.S_ISDIR(base.lstat().st_mode):
-        raise Denied('Unsafe acceptance producer directory')
-    paths = []
-    for child in sorted(base.iterdir()):
-        info = child.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            raise Denied('Unsafe acceptance producer directory')
-        if stat.S_ISDIR(info.st_mode):
-            relative = f'check-jobs/{child.name}/job.json'
-            info = _present(project.root, relative, stable=reuse)
-            if not info:
-                continue
-            if _digest(child.name):
-                paths.append(child / 'job.json')
-                if reuse and stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                    identities[child.name] = _file_identity(info)
-            else:
-                # Even oversized leaves must first pass safe_read's path/link
-                # checks. Only its size disposition is content-only.
-                try:
-                    safe_read(project.root, relative, project.config.limits.file_bytes)
-                except LimitExceeded:
-                    pass
-                if invalid is None:
-                    raise Denied('Invalid acceptance producer entry')
-                key = digest(b'mizu.check-job-entry.v1\0' + os.fsencode(child.name))
-                invalid[('entry', key)] = 'non_producer_entry'
-    return paths
-
-
 def _inspect_evidence(project, job):
     """Shared pure inspection for discovery/retention; never mint or repair proof."""
     job_id = job['id']
@@ -234,40 +181,58 @@ def _inspect_evidence(project, job):
     return None, value
 
 
-def discover(project):
-    """One queue-locked read-only snapshot, with complete internal exclusions.
+def _jobs(project, *, locked=False):
+    return project.insights.ledger.read('check_jobs', locked=locked)
 
-    Only safely read individual content failures are isolated. No retention,
-    acknowledgement, quarantine, proof creation or producer writes occur here.
-    Raw records are retained so overlays remain exactly one hop.
+
+def raw_jobs(project, *, invalid=False):
+    """Raw records of every valid job, from the index; ``invalid`` adds the readable invalid ones."""
+    with _jobs(project) as db:
+        return {job_id: json.loads(raw) for job_id, raw in
+                db.execute('SELECT id, job FROM check_jobs WHERE job IS NOT NULL'
+                           + ('' if invalid else ' AND valid=1') + ' ORDER BY created_at, id')}
+
+
+def strict_jobs(project):
+    """Like :func:`raw_jobs`, but an invalid record or entry refuses the read."""
+    with _jobs(project) as db:
+        rows = db.execute('SELECT id, valid, code, job FROM check_jobs ORDER BY created_at, id').fetchall()
+    for job_id, valid, code, _ in rows:
+        if not valid:
+            raise Denied('Invalid acceptance producer entry') if code == 'non_producer_entry' \
+                else InvalidProducer(job_id, code)
+    return {job_id: json.loads(raw) for job_id, _, _, raw in rows}
+
+
+def discover(project):
+    """One consistent read of the job index with complete internal exclusions.
+
+    Records and their retained evidence were validated when the index was
+    written or built; an invalid record is excluded and reported by code.
+    Raw records are retained so overlays remain exactly one hop. No
+    retention, acknowledgement, proof creation or producer writes occur here.
     """
     jobs, invalid = {}, {}
-    with lock(project.root / 'locks/check-jobs.lock'):
-        for path in job_paths(project, invalid):
-            job_id = path.parent.name
-            try:
-                try:
-                    job = read_job(project, job_id)
-                except LimitExceeded as exc:
-                    raise InvalidProducer(job_id, 'job_file_bytes') from exc
-                _inspect_evidence(project, job)
-                jobs[job_id] = job
-            except InvalidProducer as exc:
-                invalid[exc.job_id] = exc.code
-        projected = {}
-        for job_id, raw in jobs.items():
-            job = dict(raw)
-            if job.get('shared_job') and not job.get('detached'):
-                original = jobs.get(job['shared_job'])
-                if original is None:
-                    invalid[job_id] = 'job_subscription'
-                    continue
-                for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'cache_input_empty', 'shared_key', 'cache_diagnostics'):
-                    if key in original:
-                        job[key] = original[key]
-            elif job.get('detached'):
-                job.update(status='cancelled', passed=False)
-            projected[job_id] = job
+    with _jobs(project) as db:
+        for job_id, valid, code, raw in db.execute('SELECT id, valid, code, job FROM check_jobs'):
+            if not valid:
+                invalid[('entry', entry_key(job_id)) if code == 'non_producer_entry' else job_id] = code
+            else:
+                jobs[job_id] = json.loads(raw)
+    projected = {}
+    for job_id, raw in jobs.items():
+        job = dict(raw)
+        if job.get('shared_job') and not job.get('detached'):
+            original = jobs.get(job['shared_job'])
+            if original is None:
+                invalid[job_id] = 'job_subscription'
+                continue
+            for key in ('status', 'passed', 'error', 'finished_at', 'cache_input', 'cache_input_empty', 'shared_key', 'cache_diagnostics'):
+                if key in original:
+                    job[key] = original[key]
+        elif job.get('detached'):
+            job.update(status='cancelled', passed=False)
+        projected[job_id] = job
     return projected, invalid
 
 
@@ -655,31 +620,7 @@ def recover_run(project, run_id):
     return None
 
 
-_SETTLED = 'settled.json'
-_CANDIDATE_KEYS = ('created_at', 'shared_job', 'status')
-
-
-def _settled_candidate(project, job_id, identity):
-    """Scheduling projection of a job recovery already settled, else None.
-
-    The marker binds the exact job.json file identity, so any rewrite (reopen,
-    acknowledgement, receipt binding) invalidates it. Any missing, unreadable or
-    malformed marker means the job is inspected in full.
-    """
-    try:
-        value = json.loads(safe_read(project.root, f'check-jobs/{job_id}/{_SETTLED}', 4096))
-    except (Denied, LimitExceeded, ValueError, UnicodeError, RecursionError):
-        return None
-    candidate = value.get('candidate') if isinstance(value, dict) else None
-    if (not isinstance(value, dict) or set(value) != {'identity', 'candidate'}
-            or value['identity'] != list(identity) or not isinstance(candidate, dict) or set(candidate) != set(_CANDIDATE_KEYS)
-            or any(item is not None and not isinstance(item, str) for item in candidate.values())
-            or candidate['status'] in (None, 'queued', 'running')):
-        return None
-    return candidate
-
-
-def recover_job(project, job_id, *, jobs=None):
+def recover_job(project, job_id):
     # Snapshot the producer under its own lock, then release BEFORE retaining.
     if not _digest(job_id):
         raise Denied('Invalid acceptance job ID')
@@ -687,8 +628,7 @@ def recover_job(project, job_id, *, jobs=None):
         if not _present(project.root, f'check-jobs/{job_id}/job.json'):
             return None  # Cache eviction is not loss of durable proof.
         try:
-            identity = [] if jobs is not None and _job_read_reuse() else None
-            job = read_job(project, job_id, identity=identity)
+            job = read_job(project, job_id)
         except LimitExceeded:
             return None
         try:
@@ -700,19 +640,9 @@ def recover_job(project, job_id, *, jobs=None):
             # disposition. Read-only discovery leaves the scope and bytes alone.
             job.pop('acceptance_scope')
             job['acceptance_retention_refusal'] = 'result_file_bytes'
-            from .fs import write_json
-            write_json(project.root / f'check-jobs/{job_id}/job.json', job)
+            write_job(project, job_id, job)
             return None
         if existing is not None or value is None:
-            if identity is not None:
-                candidate = job_candidate(job)
-                jobs[job_id] = (identity[0], candidate)
-                if candidate['status'] not in ('', 'queued', 'running'):
-                    # Nothing is left for recovery to repair until job.json is
-                    # rewritten. The marker lives in the job directory and ends
-                    # with it when the job is evicted.
-                    atomic_write(project.root / f'check-jobs/{job_id}/{_SETTLED}',
-                                 canonical({'identity': list(identity[0]), 'candidate': candidate}))
             return existing
     receipt_id = _retain(project.root, value)
     # Separate acquisitions: never acceptance.lock -> check-jobs.lock while
@@ -723,40 +653,36 @@ def recover_job(project, job_id, *, jobs=None):
         latest = read_job(project, job_id)
         if latest.get('acceptance_receipt_id') != receipt_id:
             latest['acceptance_receipt_id'] = receipt_id
-            from .fs import write_json
-            write_json(project.root / f'check-jobs/{job_id}/job.json', latest)
+            write_job(project, job_id, latest)
     return receipt_id
 
 
-def recover_producers(project, *, include_runs=False, jobs=None):
+def write_job(project, job_id, job):
+    """Commit one job record and its index row; the caller holds check-jobs.lock."""
+    from .fs import write_json
+    with project.insights.ledger.write('check_jobs', [job_id]):
+        write_json(project.root / f'check-jobs/{job_id}/job.json', job)
+
+
+def recover_producers(project, *, include_runs=False):
     """Recovery trigger for runner/backup; terminal producers are idempotent.
 
+    Only jobs whose index row shows a scope without its receipt need work.
     Old/unbound results have no scope marker and cannot acquire one in recovery.
-    Invalid cache content is returned by ID/code, never modified or retained.
+    Invalid jobs are returned by ID/code, never modified or retained.
     Callers bound the visible diagnostics separately from the exclusion set.
-    Runner recovery scans only the bounded job cache. Backup maintenance can
-    also retry retained run records and unindexed objects. Durable acceptance
-    projection stays indexed; discover() separately inspects the cache without
-    retaining results or scanning historical runs. The optional runner cache
-    holds only scheduling projections of validated, safely-opened jobs that
-    recovery did not rewrite; consumers must match a fresh job_paths identity.
-    Selected jobs must be re-read under the owner/runner locks before use.
+    Runner recovery scans only the job index. Backup maintenance can
+    also retry retained run records and unindexed objects.
     """
     if include_runs:
         recover(project.root)
-    invalid = {}
-    identities = {} if jobs is not None and _job_read_reuse() else None
-    with lock(project.root / 'locks/check-jobs.lock'):
-        paths = job_paths(project, invalid, identities=identities)
-    for path in paths:
-        if identities is not None and path.parent.name in identities:
-            # Unchanged settled jobs cost one small read: no lock, no revalidation.
-            candidate = _settled_candidate(project, path.parent.name, identities[path.parent.name])
-            if candidate is not None:
-                jobs[path.parent.name] = (identities[path.parent.name], candidate)
-                continue
+    with _jobs(project) as db:
+        invalid = {('entry', entry_key(job_id)) if code == 'non_producer_entry' else job_id: code
+                   for job_id, code in db.execute('SELECT id, code FROM check_jobs WHERE valid=0')}
+        pending = [row[0] for row in db.execute('SELECT id FROM check_jobs WHERE proof_pending=1')]
+    for job_id in pending:
         try:
-            recover_job(project, path.parent.name, jobs=jobs)
+            recover_job(project, job_id)
         except InvalidProducer as exc:
             invalid[exc.job_id] = exc.code
     if include_runs:

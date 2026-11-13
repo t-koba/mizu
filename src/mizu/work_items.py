@@ -37,7 +37,7 @@ from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now
 from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
 from .ledger import rows as _rows
-from . import insight_index
+from . import check_job_index, insight_index
 from .work_item_index import ITEMS
 from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
                              task_id, task_seeds, validate_origin, validate_scope, validate_seed,
@@ -1602,9 +1602,14 @@ class WorkItems:
                 self._ledger.rebuild("items")
                 repaired = True
             insights = insight_index.audit(self.insights, repair=repair)
+            jobs = None
+            if "check_jobs" in self.insights.ledger.domains:
+                with lock(self.root / "locks" / "check-jobs.lock"):
+                    jobs = check_job_index.audit(self.insights.ledger, repair=repair)
             return {"items": len(files) + len(errors), "unseeded_decisions": len(unseeded),
-                    "index": state, "consistent": consistent and insights["consistent"],
-                    "repaired": repaired or insights["repaired"], "insights": insights,
+                    "index": state, "consistent": consistent and insights["consistent"] and (jobs is None or jobs["consistent"]),
+                    "repaired": repaired or insights["repaired"] or bool(jobs and jobs["repaired"]),
+                    "insights": insights, **({"check_jobs": jobs} if jobs is not None else {}),
                     "corrupt": [{"id": item_id, "error": str(exc)}
                                 for item_id, exc in errors[:MAX_OPEN_PAGE_ROWS]],
                     "corrupt_count": len(errors),
