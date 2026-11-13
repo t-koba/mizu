@@ -266,7 +266,9 @@ for _ in range(12):
             "divergent_count": 0, "divergent_unseeded": [], "divergent_unseeded_count": 0,
             "insights": {"insights": 1, "decisions": 1, "index": "complete", "consistent": True,
                          "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
-                         "divergent_count": 0}})
+                         "divergent_count": 0},
+            "check_jobs": {"jobs": 0, "index": "outdated", "consistent": True, "repaired": False,
+                           "corrupt": [], "corrupt_count": 0, "divergent": [], "divergent_count": 0}})
         revision = self.project.root / "work-items" / item["id"] / "2.json"
         create = self.project.root / "work-items" / item["id"] / "create.json"
         seed = self.project.root / "decision-history" / f"{decided['id'][3:]}.json"
