@@ -7,6 +7,7 @@ import datetime as dt
 import errno
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
@@ -49,7 +50,9 @@ MAX_JSON_DEPTH = 64
 JSON_DEPTH_REFUSED = "JSON exceeds the nesting depth bound"
 #: One JSON string or structural bracket. A string matches whole, so a bracket
 #: inside a string never counts as nesting.
-_JSON_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{}]')
+_JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"')
+_NOT_BRACKET = re.compile(rb'[^\[\]{}]')
+_DEPTH_STEP = {0x5b: 1, 0x7b: 1, 0x5d: -1, 0x7d: -1}
 
 
 def _reject_nonfinite_constant(value: str) -> object:
@@ -73,16 +76,8 @@ def _too_deep(raw: bytes) -> bool:
     """
     if raw.count(b"{") + raw.count(b"[") <= MAX_JSON_DEPTH:
         return False
-    depth = 0
-    for match in _JSON_TOKEN.finditer(raw):
-        token = match.group()
-        if token[:1] in (b"{", b"["):
-            depth += 1
-            if depth > MAX_JSON_DEPTH:
-                return True
-        elif token[:1] in (b"}", b"]"):
-            depth -= 1
-    return False
+    brackets = _NOT_BRACKET.sub(b"", _JSON_STRING.sub(b"", raw))
+    return max(itertools.accumulate(map(_DEPTH_STEP.__getitem__, brackets)), default=0) > MAX_JSON_DEPTH
 
 
 def loads_finite(raw: bytes | str, *, object_pairs_hook=None) -> Any:

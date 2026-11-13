@@ -1550,6 +1550,12 @@ class WorkItems:
         with self._ledger.read("items", locked=False) as db:
             return _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
 
+    def origin_sources(self) -> dict:
+        """``{insight id: (readable, submitting source or None)}`` for every known insight."""
+        with self._ledger.read("insights", locked=False) as db:
+            return {row[0]: (bool(row[1]), row[2])
+                    for row in _rows(db, "SELECT id, valid, source FROM insights")}
+
     def closed_items(self, *, limit: int):
         """Return the closed page and the current records of its rows."""
         return self._page_closed_impl(limit=limit, readonly=True, include_items=True)

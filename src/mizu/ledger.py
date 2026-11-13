@@ -147,6 +147,12 @@ class Ledger:
         if state == (domain.schema, 1):
             return
         db.execute("BEGIN IMMEDIATE")
+        if "domain" not in [row[1] for row in db.execute("PRAGMA table_info(intents)")] and \
+                db.execute("SELECT 1 FROM sqlite_master WHERE name='intents'").fetchone():
+            # A single-domain index of an older release: discard it whole.
+            for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+                db.execute(f'DROP TABLE "{table}"')
+            state = None
         if self._state(db, domain) is None and not db.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='meta'").fetchone():
             for statement in filter(str.strip, _BASE.split(";")):

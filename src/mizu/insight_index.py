@@ -136,7 +136,9 @@ class InsightSource:
             rev = record.get("rev", 1)
             if record.get("id") != insight_id or type(rev) is not int or rev < 1:
                 return (insight_id, 0, 0, None, None, None, None, None, None, None)
-        return (insight_id, 0, 1, rev, None, None, None, None, None, None)
+        source = record.get("source")
+        return (insight_id, 0, 1, rev, source if isinstance(source, str) else None,
+                None, None, None, None, None)
 
     def _decision(self, stem: str, *, recover: bool) -> tuple:
         from .insights import MAX_DECISION_EVENT_BYTES

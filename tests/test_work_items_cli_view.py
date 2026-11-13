@@ -380,6 +380,7 @@ class WorkItemsCliViewTests(Fixture):
                 lock_path.unlink()
             except FileNotFoundError:
                 pass
+            forget_ledger(self.project.root)  # Only a build of the index reads the archive.
             with self.assertRaises(Denied):
                 self.store.page_open_readonly()
             # Fail closed: sidecar preserved, archive untouched, no locks/sidecars created.

@@ -187,8 +187,7 @@ def finish_only_rates(project, *, as_of=None) -> dict:
         used_bytes += allowance
         raw = safe_read(project.root, name, allowance)
         used_bytes -= allowance - len(raw)
-        loads_finite(raw)
-        value = json.loads(raw, object_pairs_hook=unique_object)
+        value = loads_finite(raw, object_pairs_hook=unique_object)
         if not isinstance(value, dict):
             raise ValueError("not an object")
         return value

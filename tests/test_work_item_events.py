@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks
+from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks, forget_ledger
 from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
@@ -150,6 +150,7 @@ class WorkItemEventTests(Fixture):
         token = ctx.work_item_events[0]["ack_token"]
         # Current routing/payload changed: retained identity alone is not enough.
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         self.assertNotEqual(self.delivered(sources="any")[0]["ack_token"], token)
         with self.assertRaises(Denied):
             self.finish(ctx, ack_events=[token])
@@ -383,6 +384,7 @@ class WorkItemEventTests(Fixture):
         # Removing the supported origin body is a legacy routing hole, not an
         # invitation to fall back to transition actor (or the identity sidecar).
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         self.assertEqual(self.page()["events"], [])
         self.assertEqual(self.page("worker")["events"], [])
         unknown = self.page("searcher", sources="any")
@@ -404,6 +406,7 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(identity["id"], proposal["id"])
         insight_archive.store(self.project.root, body, {}, identity)
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         self.assertEqual(self.page()["events"], [original])
         events.acknowledge(self.store, "reviewer", [original])
         self.assertEqual(self.page()["acknowledged"], 1)
@@ -790,6 +793,7 @@ class WorkItemEventTests(Fixture):
         proposals, _, _ = self.grouped_terminal_fixture()
         # Unknown routing is included only by any-source subscribers.
         (self.project.root / "inbox" / f"{proposals[0]['id']}.json").unlink()
+        forget_ledger(self.project.root)
         template = self.config.roles["reviewer"]
         roles = {name: dataclasses.replace(template, work_item_events=actions, work_item_sources=route)
                  for name, actions, route in
@@ -928,6 +932,7 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {"reviewer": True})
         # Once the submitter is unknown, only any can match (not actor worker).
         (self.project.root / "inbox" / f"{rows[0]['origin']['insight_id']}.json").unlink()
+        forget_ledger(self.project.root)
         output = execute(args)
         self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {})
         self.file.write_text(text.replace('[roles.searcher]\nwork_item_events = ["done"]',
@@ -991,6 +996,7 @@ class WorkItemEventTests(Fixture):
         self.project.set_control(wake_generation="")  # no pending operator wake
         proposal, _ = self.terminal(source="searcher")
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         own = Engine(self.subscribed_config(), driver=ScriptDriver(finish_with_event_acks))
         self.assertEqual(own.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
         engine = Engine(self.subscribed_config(work_item_sources="any"), driver=ScriptDriver(finish_with_event_acks))
