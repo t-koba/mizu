@@ -1,4 +1,5 @@
 """Current-state index: crash repair, concurrency, rebuild equality and audit."""
+import contextlib
 import json
 import random
 import sqlite3
@@ -18,7 +19,7 @@ from mizu.work_items import MAX_REVISIONS, WorkItems
 
 def index_rows(root):
     """The complete derived contents of an index file, for equality checks."""
-    with sqlite3.connect(Path(root) / ledger_module.NAME) as db:
+    with contextlib.closing(sqlite3.connect(Path(root) / ledger_module.NAME)) as db, db:
         items = db.execute(f"SELECT {', '.join(ledger_module.COLUMNS)} FROM items ORDER BY id").fetchall()
         unseeded = db.execute("SELECT event_id FROM unseeded ORDER BY event_id").fetchall()
         intents = db.execute("SELECT item_id FROM intents").fetchall()
@@ -107,14 +108,14 @@ class LedgerTests(Fixture):
         self.assertFalse((self.project.root / ledger_module.NAME).exists())
         self.assertEqual(self.store.page_open(), expected)
         self.assertTrue((self.project.root / ledger_module.NAME).exists())
-        with sqlite3.connect(self.project.root / ledger_module.NAME) as db:
+        with contextlib.closing(sqlite3.connect(self.project.root / ledger_module.NAME)) as db, db:
             db.execute("UPDATE meta SET value=? WHERE key='schema'", (ledger_module.SCHEMA - 1,))
             db.execute("DELETE FROM items")
         self.assertEqual(self.store.page_open_readonly(), expected)
         self.assertEqual(self.store.page_open(), expected)
         # An interrupted build resumes from the rows it already committed.
         other = self.item("Other")
-        with sqlite3.connect(self.project.root / ledger_module.NAME) as db:
+        with contextlib.closing(sqlite3.connect(self.project.root / ledger_module.NAME)) as db, db:
             db.execute("UPDATE meta SET value=0 WHERE key='complete'")
             db.execute("DELETE FROM items WHERE id=?", (other["id"],))
         replayed = []
@@ -291,7 +292,7 @@ for _ in range(12):
         self.assertEqual((result["divergent"], result["corrupt_count"]), ([decided["id"]], 0))
         seed.write_bytes(original[seed])
         # The index alone disagreeing with valid history is divergence, repaired on request.
-        with sqlite3.connect(self.project.root / ledger_module.NAME) as db:
+        with contextlib.closing(sqlite3.connect(self.project.root / ledger_module.NAME)) as db, db:
             db.execute("UPDATE items SET status='done' WHERE id=?", (item["id"],))
         result = self.store.audit()
         self.assertEqual((result["divergent"], result["consistent"]), ([item["id"]], False))

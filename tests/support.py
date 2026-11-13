@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import dataclasses
 import json
 import shutil
@@ -71,7 +72,7 @@ def index_items(root, items, *, replace=False):
              (item["origin"] or {}).get("insight_id"), (item["origin"] or {}).get("rev"),
              (item.get("wait") or {}).get("kind"), None, item.get("blocked_since"), None,
              canonical(item).decode()) for item in items]
-    with sqlite3.connect(Path(root) / NAME) as db:
+    with contextlib.closing(sqlite3.connect(Path(root) / NAME)) as db, db:
         if replace:
             db.execute("DELETE FROM items")
         db.executemany(f"INSERT OR REPLACE INTO items({', '.join(COLUMNS)}) "
