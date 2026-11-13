@@ -231,9 +231,7 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
     ``sha`` plus a newline with mode 0o444. The model-visible virtual
     path stays ``refs/remotes/upstream/<name>``. Stale files under the
     store are removed so a fetch refreshes the view; stale empty
-    directories are left in place. The legacy
-    ``workspace/refs/remotes/upstream`` subtree is cleaned when safely
-    accessible (unsafe/busy paths remain), without following workspace links.
+    directories are left in place.
     Bounds: at most 4096 refs. Trust: host side only (the daemon/operator fetch path), never
     model-invoked; content stays external-untrusted. Retry/cancellation:
     single pass, no retry. Evidence: returned receipt names the prefix
