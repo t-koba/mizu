@@ -88,8 +88,9 @@ INSIGHTS = _Insights("insights", 1, _TABLES)
 
 
 def generation(db) -> str:
+    """The inbox generation as a SHA-256 hex identity of the epoch and sequence."""
     values = dict(db.execute("SELECT key, value FROM meta WHERE key LIKE 'inbox.%'"))
-    return f"{values['inbox.epoch']}.{values['inbox.seq']}"
+    return digest(canonical([values["inbox.epoch"], values["inbox.seq"]]))
 
 
 class InsightSource:

@@ -1841,6 +1841,8 @@ TIMED_WAIT_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 RANGE_ARGUMENTS = {
+    ('insight_index.py', 'audit', 0, 0): (
+        '1', 'mechanism', 'insight audit / prior revisions start at the first'),
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         '1025', 'safety',
         'check jobs / identity search is one candidate beyond MAX_CHECK_RETAINED'),
@@ -1876,6 +1878,8 @@ RANGE_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 SYMBOLIC_RANGE_ARGUMENTS = {
+    ('insight_index.py', 'audit', 1, 0): (
+        'row[3]', 'mechanism', 'insight audit / prior revisions below the live revision'),
     ('admission.py', 'check_slot_exclusions', 0, 0): (
         'max(0, slots)', 'configured policy',
         'admission / one exclusion per configured parallel_checks slot'),
@@ -2531,10 +2535,6 @@ COMPARISON_BOUND_ARGUMENTS = {
         '2', 'format', 'optional work-item record / its relative path has exactly directory and file components'),
     ('work_items.py', 'WorkItems._optional_record', 1, 1): (
         '1', 'safety', 'optional work-item record / accept only an unaliased regular file'),
-    ('work_items.py', 'WorkItems._origin_revision', 1, 0): (
-        '1', 'format', 'work-item origin / referenced decision revision is positive'),
-    ('work_items.py', 'WorkItems._origin_revision', 1, 1): (
-        '1', 'format', 'work-item origin / reject zero or negative referenced revisions'),
     ('work_items.py', 'WorkItems._validate_current_decision_shape', 1, 0): (
         '1', 'format', 'current decision shape / a decision revision is positive'),
     ('work_items.py', 'WorkItems._history_revisions', 1, 0): (

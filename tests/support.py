@@ -65,7 +65,8 @@ def history_write_json(path, value, **kwargs):
 def index_items(root, items, *, replace=False):
     """Put synthetic current records straight into the derived index (scale tests)."""
     import sqlite3
-    from mizu.ledger import COLUMNS, NAME
+    from mizu.ledger import NAME
+    from mizu.work_item_index import COLUMNS
     from mizu.work_items import _timestamp_order
     rows = [(item["id"], item["rev"], item["status"], item["holder"],
              _timestamp_order(item["created_at"]), _timestamp_order(item["updated_at"]),

@@ -388,6 +388,7 @@ class WriterWaitTests(Fixture):
                     snapshot, self.config, self.role(), False, due, project=self.project))
         (self.project.root / 'inbox').mkdir(exist_ok=True)
         (self.project.root / 'inbox' / 'broken.json').write_text('{')
+        forget_ledger(self.project.root)
         self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
         self.assertFalse(_writer_progress_fallback(
             snapshot, self.config, self.role(), False, due, project=self.project))
@@ -470,6 +471,7 @@ class WriterWaitTests(Fixture):
                                      expected_rev=question['rev'])
         self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
         (self.project.root / 'inbox' / 'broken.json').write_text('{')
+        forget_ledger(self.project.root)
         self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
 
     def test_ready_conversion_rechecks_readiness_but_not_wait_liveness(self):
