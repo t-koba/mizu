@@ -184,7 +184,7 @@ mizu cleanup demo
 - `role-state/`: 各役割の現行研究状態の JSON レコード ★（role lock と `.new-*` 一時ファイルは除外。安全に読める不正 JSON は raw のまま保存し、復元後も `unavailable` として扱います）
 - `evidence/`: 不変な公開ID・dispatch marker、receipt-pinned CI wait の結果・ack、および `acceptance/` の正規化済み acceptance receipt（stdout/stderr と command log 本文は含まない） ★
 - `check-jobs/`: 非同期チェックの上限付き live cache とコマンド証跡（backup対象外：job、raw log、wait 記録は eviction や restore 後に失われることがあります）
-- `ledger.sqlite3`: 作業項目の現在状態インデックス（backup対象外：履歴から導出され、
+- `ledger.sqlite3`: 作業項目・insight・現行decisionの現在状態インデックス（backup対象外：履歴から導出され、
   restore 後や欠落・旧スキーマ時はレコードロックを取る最初の処理が自動で再構築します）
 - `health/`: ヘルスチェック記録 ★（`capture_limit` は現在も適用されている
   snapshot 上限超過の原因（パスとサイズ）です。capture が成功すると解除され
@@ -633,7 +633,9 @@ replays every work-item history with full validation and compares it with the
 index; it prints `items`, `unseeded_decisions`, `index` (`complete`,
 `partial`, `interrupted`, `outdated` or `missing`), `consistent`,
 `repaired`, and bounded `corrupt`, `divergent` and `divergent_unseeded` lists
-with their counts. It changes nothing unless `--repair` is also given, which
+with their counts, plus `insights` with the same checks for inbox records,
+decision pointers (shape and immutable-event binding), prior revisions and
+index divergence. It changes nothing unless `--repair` is also given, which
 rebuilds the index when every history validates. Writers wait for the audit.
 
 - Options and defaults: `--limit` is the open page size (default 25, exact int

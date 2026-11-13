@@ -44,7 +44,7 @@ root and its ancestors remain trusted operator-owned state.
 The state root is never mounted into a sandbox; agents change it only through
 host operations that validate each write. Only the operator account and its
 host processes can write it, and they could equally rewrite any derived file,
-so reads do not re-authenticate history. Work-item records are validated when
+so reads do not re-authenticate history. Work-item, insight and decision records are validated when
 written and when the current-state index is built from them; `mizu work-items
 PROJECT --audit` replays every chain strictly (manifests, retained receipts,
 wait evidence) and reports accidental corruption or index divergence. Records

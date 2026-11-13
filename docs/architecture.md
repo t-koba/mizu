@@ -612,6 +612,24 @@ immutable title authority, not the subsequently revisable insight.
 
 ### Current-state index
 
+The revision files, the inbox and the decision files are the durable history.
+The index has two domains with separate tables, schema numbers and build
+state: work items (below) and insights. The insight domain holds `insights`
+(one row per known insight: the live inbox record with its source, kind,
+addressee, creation time, content identity and exact record, or the newest
+archived revision; unreadable inbox files are rows marked invalid) and
+`decisions` (one row per current decision pointer, marked valid when readable
+with a known action and revision, and linked when it also has the full
+persisted shape and equals its immutable `decision-history` event). The inbox
+generation is a digest of an epoch (the contents at build time) and a
+sequence that advances in the transaction of each write that changes a live
+record's content identity. Writes (`submit`, `revise`, `attach_evidence`,
+`decide`, `withdraw`, archival) use the same intent, file, replay protocol with
+keys `i:ID` and `d:ID`. Counts, listings, pages, `scan_source`, the deferral
+gate, origin staleness (a join of items, insights and decisions) and event
+origin routing are indexed queries; fail-closed readers refuse while an
+invalid row exists.
+
 The revision files are the durable, append-only history. Current state is read
 only from the per-project ledger index `ledger.sqlite3` in the project root
 (stdlib SQLite, WAL journal, `synchronous=FULL`, connections opened per
