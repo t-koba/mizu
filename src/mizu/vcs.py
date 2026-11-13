@@ -172,17 +172,6 @@ def _store_base(project_root: Path) -> Path:
     return project_root.joinpath(REF_STORE_NAME)
 
 
-def _remove_legacy_tree(project_root: Path) -> None:
-    """Best-effort, no-follow cleanup anchored at the trusted project root.
-
-    Links/unsafe or unavailable entries remain for a later refresh. Only the
-    obsolete subtree and empty prefix parents are removed, never workspace.
-    See ``_legacy_refs`` for the native handle guarantees and platform limits.
-    """
-    from ._legacy_refs import remove_legacy_refs
-    remove_legacy_refs(project_root, REF_PREFIX)
-
-
 def split_ref_path(path: str) -> str | None:
     """Return the ref name for a virtual tool path under the ref prefix.
 
@@ -275,7 +264,6 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
             _clear_readonly_for_windows(target)
         atomic_write(target, (validated[name] + "\n").encode(), mode=0o444)
     _prune_stale(base, wanted)
-    _remove_legacy_tree(project_root)
     try:
         have = set(list_refs(project_root))
     except OSError as exc:
