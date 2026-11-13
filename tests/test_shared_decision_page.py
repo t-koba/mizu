@@ -546,26 +546,6 @@ class SharedDecisionPageTests(unittest.TestCase):
         self.assertIn(True, scanned)
         self.assertFalse(held)
 
-    def test_archived_inbox_row_is_skipped_during_unlocked_scan(self):
-        self.insights.submit(source="reviewer", title="Pending", body="Retained",
-                             base_snapshot=None, addressee="worker")
-        real = insights_module.safe_read
-        removed = []
-
-        def vanish(root, name, maximum):
-            if name.startswith("inbox/") and not removed:
-                (root / name).unlink()
-                removed.append(name)
-            return real(root, name, maximum)
-
-        with patch("mizu.insights.safe_read_managed", vanish):
-            page, manifest = self.insights.shared_decision_page(
-                "worker", ACTIONS, max_bytes=MAX_FRAME, configured_roles={"worker"})
-        self.assertEqual(len(removed), 1)
-        self.assertEqual(page["events"], [])
-        self.assertEqual(page["pending_count"], 0)
-        self.assertEqual(manifest, ())
-
     def test_unlocked_scan_does_not_exclude_a_concurrent_source_write(self):
         self.decide()
         original = Insights._decision_page_envelopes_locked
