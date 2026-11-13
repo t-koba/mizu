@@ -676,7 +676,7 @@ def recover_producers(project, *, include_runs=False):
     """
     if include_runs:
         recover(project.root)
-    with _jobs(project) as db:
+    with lock(project.root / 'locks/check-jobs.lock'), _jobs(project, locked=True) as db:
         invalid = {('entry', entry_key(job_id)) if code == 'non_producer_entry' else job_id: code
                    for job_id, code in db.execute('SELECT id, code FROM check_jobs WHERE valid=0')}
         pending = [row[0] for row in db.execute('SELECT id FROM check_jobs WHERE proof_pending=1')]
