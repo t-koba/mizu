@@ -37,6 +37,8 @@ function validatedAuthoritySections(value, required) {
 export function register(pi, config, dependencies = {}) {
   const call = dependencies.request || request;
   const authoritySections = validatedAuthoritySections(dependencies.authoritySections, dependencies.requireAuthority === true);
+  const systemCwd = dependencies.systemCwd;
+  if (systemCwd !== undefined && (typeof systemCwd !== 'string' || !systemCwd)) throw new Error('Invalid system cwd');
   if (authoritySections) pi.on('before_agent_start', event => {
     // Use the supported mutable options path, not a forced prompt or a manual
     // SessionManager append (createAgentSession replaces initial system state).
@@ -48,6 +50,10 @@ export function register(pi, config, dependencies = {}) {
     }
     // Ordered pairs survive the host's canonical JSON object-key sorting.
     Object.assign(sections, Object.fromEntries(authoritySections));
+    // The SDK renders its cwd section ahead of every custom section. A named
+    // section replaces the value in place, so the standing instructions that
+    // follow stay one byte-stable prefix instead of starting after a per-run path.
+    if (systemCwd !== undefined) sections.cwd = systemCwd;
   });
   for (const tool of config.tools) {
     pi.registerTool({

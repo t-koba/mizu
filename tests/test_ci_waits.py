@@ -4,11 +4,12 @@ import json
 import uuid
 from unittest.mock import Mock, patch
 
-from support import Fixture, ScriptDriver, without_blocked_age
+from support import Fixture, ScriptDriver, without_blocked_age, forget_ledger
 from mizu import ci_waits, vcs
 from mizu.config import PublicationEvidence
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical, read_json, write_json
+from mizu.fs import PREVIEW_BYTES, canonical, read_json
+from support import history_write_json as write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
 from mizu.publication import Publication
@@ -412,6 +413,7 @@ class CiWaitTests(CiWaitFixture):
             self.project.insights._normalize_wait(self.wait, "defer")
         # Stored wait reads revalidate the completed receipt, not just ID syntax.
         self.publication.path("receipt").unlink()
+        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.get(item["id"])
 
@@ -548,8 +550,7 @@ class CiWaitTests(CiWaitFixture):
         with patch.object(self.project.insights, "due_waits", return_value=[]) as due_waits, \
                 patch.object(self.project.insights, "pending_obligations", return_value=[]) as obligations, \
                 patch("mizu.runtime.ci_waits.delivery", return_value=([], [])) as ci_delivery, \
-                patch("mizu.runtime.proposal_waits.delivery", return_value=([], [])) as proposal_delivery, \
-                patch("mizu.runtime.readonly_view", side_effect=lambda store, **kwargs: store):
+                patch("mizu.runtime.proposal_waits.delivery", return_value=([], [])) as proposal_delivery:
             engine._dispatch_state(self.project, "worker", role, event_trigger=True)
         due_waits.assert_called_once_with("worker", self.project.snapshots.get(), limit=limit)
         obligations.assert_called_once_with("worker", limit=limit)
@@ -566,8 +567,7 @@ class CiWaitTests(CiWaitFixture):
         def dispatch():
             return engine._dispatch_state(self.project, "worker", role, event_trigger=True)
 
-        with patch("mizu.runtime.readonly_view", side_effect=lambda store, **kwargs: store):
-            expected = dispatch()
+        expected = dispatch()
         self.assertEqual(dispatch(), expected)
         self.assertEqual(expected["_dispatch"].admission, "wait")
         self.assertEqual([event["work_item"] for event in expected["wait_events"]], [item["id"]])
@@ -577,8 +577,7 @@ class CiWaitTests(CiWaitFixture):
         current = dispatch()
         self.assertEqual(current["wait_events"], [])
         self.assertEqual(current["_dispatch"].admission, "ready_work")
-        with patch("mizu.runtime.readonly_view", side_effect=lambda store, **kwargs: store):
-            self.assertEqual(dispatch(), current)
+        self.assertEqual(dispatch(), current)
 
     def test_runtime_replays_unselected_explicit_ci_delivery(self):
         item = self.block("replay", actor="reviewer")
@@ -819,6 +818,7 @@ class CiWaitTests(CiWaitFixture):
         self.poll()
         context = self.delivery_context()
         self.publication.path("receipt").unlink()
+        forget_ledger(self.project.root)  # The wait's receipt is validated on rebuild.
         with self.assertRaises(Denied):
             ci_waits.pending(self.store, "worker")
         with self.assertRaises(Denied):
@@ -828,7 +828,7 @@ class CiWaitTests(CiWaitFixture):
         self.assertIn("error", result)  # global scan failure, not per-item errors
         reader.assert_not_called()
         for failure in (Denied("malformed ledger"), OSError("unreadable ledger")):
-            with self.subTest(failure=failure), patch.object(self.store, "_iter_item_events", side_effect=failure):
+            with self.subTest(failure=failure), patch.object(self.store, "current_items", side_effect=failure):
                 with self.assertRaises(type(failure)):
                     ci_waits.pending(self.store, "worker")
                 result, reader = self.poll()

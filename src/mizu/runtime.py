@@ -25,7 +25,7 @@ from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
 from .admission import admission, has_live_demand, role_exclusion
-from . import check_jobs
+from . import check_jobs, tool_results
 from . import wait_events as structured_wait_events
 from . import proposal_waits, ci_waits, dispatch_evidence, safe_point, work_item_events
 from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
@@ -58,6 +58,7 @@ from .fs import (canonical, digest, loads_finite, lock, mkdir, now, read_json, r
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST, ID)
 from .project import Project
+from .readiness_witness import settled as witness_settled, witness as state_witness
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
                        missing_finish_recovery_due, missing_finish_streak,
                        no_progress_recovery_due, progress_disposition, progress_timestamp,
@@ -79,7 +80,6 @@ from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
 from . import work_item_operations
-from .work_item_read_view import readonly_view
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .web_worker import bounded
@@ -198,6 +198,7 @@ WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidenc
 OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
+    "result_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
 
@@ -1140,7 +1141,7 @@ class Context:
                 if operation in {"submit_insight", "revise_insight", "withdraw_insight", "attach_evidence"}:
                     self.progress_insight = True
                 self.tool_admission_exception = None
-                return result
+                return tool_results.bounded(self, operation, arguments, result)
             finally:
                 # Completion of actual admitted work is not a heartbeat and
                 # never resets an active request (Claude query / Codex turn).
@@ -1157,6 +1158,9 @@ class Context:
             if handler is None:
                 raise Denied("Unknown operation")
             return handler(self, args)
+
+    def _op_result_read(self, args: dict) -> dict:
+        return tool_results.read(self, args)
 
     def _op_diff(self, args: dict) -> dict:
         return workspace_reads.op_diff(self, args)
@@ -2043,7 +2047,7 @@ class Context:
         return self._op_exec_experiment("experiment", args)
 
     _DISPATCH = {
-        "diff": _op_diff, "files": _op_files, "read": _op_read,
+        "diff": _op_diff, "files": _op_files, "read": _op_read, "result_read": _op_result_read,
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
@@ -2744,8 +2748,7 @@ class Engine:
         waits_reconciled, pending_resolution = (
             _reconcile_work_item_waits(project, role, self.config) if reconcile_waits
             else (False, prior_wait_resolution_pending))
-        # Reuse validated records only within this dispatch, never across rechecks.
-        work_items = readonly_view(project.work_items, limits=self.config.limits)
+        work_items = project.work_items
         terminal_page = work_item_events.pending(
             work_items, role_name, role.work_item_events, sources=role.work_item_sources,
             limit=role_work_item_events_limit(project.config, role))
@@ -2832,6 +2835,19 @@ class Engine:
         # operator wakes independently, even when no new code is published.
         wake_base = snapshot if role.workspace == "write" else cursor
         operator_woke = _operator_woke(project.control(), wake_base, observer=role.workspace != "write")
+        # ``roles.<name>.event_wakes``: a standalone event dispatch sees only the
+        # listed wake kinds. Masking the facts here leaves nothing consumed:
+        # a skipped attempt acknowledges no event, record or cursor.
+        def wakes(kind):
+            return not event_trigger or kind in role.event_wakes
+        has_code_event = has_code_event and wakes("code")
+        ready_work_changed = ready_work_changed and wakes("ready_work")
+        operator_woke = operator_woke and wakes("operator")
+        has_wait = has_wait and wakes("wait")
+        ci_failures_wake = bool(ci_failures) and wakes("ci")
+        record_wake = bool(record_state[0]["wake_pending"]) and wakes("operator_record")
+        decision_wake = bool(substantive_events or substantive_diagnostics) and wakes("decision")
+        work_item_wake = bool(terminal_events) and wakes("work_item")
         if event_trigger:
             event_gate = _scheduling.evaluate(_scheduling.DispatchFacts(
                 event_trigger=True,
@@ -2842,11 +2858,11 @@ class Engine:
                 operator_woke=operator_woke and role.workspace != "write",
                 explicit_wake=operator_woke and role.workspace != "write",
                 ready_work_changed=ready_work_changed,
-                has_record=bool(record_state[0]["wake_pending"]),
-                has_decision=bool(substantive_events or substantive_diagnostics),
-                has_work_item=bool(terminal_events),
+                has_record=record_wake,
+                has_decision=decision_wake,
+                has_work_item=work_item_wake,
                 has_wait=has_wait,
-                has_ci=bool(ci_failures),
+                has_ci=ci_failures_wake,
             ))
             if event_gate.skipped == "no-event":
                 return {"skip": {"skipped": "no-event", "snapshot": snapshot["id"],
@@ -2874,11 +2890,11 @@ class Engine:
             has_code_event=bool(has_code_event),
             explicit_wake=bool(explicit_wake),
             ready_work_changed=ready_work_changed,
-            has_record=bool(record_state[0]["wake_pending"]),
-            has_decision=bool(substantive_events or substantive_diagnostics),
-            has_work_item=bool(terminal_events),
+            has_record=record_wake,
+            has_decision=decision_wake,
+            has_work_item=work_item_wake,
             has_wait=has_wait,
-            has_ci=bool(ci_failures),
+            has_ci=ci_failures_wake,
             operator_woke=bool(operator_woke and role.workspace != "write"),
             progress_self_admits=bool(progress_self_admits),
             has_next_task=bool(next_task),
@@ -2913,6 +2929,9 @@ class Engine:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
+        control = project.control()
+        if not control.get("armed") or control.get("paused"):
+            raise Denied("Project is unarmed or paused")  # Before any maintenance, probe or inbox read.
         DelegationJobs.guard(project.root)
         from .workspace_cache import maintain
         maintain(project)  # Before probes/admission take any execution locks.
@@ -2971,8 +2990,7 @@ class Engine:
                                  if role.workspace == "write" else None)
                     empty = False
                     if role.scheduled_inputs == ("deferred_insights",):
-                        has_deferred = project.insights.has_current_defer(
-                            max_entries=self.config.limits.scheduled_input_scan_items)
+                        has_deferred = project.insights.has_current_defer()
                         empty = has_deferred is False
                     if empty and not explicit_wake and not next_task:
                         try:
@@ -3320,13 +3338,14 @@ class Engine:
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
                 decoded = json.loads(prompt)
-                work_items_page = decoded["open_work_items"]
+                work_items_page = decoded.get("open_work_items")
                 write_json(run_dir / "prompt_projection.json",
                            {"run": run_id, "role": role_name, "profile": role.profile, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
                             "pending_insights": len(decoded.get("pending_insights", [])),
                             "open_insights": (decoded.get("open_insights") or {}).get("total", 0),
-                            "open_work_items": {
+                            # None: this role's prompt carries no work-item inventory.
+                            "open_work_items": None if work_items_page is None else {
                                 "shown": len(work_items_page["items"]),
                                 "total": work_items_page["total"],
                                 "overflow_count": work_items_page["overflow_count"],
@@ -4710,14 +4729,11 @@ def _decision_delivery_state(project, role_name, role):
 def _receipt_wait_due(store, role, *, limit=1) -> bool:
     """Share one authoritative work-item traversal for CI/proposal readiness.
 
-    Holds ``insights.lock`` once and reconstructs each item from the
-    ``recover=False``/``readonly=True`` scan. A strict full-chain proof is
-    reused only while its exact history identity, snapshot policy, and every
-    referenced evidence-file identity remain unchanged; misses replay fully.
-    CI/proposal evidence and time-dependent readiness are still reevaluated
-    by the route-owned read-only accumulators each poll. Retains only O(limit)
-    candidates plus the first deferred proposal
-    failure; iterator, seed and full-chain failures abort even after an
+    Holds ``insights.lock`` once and feeds every blocked item from the
+    current-state index to both accumulators; CI/proposal evidence and
+    time-dependent readiness are reevaluated by the route-owned read-only
+    accumulators each poll. Retains only O(limit) candidates plus the first
+    deferred proposal failure; index failures abort even after an
     earlier candidate. Finalizes CI first: a CI event returns True and
     discards the deferred proposal failure, otherwise the deferred failure
     propagates or the proposal accumulator finalizes. No recovery, writes,
@@ -4726,14 +4742,7 @@ def _receipt_wait_due(store, role, *, limit=1) -> bool:
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
     proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
     with lock(store.root / "locks" / "insights.lock"):
-        for event_id, event, history_revisions, history_key in store._iter_item_events_with_revisions(
-                recover=False, cache=True, with_identity=True):
-            kind, seed = store._seed_for_event(event_id, event, readonly=True)
-            if kind != "seed":
-                continue
-            if history_revisions is None:
-                history_revisions, history_key = store._history_revisions_readonly(seed["id"])
-            item = store._readiness_item(seed, event, history_revisions, history_key)
+        for item in store.current_items(statuses=("blocked",)):
             ci_waits.readiness_feed(ci_state, store, item)
             proposal_waits.readiness_feed(proposal_state, store, item)
         if ci_waits.readiness_events(ci_state):
@@ -5185,6 +5194,9 @@ def daemon(config: Config, name: str, role_name: str) -> None:
             upstream_state: dict = {"last_fetch": None}
             ordinary_after = 0.0
             project = None
+            # (state witness, monotonic re-evaluation deadline) of the last
+            # negative readiness result; see readiness_recheck_seconds.
+            readiness_memo = None
             while not stop.is_set():
                 try:
                     updated = load(config.file)
@@ -5194,30 +5206,51 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                     lock_scope.close()
                     lock_scope.enter_context(config.runtime_policy())
                     from .probes import service_due, next_deadline
-                    probe = service_due(config, name, stop)
-                    if probe is not None:
-                        print(json.dumps(probe, ensure_ascii=False), flush=True)
                     # Retain process-local history caches across unchanged reloads,
                     # but revalidate mutable project settings on every daemon poll.
                     if project is None or project.config != config:
                         project = Project(config, name)
+                        readiness_memo = None
                     else:
                         project.refresh_settings()
-                    project.insights.ingest_editor(keep_days=config.limits.retention_days)
-                    if vcs_poll_enabled(config):
-                        interval = vcs_poll_interval(config)
-                        for event in poll_project_vcs(config, project, upstream_state,
-                                                      now=time.time(), interval=interval):
-                            print(json.dumps(event, ensure_ascii=False), flush=True)
                     role = config.roles[role_name]
                     policy = getattr(role, "daemon_policy", None)
                     if policy not in DAEMON_POLICIES:
                         raise ConfigError("Invalid daemon_policy; reload validated configuration")
-                    if policy == "signals":
-                        ready = should_run(project, project.snapshots.get(), role_name=role_name)
-                    else:
-                        ready = (project.control().get("armed") and not project.control().get("paused")
-                                 and not project.control().get("draining"))
+                    control = project.control()
+                    ready = False
+                    if not control.get("armed") or control.get("paused"):
+                        readiness_memo = None
+                    # An unarmed or paused project has no work: probes, editor
+                    # ingestion, VCS polling and readiness are skipped entirely.
+                    if control.get("armed") and not control.get("paused"):
+                        probe = service_due(config, name, stop)
+                        if probe is not None:
+                            print(json.dumps(probe, ensure_ascii=False), flush=True)
+                        project.insights.ingest_editor(keep_days=config.limits.retention_days)
+                        if vcs_poll_enabled(config):
+                            interval = vcs_poll_interval(config)
+                            for event in poll_project_vcs(config, project, upstream_state,
+                                                          now=time.time(), interval=interval):
+                                print(json.dumps(event, ensure_ascii=False), flush=True)
+                        if policy == "signals" and config.limits.readiness_recheck_seconds:
+                            observed = state_witness(project.root)
+                            if (readiness_memo is not None and readiness_memo[0] == observed[0]
+                                    and time.monotonic() < readiness_memo[1]):
+                                pass
+                            else:
+                                # A positive result or an error is never reused.
+                                readiness_memo = None
+                                ready = should_run(project, project.snapshots.get(),
+                                                   role_name=role_name)
+                                if (not ready and witness_settled(observed[1], observed[2])
+                                        and state_witness(project.root)[0] == observed[0]):
+                                    readiness_memo = (observed[0], time.monotonic()
+                                                      + config.limits.readiness_recheck_seconds)
+                        elif policy == "signals":
+                            ready = should_run(project, project.snapshots.get(), role_name=role_name)
+                        else:
+                            ready = not control.get("draining")
                     if ready and time.monotonic() >= ordinary_after:
                         result = Engine(config, stop=stop).run(project, role_name, probes_serviced=True,
                                         enqueue_busy=True)

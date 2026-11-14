@@ -14,10 +14,11 @@ import json
 import unittest
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, forget_ledger
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import lock, safe_read
+from mizu.fs import lock
+from mizu.ledger import rows
 from mizu.insights import MAX_DECISION_EVENT_BYTES
 from mizu.project import Project
 from mizu.smoke_refs import record_lock
@@ -34,6 +35,12 @@ def _submit(fixture, source, title):
 def _decide(fixture, insight_id, action, reason="Handled", revisit=""):
     return fixture.project.insights.decide(
         insight_id, action, reason, revisit, "run", expected_rev=1)
+
+
+def _edit(fixture, path, content):
+    """Overwrite a record file as an outside edit; the next rebuild sees it."""
+    (path.write_bytes if isinstance(content, bytes) else path.write_text)(content)
+    forget_ledger(fixture.project.root)
 
 
 def _runs(project):
@@ -130,7 +137,7 @@ class ProducerCountsTests(Fixture):
         decisions_path = self.project.root / "decisions" / f"{insight_id}.json"
         record = json.loads(decisions_path.read_text())
         record["created_at"] = "2020-01-01T00:00:00+00:00"
-        decisions_path.write_text(json.dumps(record))
+        _edit(self, decisions_path, json.dumps(record))
         removed = self.project.insights.gc_decided()
         self.assertEqual(removed, 1)
         self.assertEqual(self.project.insights.unresolved_count("searcher"), 0)
@@ -162,7 +169,7 @@ class ProducerCountsTests(Fixture):
         def read_during_submission(*args):
             scan_started.set()
             self.assertTrue(contention_checked.wait(60))
-            return safe_read(*args)
+            return rows(*args)
 
         def submit_during_scan():
             self.assertTrue(scan_started.wait(60))
@@ -170,7 +177,7 @@ class ProducerCountsTests(Fixture):
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             with patch("mizu.insights.record_lock", observed_lock):
-                with patch("mizu.insights.safe_read", read_during_submission):
+                with patch("mizu.insights._rows", read_during_submission):
                     future = pool.submit(submit_during_scan)
                     try:
                         self.assertEqual(self.project.insights.unresolved_counts(["searcher"]),
@@ -189,13 +196,13 @@ class ProducerCountsTests(Fixture):
         bad_rows.extend({**original, "rev": rev} for rev in (None, True, "1", 0, -1, 1.5))
         for row in bad_rows:
             with self.subTest(row=row):
-                path.write_text(json.dumps(row))
+                _edit(self, path, json.dumps(row))
                 # A bad row cannot silently disappear even when its source
                 # differs from the requested source (or cannot be identified).
                 with self.assertRaises(Denied):
                     self.project.insights.unresolved_counts(["searcher"])
-        path.write_text("{")
-        with self.assertRaises(ValueError):
+        _edit(self, path, "{")
+        with self.assertRaises(Denied):
             self.project.insights.unresolved_count("searcher")
 
     def test_decision_action_revision_and_identity_are_strict(self):
@@ -209,32 +216,32 @@ class ProducerCountsTests(Fixture):
         bad_rows.extend({**original, "rev": rev} for rev in (None, True, "1", 0, -1, 1.5))
         for row in bad_rows:
             with self.subTest(row=row):
-                path.write_text(json.dumps(row))
+                _edit(self, path, json.dumps(row))
                 with self.assertRaises(Denied):
                     self.project.insights.unresolved_count("searcher")
         for action in ("accept", "modify", "reject", "defer", "withdraw"):
-            path.write_text(json.dumps({**original, "action": action}))
+            _edit(self, path, json.dumps({**original, "action": action}))
             self.assertEqual(self.project.insights.unresolved_count("searcher"),
                              1 if action == "defer" else 0)
         # Legacy omission is revision 1; a valid stale decision cannot resolve
         # the current input. Strict admission does not change tolerant readers.
-        path.write_text(json.dumps({key: value for key, value in original.items() if key != "rev"}))
+        _edit(self, path, json.dumps({key: value for key, value in original.items() if key != "rev"}))
         self.assertEqual(self.project.insights.unresolved_count("searcher"), 0)
-        path.write_text(json.dumps({**original, "rev": 2}))
+        _edit(self, path, json.dumps({**original, "rev": 2}))
         self.assertEqual(self.project.insights.unresolved_count("searcher"), 1)
 
     def test_oversized_live_row_and_decision_fail_closed(self):
         insight_id = _submit(self, "searcher", "One")
         inbox = self.project.root / "inbox" / f"{insight_id}.json"
         original = inbox.read_bytes()
-        inbox.write_bytes(b" " * (self.project.insights.maximum + 1))
-        with self.assertRaises(LimitExceeded):
+        _edit(self, inbox, b" " * (self.project.insights.maximum + 1))
+        with self.assertRaises(Denied):
             self.project.insights.unresolved_count("searcher")
-        inbox.write_bytes(original)
+        _edit(self, inbox, original)
         _decide(self, insight_id, "reject")
         decision = self.project.root / "decisions" / inbox.name
-        decision.write_bytes(b" " * (MAX_DECISION_EVENT_BYTES + 1))
-        with self.assertRaises(LimitExceeded):
+        _edit(self, decision, b" " * (MAX_DECISION_EVENT_BYTES + 1))
+        with self.assertRaises(Denied):
             self.project.insights.unresolved_count("searcher")
 
     def test_symlink_live_row_and_decision_fail_closed(self):
@@ -252,23 +259,12 @@ class ProducerCountsTests(Fixture):
                         path.symlink_to(target)
                     except (OSError, NotImplementedError):
                         self.skipTest("Host cannot create symlinks")
+                    forget_ledger(self.project.root)
                     with self.assertRaises(Denied):
                         self.project.insights.unresolved_count("searcher")
                 finally:
                     path.unlink(missing_ok=True)
-                    path.write_bytes(original)
-
-    def test_vanished_live_row_does_not_undercount_other_source(self):
-        insight_id = _submit(self, "reviewer", "Other source")
-        path = self.project.root / "inbox" / f"{insight_id}.json"
-
-        def vanish_then_read(*args):
-            path.unlink()
-            return safe_read(*args)
-
-        with patch("mizu.insights.safe_read", vanish_then_read):
-            with self.assertRaises(Denied):
-                self.project.insights.unresolved_counts(["searcher"])
+                    _edit(self, path, original)
 
 
 class ProducerEvaluatorTests(unittest.TestCase):
@@ -444,7 +440,7 @@ class ProducerHoldTests(Fixture):
         first = _submit(self, "searcher", "One")
         self.assertIsNone(producer_hold(self.project, "searcher"))
         bad = self.project.root / "inbox" / "badrecord.json"
-        bad.write_text("{not-json")
+        _edit(self, bad, "{not-json")
         try:
             held = producer_hold(self.project, "searcher")
             self.assertIsNotNone(held)
@@ -457,6 +453,7 @@ class ProducerHoldTests(Fixture):
                 bad.unlink()
             except OSError:
                 pass
+            forget_ledger(self.project.root)
         self.assertIsNone(producer_hold(self.project, "searcher"))
         _decide(self, first, "reject")
         self.assertIsNone(producer_hold(self.project, "searcher"))

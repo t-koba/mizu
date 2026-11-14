@@ -167,7 +167,7 @@ class WorkItemScopeTests(Fixture):
         self.assertEqual(self.store.get(item_id)["scope"], scope)
 
     def test_a_record_that_clears_the_scope_is_refused(self):
-        from mizu.fs import write_json
+        from support import history_write_json as write_json
         scope = "Keep the CI cell timeout at 30 minutes."
         decision = self.decide(scope=scope)
         item_id = decision["work_item"]["id"]

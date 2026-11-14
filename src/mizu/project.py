@@ -15,6 +15,7 @@ from .budget import Budget
 from .config import Config, ProjectImport, _lineage_target, keys, strings
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
+from .check_job_index import CHECK_JOBS, CheckJobSource
 from .insights import Insights
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
@@ -158,6 +159,7 @@ class Project:
                                     stale_seconds=config.limits.work_items_stale_seconds,
                                     blocked_max_age_seconds=config.limits.work_items_blocked_max_age_seconds,
                                     history_temporaries=config.limits.history_temporaries)
+        self.insights.ledger.attach(CHECK_JOBS, CheckJobSource(self))
         self.insights.work_items = self.work_items
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",

@@ -4,10 +4,11 @@ import multiprocessing
 from pathlib import Path
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, forget_ledger
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
-from mizu.fs import canonical, read_json, text_preview, write_json
+from mizu.fs import canonical, read_json, text_preview
+from support import history_write_json as write_json
 from mizu.insights import Insights
 from mizu.project import Project
 from mizu.runtime import prompt_delta_for, prompt_for
@@ -252,7 +253,7 @@ class WorkItemHoldTests(Fixture):
                          self.store.page_open_readonly, lambda: self.change(second)):
                 with self.subTest(timestamp=timestamp), self.assertRaises(Denied):
                     read()
-            self.assertEqual(self.store.get(second)["rev"], 1)
+            self.assertFalse((self.project.root / "work-items" / second / "2.json").exists())
         write_json(path, original)
 
     def test_config_defaults_bounds_overrides_and_threshold(self):

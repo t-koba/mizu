@@ -6,10 +6,11 @@ import json
 import os
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery
+from support import Fixture, bind_delivery, forget_ledger
 from mizu import work_item_events as events
 from mizu.errors import ConfigError, Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, write_json
+from mizu.fs import PREVIEW_BYTES
+from support import history_write_json as write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
 from mizu.runtime import (CONSULT_FORBIDDEN, DELEGATE_FORBIDDEN, WRAP_UP_OPS,
@@ -208,11 +209,13 @@ class DirectWorkItemTests(Fixture):
         directory.mkdir(parents=True)
         temp = directory / ".new-abcdefgh"
         temp.write_text("Uncommitted")
+        forget_ledger(self.project.root)
         self.assertEqual(self.store.page_open_readonly()["total"], 0)
         self.assertTrue(temp.exists())
         self.assertEqual(self.store.page_open()["total"], 0)
         self.assertFalse(temp.exists())
         (directory / "unknown.json").write_text("{}")
+        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_open_readonly()
 
@@ -256,6 +259,7 @@ class DirectWorkItemTests(Fixture):
             path.symlink_to(target)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"Symlinks unavailable: {exc}")
+        forget_ledger(self.project.root)
         for call in (lambda: self.store.get(item_id), self.store.page_open, self.create):
             with self.assertRaises(Denied):
                 call()
@@ -353,6 +357,7 @@ class SharedSeedCreationTests(Fixture):
         outside.mkdir()
         decisions = self.project.root / "decisions"
         saved = self.root / "saved-decisions"
+        self.project.insights.unresolved_count("worker")  # The index exists; only a rebuild reads the swap.
         if saved.exists():
             shutil.rmtree(saved)
         try:

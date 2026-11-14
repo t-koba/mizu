@@ -7,12 +7,13 @@ import json
 import os
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, forget_ledger
 from mizu import work_item_events
 from mizu import work_item_retirement
 from mizu import work_items as work_items_module
 from mizu.errors import Denied
-from mizu.fs import canonical, digest, write_json
+from mizu.fs import canonical, digest
+from support import history_write_json as write_json
 from mizu.storage import audit
 from mizu.work_items import MAX_REVISIONS
 
@@ -119,17 +120,6 @@ class RetirementTests(Fixture):
         for page in (self.store.page_open(), self.store.page_open_readonly(), self.store.page_ready()):
             self.assertNotIn(self.item_id, [r["id"] for r in page["items"]])
         self.assertEqual(self.store.page_closed_readonly()["items"][0]["id"], self.item_id)
-        if not work_items_module.IS_WINDOWS:
-            state_path = self.project.root / "work-item-state" / f"{self.item_id}.json"
-            self.assertTrue(state_path.exists())
-            state = json.loads(state_path.read_bytes())
-            self.assertEqual(state["retirement"], terminal)
-            self.assertEqual(state["current"]["rev"], MAX_REVISIONS)
-            fresh = type(self.store)(self.project.root, self.project.snapshots, self.project.insights)
-            with patch.object(fresh, "_get",
-                              side_effect=AssertionError("retired history replayed")):
-                closed = fresh.page_closed_readonly(limit=10)
-            self.assertEqual(closed["items"][0]["id"], self.item_id)
         self.assertEqual(work_item_events.pending(self.store, "reviewer", ["dropped"])["pending"], 1)
         claimed = self.store.transition(other["id"], expected_rev=1, status="doing", actor="worker")
         self.assertEqual(claimed["holder"], "worker")
@@ -196,6 +186,7 @@ class RetirementTests(Fixture):
         self.assertEqual(ctx.handle("work_items_transition", args)["actor"], "worker")
 
     def assert_invalid_readonly(self):
+        forget_ledger(self.project.root)  # Only a rebuild reads the retired history.
         frozen = self.tree()
         with patch("mizu.work_items.os.unlink", side_effect=AssertionError("read-only recovery")), \
                 patch("mizu.work_items.write_json", side_effect=AssertionError("read-only write")):
@@ -212,14 +203,8 @@ class RetirementTests(Fixture):
     def test_malformed_sidecars_and_wrong_or_gapped_chains_fail_closed(self):
         self.exhaust()
         self.change()
-        self.store.page_open_readonly()  # Prime the structural retirement cache.
         cold = self.store.page_ready()
-        with patch.object(self.store, "_iter_chain", wraps=self.store._iter_chain) as replay, \
-             patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as transition:
-            self.assertEqual(self.store.page_ready(), cold)
-            self.assertEqual(self.store.page_ready(), cold)
-            if not work_items_module.IS_WINDOWS:
-                self.assertEqual((replay.call_count, transition.call_count), (0, 0))
+        self.assertEqual(self.store.page_ready(), cold)
         original = json.loads(self.path.read_bytes())
         mutations = [{}, {**original, "schema": True}, {**original, "schema": 2},
                      {**original, "chain_sha256": "0" * 64},
@@ -252,20 +237,21 @@ class RetirementTests(Fixture):
         with self.assertRaises(Denied):
             self.store.page_ready()
         changed_path.write_bytes(saved)
+        forget_ledger(self.project.root)
         self.store.page_ready()
         changed_path.unlink()
         self.assert_invalid_readonly()
         with self.assertRaises(Denied):
             self.store.page_ready()
         changed_path.write_bytes(saved)
+        forget_ledger(self.project.root)
         self.assertEqual(self.store.get(self.item_id)["status"], "dropped")
         self.assertEqual(audit(self.project)["work_item_events_skipped"], 0)
         self.store.page_ready()
         self.path.unlink()
+        forget_ledger(self.project.root)
         # Absence is an ordinary exhausted nonterminal chain, not a retirement.
-        with patch.object(self.store, "_iter_chain", wraps=self.store._iter_chain) as replay:
-            self.assertEqual(self.store.page_ready()["total"], 1)
-            self.assertGreater(replay.call_count, 0)
+        self.assertEqual(self.store.page_ready()["total"], 1)
 
     def test_only_exhausted_nonterminal_chains_can_retire(self):
         # A fabricated early sidecar must never be ignored by a normal CAS.
@@ -314,6 +300,7 @@ class RetirementTests(Fixture):
             self.assertEqual(self.store.page_closed_readonly()["items"][0]["id"], self.item_id)
             self.assertEqual(audit(self.project)["work_item_events_skipped"], 1)
         self.assertTrue(orphan.exists())
+        forget_ledger(self.project.root)
         self.store.get(self.item_id)
         self.assertFalse(orphan.exists())
         try:
@@ -322,15 +309,19 @@ class RetirementTests(Fixture):
             self.skipTest("Hard links unavailable")
         # An old post-link atomic-write alias is a recognized committed target;
         # read-only views must not fix it. The locked read removes only alias.
+        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_closed_readonly()
         self.assertTrue(orphan.exists())
+        forget_ledger(self.project.root)
         self.assertEqual(self.store.get(self.item_id)["status"], "dropped")
         self.assertFalse(orphan.exists())
         self.assertEqual(self.path.read_bytes(), content)
         outside = self.project.root / "retirement-copy.json"
         os.link(self.path, outside)
+        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
+            forget_ledger(self.project.root)
             self.store.get(self.item_id)
         outside.unlink()
         self.path.unlink()
@@ -338,11 +329,15 @@ class RetirementTests(Fixture):
             os.symlink(outside, self.path)
         except (OSError, NotImplementedError):
             self.skipTest("Symlinks unavailable")
+        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
+            forget_ledger(self.project.root)
             self.store.get(self.item_id)
         self.path.unlink()
         self.path.mkdir()
+        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
+            forget_ledger(self.project.root)
             self.store.get(self.item_id)
 
     def test_retired_exhausted_item_releases_smoke_pins_like_dropped(self):

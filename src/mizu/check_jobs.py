@@ -22,6 +22,7 @@ from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
+from .acceptance import raw_jobs, strict_jobs, write_job
 
 
 class _SharedCheckCaptureRefused(Exception):
@@ -146,7 +147,7 @@ def save_execution(project, job):
         for key in ('detached', 'acknowledged', 'replaced_by', 'purpose'):
             if key in latest:
                 job[key] = latest[key]
-        write_json(root(project) / job['id'] / 'job.json', job)
+        write_job(project, job['id'], job)
 
 
 def _configured_input_bounds(project):
@@ -565,7 +566,7 @@ def _delivered_summary(project, job_id, owner):
         raw = raw_read(project, job_id)
         if raw.get('role') == owner:
             raw['acknowledged'] = True
-            write_json(root(project) / job_id / 'job.json', raw)
+            write_job(project, job_id, raw)
             job = read(project, job_id)
     return summary(job)
 
@@ -607,17 +608,17 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
         job.pop('purpose', None)
     else:
         job['purpose'] = purpose
-    write_json(path, job)
+    write_job(context.project, job_id, job)
     os.utime(root(context.project), None)
     return summary(read(context.project, job_id))
 
 
 def _make_room(project, *, protect=frozenset()):
-    records = sorted(root(project).glob('*/job.json'), key=lambda p: p.stat().st_mtime)
+    records = sorted(raw_jobs(project, invalid=True).values(), key=lambda value: (root(project) / value['id'] / 'job.json').stat().st_mtime)
     required = len(records) - project.config.limits.check_retained + 1
     if required <= 0:
         return
-    values = [(path, read_json(path, {})) for path in records]
+    values = [(root(project) / value['id'] / 'job.json', value) for value in records]
     references = {}
     for _, value in values:
         if value.get('shared_job'):
@@ -653,7 +654,8 @@ def _make_room(project, *, protect=frozenset()):
     # eligible set must not partially evict evidence after a target decrease.
     # Selection order also removes subscriptions before their source records.
     for victim in victims:
-        shutil.rmtree(victim)
+        with project.insights.ledger.write('check_jobs', [victim.name]):
+            shutil.rmtree(victim)
 
 
 def submit(context, script=None, *, commands=None, kind="experiment", fresh=False, purpose=None, scratch_paths=None):
@@ -723,8 +725,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
         # store must not conceal an unresolved request.
         from . import acceptance
         matches = []
-        for path in acceptance.job_paths(project):
-            record = acceptance.read_job(project, path.parent.name)
+        for record in strict_jobs(project).values():
             if record.get('cache_request') != cache_request:
                 continue
             # Every decomposed request field is compared so a changed
@@ -836,15 +837,10 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
                 return _delivered_summary(project, job_id, owner)
             if shared_key is not None and not fresh:
-                for path in sorted(root(project).glob('*/job.json')):
-                    if cache_configured:
-                        from .acceptance import read_job
-                        other = read_job(project, path.parent.name)
-                    else:
-                        other = read_json(path, {})
+                for other in (strict_jobs(project) if cache_configured else raw_jobs(project)).values():
                     if (other.get('shared_key') == shared_key and reusable(other)
                             and cache_matches(project, other, current)
-                            and not (path.parent / 'cancel.json').exists()):
+                            and not (root(project) / other['id'] / 'cancel.json').exists()):
                         job = _subscribe(context, other, purpose=purpose,
                                          request=cache_request if cache_configured else None,
                                          request_id=job_id if cache_configured else None,
@@ -896,10 +892,11 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                     job['scratch_paths'] = list(scratch_paths)
                 if purpose is not None:
                     job['purpose'] = purpose
-                write_json(directory / 'job.json', job)
+                write_job(project, job_id, job)
                 os.utime(root(project), None)
             except BaseException:
-                shutil.rmtree(directory, ignore_errors=True)
+                with project.insights.ledger.write('check_jobs', [job_id]):
+                    shutil.rmtree(directory, ignore_errors=True)
                 raise
             for record in superseded:
                 _withdraw_locked(project, record['id'], role=owner, replaced_by=job_id)
@@ -912,7 +909,7 @@ def _withdrawable(project, job):
     A shared execution still runs for its remaining consumers, so it keeps
     its place in the queue until the last consumer leaves.
     """
-    records = [read_json(p, {}) for p in root(project).glob('*/job.json')]
+    records = list(raw_jobs(project).values())
     return not _interest(records, job['id'], exclude_id=job['id'])
 
 
@@ -1120,7 +1117,7 @@ def _pending_jobs(project):
     queue. A shared execution still runs for its remaining consumers, so it
     keeps its place until the last consumer leaves.
     """
-    records = [read_json(p, {}) for p in root(project).glob('*/job.json')]
+    records = list(raw_jobs(project).values())
     pending = []
     for record in records:
         if not isinstance(record, dict) or record.get('shared_job'):
@@ -1143,9 +1140,8 @@ def _superseded(project, role, purpose, *, keep=frozenset()):
     if purpose is None:
         return []
     found = []
-    for path in sorted(root(project).glob('*/job.json')):
-        record = read_json(path, {})
-        if not isinstance(record, dict) or record.get('shared_job'):
+    for record in sorted(raw_jobs(project).values(), key=lambda value: value['id']):
+        if record.get('shared_job'):
             continue
         if record.get('role') != role or record.get('purpose') != purpose:
             continue
@@ -1163,7 +1159,7 @@ def _state_purpose(project, job_id, purpose):
     if raw.get('purpose') == purpose:
         return
     raw['purpose'] = purpose
-    write_json(root(project) / job_id / 'job.json', raw)
+    write_job(project, job_id, raw)
 
 
 def _withdraw_locked(project, job_id, *, role, replaced_by=None):
@@ -1191,16 +1187,17 @@ def _withdraw_locked(project, job_id, *, role, replaced_by=None):
         # replaced it and raises no completion event of its own.
         raw['replaced_by'] = replaced_by
         raw['acknowledged'] = True
-    write_json(root(project) / job_id / 'job.json', raw)
-    records = [read_json(p, {}) for p in root(project).glob('*/job.json')]
+    write_job(project, job_id, raw)
+    records = list(raw_jobs(project).values())
     interested = _interest(records, original_id, exclude_id=job_id)
     if replaced_by is not None and not interested and raw.get('status') == 'queued':
         # The replaced job never started: it leaves the queue at once, so the
         # runner never spends a slot on it.
         raw['status'] = 'cancelled'
-        write_json(root(project) / job_id / 'job.json', raw)
+        write_job(project, job_id, raw)
     if not interested:
-        write_json(root(project) / original_id / 'cancel.json', {'requested_at': now()})
+        with project.insights.ledger.write('check_jobs', [original_id]):
+            write_json(root(project) / original_id / 'cancel.json', {'requested_at': now()})
     os.utime(root(project), None)
     return {**summary(read(project, job_id)), 'cancel_requested': True}
 
@@ -1220,13 +1217,12 @@ def acknowledge(project, role, ids):
             if job['status'] in ('queued', 'running'):
                 continue
             original_id = job.get('shared_job', job_id)
-            for path in root(project).glob('*/job.json'):
-                raw = read_json(path, {})
+            for raw in list(raw_jobs(project).values()):
                 same_result = (not job.get('detached') and raw.get('role') == role
                                and raw.get('shared_job', raw.get('id')) == original_id)
                 if raw.get('id') == job_id or same_result:
                     raw['acknowledged'] = True
-                    write_json(path, raw)
+                    write_job(project, raw['id'], raw)
 
 
 def run_one(project, stop, *, sandbox_factory=Sandbox):
@@ -1245,8 +1241,7 @@ def _run_one(project, stop, sandbox_factory, invalid):
     from . import acceptance
     # Never while holding check-jobs.lock. Keep ALL invalid IDs out of the
     # scheduler's reads/sort, even when only 32 diagnostics can be displayed.
-    jobs = {}  # One invocation only; recovery writes deliberately stay uncached.
-    invalid.update(acceptance.recover_producers(project, jobs=jobs))
+    invalid.update(acceptance.recover_producers(project))
     from .workspace_cache import maintain
     maintain(project)  # No owner/cache/slot exclusion has been acquired yet.
     control = project.control()
@@ -1256,19 +1251,9 @@ def _run_one(project, stop, sandbox_factory, invalid):
         return {'status': 'disk-reserve'}
     blocked = False
     candidates = []
-    with lock(project.root / 'locks/check-jobs.lock'):
-        identities = {}
-        for path in acceptance.job_paths(project, invalid, identities=identities):
-            if path.parent.name in invalid:
-                continue
-            try:
-                cached = jobs.get(path.parent.name)
-                job = (cached[1] if cached is not None and cached[0] == identities.get(path.parent.name)
-                       else acceptance.job_candidate(acceptance.read_job(project, path.parent.name)))
-            except acceptance.InvalidProducer as exc:
-                invalid[exc.job_id] = exc.code
-                continue
-            candidates.append((path, job))
+    for job in raw_jobs(project).values():
+        if not job.get('shared_job') and job.get('status') in ('queued', 'running'):
+            candidates.append((root(project) / job['id'] / 'job.json', job))
     for path, job in sorted(candidates, key=lambda pair: pair[1].get('created_at', '')):
         if job.get('shared_job') or job.get('status') not in ('queued', 'running'):
             continue
@@ -1617,7 +1602,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
                     elif (len(canonical(bound)) <= MAX_BYTES // 2
                             and len(canonical({**job, 'acceptance_scope': bound})) <= project.config.limits.file_bytes):
                         job['acceptance_scope'] = bound
-                write_json(path, job)
+                write_job(project, job['id'], job)
         if not discard_scratch:
             break
         try:
@@ -1782,8 +1767,9 @@ def mark_wake_delivered(project, role, ids, run):
             if job.get('role') != role:
                 raise Denied('Check wake belongs to another role')
             if _automatic_wake_pending(project, job):
-                write_json(root(project) / job_id / 'wake.json',
-                           {'id': job_id, 'role': role, 'run': run})
+                with project.insights.ledger.write('check_jobs', [job_id]):
+                    write_json(root(project) / job_id / 'wake.json',
+                               {'id': job_id, 'role': role, 'run': run})
 
 
 def outstanding(project):
@@ -1807,12 +1793,23 @@ def wake_ready(project, role, *, discovery=None):
     try:
         if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
             return False
-        if discovery is None:
-            from .acceptance import discover
-            discovery = discover(project)
-        if any(_automatic_wake_pending(project, job) for job in discovery[0].values()
-               if job.get('role') == role):
-            return True
+        if discovery is not None:
+            if any(_automatic_wake_pending(project, job) for job in discovery[0].values()
+                   if job.get('role') == role):
+                return True
+        elif project.config.roles[role].check_result_wake:
+            from .acceptance import _jobs
+            marks = ', '.join('?' * len(TERMINAL_WAKE_STATUSES))
+            # The status a subscription reports is its original's, and a detached one is cancelled.
+            with _jobs(project) as db:
+                if db.execute(
+                        "SELECT 1 FROM check_jobs j LEFT JOIN check_jobs o ON o.id = j.shared_job "
+                        "AND o.valid = 1 AND j.detached = 0 WHERE j.valid = 1 AND j.role = ? "
+                        "AND j.acknowledged = 0 AND j.wake = 0 AND (j.shared_job IS NULL OR "
+                        "j.detached = 1 OR o.id IS NOT NULL) AND (CASE WHEN j.detached = 1 THEN "
+                        f"'cancelled' WHEN o.id IS NOT NULL THEN o.status ELSE j.status END) IN ({marks}) "
+                        "LIMIT 1", (role, *sorted(TERMINAL_WAKE_STATUSES))).fetchone():
+                    return True
         record = read_json(root(project) / (role + '.wait.json'), {})
         if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
             return False
@@ -1822,6 +1819,9 @@ def wake_ready(project, role, *, discovery=None):
         job_id = record.get('id')
         if not isinstance(job_id, str):
             return False
+        if discovery is None:
+            from .acceptance import discover
+            discovery = discover(project)
         job = discovery[0].get(job_id)
         if job is None:
             return False

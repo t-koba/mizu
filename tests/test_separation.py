@@ -209,6 +209,8 @@ class InsightRetentionTests(Fixture):
             record = json.loads(path.read_text())
             record["created_at"] = f"2026-01-01T00:00:{n:02d}+00:00"
             path.write_text(json.dumps(record))
+        from support import forget_ledger
+        forget_ledger(self.project.root)
         listed = self.project.insights.list(limit=30)
         self.assertEqual(len(listed), 30)
         titles = [r["title"] for r in listed]

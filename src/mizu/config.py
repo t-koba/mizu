@@ -23,7 +23,7 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
-                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read"})
+                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read", "result_read"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -464,6 +464,10 @@ class Limits:
     model_request_seconds: int = 1200
     command_seconds: int = 300
     idle_seconds: int = 15
+    #: Resident signals daemon: reuse a negative readiness result while the
+    #: project state tree is unchanged, re-evaluating at most this many seconds
+    #: later (0 evaluates on every idle tick).
+    readiness_recheck_seconds: int = 0
     cooldown_seconds: int = 5
     progress_signals: tuple[str, ...] = DEFAULT_PROGRESS_SIGNALS
     no_progress_continuations: int = 0
@@ -538,6 +542,8 @@ class Limits:
     #: prompt (1-64 KiB; default 4 KiB). Records over the bound inject
     #: status/generation/sizes only, never partial content.
     role_state_prompt_bytes: int = 4096
+    #: Canonical-JSON bytes of one model-facing tool response; larger results page.
+    tool_response_bytes: int = 32768
     free_disk_mb: int = 1024
     #: Operator-selected retention window (days) for budget day-files and
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
@@ -592,8 +598,6 @@ class Limits:
     #: Raw inbox/decisions stay on disk; the operator
     #: review path (`mizu insight list`) uses a separate 1000-item bound.
     pending_insights: int = 30
-    #: Maximum inbox directory entries inspected to prove a scheduled deferral set empty.
-    scheduled_input_scan_items: int = 1000
     #: Operator-selected exact revision read/output bound for explicit insight history (1-1000).
     insight_history_entries: int = DEFAULT_INSIGHT_HISTORY_ENTRIES
     #: Absolute lifetime of an explicit insight enumeration cursor (seconds).
@@ -610,12 +614,6 @@ class Limits:
     work_items_blocked_max_age_seconds: int = 604800
     #: Directory-entry budget for work-item record-question closure catalogs only.
     operator_record_catalog_scan_entries: int = 2048
-    #: Request-local retention policy: smaller budgets repeat validated reads;
-    #: oversized records bypass caching without changing projection semantics.
-    work_item_read_view_snapshot_cache_bytes: int = 32 * 1024 * 1024
-    work_item_read_view_file_cache_bytes: int = 8 * 1024 * 1024
-    work_item_read_view_item_cache_bytes: int = 8 * 1024 * 1024
-    work_item_read_view_item_cache_entries: int = 1024
     #: Operator-selected decision-event window per dispatch (1-100;
     #: default 10). The 100-event cap stays fixed mechanism; the value is
     #: policy: with rotation, a role with many deferrals sees each one
@@ -674,15 +672,10 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "smoke_retention_metadata_bytes": (1, TOML_INTEGER_MAX),
                  "smoke_retention_report_bytes": (1, TOML_INTEGER_MAX),
                  "pending_insights": (1, 1000),
-                 "scheduled_input_scan_items": (1, TOML_INTEGER_MAX),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000),
                  "work_items_blocked_max_age_seconds": (1, TOML_INTEGER_MAX),
                  "operator_record_catalog_scan_entries": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_snapshot_cache_bytes": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_file_cache_bytes": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_item_cache_bytes": (1, TOML_INTEGER_MAX),
-                 "work_item_read_view_item_cache_entries": (1, TOML_INTEGER_MAX),
                  "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),
                  "wait_events_limit": (1, 100),
@@ -690,6 +683,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "event_stream_bytes": (1048576, 268435456),
                  "role_state_bytes": (1024, 65536),
                  "role_state_prompt_bytes": (1, 65536),
+                 "tool_response_bytes": (4096, 1048576),
                  "session_max_tokens": (0, 1073741824), "session_max_age_seconds": (0, 31536000),
                  "default_wait_seconds": (1, MAX_WAIT_SECONDS),
                  "maximum_wait_seconds": (1, MAX_WAIT_SECONDS),
@@ -713,6 +707,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "model_request_seconds": (1, 1073741824),
                  "command_seconds": (1, 1073741824),
                  "idle_seconds": (1, 1073741824),
+                 "readiness_recheck_seconds": (0, 86400),
                  "cooldown_seconds": (1, 1073741824),
                  "parallel_runs": (1, 1073741824),
                  "admission_queue_capacity": (1, 1073741824),
@@ -796,6 +791,12 @@ class ServiceSettings:
     check_recovery_interval_seconds: int = 30
 
 
+#: Wake kinds that may admit a standalone ``mizu run --event`` dispatch of a
+#: role; ``roles.<name>.event_wakes`` selects a subset (default: all).
+EVENT_WAKE_KINDS = ("operator_record", "decision", "work_item", "wait", "ci",
+                    "operator", "ready_work", "code")
+
+
 @dataclasses.dataclass(frozen=True)
 class Role:
     name: str
@@ -877,6 +878,10 @@ class Role:
     #: scheduled roles. None preserves file triggers/recovery defaults; set
     #: values replace immediate file triggers, not ordinary schedules.
     event_batch_seconds: int | None = None
+    #: Wake kinds that may admit a standalone ``--event`` dispatch of this
+    #: role (subset of EVENT_WAKE_KINDS). Default is every kind; an empty
+    #: tuple means only schedules, daemons and continuations start the role.
+    event_wakes: tuple[str, ...] = EVENT_WAKE_KINDS
     #: Explicit daemon scheduling policy: ``signals`` consults the
     #: role-aware ``should_run`` readiness gate, ``periodic`` runs at the
     #: ordinary cadence while the project is armed and neither paused nor
@@ -890,6 +895,10 @@ class Role:
     #: ordinary daemon spacing only, never deferred re-evaluation or the
     #: ``cooldown_seconds`` retry policy.
     daemon_spacing_seconds: int | None = None
+    #: Optional context sections restored/removed against the capability
+    #: default (see prompt_sections); validated at load.
+    context_include: tuple[str, ...] = ()
+    context_exclude: tuple[str, ...] = ()
     #: Opt-in input gate for platform timers only; empty keeps open-ended runs.
     scheduled_inputs: tuple[str, ...] = ()
 
@@ -1733,7 +1742,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "daemon_policy", "daemon_spacing_seconds"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1747,6 +1756,10 @@ def load(file: Path) -> Config:
         caps = strings(role.get("capabilities", []), "capabilities")
         if set(caps) - CAPABILITIES or len(set(caps)) != len(caps):
             raise ConfigError(f"Invalid or duplicate capability in role {name}")
+        # The one continuation tool for oversized results (tool_results) goes to
+        # every role that holds any tool a result can come from.
+        if set(caps) - {"finish", "result_read"} and "result_read" not in caps:
+            caps = type(caps)((*caps, "result_read"))
         if "withdraw_decided" in caps and "withdraw_insight" not in caps:
             raise ConfigError(f"Role {name}: withdraw_decided requires withdraw_insight")
         engine_tools = strings(role.get("engine_tools", []), "engine_tools")
@@ -1916,6 +1929,13 @@ def load(file: Path) -> Config:
                    EVENT_POLL_SECONDS_MIN, EVENT_POLL_SECONDS_MAX)
             if daemon:
                 raise ConfigError(f"roles.{name}.event_batch_seconds cannot be used with daemon")
+        raw_event_wakes = role.get("event_wakes")
+        if raw_event_wakes is None:
+            event_wakes = EVENT_WAKE_KINDS
+        else:
+            event_wakes = tuple(strings(raw_event_wakes, f"roles.{name}.event_wakes"))
+            if len(set(event_wakes)) != len(event_wakes) or any(w not in EVENT_WAKE_KINDS for w in event_wakes):
+                raise ConfigError(f"roles.{name}.event_wakes must contain unique supported wake kinds")
         raw_daemon_policy = role.get("daemon_policy")
         if raw_daemon_policy is None:
             daemon_policy = "signals" if workspace == "write" else "periodic"
@@ -1932,6 +1952,8 @@ def load(file: Path) -> Config:
             if value not in ("own", "any"):
                 raise ConfigError(f"roles.{name}.{field} must be own or any")
             evidence_sources[field] = value
+        from .prompt_sections import validate as _validate_sections
+        context_include, context_exclude = _validate_sections(name, role.get("context_sections", {}))
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
@@ -1950,9 +1972,11 @@ def load(file: Path) -> Config:
                            progress_signals=role_progress,
                            event_poll_seconds=role_event_poll,
                            event_batch_seconds=role_event_batch,
+                           event_wakes=event_wakes,
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing,
-                           scheduled_inputs=scheduled_inputs, **evidence_sources)
+                           scheduled_inputs=scheduled_inputs, context_include=context_include,
+                           context_exclude=context_exclude, **evidence_sources)
     if not roles:
         raise ConfigError("At least one role is required")
     consult_role = string(data.get("consult_role", ""), "consult_role")

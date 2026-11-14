@@ -8,7 +8,8 @@ from support import Fixture, ScriptDriver
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, ProtocolError
-from mizu.fs import digest, lock, mkdir, read_json, write_json
+from mizu.fs import digest, lock, mkdir, read_json
+from support import history_write_json as write_json
 from mizu.project import Project, initialize
 from mizu.smoke_refs import shared_lock
 from mizu.runtime import Engine, should_run
@@ -204,7 +205,7 @@ class ContextTests(Fixture):
                 validate(args, read_schema)
 
     def test_legacy_runtime_inventory_reconcile_actor_and_transition(self):
-        from mizu.fs import write_json
+        from support import history_write_json as write_json
         event_id = "a" * 32
         source = {"id": "synthetic-origin", "rev": 1, "action": "modify",
                   "created_at": "2024-01-01T00:00:00+00:00", "reason": "Synthetic legacy decision"}
@@ -884,7 +885,7 @@ class PromptProjectionTests(Fixture):
         import dataclasses
         import json
         from mizu.runtime import prompt_for, prompt_delta_for
-        from mizu.fs import write_json
+        from support import history_write_json as write_json
         for index in range(3):
             proposal = self.project.insights.submit(
                 source="worker", title=f"Prompt item {index}", body="Open", base_snapshot=None)
@@ -896,9 +897,11 @@ class PromptProjectionTests(Fixture):
             self.config.limits, work_items_prompt=2))
         ctx = self.context("consult")
         ctx.config = small
-        # No capability is needed for the project-wide prompt projection.
+        # Without a work-item capability the inventory is offered only on explicit
+        # configuration; the projection itself needs no capability.
         ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(
-            capability for capability in ctx.role.capabilities if capability != "work_items_read"))
+            capability for capability in ctx.role.capabilities if capability != "work_items_read"),
+            context_include=("open_work_items",))
         self.assertNotIn("work_items_read", ctx.role.capabilities)
         full = json.loads(prompt_for(ctx))
         delta = json.loads(prompt_delta_for(ctx, []))
@@ -1009,7 +1012,8 @@ class PromptProjectionTests(Fixture):
 
     def test_active_record_reports_current_activity(self):
         import json
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         ctx = self.context("worker")
         active = ctx.project.root / "active" / "worker.json"
         write_json(active, {"run": ctx.run_dir.name, "role": "worker",
@@ -1025,7 +1029,8 @@ class PromptProjectionTests(Fixture):
         self.assertIn("activity_since", record)
 
     def test_child_activity_is_published_without_overwriting_role_owner(self):
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         ctx = self.context("worker")
         ctx.parent_run = "parent-run"
         active = ctx.project.root / "active" / "worker.json"
@@ -1040,7 +1045,8 @@ class PromptProjectionTests(Fixture):
         self.assertEqual(read_json(active), owner)
 
     def test_activity_gauge_matches_parent_record(self):
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         ctx = self.context("worker")
         active = ctx.project.root / "active" / "worker.json"
         write_json(active, {"run": ctx.run_dir.name, "role": "worker"})
@@ -1050,7 +1056,8 @@ class PromptProjectionTests(Fixture):
             self.assertEqual(gauge[key], read_json(active)[key])
 
     def test_active_record_ignores_superseded_run_and_explain_tolerates_legacy(self):
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         from mizu.explain import explain
         ctx = self.context("worker")
         active = ctx.project.root / "active" / "worker.json"
@@ -1067,7 +1074,8 @@ class PromptProjectionTests(Fixture):
         self.assertNotIn("activity", reported["record"])
 
     def test_explain_reports_live_activity(self):
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         from mizu.explain import explain
         ctx = self.context("worker")
         active = ctx.project.root / "active" / "worker.json"
@@ -1115,7 +1123,8 @@ class PromptProjectionTests(Fixture):
 
     def test_run_records_prompt_projection_evidence(self):
         import dataclasses
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         for index in range(3):
             proposal = self.project.insights.submit(
                 source="worker", title=f"Audit item {index}", body="Open", base_snapshot=None)

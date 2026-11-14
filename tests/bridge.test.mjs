@@ -349,6 +349,20 @@ test('authority sections preserve source order and replace only the Mizu namespa
   assert.deepEqual(Object.entries(options.sections), [['unrelated', 'untouched'], ...authority_sections]);
 });
 
+test('Pi registration replaces the SDK cwd section with the stable value and refuses an invalid one', () => {
+  let hook;
+  const pi = { on: (name, fn) => { if (name === 'before_agent_start') hook = fn; } };
+  const valid = [['mizu_authority_policy_0', 'policy'], ['mizu_authority_charter', 'charter']];
+  register(pi, { tools: [] }, { authoritySections: valid, requireAuthority: true, systemCwd: '/workspace' });
+  const options = { sections: { cwd: '/runs/a/controller' } };
+  hook({ systemPromptOptions: options });
+  assert.equal(options.sections.cwd, '/workspace');
+  assert.deepEqual(Object.entries(options.sections).slice(1), valid);
+  for (const bad of ['', 7, null]) {
+    assert.throws(() => register(pi, { tools: [] }, { authoritySections: valid, requireAuthority: true, systemCwd: bad }),
+      /system cwd/);
+  }
+});
 
 test('production Pi authority registration fails closed on missing or ambiguous sections', () => {
   const pi = { on() {} };

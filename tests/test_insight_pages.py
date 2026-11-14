@@ -6,7 +6,7 @@ import json
 import sqlite3
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, forget_ledger, history_write_json
 from mizu import insight_archive
 from mizu.cli import main
 from mizu.config import load
@@ -27,6 +27,7 @@ class InsightPageTests(Fixture):
         for n in reversed(range(count)):
             record = self.record(n)
             (inbox / f'{record["id"]}.json').write_bytes(canonical(record))
+        forget_ledger(self.project.root)
 
     def record(self, n, rev=1):
         return {"id": f"{n:032x}", "rev": rev, "source": "searcher", "origin": None,
@@ -73,22 +74,17 @@ class InsightPageTests(Fixture):
 
     def test_complete_live_ties_and_replay_over_1000(self):
         self.bulk_live()
-        # Same created_at/id but distinct paths: no row may disappear.
-        alias = self.record(0)
-        alias['title'] = 'Alias sorts first by path'
-        write_json(self.project.root / 'inbox' / '000-alias.json', alias)
         page = self.project.insights.list_page(limit=1000)
         again = self.project.insights.list_page(limit=7, cursor=page['next_cursor'])
         self.assertEqual(again, self.project.insights.list_page(limit=7, cursor=page['next_cursor']))
         items = self.collect('live', 1000, page)
-        self.assertEqual(len(items), 1008)
+        self.assertEqual(len(items), 1007)
         self.assertEqual(items, self.project.insights.list(pending=False, limit=2000))
-        self.assertEqual(items[0]['title'], alias['title'])
         self.assertEqual(len(self.project.insights.list(pending=False, limit=1000)), 1000)
 
     def test_live_staleness_binds_all_rows_bodies_evidence_and_decisions(self):
         self.bulk_live(3)
-        for kind in ('body', 'evidence', 'decision', 'revision', 'append', 'remove', 'path'):
+        for kind in ('body', 'evidence', 'decision', 'revision', 'append', 'remove'):
             with self.subTest(kind=kind):
                 page = self.project.insights.list_page(limit=1)
                 path = self.project.root / 'inbox' / f'{2:032x}.json'
@@ -100,16 +96,14 @@ class InsightPageTests(Fixture):
                         record['evidence'] = [{'text': 'same count and timestamp still binds complete text'}]
                     else:
                         record['rev'] += 1
-                    write_json(path, record)
+                    history_write_json(path, record)
                 elif kind == 'decision':
                     self.project.insights.decide(record['id'], 'defer', 'reason', 'later', 'run', expected_rev=1)
                 elif kind == 'append':
-                    write_json(self.project.root / 'inbox' / 'extra.json', self.record(3))
+                    history_write_json(self.project.root / 'inbox' / f'{3:032x}.json', self.record(3))
                 elif kind == 'remove':
                     path.unlink()
-                else:
-                    # Recreate the row removed above at a different path.
-                    write_json(self.project.root / 'inbox' / 'alias.json', self.record(2))
+                    forget_ledger(self.project.root)
                 with self.assertRaisesRegex(Denied, 'Stale insight live cursor'):
                     self.project.insights.list_page(limit=1, cursor=page['next_cursor'])
 
@@ -124,13 +118,14 @@ class InsightPageTests(Fixture):
         path = self.project.root / 'inbox' / f'{insight_id}.json'
         record = read_json(path)
         record['evidence'][0]['text'] = 'edited, same summary'
-        write_json(path, record)
+        history_write_json(path, record)
         with self.assertRaisesRegex(Denied, 'Stale'):
             self.project.insights.list_page(limit=1, cursor=page['next_cursor'])
 
     def test_live_cost_does_not_scan_archive(self):
         self.bulk_live(3)
         self.legacy_archive()
+        self.project.insights.list_page(limit=1)  # Builds the index, the one pass over the archive.
         with patch('mizu.insight_archive._connect', side_effect=AssertionError('archive scan')):
             self.assertEqual(len(self.project.insights.list(pending=False)), 3)
             self.assertEqual(len(self.collect('live', 2)), 3)

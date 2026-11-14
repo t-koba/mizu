@@ -4,10 +4,10 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery
+from support import Fixture, bind_delivery, forget_ledger
 from mizu.cli import parser, execute
 from mizu import work_items as work_items_module
-from mizu.errors import Denied, LimitExceeded
+from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import canonical
 from mizu.work_items import (
     MAX_CLOSED_PAGE_BYTES,
@@ -44,15 +44,15 @@ class WorkItemsCliViewTests(Fixture):
         self.assertEqual(args.limit, 25)
         self.assertIsNone(args.cursor)
         self.assertEqual(args.closed, 10)
-        self.assertIsNone(args.backfill)
+        self.assertFalse(args.audit)
+        self.assertFalse(args.repair)
 
     def test_parser_custom_values(self):
         args = parser().parse_args(
             ["work-items", "sample", "--limit", "2", "--cursor", "tok", "--closed", "3"])
         self.assertEqual((args.limit, args.cursor, args.closed), (2, "tok", 3))
-        self.assertIsNone(args.backfill)
-        backfill = parser().parse_args(["work-items", "sample", "--backfill", "5"])
-        self.assertEqual(backfill.backfill, 5)
+        audit = parser().parse_args(["work-items", "sample", "--audit", "--repair"])
+        self.assertEqual((audit.audit, audit.repair), (True, True))
 
     def test_execute_uses_read_only_project(self):
         self.make_open("First item")
@@ -75,10 +75,8 @@ class WorkItemsCliViewTests(Fixture):
         self.assertIn("open", result)
         self.assertIn("closed", result)
 
-    def test_execute_backfill_is_an_explicit_writable_maintenance_variant(self):
-        _, _, item_id = self.make_open("Backfill item")
-        sidecar = self.project.root / "work-item-state" / f"{item_id}.json"
-        sidecar.unlink(missing_ok=True)
+    def test_execute_audit_is_an_explicit_writable_maintenance_variant(self):
+        _, _, item_id = self.make_open("Audited item")
         seen = {}
         import mizu.project as proj
         real_project = proj.Project
@@ -88,17 +86,13 @@ class WorkItemsCliViewTests(Fixture):
             return real_project(config, name, read_only=read_only)
 
         with patch("mizu.project.Project", side_effect=spy):
-            args = parser().parse_args(
-                ["--config", str(self.file), "work-items", "sample", "--backfill", "1"])
-            result = execute(args)
+            result = execute(parser().parse_args(
+                ["--config", str(self.file), "work-items", "sample", "--audit"]))
         self.assertTrue(seen.get("read_only") is False)
-        if work_items_module.IS_WINDOWS:
-            self.assertEqual(result["backfill"], {"checked": 0, "backfilled": 0})
-            self.assertFalse(sidecar.exists())
-        else:
-            self.assertEqual(result["backfill"], {"checked": 1, "backfilled": 1})
-            self.assertTrue(sidecar.exists())
-        self.assertEqual(result["open"]["total"], 1)
+        self.assertEqual((result["items"], result["consistent"], result["repaired"]), (1, True, False))
+        with self.assertRaises(ConfigError):
+            execute(parser().parse_args(
+                ["--config", str(self.file), "work-items", "sample", "--repair"]))
 
     def test_execute_schema_open_matches_page_open(self):
         _, _, item_id = self.make_open("Open item")
@@ -265,7 +259,7 @@ class WorkItemsCliViewTests(Fixture):
         legacy_event = {"id": "synthetic-insight", "action": "accept", "rev": 1,
                         "reason": "Legacy assessment", "revisit": "", "run": "synthetic-run",
                         "created_at": "2024-01-01T00:00:00+00:00"}
-        from mizu.fs import write_json as _write
+        from support import history_write_json as _write
         _write(self.project.root / "decision-history" / f"{legacy_id}.json",
                legacy_event, exclusive=True)
         args = parser().parse_args(["--config", str(self.file), "work-items", "sample"])
@@ -304,6 +298,7 @@ class WorkItemsCliViewTests(Fixture):
         item_dir.mkdir(parents=True, exist_ok=True)
         item_temp = item_dir / ".new-temp1234"
         item_temp.write_bytes(b"uncommitted")
+        forget_ledger(self.project.root)  # Leftovers are only seen while rebuilding.
         opened = self.store.page_open_readonly()
         closed = self.store.page_closed_readonly(limit=5)
         self.assertEqual([row["id"] for row in opened["items"]], [item_id])
@@ -317,7 +312,8 @@ class WorkItemsCliViewTests(Fixture):
         self.assertFalse(item_temp.exists())
     def _archive_origin(self, insight_id):
         import datetime as dt
-        from mizu.fs import read_json, write_json
+        from mizu.fs import read_json
+        from support import history_write_json as write_json
         dec_path = self.project.root / "decisions" / f"{insight_id}.json"
         decision = read_json(dec_path)
         old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=40)).isoformat()
@@ -384,6 +380,7 @@ class WorkItemsCliViewTests(Fixture):
                 lock_path.unlink()
             except FileNotFoundError:
                 pass
+            forget_ledger(self.project.root)  # Only a build of the index reads the archive.
             with self.assertRaises(Denied):
                 self.store.page_open_readonly()
             # Fail closed: sidecar preserved, archive untouched, no locks/sidecars created.

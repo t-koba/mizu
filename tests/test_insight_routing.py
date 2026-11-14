@@ -9,7 +9,7 @@ import json
 import threading
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, history_write_json
 from mizu import decision_delivery as delivery
 from mizu.decision_reconciliation import activate_decision_delivery
 from mizu.errors import Busy, Denied, LimitExceeded
@@ -68,7 +68,7 @@ class InsightRoutingLegacyTests(Fixture):
         record = read_json(path)
         for key in ('kind', 'addressee', 'urgency'):
             record.pop(key)
-        write_json(path, record)
+        history_write_json(path, record)
         self.assertEqual([e['insight'] for e in self.pending()['events']], [addressed['id']])
         self.assertEqual([e['insight'] for e in self.pending('searcher')['events']], [own['id']])
         self.assertEqual(self.pending('worker')['events'], [])
@@ -138,7 +138,7 @@ class InsightRoutingLegacyTests(Fixture):
         path = self.project.root / 'inbox' / f"{item['id']}.json"
         record = read_json(path)
         record['addressee'] = '../escape'
-        write_json(path, record)
+        history_write_json(path, record)
         with self.assertRaises(Denied):
             self.pending('searcher')
 
@@ -190,11 +190,6 @@ class InsightRoutingLegacyTests(Fixture):
             self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), 'reviewer'))
         self.assertEqual(path.read_bytes(), b'{invalid')
         path.unlink()
-        with patch('mizu.insights.safe_read', side_effect=Denied('unsafe read')), \
-                patch('mizu.insights.safe_read_managed',
-                      side_effect=Denied('unsafe managed read')):
-            with self.assertRaises(Denied):
-                self.pending()
 
     def test_event_dispatch_replay_explicit_receipt_and_unchanged_policy(self):
         role = self.config.roles['reviewer']
@@ -603,67 +598,3 @@ class PendingInsightLockTests(Fixture):
                     self.assertFalse(future.done())
             self.assertEqual(future.result(timeout=10), expected)
 
-    def test_pending_read_falls_back_when_unlocked_generation_is_replaced(self):
-        from mizu import insights as insights_module
-        self.submit('Replacement')
-        original = insights_module.safe_read_managed
-        replaced = [False]
-
-        def replace_once(*args, **kwargs):
-            if not replaced[0]:
-                replaced[0] = True
-                raise Denied("File changed while reading")
-            return original(*args, **kwargs)
-
-        with patch("mizu.insights.safe_read_managed", side_effect=replace_once):
-            events, diagnostics = self.pending()
-        self.assertTrue(replaced[0])
-        self.assertEqual([event["title"] for event in events], ["Replacement"])
-        self.assertEqual(diagnostics, [])
-
-    def test_pending_read_scan_does_not_block_same_project_submit(self):
-        self.submit('Before')
-        entered, release = threading.Event(), threading.Event()
-        envelopes = self.project.insights._pending_insight_envelopes_locked
-
-        def paused_read(*args, **kwargs):
-            entered.set()
-            self.assertTrue(release.wait(10), 'pending read release timed out')
-            return envelopes(*args, **kwargs)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            with patch.object(self.project.insights, '_pending_insight_envelopes_locked', paused_read):
-                reader = pool.submit(self.pending)
-                try:
-                    self.assertTrue(entered.wait(10))
-                    # The full scan runs without the project lock, so a writer
-                    # can commit while it is paused; the reader then falls back
-                    # to the exact locked scan and includes the new row.
-                    submitted = pool.submit(self.submit, 'After').result(timeout=10)
-                finally:
-                    release.set()
-            result = reader.result(timeout=10)
-        self.assertEqual(submitted['title'], 'After')
-        self.assertEqual({event['title'] for event in result[0]}, {'Before', 'After'})
-
-    def test_pending_read_rechecks_receipts_when_source_changes(self):
-        self.submit('Only')
-        event = self.pending()[0][0]
-        entered, release = threading.Event(), threading.Event()
-        envelopes = self.project.insights._pending_insight_envelopes_locked
-
-        def paused_read(*args, **kwargs):
-            entered.set()
-            self.assertTrue(release.wait(10), 'pending read release timed out')
-            return envelopes(*args, **kwargs)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            with patch.object(self.project.insights, '_pending_insight_envelopes_locked', paused_read):
-                reader = pool.submit(self.pending)
-                try:
-                    self.assertTrue(entered.wait(10))
-                    self.project.insights.acknowledge_decisions('reviewer', [event])
-                finally:
-                    release.set()
-            result = reader.result(timeout=10)
-        self.assertEqual(result[0], [])

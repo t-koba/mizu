@@ -164,13 +164,15 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
     listing.add_argument("--branch", default=None, help="Filter by exact branch name")
     listing.add_argument("--published-sha", default=None, help="Filter by exact published SHA (40 or 64 hex)")
-    p = sub.add_parser("work-items", help="Show bounded open and recently closed work items; read-only unless --backfill is given")
+    p = sub.add_parser("work-items", help="Show bounded open and recently closed work items; read-only unless --audit is given")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--limit", type=int, default=25, help="Open items per page (1-100; default: 25)")
     p.add_argument("--cursor", default=None, help="Opaque open-page continuation from a previous call")
     p.add_argument("--closed", type=int, default=10, help="Closed items to include, newest first (0-100; default: 10)")
-    p.add_argument("--backfill", type=int, default=None, metavar="N",
-                   help="Under the record lock, build up to N missing current-state sidecars (1-100) before showing the page")
+    p.add_argument("--audit", action="store_true",
+                   help="Under the record lock, replay every work-item history with full validation and compare it with the current-state index")
+    p.add_argument("--repair", action="store_true",
+                   help="With --audit, rebuild the current-state index from the history when they diverge")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -551,8 +553,7 @@ def _cmd_work_items(config, project, args):
     ``event_acknowledgements`` (not limited to summary ID samples). The project must already be
     opened read-only by the caller.
     """
-    from .work_item_read_view import readonly_view
-    store = readonly_view(project.work_items, limits=config.limits)
+    store = project.work_items
     from .work_item_events import closed_page, progress
     roles = {name: config.roles[name] for name in project.roles}
     event_delivery = progress(store, roles)
@@ -724,16 +725,11 @@ def _execute(config, args):
         return _cmd_editor_export(config, project, args)
     if args.command == "work-items":
         from .project import Project as _ReadOnlyProject
-        backfill = None
-        if args.backfill is None:
-            project = _ReadOnlyProject(config, args.project, read_only=True)
-        else:
-            project = _ReadOnlyProject(config, args.project)
-            backfill = project.work_items.backfill_current_states(limit=args.backfill)
-        result = _cmd_work_items(config, project, args)
-        if backfill is not None:
-            result["backfill"] = backfill
-        return result
+        if args.repair and not args.audit:
+            raise ConfigError("--repair requires --audit")
+        if args.audit:
+            return _ReadOnlyProject(config, args.project).work_items.audit(repair=args.repair)
+        return _cmd_work_items(config, _ReadOnlyProject(config, args.project, read_only=True), args)
     if args.command == "publication":
         from .project import Project
         if args.publication_command == "list":
