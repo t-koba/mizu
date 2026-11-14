@@ -17,6 +17,7 @@ from mizu.protocol import tool_definitions
 from mizu.project import Project
 from mizu.publication import Publication
 from mizu.distribution import public_source_identity
+from mizu import vcs
 from mizu.runtime import Context, Engine
 
 SHA = "a" * 40
@@ -62,9 +63,12 @@ class CiRequestTests(Fixture):
         return Context(config, self.project, role, run, self.project.snapshots.get(),
                        self.project.workspace)
 
-    def request(self, ctx, workflows=("ci",)):
-        return ctx.handle("vcs_request", {"publication_id": self.receipt["publication_id"],
-                                           "workflows": list(workflows)})
+    def request(self, ctx, workflows=("ci",), attempt=None):
+        args = {"publication_id": self.receipt["publication_id"],
+                "workflows": list(workflows)}
+        if attempt is not None:
+            args["attempt"] = attempt
+        return ctx.handle("vcs_request", args)
 
     def test_request_runs_at_the_published_commit_and_records_it(self):
         ctx = self.context(runs())
@@ -77,6 +81,92 @@ class CiRequestTests(Fixture):
         stored = CiRequests(self.project.root).outcome(identity)
         self.assertEqual(stored["runs"][0]["head_sha"], SHA)
         self.assertIsNotNone(CiRequests(self.project.root).dispatched(identity))
+
+    def test_adapter_request_and_no_dispatch_echo_bind_the_explicit_attempt(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)
+        payload = {"outcome": "not_dispatched", "request_id": identity, "attempt": 2,
+                   "reason_code": "provider_rejected"}
+        with patch("mizu.vcs.invoke", return_value=payload) as invoke:
+            result = vcs.request_runs_via({"request_grant": True}, SHA, ["ci"],
+                                          request_id=identity, attempt=2)
+        self.assertEqual(result["request_id"], identity)
+        self.assertEqual(result["attempt"], 2)
+        request = invoke.call_args.args[1]
+        self.assertEqual((request["request_id"], request["attempt"]), (identity, 2))
+        for bad in ({**payload, "request_id": "0" * 64},
+                    {**payload, "attempt": 1},
+                    {**payload, "reason_code": ["provider_rejected"]},
+                    {**payload, "runs": []}):
+            with self.subTest(response=bad), patch("mizu.vcs.invoke", return_value=bad):
+                with self.assertRaises(Denied):
+                    vcs.request_runs_via({"request_grant": True}, SHA, ["ci"],
+                                         request_id=identity, attempt=2)
+
+    def test_terminal_no_dispatch_is_durable_and_replays_without_a_provider_call(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        payload = {"outcome": "not_dispatched", "request_id": identity, "attempt": 1,
+                   "reason_code": "pre_dispatch_refusal"}
+        ctx = self.context(payload)
+        first = self.request(ctx)
+        self.assertEqual(first["outcome"], "not_dispatched")
+        self.assertEqual(first["reason_code"], "pre_dispatch_refusal")
+        self.assertEqual(first["runs"], [])
+        stored = CiRequests(self.project.root).outcome(identity)
+        self.assertEqual(stored["outcome"], "not_dispatched")
+        row = CiRequests(self.project.root).daily()["days"][0]["items"][0]
+        self.assertEqual((row["state"], row["attempt"], row["reason_code"]),
+                         ("not_dispatched", 1, "pre_dispatch_refusal"))
+        activity = ctx.ci_request_summary()["requests"][0]
+        self.assertEqual((activity["state"], activity["attempt"], activity["reason_code"]),
+                         ("not_dispatched", 1, "pre_dispatch_refusal"))
+        with patch("mizu.runtime._vcs.request_runs_via",
+                   side_effect=AssertionError("terminal replay cannot call the adapter")):
+            again = self.request(self.context(runs()))
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again["request_id"], identity)
+
+    def test_malformed_no_dispatch_echo_stays_unresolved_and_blocks_later_attempts(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        bad = {"outcome": "not_dispatched", "request_id": "0" * 64, "attempt": 1,
+               "reason_code": "provider_rejected"}
+        with self.assertRaises(Denied):
+            self.request(self.context(bad))
+        self.assertEqual(CiRequests(self.project.root).daily()["days"][0]["items"][0]["state"],
+                         "unresolved")
+        with self.assertRaises(Denied):
+            self.request(self.context(runs()), attempt=2)
+        self.assertIsNotNone(CiRequests(self.project.root).dispatched(identity))
+        self.assertIsNone(CiRequests(self.project.root).dispatched(
+            request_id(self.receipt["publication_id"], SHA, ["ci"], 2)))
+
+    def test_next_attempt_requires_exact_previous_no_dispatch_and_is_independently_idempotent(self):
+        with self.assertRaises(Denied):
+            self.request(self.context(runs()), attempt=2)
+        no_spend_id = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        self.assertIsNone(CiRequests(self.project.root).dispatched(no_spend_id))
+        self.request(self.context({"outcome": "not_dispatched", "request_id": no_spend_id,
+                                  "attempt": 1, "reason_code": "provider_rejected"}))
+        second_id = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)
+        second = self.request(self.context(runs()), attempt=2)
+        self.assertEqual(second["request_id"], second_id)
+        self.assertEqual(second["attempt"], 2)
+        rows = [row for day in CiRequests(self.project.root).daily()["days"]
+                for row in day["items"]]
+        self.assertEqual({(row["attempt"], row["state"]) for row in rows},
+                         {(1, "not_dispatched"), (2, "resolved")})
+        self.assertTrue(self.request(self.context(runs()), attempt=2)["replayed"])
+        with self.assertRaises(Denied):
+            self.request(self.context(runs()), attempt=3)
+
+    def test_no_dispatch_leaves_covered_items_unchanged(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        item = self.covered_item()
+        ctx = self.context({"outcome": "not_dispatched", "request_id": identity,
+                            "attempt": 1, "reason_code": "pre_dispatch_refusal"},
+                           poll_enabled=True)
+        out = self.request_covered(ctx, [item])
+        self.assertEqual(out["coverage"]["not_applied"], [item["id"]])
+        self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
 
     def test_a_run_at_another_commit_is_refused_and_never_recorded(self):
         ctx = self.context(runs(head_sha=OTHER_SHA))
@@ -476,7 +566,7 @@ class CiRequestTests(Fixture):
         path.write_text("{\"request_id\": \"other\"}", encoding="utf-8")
         # A readable outcome that names another request is never returned
         # unvalidated, and it is not a reason to hide the request: the
-        # dispatch marker proves the provider was asked, so a CI run may
+        # dispatch marker shows the adapter attempt began, so a CI run may
         # have been spent and the request is listed as unresolved.
         listing = CiRequests(self.project.root).daily()
         self.assertEqual(listing["total"], 1)
@@ -565,8 +655,8 @@ class CiRequestTests(Fixture):
         # The invalid outcome is never returned unvalidated.
         with self.assertRaises(Denied):
             store.outcome(identity)
-        # The dispatch marker still proves the request reached the provider,
-        # so it is listed as unresolved rather than hidden.
+        # The dispatch marker still proves an adapter attempt began and may
+        # have spent a run, so it is listed as unresolved rather than hidden.
         listing = store.daily()
         self.assertEqual(listing["total"], 1)
         item = listing["days"][0]["items"][0]
@@ -589,8 +679,8 @@ class CiRequestTests(Fixture):
         # The oversized outcome is never returned unvalidated.
         with self.assertRaises(LimitExceeded):
             store.outcome(identity)
-        # The dispatch marker still proves the request reached the provider,
-        # so it is listed as unresolved rather than hidden.
+        # The dispatch marker still proves an adapter attempt began and may
+        # have spent a run, so it is listed as unresolved rather than hidden.
         listing = store.daily()
         self.assertEqual(listing["total"], 1)
         item = listing["days"][0]["items"][0]

@@ -132,6 +132,17 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(unresolved["matched_rows"], 0)
         self.assertEqual(unresolved["unmatched_rows"], 3)
 
+    def test_not_dispatched_attempt_never_reads_status_or_implies_cost(self):
+        read = Mock(side_effect=AssertionError("no CI run means no status attribution"))
+        row = request(runs=[], state="not_dispatched", attempt=1,
+                      reason_code="pre_dispatch_refusal")
+        out = observed_costs(page(row), read)
+        read.assert_not_called()
+        report = out["days"][0]["requests"][0]
+        self.assertEqual(report["status"], "not_dispatched")
+        self.assertEqual(report["unobserved_workflow_run_ids"], [])
+        self.assertIsNone(out["observed_wall_seconds"])
+
     def test_absent_coverage_is_null_not_zero(self):
         for observation in (status(), status({"check": "legacy", "state": "success", "sha": SHA})):
             out = observed_costs(page(request()), lambda _: observation)

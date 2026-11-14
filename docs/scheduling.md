@@ -705,28 +705,26 @@ The recorded requests are visible per day. `vcs_read` with the `ci_requests` op
 lists the project's recorded CI requests from local durable evidence, grouped
 by UTC day: each day row counts the requests made on that day and names the
 work items they covered, next to the request's own identity, workflows and
-provider run identities. A request is dated by its dispatch: the day it was
-made is the day the provider was asked, and a later answer never moves it, so
-the day comes from the dispatch marker whether the request is resolved or
-not. A request whose outcome is unknown is listed too,
-marked `unresolved`: the dispatch marker proves the request reached the
-provider, so a CI run may have been spent, and the request is never retried
-blindly. An outcome record that cannot be read is such an unknown outcome:
-it is never returned unvalidated, and it never hides the request, which stays
-listed as `unresolved` with no provider run. The listing is a bounded page
-(`total`, `truncated`
-and `scan_stopped`, as the publication listing is), an unreadable or invalid
-record is skipped rather than returned unvalidated, a dispatch whose marker
-cannot be validated is not listed at all, and no provider is contacted.
+provider run identities. An attempt is dated by its dispatch marker: the day the adapter was called,
+and a later answer never moves it, whether or not the provider created a run. Each row also names its explicit attempt number. An unknown outcome is
+listed as `unresolved`: the marker shows the adapter attempt began, and a run
+may have been spent, so that attempt is never retried blindly. A typed, exact-attempt `not_dispatched` result records that
+no run was created; only then may a caller explicitly increment the attempt.
+An unreadable outcome remains `unresolved` with no provider run. The listing is
+a bounded page (`total`, `truncated` and `scan_stopped`, as the publication
+listing is); unreadable or invalid records are not returned unvalidated, a
+dispatch whose marker cannot be validated is not listed at all, and no
+provider is contacted.
 
 Runner wall time is separate from this local count view. `vcs_read` with
 `ci_costs` derives an explicitly partial observed subtotal for a page of
 1–8 validated dispatches (`limit`, default 8; `offset` 0–999, default 0).
 It reuses one exact publication-bound status observation per receipt within
 the page and retains its evidence reference. Typed workflow-run/job/attempt/
-repository identity is required for attribution; legacy identityless checks,
-unresolved dispatches, missing/unavailable status, missing durations and
-running checks remain visible, never converted into zero time. Checks are
+repository identity is required for attribution; terminal `not_dispatched`
+attempts trigger no status read and contribute no run timing. Legacy identityless
+checks, unresolved dispatches, missing/unavailable status, missing durations
+and running checks remain visible, never converted into zero time. Checks are
 attributed to the UTC dispatch day even across midnight. Identical execution
 tuples are deduplicated within the page; attempts remain distinct, conflicts
 are excluded. Page/scan truncation is visible. Pagination is positional and
@@ -740,11 +738,12 @@ exact schema, bounds, repository attestation and failure behavior. Existing
 A run's own record names the CI requests that run made. The run record
 carries `ci_requests`: the entries for the requests, each with the request
 identity, the UTC day it was made, its workflows, the work items it covered
-and whether it is `resolved` or still `unresolved`, plus the total number of
-requests the run made. A request is named from the moment it is dispatched,
-because a CI run may have been spent from there on, and a later failure
-cannot drop it. The day it was made is the day it was dispatched, and the
-answer that arrives later does not move it. The list holds at
+and whether it is `resolved`, `not_dispatched` or `unresolved`, plus the
+attempt number and a bounded reason code for no-spend attempts. An attempt is
+named before the adapter call, because a CI run may have been spent from there
+on; a terminal no-spend response later changes its state without erasing the
+attempt. The day it was made is the day it was dispatched, and the answer that
+arrives later does not move it. The list holds at
 most 16 entries and the total is reported beside it, so a truncated list is
 visible rather than silent. A replay of an already recorded request made no
 new run, so it adds nothing to the list.
@@ -756,13 +755,15 @@ validated before the provider is called, so an unknown item, a stale
 revision, or an item that cannot take the wait never spends a run, and the
 request's durable record keeps the covered set, so the request's wall time is
 attributable to what it covered.
-After the request is recorded, the product registers the same receipt-pinned
-CI wait on each covered item: the item becomes `blocked` with that wait, and
-its holder keeps the completion decision, green or red. A replay never spends
-a second run: it returns the recorded outcome whatever became of the covered
-items, completes a coverage whose registration was interrupted, and reports
-the items it could not register, so a holder that resumed an item keeps that
-decision. A replay reports the requested items the recorded request does not
+After successful dispatch is recorded, the product registers the same
+receipt-pinned CI wait on each covered item: the item becomes `blocked` with
+that wait, and its holder keeps the completion decision, green or red. A
+`not_dispatched` attempt registers no waits and leaves the covered items
+unchanged; its response marks all requested coverage `not_applied`. A replay never spends
+a second run: successful outcomes return the recorded result and can complete
+a coverage whose registration was interrupted. A no-spend outcome remains a
+terminal no-run record; only an explicit next attempt after it can call the
+adapter again. Coverage never applies to no-spend outcomes. A replay reports the requested items the recorded request does not
 cover as not applied, and the recorded request's coverage governs the rest:
 the comparison is by item identity, so the same items in another order are
 the same coverage. Covering work items needs the

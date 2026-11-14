@@ -3,16 +3,14 @@
 A CI request asks the provider for one run per workflow at an exact
 published commit. The record is create-only: a dispatch marker is written
 before the provider is called and the outcome follows it. A timed-out
-dispatch remains unresolved and is never retried blindly. The adapter
-request carries only the SHA and workflow set; returned run IDs are stored
-under the durable request locally but are not provider-attested as its outcome.
+dispatch remains unresolved and is never retried blindly. The adapter receives
+the SHA, workflow set, durable request ID and explicit attempt; returned run IDs
+are stored under that request locally but are not provider-attested as its outcome.
 An exact-SHA status row may prove a check result but cannot resolve
-the marker, and an empty status observation does not prove that dispatch
-never occurred or that no late run can appear. Future reconciliation requires
-a provider-independent adapter contract binding run identity to the exact
-request and authoritative terminal no-dispatch evidence after a documented
-bounded condition that rules out late creation. Until an adapter can provide
-those guarantees, unresolved dispatches remain unresolved.
+the marker. A typed adapter result may close an attempt as ``not_dispatched``
+only when it attests that no run was created; only that terminal outcome
+permits an explicitly numbered later attempt. Missing, malformed, timed-out
+or otherwise uncertain outcomes remain unresolved and block retries.
 
 Records live in the project's evidence tree, outside the workspace.
 """
@@ -26,7 +24,7 @@ from pathlib import Path
 from .config import CiRequestEvidence
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
-from .vcs import validate_ci_request, validate_ci_runs
+from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 
 #: Bounded record size (8 KiB), like the other evidence records.
 RECORD_BYTES = 8192
@@ -34,16 +32,18 @@ REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
 DISPATCH_FILE = re.compile(r"([0-9a-f]{64})\.dispatch\.json\Z")
 
 
-def request_id(publication_id: str, sha: str, workflows: list[str]) -> str:
-    """The stable identity of one request: the receipt, the commit, the workflows.
+def request_id(publication_id: str, sha: str, workflows: list[str], attempt: int = 1) -> str:
+    """Identify one idempotent attempt for a receipt/SHA/workflow set.
 
-    The same request always names the same record, so a retry replays the
-    stored outcome instead of spending a second run. The workflows are sorted:
-    the same set of workflows in another order is the same request, not a
-    second run.
+    Attempt one preserves the original identity. Later attempts have distinct
+    immutable records; the runtime permits them only after the preceding
+    no-spend outcome. Workflow order does not change either identity.
     """
-    return digest(canonical({"publication_id": publication_id, "sha": sha,
+    if type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT:
+        raise Denied("Invalid CI request attempt")
+    base = digest(canonical({"publication_id": publication_id, "sha": sha,
                              "workflows": sorted(workflows)}))
+    return base if attempt == 1 else digest(canonical({"request_id": base, "attempt": attempt}))
 
 
 class CiRequests:
@@ -82,7 +82,7 @@ class CiRequests:
         return record
 
     def dispatched(self, identity: str) -> dict | None:
-        """The dispatch marker of a request, when it was sent to the provider."""
+        """The marker written before the adapter call, if an attempt began."""
         return self._read(identity, "dispatch")
 
     def mark_dispatch(self, identity: str, record: dict) -> None:
@@ -90,7 +90,7 @@ class CiRequests:
         self._write(identity, "dispatch", record)
 
     def record_outcome(self, identity: str, record: dict) -> None:
-        """Write the outcome of a dispatched request."""
+        """Write the terminal adapter outcome for a marked attempt."""
         self._write(identity, "request", record)
 
     def _write(self, identity: str, kind: str, record: dict) -> None:
@@ -107,15 +107,16 @@ class CiRequests:
         requests made on that UTC day and names the work items they covered,
         so the CI a unit spent is visible per day next to the requests
         themselves. A request is dated by its dispatch: the day it was made
-        is the day the provider was asked, and a later answer never moves it,
-        so the day comes from the dispatch marker in both states. Each item
+        is the day the adapter call began, and a later answer never moves it,
+        so the day comes from the marker in every state. Each item
         names the request, its workflows, the provider runs it produced and
-        whether the request is ``resolved`` or still ``unresolved``: a
-        dispatch whose outcome is unknown may have spent a CI run, so it is
-        listed rather than hidden, and an outcome that cannot be read is
-        such an unknown outcome, not a reason to hide the request. The rows
+        whether the request is ``resolved``, ``not_dispatched`` or
+        ``unresolved``: an unknown outcome may have spent a CI run, so it is
+        listed rather than hidden, while only the terminal no-spend outcome
+        permits a later explicit attempt. An unreadable result remains
+        unresolved, not a reason to hide the request. The rows
         are chronological and the page holds at most ``limit`` requests.
-        Bounds: at most 100 requests per page; policy bounds post-listing
+        Bounds: at most 100 attempts per page; policy bounds post-listing
         name processing and candidate-record validation (defaults 10000/1000).
         os.listdir still materializes and sorts all names before these bounds.
         Trust: locally recorded evidence; an unreadable, oversized or
@@ -141,12 +142,12 @@ class CiRequests:
             day["covered_items"] += len(row["covered"])
             day["items"].append({key: row[key] for key in
                                  ("request_id", "publication_id", "sha", "workflows",
-                                  "runs", "covered", "state")})
+                                  "runs", "covered", "state", "attempt", "reason_code")})
         return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
                 "scan_stopped": scan_stopped}
 
     def page(self, *, limit: int = 8, offset: int = 0) -> dict:
-        """Read at most eight validated dispatches for the derived cost view.
+        """Read at most eight validated attempts for the derived cost view.
 
         Same scan, validation and chronological order as daily(); pagination
         is positional, not a snapshot cursor. No provider calls or writes.
@@ -187,7 +188,8 @@ class CiRequests:
                 # An unreadable, oversized or invalid outcome is never listed
                 # unvalidated, and it never denies the records beside it. It
                 # is also no reason to hide the request: the dispatch marker
-                # below still proves it reached the provider.
+                # below still proves an adapter attempt began and may have
+                # reached the provider.
                 record = None
             try:
                 marker = self._read(identity, "dispatch")
@@ -200,17 +202,17 @@ class CiRequests:
                 # request by, so the request is not listed at all.
                 continue
             if record is None:
-                # No usable outcome: the request was dispatched and its result
-                # is unknown, so it may have spent a CI run. The dispatch
-                # marker is the evidence that names it.
+                # No usable outcome: the adapter attempt began and its result
+                # is unknown, so it may have spent a CI run. The marker names
+                # the attempt but does not prove provider contact.
                 rows.append(marker_row)
                 continue
             row = _validated_outcome(record, identity, marker, marker_row)
             if row is None:
                 # A readable outcome that cannot be validated is an unknown
                 # outcome, not an absent request: the dispatch marker already
-                # in hand proves the provider was asked, so the request is
-                # listed as unresolved rather than hidden.
+                # in hand proves the adapter attempt began and may have spent
+                # a run, so it is listed as unresolved rather than hidden.
                 rows.append(marker_row)
                 continue
             rows.append(row)
@@ -223,28 +225,37 @@ def _validated_outcome(record: dict, identity: str, marker: dict,
     """Validate an outcome once against the identity and its dispatch marker."""
     if marker_row is None:
         marker_row = _unresolved_summary(marker, identity)
-    if (marker_row is None
-            or record.get("covered", []) != marker.get("covered", [])):
+    if (marker_row is None or record.get("covered", []) != marker.get("covered", [])
+            or record.get("attempt", 1) != marker_row["attempt"]):
         return None
     return _summary(record, identity, marker_row)
 
 
 def _summary(record: dict, identity: str, marker: dict) -> dict | None:
-    """One request record with its dispatch marker, as a day row.
-
-    The day is the day the request was made: the dispatch marker's instant,
-    the moment the provider was asked and a CI run may have been spent. The
-    outcome record carries the completion instant, which dates nothing, so
-    the marker dates the row while the outcome record supplies the provider
-    runs and the state. ``marker`` is the validated marker row.
-    """
-    fields = {"request_id", "publication_id", "sha", "workflows", "runs", "requested_at"}
-    if not fields <= set(record) or set(record) - (fields | {"covered"}):
+    """Validate a dispatched-run or terminal no-spend outcome."""
+    common = {"request_id", "publication_id", "sha", "workflows", "requested_at"}
+    outcome = record.get("outcome")
+    not_dispatched = outcome == "not_dispatched"
+    fields = common | {"attempt", "covered", "outcome"}
+    if not_dispatched:
+        fields |= {"reason_code", "runs"}
+        if (record.get("reason_code") not in ("pre_dispatch_refusal", "provider_rejected")
+                or record.get("runs") != []):
+            return None
+        runs = []
+    else:
+        fields |= {"runs"}
+        if outcome not in (None, "dispatched"):
+            return None
+        try:
+            runs = validate_ci_runs(record.get("runs"), marker["sha"], marker["workflows"])
+        except Denied:
+            return None
+    if (not common <= set(record) or set(record) - fields
+            or record["request_id"] != identity
+            or type(record.get("attempt", 1)) is not int
+            or record.get("attempt", 1) != marker.get("attempt", 1)):
         return None
-    if record["request_id"] != identity:
-        return None
-    # The completion instant is still validated, so a record that cannot be
-    # trusted is not listed. It does not date the row: the marker does.
     requested = record["requested_at"]
     if not isinstance(requested, str) or len(requested) > 64:
         return None
@@ -260,10 +271,9 @@ def _summary(record: dict, identity: str, marker: dict) -> dict | None:
         return None
     try:
         validate_ci_request(record["sha"], workflows)
-        if sorted(workflows) != sorted(marker["workflows"]):
-            return None
-        runs = validate_ci_runs(record["runs"], marker["sha"], marker["workflows"])
     except Denied:
+        return None
+    if sorted(workflows) != sorted(marker["workflows"]):
         return None
     covered = record.get("covered", [])
     if not isinstance(covered, list) or len(covered) > 16:
@@ -277,22 +287,23 @@ def _summary(record: dict, identity: str, marker: dict) -> dict | None:
                 or type(entry.get("rev")) is not int or entry["rev"] < 1):
             return None
         items.append({"id": entry["id"], "rev": entry["rev"]})
-    return {"date": marker["date"],
-            "request_id": identity, "publication_id": record["publication_id"],
-            "sha": record["sha"], "workflows": list(workflows), "runs": runs,
-            "covered": items, "state": "resolved"}
+    return {"date": marker["date"], "request_id": identity,
+            "publication_id": record["publication_id"], "sha": record["sha"],
+            "workflows": list(workflows), "runs": runs, "covered": items,
+            "attempt": marker.get("attempt", 1),
+            "state": "not_dispatched" if not_dispatched else "resolved",
+            "reason_code": record.get("reason_code")}
 
 
 def _unresolved_summary(record: dict, identity: str) -> dict | None:
-    """One dispatch marker without an outcome, as a day row, or None.
-
-    The dispatch marker proves the request reached the provider; its result
-    is unknown, so the row names no provider run and says so.
-    """
+    """One dispatch marker without an outcome, as a day row, or None."""
     fields = {"request_id", "publication_id", "sha", "workflows", "dispatched_at"}
-    if not fields <= set(record) or set(record) - (fields | {"covered"}):
+    if not fields <= set(record) or set(record) - (fields | {"covered", "attempt"}):
         return None
     if record["request_id"] != identity:
+        return None
+    attempt = record.get("attempt", 1)
+    if type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT:
         return None
     dispatched = record["dispatched_at"]
     if not isinstance(dispatched, str) or len(dispatched) > 64:
@@ -309,9 +320,10 @@ def _unresolved_summary(record: dict, identity: str) -> dict | None:
     workflows = record["workflows"]
     try:
         validate_ci_request(record["sha"], workflows)
+        expected = request_id(record["publication_id"], record["sha"], workflows, attempt)
     except Denied:
         return None
-    if request_id(record["publication_id"], record["sha"], workflows) != identity:
+    if expected != identity:
         return None
     covered = record.get("covered", [])
     if not isinstance(covered, list) or len(covered) > 16:
@@ -328,4 +340,5 @@ def _unresolved_summary(record: dict, identity: str) -> dict | None:
     return {"date": moment.astimezone(dt.timezone.utc).date().isoformat(),
             "request_id": identity, "publication_id": record["publication_id"],
             "sha": record["sha"], "workflows": list(workflows), "runs": [],
-            "covered": items, "state": "unresolved"}
+            "covered": items, "attempt": attempt, "state": "unresolved",
+            "reason_code": None}

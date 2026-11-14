@@ -774,9 +774,11 @@ class Context:
     def activity_summary(self) -> dict:
         return _run_activity.activity_summary(self)
 
-    def record_ci_request(self, request_id, date, workflows, covered, *, state="unresolved"):
+    def record_ci_request(self, request_id, date, workflows, covered, *, state="unresolved",
+                          attempt=1, reason_code=None):
         return _run_activity.record_ci_request(
-            self, request_id, date, workflows, covered, state=state)
+            self, request_id, date, workflows, covered, state=state,
+            attempt=attempt, reason_code=reason_code)
 
     def ci_request_summary(self) -> dict:
         return _run_activity.ci_request_summary(self)
@@ -1620,31 +1622,33 @@ class Context:
         # One request per set of workflows: a reordered retry is the same
         # request and replays its recorded outcome.
         workflows = sorted(str(name) for name in args["workflows"])
+        attempt = args.get("attempt", 1)
         requests = CiRequests(self.project.root)
-        identity = ci_request_id(receipt["publication_id"], sha, workflows)
+        identity = ci_request_id(receipt["publication_id"], sha, workflows, attempt)
         # A request may cover work items: each covered item waits for the
         # request's result through a receipt-pinned CI wait, and its holder
         # keeps the completion decision.
         covered = self._covered_waits(args.get("covered"), receipt)
         recorded = requests.outcome(identity)
         if recorded is not None:
-            # A recorded request replays: the durable outcome is returned
-            # whatever became of the covered items, because the run is spent.
-            # The recorded coverage governs; a different set is reported.
-            coverage = self._coverage_state(self._recorded_coverage(recorded), identity,
-                                            register=True)
-            # The recorded coverage governs, so only the requested items it
-            # does not name are reported as not applied. The comparison is by
-            # item identity: the same items in another order are the same
-            # coverage, and an item the recorded request covers is never
-            # reported as uncovered.
-            recorded_ids = {entry["id"] for entry in recorded.get("covered", [])}
-            coverage["not_applied"] = [entry["id"] for entry in covered
-                                       if entry["id"] not in recorded_ids]
+            if recorded.get("outcome") == "not_dispatched":
+                coverage = {"registered": [], "waiting": [], "moved": [], "refused": [],
+                            "not_applied": [entry["id"] for entry in covered]}
+            else:
+                coverage = self._coverage_state(self._recorded_coverage(recorded), identity,
+                                                register=True)
+                recorded_ids = {entry["id"] for entry in recorded.get("covered", [])}
+                coverage["not_applied"] = [entry["id"] for entry in covered
+                                           if entry["id"] not in recorded_ids]
             return {**recorded, "replayed": True, "coverage": coverage}
         if requests.dispatched(identity) is not None:
             raise Denied("An earlier CI request for this publication is unresolved; "
                          "re-observe the CI status before requesting again")
+        if attempt > 1:
+            previous_id = ci_request_id(receipt["publication_id"], sha, workflows, attempt - 1)
+            previous = requests.outcome(previous_id)
+            if previous is None or previous.get("outcome") != "not_dispatched":
+                raise Denied("A new CI attempt requires the preceding attempt's terminal no-dispatch outcome")
         # The covered items are checked before the provider is called, so a
         # coverage that cannot take the wait never spends a run.
         self._coverage_state(covered, identity, register=False)
@@ -1660,30 +1664,32 @@ class Context:
             requests.mark_dispatch(identity, {
                 "request_id": identity, "publication_id": receipt["publication_id"],
                 "sha": sha, "workflows": workflows, "dispatched_at": dispatched_at,
-                "covered": covered_records})
+                "attempt": attempt, "covered": covered_records})
             self.record_ci_request(identity, dispatched_at[:10], workflows,
-                                   covered_ids, state="unresolved")
+                                   covered_ids, state="unresolved", attempt=attempt)
 
-        runs = _vcs.request_runs_via(self.config.vcs, sha, workflows,
-                                     cancel=self.tools_cancelled, before_invoke=before_invoke)
+        response = _vcs.request_runs_via(
+            self.config.vcs, sha, workflows, request_id=identity, attempt=attempt,
+            cancel=self.tools_cancelled, before_invoke=before_invoke)
+        not_dispatched = isinstance(response, dict)
         record = {"request_id": identity, "publication_id": receipt["publication_id"],
-                  "sha": sha, "workflows": workflows, "runs": runs, "requested_at": now(),
-                  "covered": covered_records}
+                  "sha": sha, "workflows": workflows, "runs": [] if not_dispatched else response,
+                  "requested_at": now(), "attempt": attempt, "covered": covered_records,
+                  **({"outcome": "not_dispatched", "reason_code": response["reason_code"]}
+                     if not_dispatched else {})}
         requests.record_outcome(identity, record)
-        # The outcome is durable, so the request is resolved. The run's own
-        # record names the requests it made, so the CI a unit spent is visible
-        # per unit and not only in the project-level listing. This happens
-        # before the waits are registered: the run was spent, so the evidence
-        # of the request must survive a failure there. The day is the day the
-        # request was made, not the day the answer arrived: the provider was
-        # asked at the dispatch, and that is the moment a CI run may have
-        # been spent.
-        self.record_ci_request(identity, dispatched_at[:10], workflows,
-                               covered_ids, state="resolved")
+        state = "not_dispatched" if not_dispatched else "resolved"
+        self.record_ci_request(identity, dispatched_at[:10], workflows, covered_ids,
+                               state=state, attempt=attempt,
+                               reason_code=record.get("reason_code"))
         evidence_id, evidence = self._new_invocation_evidence("vcs-request")
         write_json(self.run_dir / evidence,
                    {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
-        coverage = self._coverage_state(covered, identity, register=True)
+        if not_dispatched:
+            coverage = {"registered": [], "waiting": [], "moved": [], "refused": [],
+                        "not_applied": covered_ids}
+        else:
+            coverage = self._coverage_state(covered, identity, register=True)
         return {**record, "replayed": False, "coverage": coverage}
 
     def _covered_waits(self, raw, receipt):
@@ -4466,6 +4472,7 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
                     requests = CiRequests(project.root, project.config.ci_requests).daily()
                 if any(request["publication_id"] == wait["publication_id"]
                        and request["sha"] == wait["sha"]
+                       and request["state"] != "not_dispatched"
                        for day in requests["days"] for request in day["items"]):
                     external = True
                     if (include_structured_wait and page_complete and held_wait_kind is None

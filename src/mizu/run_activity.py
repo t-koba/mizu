@@ -79,12 +79,13 @@ def activity_summary(context) -> dict:
                 "reaped_model_requests": context._activity_reaped_requests}
 
 
-def record_ci_request(context, request_id, date, workflows, covered, *, state="unresolved"):
-    """Record or update one bounded per-run CI request entry."""
+def record_ci_request(context, request_id, date, workflows, covered, *, state="unresolved",
+                      attempt=1, reason_code=None):
+    """Record or update one bounded per-run CI request attempt."""
     with context.mutex:
         entry = {"request_id": request_id, "date": date,
                  "workflows": list(workflows), "covered": list(covered),
-                 "state": state}
+                 "attempt": attempt, "reason_code": reason_code, "state": state}
         for existing in context.ci_requests:
             if existing["request_id"] == request_id:
                 # Preserve the date fixed when the request was dispatched.

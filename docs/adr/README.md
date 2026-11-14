@@ -320,18 +320,18 @@ unchanged, and credentials stay out of evidence.
 ## ADR-035 — CI runs are requested at an exact published commit
 CI starts from a push, so every publication spends a run whether or not the
 work needs one, and a writer cannot ask for evidence about the exact commit it
-published. `vcs_request` asks the provider for one run per workflow at one
-exact published commit: the target is a completed publication receipt, never a
-branch head, and the product itself verifies that every returned run names
-that commit, so a provider that cannot prove the binding refuses instead of
-guessing. The request and the returned run identities are recorded durably; a
-dispatch marker is written before the provider is called, and an unresolved
-dispatch is never retried blindly, because a second request would spend a
-second run for the same commit. The role capability and the operator's
-`request_grant` are both required and both off by default, so the mechanism
-exists without any role able to trigger it until the operator grants them.
-Ref handling stays provider policy: the product never creates or deletes a
-ref to target a commit.
+published. `vcs_request` asks the provider for one run per workflow at one exact published
+commit: the target is a completed publication receipt, never a branch head,
+and the product verifies every returned run's SHA against that commit. The
+request ID binds the receipt, SHA, workflow set and explicit attempt. A
+dispatch marker is durable before the adapter is called; an unresolved attempt
+is never retried blindly. Only an exact typed `not_dispatched` result, echoed
+with the same request ID and attempt and a bounded reason code, establishes
+that no run could have been created and permits a caller to explicitly advance
+the attempt. Missing, malformed, timed-out and otherwise uncertain outcomes
+remain unresolved without age-based expiry. The role capability and
+`request_grant` are both off by default. Ref handling stays provider policy:
+the product never creates or deletes a ref to target a commit.
 
 ## ADR-036 — A drain is recorded as a drain, and a drained unit keeps its finish
 A drain that reached a running `pi` unit was recorded as if the unit had run out
@@ -395,15 +395,18 @@ completeness. Pagination is positional, and deduplication and sums are
 page-local: pages and repeated polls must not be added as daily totals.
 Runner wall seconds never claim billing, credits, CPU time or savings. No new
 configuration, policy, CI request, private-state scrape, external adapter
-change or persistent second authority is needed.
+change or persistent second authority is needed for the cost projection; the
+CI request outcome contract is specified separately in ADR-035.
 
-The requests a unit spent are already visible per day through the local
-listing. A run's own record names the requests it made, their identity, their
-UTC dispatch day, covered work items and resolution state. A later answer
-never moves a request to another day. An unknown or unreadable outcome leaves
-the dispatched request named as unresolved rather than hiding it. These count
-views and the existing status timestamps remain independent of the derived
-numeric projection.
+The local listing shows attempts per day, including terminal no-spend and
+unresolved outcomes; only recorded runs participate in the cost projection. A
+run's own record names the requests it attempted, their identity, UTC dispatch
+day, covered work items and state. A later answer never moves an attempt to
+another day. An unknown or unreadable outcome leaves
+the attempt named as unresolved rather than hiding it; an exact terminal
+no-spend outcome remains visible but has no run timing. These count views and
+the existing status timestamps remain independent of the derived numeric
+projection.
 
 The seven-day bound on a reported job is a bound on an untrusted duration:
 the product refuses a value it cannot sanity-check, and the refusal covers

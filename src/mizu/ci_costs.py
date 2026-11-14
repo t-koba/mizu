@@ -19,6 +19,8 @@ def observed_costs(page: dict, status_read) -> dict:
     """
     statuses = {}
     for request in page["items"]:
+        if request["state"] == "not_dispatched":
+            continue
         publication = request["publication_id"]
         if publication not in statuses:
             try:
@@ -32,8 +34,10 @@ def observed_costs(page: dict, status_read) -> dict:
     executions = {}
     for request in page["items"]:
         day = days.setdefault(request["date"], {"date": request["date"], "requests": []})
-        status = statuses[request["publication_id"]]
-        report = {**request, "status_evidence": None, "status": "unavailable",
+        not_dispatched = request["state"] == "not_dispatched"
+        status = None if not_dispatched else statuses.get(request["publication_id"])
+        report = {**request, "status_evidence": None,
+                  "status": "not_dispatched" if not_dispatched else "unavailable",
                   "identityless_rows": 0, "unmatched_rows": 0, "matched_rows": 0,
                   "running_rows": 0, "missing_duration_rows": 0,
                   "state_timing_conflicts": 0,

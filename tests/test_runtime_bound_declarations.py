@@ -750,6 +750,9 @@ DECLARATIONS = {
         'MAX_CLOSE_IF_ADOPTED_CHANGED_PATHS': (
             '2000', 'mechanism', 'VCS conditional close / bounded reported changed-path count'),
         'MAX_CI_WORKFLOWS': ('8', 'mechanism', 'VCS CI request / at most eight workflows'),
+        'MAX_CI_REQUEST_ATTEMPT': (
+            '(1 << 63) - 1', 'format',
+            'VCS CI request / signed-64-bit attempt identity representation ceiling'),
         'MAX_CI_JOB_SECONDS': (
             '7 * 86400', 'safety',
             'VCS CI status / one-week sanity ceiling for reported job time'),
@@ -2373,6 +2376,15 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_requests.py', 'CiRequests.page', 2, 0): (
         '8', 'mechanism',
         'CI cost view / public partial subtotal exposes at most eight dispatches per page'),
+    ('ci_requests.py', 'request_id', 0, 0): (
+        '1', 'format',
+        'CI request attempt / attempts are positive signed-64-bit identity values'),
+    ('ci_requests.py', 'request_id', 1, 0): (
+        '1', 'format',
+        'CI request attempt / attempt one preserves the established request identity'),
+    ('ci_requests.py', '_unresolved_summary', 0, 0): (
+        '1', 'format',
+        'CI dispatch record / legacy markers default to positive attempt one'),
     ('ci_requests.py', '_summary', 1, 0): (
         '64', 'safety',
         'CI request record / cap timestamp text before ISO-8601 parsing'),

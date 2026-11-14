@@ -1853,50 +1853,48 @@ def dispose_via(settings: dict, op: str, proposal_id: str, expected_sha,
 
 #: At most eight workflows per CI request.
 MAX_CI_WORKFLOWS = 8
+#: Signed-64-bit representation bound for explicit request attempts.
+MAX_CI_REQUEST_ATTEMPT = (1 << 63) - 1
 #: A reported check cannot have run for longer than a week.
 MAX_CI_JOB_SECONDS = 7 * 86400
 
 
-def request_runs_via(settings: dict, sha: str, workflows, *, cancel=lambda: False,
-                     before_invoke=None) -> list[dict]:
-    """Ask the provider for one CI run per workflow at an exact published commit.
+def request_runs_via(settings: dict, sha: str, workflows, *, request_id: str, attempt: int = 1,
+                     cancel=lambda: False, before_invoke=None) -> list[dict] | dict:
+    """Ask for CI at an exact commit, or accept an adapter-confirmed no-spend result.
 
-    Schema: ``settings`` carries the operator grant (``request_grant``
-    true) and the adapter contract. ``sha`` is the 40/64 hex published
-    commit; ``workflows`` is a list of 1-8 distinct names. The adapter
-    request sends ``{"op": "request_runs", "sha", "workflows"}``; the
-    adapter must return ``{"runs": [{workflow, run_id, head_sha, url}]}``
-    where every ``head_sha`` equals the requested ``sha``. The product
-    verifies that binding itself and refuses a run reported at another
-    commit: a branch head is never a substitute for the exact published
-    commit, and a provider that cannot prove the binding refuses instead
-    of guessing.
-    Bounds: same contract as ``invoke``; at most eight workflows and eight
-    runs. Trust: operator-owned adapter only; results stay
-    external-untrusted. Evidence: the returned runs name workflow, run id,
-    head sha and url. Failure: ``Denied`` without the configured grant, on
-    a bad sha or workflow list, on a malformed response, or when a
-    reported run names another commit. A timed-out call after the durable
-    dispatch marker remains unresolved. This adapter request carries only
-    the SHA and workflow set; its returned run IDs are not attested as the
-    outcome of this exact durable request. A status row on a SHA may prove a
-    check result, but cannot reconcile request identity or prove that no late
-    run can appear. The marker is not retried and no
-    ``not-dispatched`` result is inferred. Future reconciliation requires a
-    provider-independent adapter contract that binds run identity to the
-    exact request and can provide authoritative terminal no-dispatch evidence
-    after a documented bounded condition that rules out late creation; an
-    adapter unable to provide those guarantees cannot reconcile. Optional
-    ``before_invoke`` has the validation/dispatch contract of ``invoke``.
+    The request carries ``sha``, the 1-8 workflow set, durable ``request_id``
+    and signed-64-bit ``attempt``. Success returns runs whose head SHA is
+    validated locally; success does not separately attest provider-side request
+    identity. A no-spend result has exactly ``outcome``, echoed ``request_id``
+    and ``attempt``, and reason code ``pre_dispatch_refusal`` or
+    ``provider_rejected``. Only the operator-owned adapter may assert no run
+    could have been created. Missing/malformed output, process failure, timeout
+    and lost calls leave the prewritten marker unresolved. Results remain
+    external-untrusted; ``before_invoke`` retains ``invoke``'s point-of-no-return
+    contract.
     """
     if not isinstance(settings, dict) or settings.get("request_grant") is not True:
         raise Denied("CI requests are not granted in VCS configuration")
     validate_ci_request(sha, workflows)
+    if (not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{64}", request_id)
+            or type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT):
+        raise Denied("Invalid CI request attempt identity")
     data = invoke(settings, {"op": "request_runs", "sha": sha,
-                             "workflows": list(workflows)},
+                             "workflows": list(workflows), "request_id": request_id,
+                             "attempt": attempt},
                   cancel=cancel, before_invoke=before_invoke)
-    if not isinstance(data, dict):
-        raise Denied("VCS adapter must return a JSON object")
+    if data.get("outcome") == "not_dispatched":
+        if (set(data) != {"outcome", "request_id", "attempt", "reason_code"}
+                or data["request_id"] != request_id or type(data["attempt"]) is not int
+                or data["attempt"] != attempt
+                or not isinstance(data["reason_code"], str)
+                or data["reason_code"] not in {"pre_dispatch_refusal", "provider_rejected"}):
+            raise Denied("Invalid CI no-dispatch response")
+        return {"outcome": "not_dispatched", "request_id": request_id,
+                "attempt": attempt, "reason_code": data["reason_code"]}
+    if "outcome" in data:
+        raise Denied("Invalid CI request outcome")
     return validate_ci_runs(data.get("runs"), sha, workflows)
 
 

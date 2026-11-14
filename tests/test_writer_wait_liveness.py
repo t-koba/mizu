@@ -542,6 +542,21 @@ class WriterCiWaitTests(CiWaitFixture):
         return self.store.create(actor="worker", idempotency_key=key,
                                  title="Independent ready work")["record"]["work_item"]
 
+    def test_terminal_no_dispatch_does_not_claim_remote_ci_wait_liveness(self):
+        self.block()
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        marker = {"request_id": identity, "publication_id": self.receipt["publication_id"],
+                  "sha": SHA, "workflows": ["ci"], "dispatched_at": now(), "attempt": 1}
+        store.mark_dispatch(identity, marker)
+        store.record_outcome(identity, {
+            "request_id": identity, "publication_id": self.receipt["publication_id"],
+            "sha": SHA, "workflows": ["ci"], "runs": [], "requested_at": now(),
+            "attempt": 1, "outcome": "not_dispatched", "reason_code": "provider_rejected"})
+        self.assertEqual(_writer_wait_sources(
+            self.project, self.config.roles["worker"], include_structured_wait=True),
+            (None, False, None))
+
     def test_live_held_ci_wait_reenters_after_backoff_and_reports_conversion(self):
         item = self.block()
         for index in range(32):
