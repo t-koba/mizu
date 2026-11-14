@@ -321,7 +321,7 @@ decisive (Linux, every behaviour); the operating system is varied with the
 suite whole, because platform-dependent branches (`IS_WINDOWS`, locks,
 replacement, process control) are reached from tests of many modules, not only
 the ones named for the platform. Platform behaviour has differed by OS, not by
-Python version, so macOS and Windows use the oldest supported Python once.
+Python version, so macOS and Windows run once, on the newest supported Python.
 
 The Windows cell runs unittest in two stable-ID parity shards to keep its wall
 time near the other cells (`--test-shard 0|1`): the low bit of the SHA-256 of
