@@ -135,7 +135,7 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
         windows = re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
                              r'            shard: "(\d)"\n', matrix)
-        self.assertEqual(windows, [('3.11', '0'), ('3.11', '1')])
+        self.assertEqual(windows, [('3.14', '0'), ('3.14', '1')])
         self.assertEqual(matrix.count('windows-latest'), 2)
         self.assertNotIn('--suite-child-timeout', core)
         # The shard flag exists only where a cell declares a shard, and the

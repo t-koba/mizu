@@ -312,7 +312,7 @@ before promotion:
 | Job | Cells | Purpose |
 |---|---|---|
 | `core` | Linux x Python 3.11-3.14 | The complete gate and suite on every supported interpreter; Linux/3.13 also runs the installer gate, rootless OCI integration and the sdist build |
-| `core` | macOS x 3.11; Windows x 3.11 as two shards | The complete gate and suite on each other OS |
+| `core` | macOS x 3.14; Windows x 3.14 as two shards | The complete gate and suite on each other OS |
 | `durable-contract` | Linux 3.13 | Pinned Pi SDKs provisioned, gate unwaived |
 | `delegation-recovery-smoke` | Linux 3.13 | Synthetic supervisor death and recovery on rootless OCI |
 
