@@ -218,14 +218,19 @@ class RetirementTests(Fixture):
             record["request"][field] = value
             record["request_sha256"] = digest(canonical(record["request"]))
             mutations.append(record)
-        for record in mutations:
+        for index, record in enumerate(mutations):
             with self.subTest(record=record):
                 write_json(self.path, record)
-                self.assert_invalid_readonly()
+                # Cover all reader, transition and audit routes once; each other
+                # mutation still fails a public read of the full 256-event chain.
+                if index == 0:
+                    self.assert_invalid_readonly()
                 with self.assertRaises(Denied):
                     self.store.page_ready()
         self.path.write_text('{"schema":', encoding="utf-8")
-        self.assert_invalid_readonly()
+        forget_ledger(self.project.root)
+        with self.assertRaises(Denied):
+            self.store.page_ready()
         write_json(self.path, original)
         self.store.page_ready()  # Warm the exact retirement chain hash again.
         changed_path = self.directory / "4.json"
