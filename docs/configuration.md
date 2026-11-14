@@ -16,10 +16,15 @@ The host-only `mizu record` CLI supports the configured `answer` and
 `operator.notice` kinds. A missing kind table is disabled; declaring a table
 without `enabled` defaults that kind to enabled. The routes are fixed to the
 exact question's authenticated source role and the notice's explicit addressee;
-retention is permanently `permanent`, and `wake` defaults to true for a declared
-kind. These are explicit product policy defaults, not model write grants. The
-complete schema, CLI lifecycle, wake behavior and acknowledgement rules are in
-[shared-record delivery](shared-records.md#operator-answers-and-notices-active-without-decision-cutover).
+the only accepted retention value is `permanent`, and `wake` defaults to true
+for a declared kind. No TTL/deletion setting is supported today. The required
+retention policy has no fixed horizon: keep data while any source, audit, wait,
+work-item history, backup or other live reference requires it, and reclaim only
+through bounded product-owned proof that every source released its references.
+Acknowledgement alone never authorizes deletion. That cleanup is not implemented,
+so all records and receipts remain retained. These are explicit product policy
+defaults, not model write grants. The complete schema, CLI lifecycle, wake
+behavior and acknowledgement rules are in [shared-record delivery](shared-records.md#operator-answers-and-notices-active-without-decision-cutover).
 
 ## Declared host records
 

@@ -348,12 +348,16 @@ retention are supported in this slice. Unknown kinds/keys/routes/retention fail
 configuration validation. An omitted kind table is disabled; only explicitly
 declared kinds are enabled. Disabling a kind stops new writes and new deliveries,
 not audit retrieval, already-frozen acknowledgements or existing receipts.
-Permanent immutable retention is the only supported policy: no TTL, automatic
-deletion, expiry or redaction. Future finite retention requires separate design
-covering audit references, receipts, backup/restore, deletion eligibility and
-dry-run reporting (operator answer `answer-c4114659257f48b790b42de30e32eecf-r1`).
-Both content and closure records, plus exact receipts, remain in the existing
-backup/restore audit members.
+Permanent retention is the only policy implemented today: there is no TTL,
+automatic deletion, expiry or redaction. The product retention policy has no
+fixed horizon: records and receipts remain while a declared source, audit,
+wait, work-item history, backup or other live reference requires them. An
+acknowledgement alone never authorizes deletion or releases another reference.
+Product-owned, bounded reclamation after every source owner proves an object
+unreferenced is required but not yet implemented; until then, all records and
+receipts remain. Unknown, corrupt, incomplete or over-budget reference evidence
+must fail closed and keep the data. Both content and closure records, plus exact
+receipts, remain in the existing backup/restore audit members.
 
 Pending enabled records with `wake = true` admit the addressed role through the
 existing event and on-change gates (`operator_record` admission). Armed daemon readiness consults
