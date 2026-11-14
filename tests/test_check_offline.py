@@ -766,7 +766,7 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
         marker = '      - name: Upload managed-import diagnostic\n'
         parts = workflow.split(marker)
         self.assertEqual(len(parts), 2, 'expected one diagnostic block, in the core job')
-        upload = parts[1].split('  durable-contract:', 1)[0]
+        upload = parts[1].split('  platform-compatibility:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines()
                           if line.strip().startswith('if:')],
                          ["if: always() && runner.os == 'Windows'"])
