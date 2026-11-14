@@ -1184,6 +1184,7 @@ CONFIGURED = {
         'cache_affinity_runs': ('200', 'configured policy', 'usage / affinity history window'),
     },
     'CiRequestEvidence': {
+        'unknown_after_seconds': ('86400', 'configured policy', 'CI requests / explicit unknown-outcome settlement grace'),
         'name_processing_limit': ('10000', 'configured policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
         'record_limit': ('1000', 'configured policy', 'CI requests / candidate-record validation budget'),
     },
@@ -2395,14 +2396,20 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format',
         'CI request record / covered work-item revisions use positive persisted revision numbers'),
     ('ci_requests.py', '_unresolved_summary', 1, 0): (
+        '1', 'format',
+        'CI dispatch record / attempt one cannot inherit duplicate-spend risk from a predecessor'),
+    ('ci_requests.py', '_unresolved_summary', 1, 1): (
         '64', 'safety',
         'CI dispatch record / cap timestamp text before ISO-8601 parsing'),
-    ('ci_requests.py', '_unresolved_summary', 1, 1): (
+    ('ci_requests.py', '_unresolved_summary', 1, 2): (
         '16', 'format',
         'CI dispatch record / covered work items follow the public 16-item request schema'),
-    ('ci_requests.py', '_unresolved_summary', 1, 2): (
+    ('ci_requests.py', '_unresolved_summary', 1, 3): (
         '1', 'format',
         'CI dispatch record / covered work-item revisions use positive persisted revision numbers'),
+    ('ci_requests.py', '_validated_outcome', 0, 0): (
+        '1', 'configured policy',
+        'CI request outcome / unknown-outcome grace is a positive configured duration'),
     ('ci_waits.py', 'terminal', 1, 0): (
         '1', 'safety',
         'CI terminal observation / each declared check name must match exactly one result'),
