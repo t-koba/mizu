@@ -10,29 +10,38 @@ concurrency:
   cancel-in-progress: true
 jobs:
   core:
-    # Linux runs the complete suite on every supported Python (the behavioural
-    # evidence); Linux/3.13 also stages the installer, builds the sdist and runs
-    # rootless OCI. macOS and Windows run the complete suite once, on the oldest
-    # supported Python: platform behaviour varies by OS, not by interpreter
-    # version. The Windows cell is split in two stable-ID parity shards to keep
-    # its wall time near that of the other cells; every shard runs the full
-    # non-unittest gate.
+    # Portable development plane; only Ubuntu/Python 3.13 adds rootless OCI.
+    # Windows/Python 3.11–3.14 use the same complete suite split by stable
+    # test-ID parity. Their aggregates below preserve the existing required
+    # check names; each shard still runs every non-unittest gate.
+    # The exact Windows 3.11 publication on mizu reached the unchanged 1,800 s
+    # child bound without unittest failure details; splitting keeps the gate
+    # complete without increasing its timeout.
+    # Windows 3.13 timed out at that same child limit on main.
+    # The exact Windows 3.14 timing artifact recorded 3,735 completed tests
+    # totaling 1,781.994 s (longest case 11.678 s) before the unchanged 1,800 s
+    # child limit. Splitting this distributed workload reuses the 3.12 path;
+    # it does not raise the limit or remove tests/assertions.
+    # The 60 s setup + 1,800 s child + bounded later phase, cleanup and
+    # receipt reserve model to 3,246 s, fitting each 60-minute cell. Linux/
+    # Python 3.13 also stages the installer and runs OCI: 3,246 + 3,300 + 600
+    # = 7,146 s, inside its unchanged 120-minute scope.
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         python: ["3.11", "3.12", "3.13", "3.14"]
-        include:
-          - os: macos-latest
-            python: "3.14"
+        exclude:
+          - os: windows-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.13"
           - os: windows-latest
             python: "3.14"
-            shard: "0"
-          - os: windows-latest
-            python: "3.14"
-            shard: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -44,8 +53,10 @@ jobs:
         # Offline runners do not provision the operator-owned Pi SDKs, so the
         # SDK, durable, and reasoning-replay gates are explicitly waived here;
         # the authoritative network-enabled job below provisions both adapters.
-        # Every cell publishes sanitized per-test timing evidence.
-        run: python scripts/check.py ${{ matrix.shard && format('--test-shard {0} ', matrix.shard) || '' }}--report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+        # Every cell collects the sanitized timing evidence, so each supported
+        # host's suite cost is published and the one shared child bound rests
+        # on measured costs rather than on a sibling host's measurement.
+        run: python scripts/check.py --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
       - name: Core installer and CLI lifecycle
         if: runner.os == 'Linux' && matrix.python == '3.13'
         # Reuse the full source gate above via an explicit content-bound
@@ -73,11 +84,13 @@ jobs:
         # It never includes failure details or output tails;
         # do not upload offline.json, which can contain diagnostics. Always
         # runs (even on timeout) with missing-file tolerance so a killed
-        # child still reports its partial entry.
+        # child still reports its partial entry. Every cell publishes its
+        # own artifact, so the shared child bound rests on each supported
+        # host's measured cost.
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: test-timings-${{ matrix.os }}-${{ matrix.python }}${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}
+          name: test-timings-${{ matrix.os }}-${{ matrix.python }}
           path: |
             private-validation/test-timings.json
             private-validation/test-timings.json.d/*.json
@@ -88,10 +101,202 @@ jobs:
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}
+          name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}
           path: private-validation/project-import-diagnostic.json
           retention-days: 7
           if-no-files-found: ignore
+  windows-311-shards:
+    # Preserve the full Windows 3.11 suite after its unsharded child reached
+    # the unchanged 1,800-second bound; only unittest execution is partitioned.
+    name: windows-311-shard (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.11"
+      - name: Offline core and transport contracts
+        run: python scripts/check.py --test-shard ${{ matrix.shard }} --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-timings-windows-latest-3.11-shard-${{ matrix.shard }}
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: project-import-diagnostic-windows-latest-3.11-shard-${{ matrix.shard }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+  windows-311-core:
+    # Exactly one replacement for Offline checks / core (windows-latest, 3.11).
+    name: core (windows-latest, 3.11)
+    needs: [windows-311-shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both shards
+        env:
+          SHARDS_RESULT: ${{ needs.windows-311-shards.result }}
+        run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
+  windows-312-shards:
+    # Windows 3.12–3.14 split only unittest execution; every shard retains
+    # the full non-unittest gate, and each aggregate preserves its old check name.
+    name: windows-312-shard (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Offline core and transport contracts
+        run: python scripts/check.py --test-shard ${{ matrix.shard }} --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-timings-windows-latest-3.12-shard-${{ matrix.shard }}
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: project-import-diagnostic-windows-latest-3.12-shard-${{ matrix.shard }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+  windows-312-core:
+    # Exactly one replacement for Offline checks / core (windows-latest, 3.12).
+    # always() prevents a failed/cancelled/skipped dependency from skipping the
+    # gate; only success of the whole two-cell matrix may turn it green.
+    name: core (windows-latest, 3.12)
+    needs: [windows-312-shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both shards
+        env:
+          SHARDS_RESULT: ${{ needs.windows-312-shards.result }}
+        run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
+  windows-313-shards:
+    # Reuse the established 3.12 split for the timed-out 3.13 suite.
+    name: windows-313-shard (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.13"
+      - name: Offline core and transport contracts
+        run: python scripts/check.py --test-shard ${{ matrix.shard }} --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-timings-windows-latest-3.13-shard-${{ matrix.shard }}
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: project-import-diagnostic-windows-latest-3.13-shard-${{ matrix.shard }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+  windows-313-core:
+    # Exactly one replacement for Offline checks / core (windows-latest, 3.13).
+    name: core (windows-latest, 3.13)
+    needs: [windows-313-shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both shards
+        env:
+          SHARDS_RESULT: ${{ needs.windows-313-shards.result }}
+        run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
+  windows-314-shards:
+    # Reuse the established 3.12 split for the measured near-bound 3.14 suite.
+    name: windows-314-shard (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.14"
+      - name: Offline core and transport contracts
+        run: python scripts/check.py --test-shard ${{ matrix.shard }} --report private-validation/offline.json --test-timings private-validation/test-timings.json --allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests --fail-fast
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-timings-windows-latest-3.14-shard-${{ matrix.shard }}
+          path: |
+            private-validation/test-timings.json
+            private-validation/test-timings.json.d/*.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload managed-import diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: project-import-diagnostic-windows-latest-3.14-shard-${{ matrix.shard }}
+          path: private-validation/project-import-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+  windows-314-core:
+    # Exactly one replacement for Offline checks / core (windows-latest, 3.14).
+    name: core (windows-latest, 3.14)
+    needs: [windows-314-shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require both shards
+        env:
+          SHARDS_RESULT: ${{ needs.windows-314-shards.result }}
+        run: python -c "import os, sys; sys.exit(0 if os.environ.get('SHARDS_RESULT') == 'success' else 1)"
   durable-contract:
     # Authoritative durable coverage: the pinned Pi SDK is provisioned here in
     # a network-enabled setup step, then the whole gate runs unwaived and
