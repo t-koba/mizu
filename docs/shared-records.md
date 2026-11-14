@@ -544,7 +544,46 @@ For the active `insight.decision` pilot, `decision_page_bytes` is an explicit pe
 | Operator answers and notices | Trusted host CLI writes `answer` and `operator.notice` directly to SharedRecords as `operator.cli`; no model writer. | Answers bind an exact Insight ID/revision and route to the authenticated source role. Notices route only to their explicit validated addressee. Both use manifest-scoped `record_read` and explicit `finish.ack_events`. Notice writer closure/supersession appends an immutable closure event; neither kind uses Insight decisions. Pending eligible records can be a configured wake source through existing scheduler gates; no new scheduler service. | 32768-character content, 140000-byte envelopes, 20 aggregate references plus pending/truncation metadata; permanent immutable record/closure/receipt audit. See operator CLI and configuration above. |
 | Publication blockers | Publication intent/receipt records are host VCS evidence, bound to approval, run, whole-capture `code_digest`, public-source projection and exact published SHA. A failed operation is also a run/tool result; the inspected product path has no distinct durable `publication.blocker` inbox. | A future blocker record must be emitted only from a validated host publication outcome, bind the exact publication attempt/receipt or source snapshot, and route under explicit policy. It cannot grant approval, reinterpret `code_digest`, or infer a task/dependency from an error message. Publication approval and adapter reconciliation remain unchanged. | Publication receipts are immutable project evidence; failures remain run evidence. No common blocker retention or acknowledgement policy exists. |
 
-Across the families, source history is authoritative and retention differs: insight archives are permanent, WorkItems retain validated revision chains, check jobs use an acknowledged-eviction cap, and other evidence stores keep their own bounds. The shared delivery store must not add a destructive global TTL. Unacknowledged records and unresolved source events are never silently expired; any later pruning is a documented per-kind policy and cannot remove source history or verified completion evidence.
+### Reference and release inventory
+
+`SharedRecords` has no delete/prune operation, so no stored kind is currently
+reclaimable. Operator and host record declarations require permanent retention.
+`freeze()` returns an in-memory unit manifest; reads and acknowledgements remain
+valid after source movement, but that live reference is not durably registered.
+A collector without active-manifest tracking could invalidate an in-flight read
+or acknowledgement.
+
+| Kind or family | Authoritative references | Current release path |
+|---|---|---|
+| `insight.decision` | Immutable decision history, shared-activation evidence where enabled, exact per-role receipts, and live unit manifests. | Decision history and receipts have no release path; retained permanently. |
+| `insight.pending` | Exact insight revision and routing eligibility; shared-activation report where enabled; exact per-role receipts and live unit manifests. | A revision/decision can end delivery eligibility, but cannot release report, receipt, or live-manifest references. No source release hook exists. |
+| `ci.wait` | Work-item ID/revision/holder, retained wait evidence, exact receipt and live unit manifest. | Work-item and wait histories remain; no release hook. |
+| `proposal.wait` | Blocked work-item ID/revision/holder and complete persisted VCS observation, plus exact receipt and live unit manifest. | Work-item/VCS evidence remains; no release hook. |
+| Operator `answer` and `operator.notice` | Primary operator audit record and exact subject/closure links; the operator record index is derived. | Routes require permanent retention; closure does not delete or mutate either record. |
+| Declared host snapshot/outcome records | Exact snapshot IDs in the subject and payload, which storage GC treats as roots; exact receipts and live manifests. | Host declarations require permanent retention; no source release hook exists. |
+| Configured role-authored records | Authenticated writer and opaque payload/subject; external references are not discoverable by Mizu. | No source adapter can prove release; retain permanently. |
+| Per-role acknowledgement receipts | Exact role, record ID, and record digest; acknowledgement is audit evidence, not a release signal. | No receipt-deletion path exists; keep the record while any receipt remains. |
+
+Backups include both `shared-records` and `shared-record-receipts`; restore can
+reintroduce them. Backup retention/removal is not integrated with a live-record
+reference index, so a future collector must treat each retained backup as a
+reference and rebuild those references on restore. **No current kind is proven
+eligible for deletion.**
+
+A bounded implementation must make references source-owned and exact, with a
+per-record reverse index so work follows changed references rather than scanning
+the store. Register each frozen unit manifest durably before delivery; release
+that pin only after the unit is terminal and acknowledgement effects settle.
+Unsettled or unrecoverable units keep their pins. Source owners add references
+before committing source events (an orphan pin only leaks) and release them only
+after the source change commits (a lost release only leaks). A collector may
+remove only an explicitly eligible kind whose complete per-record index has no
+edge from any source, active manifest, receipt, audit history or retained
+backup. Source owners, backup capture/restore and the collector must serialize
+reference updates through the same index protocol; incomplete index evidence
+blocks deletion. Legacy, unsupported, corrupt, ambiguous or over-budget
+references remain permanent. Acknowledgement time and a global TTL never
+authorize deletion.
 
 ## CI-wait explicit-receipt preflight (shadow only)
 
