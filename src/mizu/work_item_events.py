@@ -10,6 +10,7 @@ import heapq
 import json
 import os
 
+from . import insight_archive
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, identifier, mkdir, now, safe_read, write_json
 from .work_items import (_ReverseKey, _directory, _timestamp, _timestamp_order,
@@ -23,24 +24,26 @@ def _identity(item):
     return f"{SOURCE}:{item['id']}:{item['rev']}"
 
 
-def _origin_source(sources, origin):
+def _origin_source(store, origin):
     """Resolve submitter, never the transition actor (including legacy holes)."""
     if origin is None or "work_item_id" in origin:
         return None
-    known = sources.get(origin["insight_id"])
-    if known is None:
+    insight_id = origin["insight_id"]
+    record = store._optional_record(f"inbox/{insight_id}.json")
+    if record is None:
+        record = insight_archive.read_immutable(store.root, insight_id, include_unavailable=True)
+    if record is None:
         return None
-    if not known[0]:
+    if not isinstance(record, dict) or record.get("id") != insight_id:
         raise Denied("Invalid work-item event origin")
-    return known[1]
+    return identifier(record["source"]) if record.get("source") is not None else None
 
 
-def _payload(store, item, sources=None):
-    _, row = store.closed_row(item)
+def _payload(store, item):
+    _, row = store._closed_row(item)
     row.update(event=_identity(item), source=SOURCE, type=item["status"],
                terminal_at=item["updated_at"], transition=item["transition"],
-               origin_source=_origin_source(store.origin_sources() if sources is None else sources,
-                                            item["origin"]),
+               origin_source=_origin_source(store, item["origin"]),
                verification=({"sha256": digest(canonical(item["verification"])),
                               "passed": True, "code_digest": item["verification"]["code_digest"]}
                              if item["status"] == "done" else None))
@@ -55,21 +58,9 @@ def _receipt_path(store, role, item):
     return store.root / "work-item-receipts" / role / f"{item['id']}.{item['rev']}.json"
 
 
-def _receipts(store, role):
-    """Receipt file names of one role, or None when it has no receipt directory."""
-    directory = store.root / "work-item-receipts" / identifier(role)
-    if not _directory(directory.parent) or not _directory(directory):
-        return None
-    with os.scandir(directory) as entries:
-        return {entry.name for entry in entries}
-
-
-def _received(store, role, item, listing=...):
+def _received(store, role, item):
     path = _receipt_path(store, role, item)
-    if listing is not ...:
-        if listing is None or path.name not in listing:
-            return False
-    elif not _directory(path.parent.parent) or not _directory(path.parent):
+    if not _directory(path.parent.parent) or not _directory(path.parent):
         return False
     try:
         path.lstat()
@@ -114,13 +105,13 @@ class _PendingPage:
         self.acknowledged_heap = []
         self.acknowledged = self.eligible = self.unknown = 0
 
-    def add(self, store, item, row, listing=...):
+    def add(self, store, item, row):
         if row["origin_source"] is None:
             self.unknown += 1
         if self.sources == "own" and row["origin_source"] != self.role:
             return
         key = (_timestamp_order(item["updated_at"]), item["id"], item["rev"])
-        if _received(store, self.role, item, listing):
+        if _received(store, self.role, item):
             self.acknowledged += 1
             candidate = (key, _identity(item))
             # Only the most recent ten exact acknowledgements, not a receipt listing.
@@ -158,15 +149,19 @@ def _pending_pages(store, subscriptions, limit):
         raise Denied("Work-item event limit must be in [1, 100]")
     unseeded = 0
     if any(page.actions for page in pages):
-        unseeded = store.unseeded_decisions()
-        sources = store.origin_sources()
-        listings = {page.role: _receipts(store, page.role) for page in pages}
-        for item in store.current_items(statuses=("done", "dropped")):
+        for event_id, event in store._iter_item_events(recover=False):
+            kind, seed = store._seed_for_event(event_id, event, readonly=True)
+            if kind == "unseeded":
+                unseeded += 1
+            if kind != "seed":
+                continue
+            item = store._get(seed["id"], seed_event=event,
+                              history_revisions=store._history_revisions(seed["id"], recover=False))
             matching = [page for page in pages if item["status"] in page.actions]
             if matching:
-                row = _payload(store, item, sources)
+                row = _payload(store, item)
                 for page in matching:
-                    page.add(store, item, row, listings[page.role])
+                    page.add(store, item, row)
     return [page.result(unseeded) for page in pages]
 
 
@@ -196,7 +191,7 @@ def _validate_payload(store, event):
         raise Denied("Invalid work-item acknowledgement event")
     item_id = event.get("id")
     # Reuse full seed/chain validation, never trust a delivered mutable id.
-    item = store.current(item_id)
+    item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
     if item["status"] not in ("done", "dropped") or event != _payload(store, item):
         raise Denied("Work-item acknowledgement differs from terminal event")
     return item
@@ -289,10 +284,9 @@ def closed_page(store, roles, *, limit=10):
     Every matching role is included in sorted order, or the entire read fails
     closed at the existing row/page byte bounds. No locks or recovery.
     """
-    page, items = store.closed_items(limit=limit)
-    sources = store.origin_sources()
+    page, items = store._page_closed_impl(limit=limit, readonly=True, include_items=True)
     for row, item in zip(page["items"], items):
-        payload = _payload(store, item, sources)
+        payload = _payload(store, item)
         acknowledgements = {}
         row["event_acknowledgements"] = acknowledgements
         for name in sorted(roles):

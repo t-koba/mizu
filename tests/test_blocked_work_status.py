@@ -5,8 +5,7 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu.errors import Denied
-from mizu.fs import PREVIEW_BYTES, canonical, read_json
-from support import history_write_json as write_json
+from mizu.fs import PREVIEW_BYTES, canonical, read_json, write_json
 from mizu.runtime import prompt_for
 
 FUTURE = {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}

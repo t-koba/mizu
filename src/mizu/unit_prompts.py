@@ -20,7 +20,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from . import acceptance, check_jobs, prompt_sections
+from . import acceptance, check_jobs
 from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
 from .protocol import WRITER_CONTINUATION_CONTRACT, tool_definitions
@@ -533,10 +533,10 @@ def prompt_for(context: Context) -> str:
         ci_branch = None
     ci_failures = opening["ci_failures"]
     ci_failures_may_be_truncated = opening["ci_truncated"]
-    return json.dumps(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
+                       "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       **({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
@@ -569,7 +569,7 @@ def prompt_for(context: Context) -> str:
                        "ready_work": opening["ready_work"],
                        "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
-                       **_prompt_clock(context)}),
+                       **_prompt_clock(context)},
                       ensure_ascii=False)
 
 
@@ -627,11 +627,11 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     open_backlog = opening["open_backlog"]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
-    return json.dumps(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps({**({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
+                       "unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
-                       "goal_digest": context.goal_digest,
-                       **({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        **(grant_transition or {}),
+                       "goal_digest": context.goal_digest,
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
@@ -664,5 +664,5 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "ready_work": opening["ready_work"],
                        "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
-                       **_prompt_clock(context)}),
+                       **_prompt_clock(context)},
                       ensure_ascii=False)

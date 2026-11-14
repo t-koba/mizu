@@ -7,12 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, bind_delivery, index_items, forget_ledger
+from support import Fixture, ScriptDriver, bind_delivery
 from mizu import work_item_resolution as resolution, work_order
 from mizu.distribution import public_source_identity
 from mizu.errors import Busy, ConfigError, Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical, digest, read_json
-from support import history_write_json as write_json
+from mizu.fs import PREVIEW_BYTES, canonical, digest, read_json, write_json
 from mizu.project import Project, check_project_settings
 from mizu.publication import Publication
 from mizu.unit_prompts import prompt_for
@@ -413,60 +412,79 @@ class WaitResolutionTests(Fixture):
         items = {f'wi_{index:032x}': {**template, 'id': f'wi_{index:032x}'}
                  for index in range(203)}
 
-        index_items(self.project.root, items.values(), replace=True)
-        expected = {f"{item_id}:{template['wait_resolution']['wait_rev']}" for item_id in items}
-        shown = set()
-        previous_boundary = None
-        snapshot = self.project.snapshots.get()
-        role = self.config.roles['worker']
-        for _ in range(len(items)):
-            if not _ready_work_observation(self.project, snapshot, role)[2]:
-                break
-            context = SimpleNamespace(config=self.config, project=self.project,
-                role=role, snapshot=snapshot, goal_digest=digest(self.project.goal.encode()))
-            prompt = work_order._capture_opening(context)
-            current = set()
-            for page in ('open_work_items', 'ready_work'):
-                self.assertLessEqual(len(prompt[page]['items']), 1)
-                current.update(f"{row['id']}:{row['wait_resolution']['wait_rev']}"
-                               for row in prompt[page]['items'])
-            self.assertTrue(current - shown)
-            shown.update(current)
-            progress = _progress_record(snapshot, 'worker', (),
-                {name: False for name in PROGRESS_SIGNALS}, 'wait', ready_work=True,
-                ready_work_signature=prompt['ready_signature'],
-                wait_resolution_tokens=context.wait_resolution_tokens,
-                wait_resolution_high_water=context.wait_resolution_high_water)
-            snapshot = {**snapshot, 'progress': progress}
-            self.assertEqual(progress['schema'], 5)
-            self.assertLessEqual(len(progress['wait_resolution_tokens']), MAX_WAIT_RESOLUTION_TOKENS)
-            boundary = progress['wait_resolution_high_water']['token']
-            self.assertTrue({token for token in expected if token <= boundary} <= shown)
-            if previous_boundary is not None:
-                self.assertGreater(boundary, previous_boundary)
-            previous_boundary = boundary
-        self.assertEqual(shown, expected)
-        # Restart and unrelated ready work cannot replay the overflow whose
-        # exact receipt no longer fits in the 200-token list.
-        before = snapshot['progress']
-        durable = self.project.snapshots.create(
-            self.project.snapshots.capture_files(self.project.workspace),
-            goal='Goal', state='State', run=None, outcome='wait', summary='Delivered overflow',
-            progress=before)
-        self.project.snapshots.publish(durable)
-        ordinary_id = 'wi_' + 'f' * 32
-        items[ordinary_id] = {key: value for key, value in
-                              {**template, 'id': ordinary_id, 'holder': None}.items()
-                              if key != 'wait_resolution'}
-        for _ in range(2):
-            driver = ScriptDriver()
-            self.assertEqual(Engine(self.config, driver=driver).run(
-                self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
-            self.assertFalse(driver.calls)
-        after_page = self.store.page_ready(role_name='worker', limit=1,
-            _delivered_wait_resolution_tokens=before['wait_resolution_tokens'],
-            _wait_resolution_high_water=before['wait_resolution_high_water'])
-        self.assertEqual(after_page['_wait_resolution_high_water'], before['wait_resolution_high_water'])
+        original_events = self.store._iter_item_events_with_revisions
+        original_seed = self.store._seed_for_event
+        original_peek = self.store._peek_full_item
+        original_hold = self.store._current_hold
+
+        def events(**kw):
+            if 'with_identity' not in kw:
+                yield from original_events(**kw)
+                return
+            for item_id in reversed(items):  # Selection cannot depend on scan order.
+                row = (item_id[3:], {'id': item_id}, frozenset())
+                yield row + (None,) if kw.get("with_identity") else row
+
+        with patch.object(self.store, '_iter_item_events_with_revisions', new=events), \
+             patch.object(self.store, '_seed_for_event', new=lambda event_id, event, **kw: (
+                 ('seed', event) if 'id' in event else original_seed(event_id, event, **kw))), \
+             patch.object(self.store, '_peek_full_item', new=lambda item_id, **kw: (
+                 items[item_id] if item_id in items else original_peek(item_id, **kw))), \
+             patch.object(self.store, '_current_hold', new=lambda item_id, **kw: (
+                 (items[item_id], None) if item_id in items else original_hold(item_id, **kw))):
+            expected = {f"{item_id}:{template['wait_resolution']['wait_rev']}" for item_id in items}
+            shown = set()
+            previous_boundary = None
+            snapshot = self.project.snapshots.get()
+            role = self.config.roles['worker']
+            for _ in range(len(items)):
+                if not _ready_work_observation(self.project, snapshot, role)[2]:
+                    break
+                context = SimpleNamespace(config=self.config, project=self.project,
+                    role=role, snapshot=snapshot, goal_digest=digest(self.project.goal.encode()))
+                prompt = work_order._capture_opening(context)
+                current = set()
+                for page in ('open_work_items', 'ready_work'):
+                    self.assertLessEqual(len(prompt[page]['items']), 1)
+                    current.update(f"{row['id']}:{row['wait_resolution']['wait_rev']}"
+                                   for row in prompt[page]['items'])
+                self.assertTrue(current - shown)
+                shown.update(current)
+                progress = _progress_record(snapshot, 'worker', (),
+                    {name: False for name in PROGRESS_SIGNALS}, 'wait', ready_work=True,
+                    ready_work_signature=prompt['ready_signature'],
+                    wait_resolution_tokens=context.wait_resolution_tokens,
+                    wait_resolution_high_water=context.wait_resolution_high_water)
+                snapshot = {**snapshot, 'progress': progress}
+                self.assertEqual(progress['schema'], 5)
+                self.assertLessEqual(len(progress['wait_resolution_tokens']), MAX_WAIT_RESOLUTION_TOKENS)
+                boundary = progress['wait_resolution_high_water']['token']
+                self.assertTrue({token for token in expected if token <= boundary} <= shown)
+                if previous_boundary is not None:
+                    self.assertGreater(boundary, previous_boundary)
+                previous_boundary = boundary
+            self.assertEqual(shown, expected)
+            # Restart and unrelated ready work cannot replay the overflow whose
+            # exact receipt no longer fits in the 200-token list.
+            before = snapshot['progress']
+            durable = self.project.snapshots.create(
+                self.project.snapshots.capture_files(self.project.workspace),
+                goal='Goal', state='State', run=None, outcome='wait', summary='Delivered overflow',
+                progress=before)
+            self.project.snapshots.publish(durable)
+            ordinary_id = 'wi_' + 'f' * 32
+            items[ordinary_id] = {key: value for key, value in
+                                  {**template, 'id': ordinary_id, 'holder': None}.items()
+                                  if key != 'wait_resolution'}
+            for _ in range(2):
+                driver = ScriptDriver()
+                self.assertEqual(Engine(self.config, driver=driver).run(
+                    self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+                self.assertFalse(driver.calls)
+            after_page = self.store.page_ready(role_name='worker', limit=1,
+                _delivered_wait_resolution_tokens=before['wait_resolution_tokens'],
+                _wait_resolution_high_water=before['wait_resolution_high_water'])
+            self.assertEqual(after_page['_wait_resolution_high_water'], before['wait_resolution_high_water'])
 
     def test_resolution_high_water_resets_for_changed_proofs_and_prunes(self):
         first = self.block('boundary-first')
@@ -729,6 +747,26 @@ class WaitResolutionTests(Fixture):
         self.assert_pending_prefix_does_not_starve('publication_ci')
 
     @unittest.skipIf(IS_WINDOWS, 'Projection reuse is disabled on Windows')
+    def test_preparation_reuses_existing_scans_and_closed_projections(self):
+        closed_ids = set()
+        for n in range(12):
+            item = self.store.create(actor='worker', idempotency_key=f'closed-{n}',
+                                     title='Closed work')['record']['work_item']
+            for rev in range(1, 5):
+                item = self.store.transition(item['id'], expected_rev=rev, status='doing',
+                                             actor='worker', scope=f'Scope {rev}', reason='Revise scope')
+            self.store.transition(item['id'], expected_rev=5, status='dropped',
+                                  actor='worker', reason='Settled')
+            closed_ids.add(item['id'])
+        self.block('active')
+        prompt_for(self.context())  # Warm the existing proof cache.
+        with patch.object(self.store, '_iter_item_events_with_revisions',
+                          wraps=self.store._iter_item_events_with_revisions) as scans, \
+                patch.object(self.store, '_current_hold', wraps=self.store._current_hold) as replay:
+            prompt_for(self.context())
+        self.assertEqual(scans.call_count, 2)  # Open/order and ready, no third pass.
+        self.assertFalse(closed_ids & {call.args[0] for call in replay.call_args_list})
+
     def test_missing_finish_probe_does_not_rotate_for_another_roles_held_open_work(self):
         from mizu.runtime import session_prompt
         item = self.block(actor='reviewer')
@@ -745,8 +783,126 @@ class WaitResolutionTests(Fixture):
         self.assertIn('missing-finish', rotation['reason'])
 
     @unittest.skipIf(IS_WINDOWS, 'Projection reuse is disabled on Windows')
+    def test_resolved_publication_projection_reuses_and_invalidates_proof_witnesses(self):
+        older = self.baseline
+        self.baseline = self.snapshot('delivery')
+        item = self.block(kind='publication_ci')
+        middle = self.snapshot('middle')
+        snapshot = self.snapshot('published-descendant')
+        receipt = self.receipt(snapshot)
+        self.reconcile()
+        # An older parent outside the consumed proof need not remain readable
+        # to cache a valid resolution. Both required ancestry endpoints remain.
+        older_path = self.project.root / 'snapshots' / f"{older['id']}.json"
+        older_raw = older_path.read_bytes()
+        older_path.write_text('{}')
+        self.store.page_ready(role_name='worker')  # Replay once and gather witnesses.
+        with patch.object(self.store, '_iter_chain', wraps=self.store._iter_chain) as replay, \
+                patch.object(Publication, 'read_receipt', wraps=Publication.read_receipt) as read, \
+                patch.object(self.project.snapshots, 'require_descendant',
+                             wraps=self.project.snapshots.require_descendant) as ancestry:
+            for _ in range(3):
+                self.assertEqual(self.store.page_ready(role_name='worker')['items'][0]['id'], item['id'])
+                self.store.page_open_readonly()
+        self.assertEqual((replay.call_count, read.call_count, ancestry.call_count), (0, 0, 0))
+        older_path.write_bytes(older_raw)
+        paths = [self.project.root / 'evidence/publications' / f"{receipt['publication_id']}.receipt.json",
+                 self.project.root / 'snapshots' / f"{middle['id']}.json",
+                 self.project.root / 'snapshots' / f"{self.baseline['id']}.json"]
+        for path in paths:
+            raw = path.read_bytes()
+            path.write_text('{}')
+            with self.subTest(path=path.name), self.assertRaises(Denied):
+                self.store.page_ready(role_name='worker')
+            path.write_bytes(raw)
+            self.store.page_ready(role_name='worker')
+
     @unittest.skipIf(IS_WINDOWS, 'Sidecar reuse is disabled on Windows')
+    def test_historical_resolution_cannot_be_hidden_by_transition_or_backfill_sidecars(self):
+        item = self.block(kind='publication_ci')
+        sidecar = self.store._sidecar_path(item['id'])
+        stale = sidecar.read_bytes()
+        snapshot = self.snapshot('published-descendant')
+        receipt = self.receipt(snapshot)
+        self.reconcile()
+        self.assertFalse(sidecar.exists())  # Resolution itself is exact-only.
+        opened = self.store.get(item['id'])
+        receipt_path = (self.project.root / 'evidence/publications' /
+                        f"{receipt['publication_id']}.receipt.json")
+        receipt_raw = receipt_path.read_bytes()
+        for status in ('doing', 'open'):
+            with self.subTest(status=status):
+                # Even after resolution leaves both current/previous records,
+                # the immutable history, not a cache marker, excludes sidecars.
+                sidecar.write_bytes(stale)
+                opened = self.store.transition(item['id'], expected_rev=opened['rev'],
+                                                status=status, actor='worker')
+                self.assertNotIn('wait_resolution', opened)
+                self.assertFalse(sidecar.exists())
+                sidecar.write_bytes(stale)
+                self.store.backfill_current_states()
+                self.assertFalse(sidecar.exists())
+                fresh = Project(self.config, 'sample')
+                self.assertEqual(fresh.work_items.page_open_readonly()['items'][0]['status'], status)
+                receipt_path.write_text('{}')
+                try:
+                    fresh = Project(self.config, 'sample')
+                    with self.assertRaises(Denied):
+                        fresh.work_items.page_open_readonly()
+                finally:
+                    receipt_path.write_bytes(receipt_raw)
+
     @unittest.skipIf(IS_WINDOWS, 'Projection reuse is disabled on Windows')
+    def test_external_resolution_cache_witnesses_exact_missing_publication_siblings(self):
+        item = self.block(kind='publication_ci')
+        snapshot = self.snapshot('externally-published-descendant')
+        receipt = Publication.record_external(
+            self.project.root, branch='published', published_sha='b' * 40,
+            code_digest=snapshot['code_digest'], approval='approval',
+            projection=public_source_identity(snapshot['files']))
+        self.reconcile()
+        self.assertEqual(self.store.get(item['id'])['wait_resolution']['kind'], 'superseded')
+        directory = self.project.root / 'evidence/publications'
+        for kind in ('intent', 'dispatch', 'receipt'):
+            with self.subTest(kind=kind):
+                self.store.page_ready(role_name='worker')  # Cache the valid external proof.
+                self.assertEqual(len(self.store._projection_cache[item['id']]), 4)
+                # Unrelated additions must not invalidate an exact proof.
+                unrelated = directory / f"{'e' * 64}.{kind}.json"
+                unrelated.write_text('{}')
+                original_lstat = Path.lstat
+
+                def apfs_lstat(path):
+                    info = original_lstat(path)
+                    if path == directory and unrelated.exists():
+                        return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
+                            st_mode=info.st_mode, st_nlink=info.st_nlink + 1,
+                            st_file_attributes=getattr(info, 'st_file_attributes', 0),
+                            st_mtime_ns=info.st_mtime_ns, st_ctime_ns=info.st_ctime_ns,
+                            st_size=info.st_size)
+                    return info
+
+                with patch.object(Path, 'lstat', apfs_lstat):
+                    with patch.object(
+                            self.store, '_iter_chain', wraps=self.store._iter_chain) as replay:
+                        row = self.store.page_ready(role_name='worker')['items'][0]
+                        self.assertEqual(row['id'], item['id'])
+                        self.store.page_open_readonly()
+                self.assertEqual(replay.call_count, 0)
+                conflict = directory / f"{receipt['publication_id']}.{kind}.json"
+                conflict.write_text('{}')
+                try:
+                    with self.assertRaises(Denied):
+                        Publication.read_receipt(self.project.root, receipt['publication_id'])
+                    for read in (lambda: self.store.page_ready(role_name='worker'),
+                                 self.store.page_open_readonly):
+                        with self.assertRaises(Denied):
+                            read()
+                    self.assertNotIn(item['id'], self.store._projection_cache)
+                finally:
+                    conflict.unlink()
+                    unrelated.unlink()
+
     def test_unknown_and_corrupt_snapshot_proof_stay_pending(self):
         item = self.block()
         with patch.object(self.project.snapshots, 'get', side_effect=Denied('Unavailable')):
@@ -832,7 +988,6 @@ class WaitResolutionTests(Fixture):
         path = self.project.root / 'evidence/publications' / f"{receipt['publication_id']}.receipt.json"
         raw = path.read_bytes()
         path.write_text('{}')
-        forget_ledger(self.project.root)  # Rebuilding validates the pinned receipt again.
         with self.assertRaises(Denied):
             self.store.get(item['id'])
         path.write_bytes(raw)

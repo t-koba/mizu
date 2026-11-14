@@ -5,11 +5,10 @@ import json
 import os
 from unittest.mock import patch
 
-from support import Fixture, forget_ledger
+from support import Fixture
 from mizu import work_items as work_items_module
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical
-from support import history_write_json as write_json
+from mizu.fs import PREVIEW_BYTES, canonical, write_json
 
 
 class LegacyWorkItemTests(Fixture):
@@ -96,6 +95,28 @@ class LegacyWorkItemTests(Fixture):
                 with self.assertRaises(Denied):
                     self.resolve(event_id, **changes)
                 self.assertFalse(self.sidecar(event_id).exists())
+
+    def test_backfill_legacy_sidecars_converges_across_bounded_calls(self):
+        if work_items_module.IS_WINDOWS:
+            self.skipTest("POSIX-only current-state sidecar cache")
+        item_ids = []
+        for _ in range(25):
+            event_id, _, _ = self.legacy()
+            self.resolve(event_id)
+            item_ids.append(f"wi_{event_id}")
+
+        sidecar_dir = self.project.root / "work-item-state"
+        previous = set()
+        for completed, expected_new in ((10, 10), (20, 10), (25, 5)):
+            result = self.store.backfill_current_states(limit=10)
+            self.assertEqual(result, {"checked": completed, "backfilled": expected_new})
+            present = {path.stem for path in sidecar_dir.glob("*.json")}
+            self.assertTrue(previous <= present)
+            self.assertEqual(len(present), completed)
+            previous = present
+        self.assertEqual(self.store.backfill_current_states(limit=10),
+                         {"checked": 25, "backfilled": 0})
+        self.assertEqual(previous, set(item_ids))
 
     def test_by_id_history_reads_open_reconciliation_sidecar_seed(self):
         event_id, _, _ = self.legacy()
@@ -236,13 +257,10 @@ class LegacyWorkItemTests(Fixture):
         sidecar = self.sidecar(event_id)
         for content in (b"{", b"[]", b'{"value":NaN}'):
             sidecar.write_bytes(content)
-            forget_ledger(self.project.root)
             for read in (self.store.page_open, self.store.page_legacy):
-                forget_ledger(self.project.root)
                 with self.assertRaises(Denied):
                     read()
         sidecar.write_bytes(b" " * (PREVIEW_BYTES + 1))
-        forget_ledger(self.project.root)
         with self.assertRaises(LimitExceeded):
             self.store.page_legacy()
 
@@ -259,7 +277,6 @@ class LegacyWorkItemTests(Fixture):
         self.assertFalse(alias.exists())
         sidecar.unlink()
         alias.write_bytes(canonical(record))
-        forget_ledger(self.project.root)
         self.assertEqual(self.store.page_open()["unseeded_decisions"], 1)
         self.assertFalse(sidecar.exists())
         self.assertFalse(alias.exists())
@@ -270,25 +287,21 @@ class LegacyWorkItemTests(Fixture):
         sidecar = self.sidecar(event_id)
         outside = self.project.root / "unrecognized-link"
         self.hardlink(sidecar, outside)
-        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_legacy()
         outside.unlink()
         outside.write_text("uncommitted")
         self.hardlink(outside, sidecar.parent / ".new-abcdefgh")
-        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.resolve(event_id)
         (sidecar.parent / ".new-abcdefgh").unlink()
         unsafe = sidecar.parent / ".new-abcdefgh"
         self.symlink(outside, unsafe)
-        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_legacy()
         unsafe.unlink()
         for i in range(258):
             (sidecar.parent / f".new-{i:08d}").write_text("orphan")
-        forget_ledger(self.project.root)
         with self.assertRaisesRegex(Denied, "bound"):
             self.store.page_open()
 
@@ -301,7 +314,6 @@ class LegacyWorkItemTests(Fixture):
         target = self.project.root / "sidecar-target"
         target.write_bytes(content)
         self.symlink(target, sidecar)
-        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_open()
         sidecar.unlink()
@@ -309,7 +321,6 @@ class LegacyWorkItemTests(Fixture):
         target_dir = self.project.root / "other-directory"
         target_dir.mkdir()
         self.symlink(target_dir, sidecar.parent, target_is_directory=True)
-        forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.resolve(event_id)
         self.assertEqual(list(target_dir.iterdir()), [])

@@ -226,7 +226,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         with self.assertRaises(Denied):
             store.get(f"wi_{event_id}")
         # Missing old markers remain unresolved; no inference from rationale/source.
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         legacy = {key: value for key, value in decision.items()
                   if key not in ("work_item_intent", "decision_key")}
         write_json(self.project.root / "decision-history" / f"{'a' * 32}.json", legacy, exclusive=True)
@@ -265,7 +265,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
                 self.assertEqual(self.decide(revised)["rev"], 2)
 
     def test_defer_can_be_superseded_but_old_substantive_history_still_blocks(self):
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         proposal = self.submit()
         deferred = self.decide(proposal, "defer")
         self.decide(proposal, "defer")
@@ -343,7 +343,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
 
     def test_pointer_failure_after_history_commit_does_not_allow_duplicate(self):
         from unittest.mock import patch
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         for action, intent in (("accept", "create"), ("modify", "none"), ("reject", None)):
             for defer_first in (False, True):
                 with self.subTest(action=action, intent=intent, defer_first=defer_first):
@@ -392,7 +392,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
     def test_stable_event_id_collision_is_refused_without_writes(self):
         from unittest.mock import patch
         from mizu.insights import _decision_key
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         proposal = self.submit()
         original = self.decide(proposal)
         key = _decision_key(proposal["id"], 1)
@@ -413,7 +413,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
 
     def test_partial_commit_retry_reuses_intent_across_runs_and_policy_changes(self):
         from unittest.mock import patch
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         proposal = self.submit("worker")
         original_run = "first-run"
         def write(path, *args, **kwargs):
@@ -441,7 +441,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
 
     def test_pointer_recovery_rejects_seed_bound_to_different_title(self):
         from unittest.mock import patch
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         proposal = self.submit()
         def write(path, *args, **kwargs):
             if path.parent.name == "decisions":
@@ -460,7 +460,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         self.assertFalse(self.decided(proposal["id"]))
 
     def test_no_work_rejects_sidecars_and_malformed_marker_bindings(self):
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         self.decide(self.submit(), work_item_intent="none")
         path = next((self.project.root / "decision-history").glob("*.json"))
         event = json.loads(path.read_text())
@@ -485,7 +485,7 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         path = next((self.project.root / "decision-history").glob("*.json"))
         event = json.loads(path.read_text())
         event["decision_key"] = "0" * 32
-        from support import history_write_json as write_json
+        from mizu.fs import write_json
         write_json(path, event)
         with self.assertRaisesRegex(Denied, "decision key"):
             self.project.work_items.page_legacy()

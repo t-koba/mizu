@@ -1,16 +1,35 @@
-"""Append-audited work-item store with bounded indexed reads; no scheduling.
+"""Append-audited work-item store with bounded runtime reads; no scheduling.
 
 Seeds are immutable direct creation records, accept/modify decision events or
-hash-bound legacy sidecars. Each successful CAS appends one full state under
-insights.lock, never a pointer, after replaying and validating the item's
-whole chain. Current-state reads come only from the ledger index
-(:mod:`mizu.ledger`), which every write updates in its critical section; no
-read replays history. Full-chain validation runs at write time, when the
-index is built from the files, and in :meth:`WorkItems.audit`. Origin
-staleness, hold ages and wait liveness are computed from current records on
-every read. Retrying a committed CAS requires a re-read. Same-status events
-require a scope/reference change, held-open release, or delivery binding; only
-a proven forward dropped-to-done correction may follow a terminal event.
+hash-bound legacy sidecars. Reads and transitions share insights.lock; each successful CAS appends one full state, never a pointer.
+Read-only views (`page_open_readonly`, `page_closed_readonly`) never acquire
+insights.lock and never recover or delete temporary files; they validate the
+same committed records and fail closed on unsafe or malformed state.
+Read-only pages and locked live ready scans may reuse a structural projection
+only while the seed digest and every entry's metadata in the item directory
+are unchanged. The sidecar stores full source records and is compared
+byte-for-structure
+with the exact current/previous source records (at most two revision reads,
+plus a retirement file when present) before use. Terminal and retired items
+retain a source-backed sidecar so open/status scans skip their closed
+histories. The sidecar is a local POSIX metadata-witness fast path, the exact
+history replay is the fallback, and Windows bypasses sidecar reuse. Origin
+staleness and hold state are recomputed on every call, and any unexpected
+shape bypasses the fast path. A continued doing-to-doing revision has no
+source-backed earlier hold start in its current and previous records, so it
+removes the sidecar; a fresh reader replays exactly on this and other misses.
+Items with any wait resolution also remain exact-only: current/previous
+records cannot establish their historical resolution proof.
+Live ready scans still validate every history directory and recover leftovers
+before sampling its identity. In-process terminal and resolved-open projections
+come only from full status-mode replay, including exact resolution proof,
+retirement chain hashes and completion proof where applicable. They are reused only while the complete history witness and all proof
+sources (manifest, retained receipt, and CI publication when used) are unchanged
+across validation and lookup. Sidecars alone cannot establish this proof.
+Completed sidecar reads still validate exact completion evidence.
+Unknown/unsafe records, incomplete chains and bounds fail closed. Retrying a committed CAS requires a re-read. Same-status events
+require a scope/reference change, held-open release, or delivery binding; only a proven forward dropped-to-done correction
+may follow a terminal event.
 """
 from __future__ import annotations
 
@@ -32,13 +51,10 @@ from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      PublicationEvidence, TOML_INTEGER_MAX)
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
-from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
-                 safe_read, sync_dir, text_preview, write_json)
+from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now, safe_read,
+                 sync_dir, text_preview, write_json)
 from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
-from .ledger import rows as _rows
-from . import check_job_index, insight_index
-from .work_item_index import ITEMS
 from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
                              task_id, task_seeds, validate_origin, validate_scope, validate_seed,
                              validate_tasks)
@@ -76,11 +92,10 @@ _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 _HISTORY_UNSET = object()
-_ORIGIN_COLUMNS = "n.id, n.valid, n.rev, d.insight_id, d.rev, d.action, d.linked"
-_ORIGIN_SELECT = "SELECT " + _ORIGIN_COLUMNS
-_ORIGIN_JOIN = ("LEFT JOIN insights n ON n.id = {key} "
-                "LEFT JOIN decisions d ON d.insight_id = {key}")
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
+_SIDECAR_SCHEMA = 1
+_SIDECAR_DIR = "work-item-state"
+_SIDECAR_MAX_BYTES = PREVIEW_BYTES * 2 + 4096
 
 
 def wait_resolution_token(item: dict) -> str:
@@ -227,8 +242,9 @@ class WorkItems:
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
         self.history_temporaries = history_temporaries
-        self._ledger = insights.ledger
-        self._ledger.attach(ITEMS, self)
+        self._direct_cache: dict[str, tuple] = {}
+        self._history_cache: dict[str, tuple] = {}
+        self._projection_cache: dict[str, tuple] = {}
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
                for value in (doing_limit, *self.doing_limits.values())):
             raise Denied("Work-item doing limit must be an integer in [1, 100]")
@@ -236,11 +252,17 @@ class WorkItems:
             raise Denied("Work-item stale threshold must be an integer in [1, 31536000]")
 
     def _require_doing_capacity(self, actor: str) -> None:
-        """Count the actor's doing items in the index; caller holds insights.lock."""
+        """Count validated holder state under insights.lock, never a page/index."""
         limit = self.doing_limits.get(actor, self.doing_limit)
-        with self._ledger.read("items", locked=True) as db:
-            count = _rows(db, "SELECT COUNT(*) FROM items WHERE status='doing' AND holder=?",
-                          (actor,))[0][0]
+        count = 0
+        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=True):
+            kind, seed = self._seed_for_event(event_id, event, readonly=False)
+            if kind != "seed":
+                continue
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=True)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions)
+            if item["status"] == "doing" and item["holder"] == actor:
+                count += 1
         if count >= limit:
             raise Denied(f"Work-item doing slots full for {actor}: {count}/{limit}; "
                          "release or block held work before claiming another item")
@@ -255,8 +277,10 @@ class WorkItems:
     def require_open_capacity(self, requested_delta: int) -> None:
         """Check a whole new-seed transaction while holding insights.lock.
 
-        Zero-seed decisions and a disabled cap do not read the index.
-        Existing over-limit work stays unchanged.
+        WorkItems is the only count source: replay committed seeds and CAS
+        histories, including legacy open resolutions. No quota/index state.
+        Replays must return before this check; zero-seed decisions and a
+        disabled cap do not scan. Existing over-limit work stays unchanged.
         """
         limit = self.insights.open_work_items
         if not requested_delta or not limit:
@@ -266,17 +290,47 @@ class WorkItems:
             raise OpenWorkItemsFull(current_count=current_count, limit=limit,
                                     requested_delta=requested_delta)
 
-    def _count_open(self, *, locked: bool) -> int:
-        with self._ledger.read("items", locked=locked) as db:
-            return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('open', 'doing', 'blocked')")[0][0]
-
     def count_open(self) -> int:
-        """Count seeded open/doing/blocked work while holding insights.lock."""
-        return self._count_open(locked=True)
+        """Count seeded open/doing/blocked work while holding insights.lock.
+
+        WorkItems stays the only count source: replay committed seeds and
+        CAS histories, including legacy open resolutions. No quota/index
+        state. Superseded delivery snapshots are not consumed; current active
+        bindings and current done proofs remain strict. Malformed or unsafe
+        records fail closed; systemic I/O propagates so the caller can hold
+        fail-closed.
+        """
+        current_count = 0
+        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=True):
+            kind, seed = self._seed_for_event(event_id, event, readonly=False)
+            if kind != "seed":
+                continue
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=True)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
+                             verify_snapshots=False, verify_current_delivery=True)
+            if item["status"] in OPEN_STATUS_ORDER:
+                current_count += 1
+        return current_count
 
     def count_open_readonly(self) -> int:
-        """Count seeded open/doing/blocked work without taking the lock or writing."""
-        return self._count_open(locked=False)
+        """Count seeded open/doing/blocked work without taking the lock.
+
+        Same seed/history replay as :meth:`count_open` but never recovers
+        or deletes: validated temporaries are ignored and anything unsafe
+        or unexpected fails closed. Status and admission gates use this so
+        a held dispatch never mutates the ledger it is measuring.
+        """
+        current_count = 0
+        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=False):
+            kind, seed = self._seed_for_event(event_id, event, readonly=True)
+            if kind != "seed":
+                continue
+            revisions = scanned if scanned is not None else self._history_revisions(seed["id"], recover=False)
+            item = self._get(seed["id"], seed_event=event, history_revisions=revisions,
+                             verify_snapshots=False, verify_current_delivery=True)
+            if item["status"] in OPEN_STATUS_ORDER:
+                current_count += 1
+        return current_count
 
     def _read(self, name: str) -> dict:
         event = name.startswith("work-items/") and _REVISION_NAME.fullmatch(Path(name).name)
@@ -306,9 +360,17 @@ class WorkItems:
             return None
         create = directory / "create.json"
         try:
-            create.lstat()
+            directory_info = directory.lstat()
+            create_info = create.lstat()
         except FileNotFoundError:
             return None
+        key = (directory_info.st_dev, directory_info.st_ino, directory_info.st_mode,
+               directory_info.st_mtime_ns, directory_info.st_ctime_ns,
+               directory_info.st_size, create_info.st_dev, create_info.st_ino,
+               create_info.st_mode, create_info.st_nlink, create_info.st_mtime_ns,
+               create_info.st_ctime_ns, create_info.st_size)
+        # Both conflicting sources live outside the create.json key, so check
+        # them on every lookup, including a cache hit.
         try:
             (directory / "legacy.json").lstat()
         except FileNotFoundError:
@@ -323,6 +385,10 @@ class WorkItems:
                 pass
             else:
                 raise Denied("Direct work-item ID collides with a decision event")
+        cached = (self._direct_cache.get(item_id)
+                  if not IS_WINDOWS else None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
         record = self._read(f"work-items/{item_id}/create.json")
         if set(record) - {"requested_smoke_refs"} != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
             raise Denied("Invalid direct work-item creation record")
@@ -336,7 +402,596 @@ class WorkItems:
                 or seed["id"] != item_id
                 or seed["origin"] is not None and seed["origin"].get("work_item_id") == item_id):
             raise Denied("Invalid direct work-item binding")
+        if not IS_WINDOWS:
+            self._direct_cache[item_id] = (key, record)
         return record
+
+    def _history_identity(self, item_id: str):
+        """Return the metadata identity of one item's history directory.
+
+        Additions, removals, renames and in-place metadata changes are
+        reflected in the directory and entry stats. Like the direct-seed
+        cache, this is a cheap invalidator, not a content digest; an expected
+        regular file whose bytes change while its metadata is preserved still
+        falls outside the metadata fast path, and an unexpected directory
+        shape falls back to the complete validating scan.
+        """
+        directory = self.root / "work-items" / item_id
+        try:
+            dir_info = directory.lstat()
+        except FileNotFoundError:
+            return ("missing",)
+        except OSError:
+            return None
+        if not stat.S_ISDIR(dir_info.st_mode) or stat.S_ISLNK(dir_info.st_mode):
+            return None
+        entries = []
+        try:
+            with os.scandir(directory) as scanned:
+                for entry in scanned:
+                    info = _entry_stat(entry)
+                    if not stat.S_ISREG(info.st_mode):
+                        return None
+                    entries.append((entry.name, info.st_dev, info.st_ino,
+                                    info.st_mode, info.st_nlink,
+                                    info.st_mtime_ns, info.st_ctime_ns,
+                                    info.st_size))
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        entries.sort()
+        return ((dir_info.st_dev, dir_info.st_ino, dir_info.st_mode,
+                 dir_info.st_nlink, dir_info.st_mtime_ns,
+                 dir_info.st_ctime_ns, dir_info.st_size), tuple(entries))
+
+    @staticmethod
+    def _proof_identity(root, relative):
+        """POSIX no-follow witness, including ancestor replacement/unsafe paths.
+
+        Missing optional publication files are witnessed too: each cache lookup
+        rechecks the exact leaf, so its creation changes the witness. Directory
+        times are excluded to avoid invalidating on unrelated evidence additions.
+        Unsupported/unsafe sources always miss the cache.
+        """
+        try:
+            identities = []
+            path = root
+            for part in ("", *Path(relative).parts):
+                path = path / part
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    if path == root / relative:
+                        return (*identities, ("missing",))
+                    return None
+                if (stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    return None
+                base = (info.st_dev, info.st_ino, info.st_mode)
+                if path == root / relative:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        return None
+                    identities.append((*base, info.st_nlink, info.st_mtime_ns,
+                                       info.st_ctime_ns, info.st_size))
+                else:
+                    if not stat.S_ISDIR(info.st_mode):
+                        return None
+                    # Directory st_nlink is not portable: APFS includes all
+                    # entries, so unrelated sibling files would invalidate an
+                    # exact missing-leaf witness. The inode still pins the path.
+                    identities.append(base)
+            return tuple(identities)
+        except (OSError, AttributeError, NotImplementedError):
+            return None
+
+    def _validation_sources(self, record, previous):
+        """Sample external dependencies BEFORE exact status-mode validation.
+
+        Receipt parsing only discovers sources, never proof. The ordinary
+        validator still checks manifests, acceptance and publications. Include
+        historical pinned waits too: their validators also consume evidence.
+        """
+        sources = []
+
+        def add(root, relative):
+            sources.append((root, relative, self._proof_identity(root, relative)))
+
+        def snapshot(sid):
+            if not isinstance(sid, str) or not DIGEST.fullmatch(sid):
+                raise ValueError("Invalid snapshot source")
+            add(self.snapshots.root, f"snapshots/{sid}.json")
+
+        def publication(pid):
+            if not isinstance(pid, str) or not DIGEST.fullmatch(pid):
+                raise ValueError("Invalid publication source")
+            for kind in ("intent", "dispatch", "receipt", "external"):
+                add(self.root, f"evidence/publications/{pid}.{kind}.json")
+
+        try:
+            wait = record.get("wait") or {}
+            delivery = record.get("delivery")
+            if delivery is not None:
+                snapshot(delivery["snapshot_id"])
+            if wait.get("kind") == "publication_ci":
+                snapshot(wait["snapshot_id"])
+            elif wait.get("kind") in ("ci", "proposal_merged"):
+                publication(wait["publication_id"])
+            resolution = record.get("wait_resolution")
+            if resolution is not None:
+                evidence = resolution["evidence"]
+                snapshot(evidence["snapshot_id"])
+                if resolution["kind"] == "superseded":
+                    publication(evidence["publication_id"])
+                    # Witness exactly the ancestry consumed by validation,
+                    # not older parents beyond both pinned ancestors.
+                    targets = {previous["wait"]["snapshot_id"], record["delivery"]["snapshot_id"]}
+                    sid, edges = evidence["snapshot_id"], 0
+                    while sid is not None and edges <= self.snapshots.history_index:
+                        snapshot(sid)
+                        targets.discard(sid)
+                        if not targets:
+                            break
+                        sid = self.snapshots.get(sid).get("parent")
+                        edges += 1
+                    if targets:
+                        raise ValueError("Incomplete resolution proof sources")
+            if record.get("status") == "done":
+                snapshot(record["snapshot_id"])
+                verification = record["verification"]
+                if ("delivery_schema" in record
+                        and verification.get("source") == "retained_acceptance"):
+                    from .acceptance import _BASE, _read
+                    rid = verification["receipt_id"]
+                    if not isinstance(rid, str) or not DIGEST.fullmatch(rid):
+                        raise ValueError("Invalid acceptance source")
+                    relative = f"{_BASE}/objects/{rid}.json"
+                    add(self.root, relative)
+                    receipt = _read(self.root, relative)
+                    if receipt.get("schema") == 2:
+                        publication(receipt["publication_id"])
+            return sources
+        except (OSError, Denied, LimitExceeded, ValueError, TypeError, KeyError, AttributeError):
+            return [(None, None, None)]
+
+    def _proof_unchanged(self, sources):
+        return all(identity is not None and self._proof_identity(root, relative) == identity
+                   for root, relative, identity in sources)
+
+    def _history_revisions_readonly(self, item_id: str):
+        """Return a revision set and the identity it was read under.
+
+        The identity is sampled before the revision scan. A caller that later
+        sees a different directory identity must not stamp the resulting item
+        with the newer identity; the mismatch is a concurrent append, not a
+        cacheable unchanged state.
+        """
+        if IS_WINDOWS:
+            return self._history_revisions(item_id, recover=False), None
+        key = self._history_identity(item_id)
+        if key is not None:
+            cached = self._history_cache.get(item_id)
+            if cached is not None and cached[0] == key:
+                return cached[1], key
+        revisions = self._history_revisions(item_id, recover=False)
+        if key is not None:
+            self._history_cache[item_id] = (key, revisions)
+        return revisions, key
+
+    def _sidecar_path(self, item_id: str) -> Path:
+        return self.root / _SIDECAR_DIR / f"{item_id}.json"
+
+    def _sidecar_store(self, item_id: str, seed: dict, identity, previous, current, since,
+                       retirement=None) -> bool:
+        """Best-effort write of exact source records; never fails a commit.
+
+        Cache boundary: any failure here falls back to exact replay and never
+        fails the committed business write. Callers store full source records
+        (the immutable seed or exact revision files), never projected items.
+        """
+        try:
+            if IS_WINDOWS:
+                # Windows reads never use this POSIX-only cache (directory
+                # metadata is not a trustworthy invalidation witness there).
+                return False
+            if ITEM_ID.fullmatch(item_id) is None or not isinstance(seed, dict):
+                return
+            if since is not None and not _timestamp(since):
+                return
+            state_dir = self.root / _SIDECAR_DIR
+            try:
+                info = state_dir.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    return
+            identity_json = json.loads(canonical(identity))
+            payload = {"schema": _SIDECAR_SCHEMA, "id": item_id,
+                       "seed_sha256": digest(canonical(seed)),
+                       "history_identity": identity_json,
+                       "previous": previous, "current": current,
+                       "doing_since": since, "retirement": retirement}
+            if len(canonical(payload)) > _SIDECAR_MAX_BYTES:
+                return False
+            path = self._sidecar_path(item_id)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            else:
+                if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400
+                        or info.st_nlink != 1):
+                    return False
+            write_json(path, payload, exclusive=False)
+            return True
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            return False
+
+    def _sidecar_remove(self, item_id: str) -> None:
+        """Best-effort removal of a terminal item's sidecar; never fails a commit.
+
+        Cache boundary: removal failure never fails the commit; the read path
+        rechecks retirement before trusting any sidecar.
+        """
+        try:
+            path = self._sidecar_path(item_id)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return
+            except OSError:
+                return
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return
+            with contextlib.suppress(OSError, NotImplementedError):
+                sync_dir(path.parent)
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            return
+
+    def _sidecar_expected_rev(self, identity, current_rev: int) -> bool:
+        """Check that a stored current revision matches its witnessed directory.
+
+        Cache boundary: any unexpected shape returns False and forces exact replay.
+        """
+        try:
+            if identity == ("missing",):
+                return current_rev == 1
+            if not isinstance(identity, tuple) or len(identity) != 2:
+                return False
+            _, entries = identity
+            names = []
+            for entry in entries:
+                if not isinstance(entry, (tuple, list)) or not entry:
+                    return False
+                names.append(entry[0])
+            for name in names:
+                if name in ("create.json", "legacy.json", "retirement.json"):
+                    continue
+                if _REVISION_NAME.fullmatch(name) is None:
+                    return False
+            numeric = sorted(int(name[:-5]) for name in names if _REVISION_NAME.fullmatch(name) is not None)
+            if not numeric:
+                return current_rev == 1
+            if numeric != list(range(2, len(numeric) + 2)):
+                return False
+            return current_rev == numeric[-1]
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            return False
+
+    def _sidecar_load(self, item_id: str, seed: dict, history_key):
+        """Return (item, since) from a source-backed sidecar, else None to replay exactly.
+
+        Cache boundary: any missing/malformed/unsafe/mismatched sidecar or source
+        read falls back to exact replay; sidecar content alone is never trusted.
+        Stored previous/current are full source records (seed or exact revision
+        files). At most the current/previous revision and retirement files are
+        read here; full history is never scanned. Completed items also validate
+        their exact current delivery manifest and retained acceptance receipt,
+        when used; source agreement alone is not completion proof.
+        """
+        try:
+            if IS_WINDOWS or history_key is None:
+                return None
+            if ITEM_ID.fullmatch(item_id) is None or not isinstance(seed, dict):
+                return None
+            state_dir = self.root / _SIDECAR_DIR
+            try:
+                dir_info = state_dir.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return None
+            if (not stat.S_ISDIR(dir_info.st_mode) or stat.S_ISLNK(dir_info.st_mode)
+                    or getattr(dir_info, "st_file_attributes", 0) & 0x400):
+                return None
+            path = self._sidecar_path(item_id)
+            try:
+                file_info = path.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return None
+            if (not stat.S_ISREG(file_info.st_mode) or stat.S_ISLNK(file_info.st_mode)
+                    or getattr(file_info, "st_file_attributes", 0) & 0x400):
+                return None
+            if getattr(file_info, "st_nlink", 1) != 1:
+                return None
+            if file_info.st_size > _SIDECAR_MAX_BYTES:
+                return None
+            try:
+                raw = safe_read(self.root, f"{_SIDECAR_DIR}/{item_id}.json", _SIDECAR_MAX_BYTES)
+            except (Denied, LimitExceeded, OSError, ValueError, UnicodeError):
+                return None
+            try:
+                payload = json.loads(raw, parse_constant=_reject_json_constant)
+            except (ValueError, UnicodeError):
+                return None
+            base_fields = {"schema", "id", "seed_sha256", "history_identity",
+                           "previous", "current", "doing_since"}
+            if not isinstance(payload, dict) or set(payload) not in (base_fields,
+                                                                     base_fields | {"retirement"}):
+                return None
+            if payload.get("schema") != _SIDECAR_SCHEMA or payload.get("id") != item_id:
+                return None
+            try:
+                if payload.get("seed_sha256") != digest(canonical(seed)):
+                    return None
+                if canonical(payload.get("history_identity")) != canonical(history_key):
+                    return None
+            except (ValueError, TypeError, UnicodeError, AttributeError):
+                return None
+            previous = payload.get("previous")
+            current_raw = payload.get("current")
+            since_stored = payload.get("doing_since")
+            retirement_raw = payload.get("retirement")
+            if not isinstance(current_raw, dict):
+                return None
+            if current_raw.get("id") != item_id:
+                return None
+            if since_stored is not None and not _timestamp(since_stored):
+                return None
+            if retirement_raw is not None and not isinstance(retirement_raw, dict):
+                return None
+            try:
+                # Resolution proof can span historical snapshots/receipts. Replay
+                # once to collect all witnesses for the in-memory proof cache.
+                if "wait_resolution" in current_raw:
+                    return None
+                current_rev = current_raw.get("rev")
+                if type(current_rev) is not int:
+                    return None
+                if not self._sidecar_expected_rev(history_key, current_rev):
+                    return None
+                if previous is None:
+                    try:
+                        validate_seed(current_raw, decision_task="wait" in current_raw)
+                    except Denied:
+                        return None
+                    if current_raw != seed or current_rev != 1:
+                        return None
+                    try:
+                        if canonical(current_raw) != canonical(seed):
+                            return None
+                    except (ValueError, TypeError, UnicodeError, AttributeError):
+                        return None
+                    exact_current = seed
+                    exact_previous = None
+                else:
+                    if not isinstance(previous, dict) or previous.get("id") != item_id:
+                        return None
+                    prev_rev = previous.get("rev")
+                    if type(prev_rev) is not int or prev_rev != current_rev - 1 or current_rev == 1:
+                        return None
+                    try:
+                        exact_current = self._read(f"work-items/{item_id}/{current_rev}.json")
+                    except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                            UnicodeError, AttributeError):
+                        return None
+                    try:
+                        if canonical(current_raw) != canonical(exact_current):
+                            return None
+                    except (ValueError, TypeError, UnicodeError, AttributeError):
+                        return None
+                    if prev_rev == 1:
+                        try:
+                            validate_seed(previous, decision_task="wait" in previous)
+                        except Denied:
+                            return None
+                        if previous != seed:
+                            return None
+                        exact_previous = seed
+                    else:
+                        try:
+                            exact_previous = self._read(f"work-items/{item_id}/{prev_rev}.json")
+                        except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                                UnicodeError, AttributeError):
+                            return None
+                        try:
+                            if canonical(previous) != canonical(exact_previous):
+                                return None
+                        except (ValueError, TypeError, UnicodeError, AttributeError):
+                            return None
+                    try:
+                        if prev_rev == 1:
+                            validate_seed(exact_previous,
+                                          decision_task="wait" in exact_previous)
+                        if exact_current.get("status") == "done":
+                            # Legacy closures lack a source-bound delivery;
+                            # keep their full-history fallback.
+                            if "delivery_schema" not in exact_current:
+                                return None
+                            delivery = exact_current.get("delivery")
+                            if (not isinstance(delivery, dict)
+                                    or set(delivery) != {"snapshot_id", "code_digest", "scope_digest", "binding_rev"}
+                                    or type(delivery["binding_rev"]) is not int
+                                    or not 3 <= delivery["binding_rev"] <= exact_previous["rev"]):
+                                return None
+                        self._validate_transition(
+                            exact_previous, exact_current, verify_snapshots=False)
+                    except (Denied, LimitExceeded):
+                        return None
+                    except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                        return None
+            except (Denied, LimitExceeded):
+                return None
+            except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                return None
+            if retirement_raw is not None:
+                if (current_rev != MAX_REVISIONS
+                        or exact_current.get("status") not in ("open", "doing", "blocked")):
+                    return None
+                try:
+                    exact_retirement = self._read(f"work-items/{item_id}/retirement.json")
+                except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                        UnicodeError, AttributeError):
+                    return None
+                try:
+                    if canonical(retirement_raw) != canonical(exact_retirement):
+                        return None
+                except (ValueError, TypeError, UnicodeError, AttributeError):
+                    return None
+                if (set(exact_retirement) != {"schema", "request", "request_sha256",
+                                              "chain_sha256", "created_at"}
+                        or exact_retirement.get("schema") != 1
+                        or not isinstance(exact_retirement.get("request"), dict)
+                        or not _timestamp(exact_retirement.get("created_at"))):
+                    return None
+                req = exact_retirement["request"]
+                if set(req) != {"id", "expected_rev", "status", "actor", "reason"}:
+                    return None
+                try:
+                    normalized = work_item_retirement.request(
+                        item_id, req.get("expected_rev"), req.get("status"),
+                        req.get("actor"), req.get("reason"))
+                except (Denied, TypeError, ValueError):
+                    return None
+                if (req != normalized
+                        or exact_retirement.get("request_sha256") != digest(canonical(normalized))
+                        or not isinstance(exact_retirement.get("chain_sha256"), str)
+                        or not DIGEST.fullmatch(exact_retirement["chain_sha256"])):
+                    return None
+                try:
+                    item = work_item_retirement.project(exact_current, exact_retirement)
+                except (Denied, LimitExceeded):
+                    return None
+                except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                    return None
+                if since_stored is not None:
+                    return None
+                return item, None
+            try:
+                item = work_item_retirement.project(exact_current, None)
+            except (Denied, LimitExceeded):
+                return None
+            except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+                return None
+            if not isinstance(item, dict):
+                return None
+            item_status = item.get("status")
+            if item_status in ("done", "dropped"):
+                if since_stored is not None:
+                    return None
+                return item, None
+            if "blocked_since" not in item:
+                if item["status"] != "open" and item["rev"] != 1:
+                    return None
+                if item["status"] == "blocked":
+                    item = {**item, "blocked_since": blocked_start(None, item)}
+            elif (exact_previous is not None and "blocked_since" not in exact_previous
+                  and exact_previous["status"] != "open" and exact_previous["rev"] != 1):
+                return None
+            if item_status == "doing":
+                if (since_stored is None or not _timestamp(since_stored)
+                        or since_stored != exact_current.get("updated_at")):
+                    return None
+            elif since_stored is not None:
+                return None
+            return item, since_stored
+        except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                AttributeError):
+            # Cache boundary: any sidecar/source failure falls back to exact
+            # replay, never fails the read.
+            return None
+
+    def backfill_current_states(self, *, limit=MAX_OPEN_PAGE_ROWS) -> dict:
+        """Build at most ``limit`` missing or invalid current-state sidecars.
+
+        The caller must be a writable project operation: this method holds the
+        record lock, validates each selected item's exact source chain, and
+        writes only the disposable sidecar cache. A valid sidecar costs at most
+        its source-identity and current/previous/retirement reads; an item that
+        still lacks a valid sidecar pays the existing exact replay once. Normal
+        terminal items and retirement are cached too, so later open/status scans
+        can skip their history. Unsafe or ambiguous sources are left alone. The
+        return value reports eligible items checked and sidecars written or
+        rebuilt.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item state backfill limit must be an integer in [1, 100]")
+        if IS_WINDOWS:
+            # The read path intentionally bypasses the cache on Windows; do not
+            # create files no read can use or report them as warmed.
+            return {"checked": 0, "backfilled": 0}
+        checked = 0
+        backfilled = 0
+        with lock(self.root / "locks" / "insights.lock"):
+            for event_id, event, scanned in self._iter_item_events_with_revisions(recover=True):
+                kind, seed = self._seed_for_event(event_id, event, readonly=False)
+                if kind != "seed":
+                    continue
+                checked += 1
+                revisions = (scanned if scanned is not None else
+                             self._history_revisions(seed["id"], recover=True))
+                identity = self._history_identity(seed["id"])
+                if identity is None:
+                    continue
+                if self._sidecar_load(seed["id"], seed, identity) is not None:
+                    continue
+                history_flags = set()
+                item, since = self._current_hold(
+                    seed["id"], seed_event=event, history_revisions=revisions,
+                    verify_snapshots=False, verify_current_delivery=True,
+                    history_flags=history_flags)
+                if "wait_resolution" in history_flags:
+                    self._sidecar_remove(seed["id"])
+                    continue
+                revision = item["rev"]
+                if revision == 1:
+                    previous, current = None, seed
+                elif revision == 2:
+                    previous = seed
+                    current = self._read(f"work-items/{seed['id']}/{revision}.json")
+                else:
+                    previous = self._read(f"work-items/{seed['id']}/{revision - 1}.json")
+                    current = self._read(f"work-items/{seed['id']}/{revision}.json")
+                retirement = None
+                if item["status"] in ("done", "dropped"):
+                    if current.get("status") not in ("done", "dropped"):
+                        retirement = self._read(
+                            f"work-items/{seed['id']}/retirement.json")
+                    since = None
+                elif (item["status"] == "doing" and previous is not None
+                        and previous.get("status") == "doing"):
+                    # The earlier doing_since is not recoverable from only the
+                    # current and previous records; keep this item exact-only.
+                    self._sidecar_remove(seed["id"])
+                    continue
+                if self._sidecar_store(seed["id"], seed, self._history_identity(seed["id"]),
+                                       previous, current, since, retirement=retirement):
+                    backfilled += 1
+                if backfilled >= limit:
+                    break
+        return {"checked": checked, "backfilled": backfilled}
 
     def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
                     actor=None, idempotency_key=None, decision_key=None,
@@ -484,11 +1139,19 @@ class WorkItems:
                 record["requested_smoke_refs"] = smoke_refs
             self.require_open_capacity(1)
             directory.mkdir(parents=True, exist_ok=True)
-            with self.committing([item_id]):
-                write_json(directory / "create.json", record, exclusive=True)
+            write_json(directory / "create.json", record, exclusive=True)
+            try:
+                # Cache boundary: best-effort seed sidecar (previous None,
+                # current exact immutable seed); never fails the commit.
+                identity = self._history_identity(item_id)
+                self._sidecar_store(item_id, seed, identity, None, seed, None)
+            except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                    AttributeError):
+                pass
             return {"record": record, "created": True}
 
-    def _iter_item_events_with_revisions(self, *, recover: bool):
+    def _iter_item_events_with_revisions(self, *, recover: bool, cache: bool = False,
+                                         with_identity: bool = False):
         task_sources = set()
         ambiguous_task_sources = set()
         for event_id, event in self._iter_decision_events(recover=recover):
@@ -498,9 +1161,15 @@ class WorkItems:
                         ambiguous_task_sources.add(seed["id"])
                     else:
                         task_sources.add(seed["id"])
-                    yield seed["id"][3:], event, None
+                    if with_identity:
+                        yield seed["id"][3:], event, None, None
+                    else:
+                        yield seed["id"][3:], event, None
             else:
-                yield event_id, event, None
+                if with_identity:
+                    yield event_id, event, None, None
+                else:
+                    yield event_id, event, None
         directory = self.root / "work-items"
         if not _directory(directory):
             return
@@ -520,14 +1189,27 @@ class WorkItems:
                         # Reuse only this scan's fully validated task sources.
                         if entry.name in ambiguous_task_sources:
                             raise Denied("Ambiguous task seed sources")
-                        revisions = self._history_revisions(entry.name, recover=recover)
-                        if entry.name in task_sources:
+                        group = entry.name in task_sources
+                        if cache and not recover:
+                            revisions, identity = self._history_revisions_readonly(entry.name)
+                        else:
+                            revisions, identity = (self._history_revisions(entry.name, recover=recover), None)
+                        if group:
                             continue
                         if revisions or (directory / entry.name / "legacy.json").exists():
                             raise Denied("Work-item history has no immutable seed")
                     continue
-                revisions = self._history_revisions(entry.name, recover=recover)
-                yield entry.name[3:], self._direct_record(entry.name), revisions
+                if cache and not recover:
+                    revisions, identity = self._history_revisions_readonly(entry.name)
+                else:
+                    revisions, identity = (self._history_revisions(entry.name, recover=recover), None)
+                if recover and with_identity and not IS_WINDOWS:
+                    identity = self._history_identity(entry.name)
+                record = self._direct_record(entry.name)
+                if with_identity:
+                    yield entry.name[3:], record, revisions, identity
+                else:
+                    yield entry.name[3:], record, revisions
 
     def _iter_item_events(self, *, recover: bool):
         for event_id, event, _ in self._iter_item_events_with_revisions(recover=recover):
@@ -713,9 +1395,8 @@ class WorkItems:
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Legacy reconciliation exceeds byte bound")
             self.require_open_capacity(1 if outcome == "open" else 0)
-            with self.committing([f"wi_{event_id}"]):
-                write_json(self.root / "work-items" / f"wi_{event_id}" / "legacy.json",
-                           record, exclusive=True)
+            write_json(self.root / "work-items" / f"wi_{event_id}" / "legacy.json",
+                       record, exclusive=True)
             return {"record": record, "created": True}
 
     def page_legacy(self, *, cursor=None, limit=25) -> dict:
@@ -913,20 +1594,21 @@ class WorkItems:
             raise Denied("Unsafe work-item origin record")
         return self._read(name)
 
-    def _origin_lookup(self, insight_id: str, *, locked: bool = True) -> tuple:
-        """Index columns of one origin insight: its row, then its current decision."""
-        with self._ledger.read("insights", locked=locked) as db:
-            return _rows(db, _ORIGIN_SELECT + " FROM (SELECT ? AS k) " + _ORIGIN_JOIN.format(key="k"),
-                         (insight_id,))[0]
-
-    def _origin_revision(self, insight_id: str) -> int | None:
-        """Current revision of an origin insight; None when it is unknown."""
-        return self._origin_rev(self._origin_lookup(insight_id))
-
-    @staticmethod
-    def _origin_rev(origin: tuple) -> int | None:
-        known, valid, revision = origin[:3]
-        if known is not None and not valid:
+    def _origin_revision(self, insight_id: str, *, readonly: bool = False) -> int | None:
+        current = self._optional_record(f"inbox/{insight_id}.json")
+        if current is None:
+            if readonly:
+                current = insight_archive.read_immutable(self.root, insight_id,
+                                                         include_unavailable=True)
+            else:
+                current = insight_archive.read(self.root, insight_id, include_unavailable=True)
+        if current is None:
+            return None
+        if current.get("body_unavailable") is True:
+            revision = current.get("rev")
+            return revision if type(revision) is int and revision >= 1 else None
+        revision = current.get("rev", 1)
+        if (current.get("id") != insight_id or type(revision) is not int or revision < 1):
             raise Denied("Invalid current work-item origin insight")
         return revision
 
@@ -976,16 +1658,12 @@ class WorkItems:
             raise Denied("Malformed current work-item origin decision")
         return action, revision
 
-    def _resolve_current_work_item(self, decision: dict, *, readonly: bool, events=None,
-                                   resolve: bool = True):
+    def _resolve_current_work_item(self, decision: dict, *, readonly: bool):
         """Resolve the work-item ID (or ordered task IDs) for a current decision.
 
         The keyed ``work_item`` branch reuses the immutable seed validator,
         which never recovers; only the legacy no-event-ID branch needs the
         history scan, recovered when locked and validated read-only otherwise.
-        ``events`` supplies the scanned history for callers that resolve many
-        decisions; without ``resolve`` the legacy branch only proves the
-        decision equals one immutable event.
         """
         action = decision.get("action")
         if action == "withdraw":
@@ -1015,16 +1693,13 @@ class WorkItems:
             # old-schema record against one immutable history event rather than
             # trusting a well-shaped mutable pointer by itself.
             match = None
-            for event_id, event in (events() if events is not None
-                                    else self._iter_decision_events(recover=not readonly)):
+            for event_id, event in self._iter_decision_events(recover=not readonly):
                 if event == decision:
                     if match is not None:
                         raise Denied("Ambiguous current legacy decision history")
                     match = (event_id, event)
             if match is None:
                 raise Denied("Current legacy decision has no immutable history event")
-            if not resolve:
-                return None
             if readonly:
                 revisions = self._history_revisions(f"wi_{match[0]}", recover=False)
                 resolution = self._legacy_resolution(*match, history_revisions=revisions)
@@ -1035,13 +1710,13 @@ class WorkItems:
             return None
         return None
 
-    def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
-        """Validated current decision of one insight with its work-item IDs, read from files."""
+    def _current_decision_impl(self, insight_id: str, *, include_work_item: bool, readonly: bool) -> dict | None:
+        """Shared current-decision read with an explicit recovery mode."""
         decision = self._optional_record(f"decisions/{insight_id}.json")
         if decision is None:
             return None
         action, revision = self._validate_current_decision_shape(decision, insight_id)
-        work_item_id = self._resolve_current_work_item(decision, readonly=False)
+        work_item_id = self._resolve_current_work_item(decision, readonly=readonly)
         result = {"rev": revision, "action": action}
         if include_work_item:
             if isinstance(work_item_id, list):
@@ -1049,6 +1724,9 @@ class WorkItems:
             else:
                 result["work_item_id"] = work_item_id
         return result
+
+    def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
+        return self._current_decision_impl(insight_id, include_work_item=include_work_item, readonly=False)
 
     def _history_revisions(self, item_id: str, *, recover: bool, require_clean=False) -> set[int] | None:
         """Validate per-item history names, optionally recovering leftovers.
@@ -1120,8 +1798,6 @@ class WorkItems:
         for entry in temporary_entries:
             try:
                 info = _entry_stat(entry)
-            except FileNotFoundError:
-                continue  # A concurrent writer finished its atomic write.
             except OSError as exc:
                 raise Denied("Unsafe work-item temporary") from exc
             if (not stat.S_ISREG(info.st_mode)
@@ -1211,7 +1887,7 @@ class WorkItems:
                     or not DIGEST.fullmatch(delivery["code_digest"])):
                 raise Denied("Invalid delivery snapshot")
             if verify_snapshots:
-                snapshot = self.snapshots.binding(delivery["snapshot_id"])
+                snapshot = self.snapshots.get(delivery["snapshot_id"])
                 if (snapshot.get("id") != delivery["snapshot_id"]
                         or snapshot.get("code_digest") != delivery["code_digest"]):
                     raise Denied("Delivery does not match its immutable snapshot")
@@ -1331,7 +2007,7 @@ class WorkItems:
                     or not isinstance(verification.get("code_digest"), str)
                     or not DIGEST.fullmatch(verification["code_digest"])):
                 raise Denied("Completion requires verified snapshot evidence")
-            snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.binding(sid)
+            snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.get(sid)
             code_digest = snapshot["code_digest"]
             if verification["code_digest"] != code_digest:
                 raise Denied("Completion evidence does not match its delivery")
@@ -1357,7 +2033,8 @@ class WorkItems:
             raise Denied("Only completed work items carry snapshot evidence")
 
     def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
-                    history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True):
+                    history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True,
+                    proof_sources=None):
         """Replay and validate one append-only chain, yielding one record at a time.
 
         The seed and each revision are immutable full-state records. Callers may
@@ -1381,6 +2058,8 @@ class WorkItems:
             raise Denied("Gapped work-item history")
         for revision in range(2, len(revisions) + 2):
             record = self._read(f"work-items/{item_id}/{revision}.json")
+            if proof_sources is not None:
+                proof_sources.extend(self._validation_sources(record, current))
             self._validate_transition(current, record, verify_snapshots=verify_snapshots)
             blocked_since = blocked_start(blocked_since, record)
             if "blocked_since" in record and record["blocked_since"] != blocked_since:
@@ -1393,23 +2072,63 @@ class WorkItems:
         if retirement is not None:
             retirement.update(chain_sha256=chain_sha256, record=terminal)
 
+    def _peek_full_item(self, item_id, *, seed_event, history_revisions):
+        """Only the request-scoped read facade can supply an exact full-proof hit."""
+        return None
+
     def _get(self, item_id: str, *, seed_event: dict | None = None,
              history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
              verify_current_delivery: bool = False) -> dict:
-        """Replay one item's current record from its revision files."""
         return self._current_hold(item_id, seed_event=seed_event,
                                   history_revisions=history_revisions,
                                   verify_snapshots=verify_snapshots,
-                                  verify_current_delivery=verify_current_delivery)[0]
+                                  verify_current_delivery=verify_current_delivery, derive_blocked=False)[0]
+
+    def _projection_key(self, seed, history_key, validation_mode):
+        """Bind cached projections to source identity and every snapshot policy input."""
+        return (digest(canonical(seed)), history_key, validation_mode, self.snapshots.root,
+                self.snapshots.max_file, self.snapshots.max_bytes, self.snapshots.max_files,
+                tuple(self.snapshots.excludes), self.snapshots.history_index, IS_WINDOWS)
+
+    def _readiness_item(self, seed, event, history_revisions, history_key):
+        """Reconstruct readiness state once per unchanged immutable source proof.
+
+        Unlike prompt projections, readiness retains strict validation of every
+        historical delivery. Its proof is separate from the status-only cache;
+        external CI/proposal evidence and time-dependent eligibility are still
+        read by their route accumulators on each poll. Unsupported identities
+        retain the exact live replay.
+        """
+        item_id = seed["id"]
+        if IS_WINDOWS or history_key is None or history_revisions is None:
+            return self._get(item_id, seed_event=event,
+                             history_revisions=history_revisions)
+        self._seed(item_id, event, history_revisions=history_revisions)
+        key = self._projection_key(seed, history_key, "readiness-full-history")
+        cached = self._projection_cache.get(item_id)
+        if cached is not None and cached[0] == key:
+            if len(cached) == 4 and self._proof_unchanged(cached[3]):
+                return cached[1]
+        self._projection_cache.pop(item_id, None)
+        proof_sources = []
+        item, since = self._current_hold(
+            item_id, seed_event=event, history_revisions=history_revisions,
+            verify_snapshots=True, derive_blocked=True, proof_sources=proof_sources)
+        if (item["status"] in OPEN_STATUS_ORDER
+                and self._history_identity(item_id) == history_key):
+            proof_sources = tuple(dict.fromkeys(proof_sources))
+            if self._proof_unchanged(proof_sources):
+                self._projection_cache[item_id] = (key, item, since, proof_sources)
+        return item
 
     def _current_hold(self, item_id: str, *, seed_event=None,
                       history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
-                      verify_current_delivery: bool = False, blocked_waiter=None) -> tuple:
-        """Replay a chain into (current record, doing start, blocked start).
-
-        The optional waiter receives the current blocked record with its
-        derived start, so a writer cannot hide a stale prior waiter.
-        """
+                      verify_current_delivery: bool = False, blocked_waiter=None, derive_blocked=True,
+                      proof_sources=None, history_flags=None) -> tuple:
+        # History flags let writers exclude historical resolution proofs from
+        # the current/previous-only sidecar without making reads mutate state.
+        # Optional output reuses this exact replay at the write boundary to
+        # prevent a doing revision from hiding a stale prior waiter.
         since = None
         blocked_since = None
         current = None
@@ -1418,7 +2137,9 @@ class WorkItems:
         retirement = {}
         for current in self._iter_chain(item_id, seed_event=seed_event,
                                         history_revisions=history_revisions, retirement=retirement,
-                                        verify_snapshots=verify_snapshots):
+                                        verify_snapshots=verify_snapshots, proof_sources=proof_sources):
+            if history_flags is not None and "wait_resolution" in current:
+                history_flags.add("wait_resolution")
             if previous is not None:
                 last_transition = (previous, current)
             previous = current
@@ -1435,218 +2156,33 @@ class WorkItems:
                 and current["status"] in OPEN_STATUS_ORDER and current.get("delivery") is not None):
             if last_transition is None:
                 raise Denied("Current delivery lacks a validated transition")
+            if proof_sources is not None:
+                relative = f"snapshots/{current['delivery']['snapshot_id']}.json"
+                proof_sources.append((self.snapshots.root, relative,
+                                      self._proof_identity(self.snapshots.root, relative)))
             self._validate_delivery(*last_transition, verify_snapshots=True)
-        return (work_item_retirement.project(current, terminal),
-                None if terminal else since, blocked_since)
-
-    # Index source: the only code that turns revision files into index rows.
-
-    def _ledger_row(self, item_id, event, revisions, *, strict=False) -> tuple:
-        item, since, blocked_since = self._current_hold(
-            item_id, seed_event=event, history_revisions=revisions,
-            verify_snapshots=strict, verify_current_delivery=True)
-        origin = item["origin"] or {}
-        source = (event.get("decision_key") if isinstance(event, dict)
-                  and ("work_items" in event or "work_item_specs" in event) else None)
-        return (item["id"], item["rev"], item["status"], item["holder"],
-                _timestamp_order(item["created_at"]), _timestamp_order(item["updated_at"]),
-                origin.get("insight_id"), origin.get("rev") if "insight_id" in origin else None,
-                (item.get("wait") or {}).get("kind"), since, blocked_since, source,
-                canonical(item).decode())
-
-    def ledger_entries(self, *, recover: bool, skip=frozenset(), strict=False, errors=None):
-        """Yield every index entry, replayed and validated from the files.
-
-        With ``errors`` (a list), an item whose chain fails validation is
-        reported there as ``(item_id, exception)`` instead of aborting.
-        """
-        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=recover):
-            kind, seed = self._seed_for_event(event_id, event, readonly=not recover)
-            if kind == "unseeded":
-                yield ("unseeded", event_id)
-            if kind != "seed" or seed["id"] in skip:
-                continue
-            revisions = (scanned if scanned is not None
-                         else self._history_revisions(seed["id"], recover=recover))
-            try:
-                yield ("item", self._ledger_row(seed["id"], event, revisions, strict=strict))
-            except (Denied, LimitExceeded) as exc:
-                if errors is None:
-                    raise
-                errors.append((seed["id"], exc))
-
-    def ledger_item(self, item_id: str, source_event, *, recover: bool) -> list:
-        """Replay the index entries of one item (none when it has no seed)."""
-        if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
-            raise Denied("Invalid work-item ID")
-        history = self.root / "decision-history"
-        if source_event is not None:
-            if not (history / f"{source_event}.json").exists():
-                return []
-            event = self._read(f"decision-history/{source_event}.json")
-        elif (history / f"{item_id[3:]}.json").exists():
-            event = self._read(f"decision-history/{item_id[3:]}.json")
-        elif (self.root / "work-items" / item_id / "create.json").exists():
-            event = self._direct_record(item_id)
-        else:
-            event = self._task_event(item_id)
-            if event is None:
-                return []
-        kind, seed = self._seed_for_event(item_id[3:], event, readonly=not recover)
-        if kind == "unseeded":
-            return [("unseeded", item_id[3:])]
-        if kind != "seed":
-            return []
-        revisions = self._history_revisions(item_id, recover=recover)
-        return [("item", self._ledger_row(item_id, event, revisions))]
-
-    def committing(self, item_ids, *, source_event=None):
-        """Bracket a revision-file commit for ``item_ids``; caller holds the record lock."""
-        return self._ledger.write("items", item_ids, hint=source_event)
-
-    # Current state: every read below comes from the index, never from history.
-
-    @staticmethod
-    def _decode(raw, since=None, blocked_since=None):
-        item = json.loads(raw)
-        if blocked_since is not None:
-            item["blocked_since"] = blocked_since
-        return item, since
-
-    def _indexed(self, item_id: str, *, locked: bool):
-        """Return (item, doing start) with any derived blocked start, or raise."""
-        if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
-            raise Denied("Invalid work-item ID")
-        with self._ledger.read("items", locked=locked) as db:
-            found = _rows(db, "SELECT item, doing_since, blocked_since FROM items WHERE id=?",
-                          (item_id,))
-        if not found:
-            raise Denied("Work item has no immutable seed")
-        return self._decode(*found[0])
-
-    def current(self, item_id: str) -> dict:
-        """Current record of one item, without locks or writes."""
-        return self._plain(item_id)
-
-    def _plain(self, item_id: str, *, locked: bool = False) -> dict:
-        if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
-            raise Denied("Invalid work-item ID")
-        with self._ledger.read("items", locked=locked) as db:
-            found = _rows(db, "SELECT item FROM items WHERE id=?", (item_id,))
-        if not found:
-            raise Denied("Work item has no immutable seed")
-        return json.loads(found[0][0])
-
-    def current_items(self, *, statuses=None) -> list[dict]:
-        """Current records of every seeded item in ID order, optionally by status."""
-        query = "SELECT item FROM items"
-        if statuses is not None:
-            if not statuses or any(status not in STATUSES for status in statuses):
-                raise Denied("Invalid work-item status filter")
-            query += f" WHERE status IN ({', '.join('?' * len(statuses))})"
-        with self._ledger.read("items", locked=False) as db:
-            found = _rows(db, query + " ORDER BY id", tuple(statuses or ()))
-        return [json.loads(raw) for (raw,) in found]
-
-    def unseeded_decisions(self) -> int:
-        """Count legacy accept/modify decisions that no reconciliation resolved."""
-        with self._ledger.read("items", locked=False) as db:
-            return _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
-
-    def origin_sources(self) -> dict:
-        """``{insight id: (readable, submitting source or None)}`` for every known insight."""
-        with self._ledger.read("insights", locked=False) as db:
-            return {row[0]: (bool(row[1]), row[2])
-                    for row in _rows(db, "SELECT id, valid, source FROM insights")}
-
-    def closed_items(self, *, limit: int):
-        """Return the closed page and the current records of its rows."""
-        return self._page_closed_impl(limit=limit, readonly=True, include_items=True)
-
-    def history(self, item_id: str):
-        """Replay and validate one item's committed chain from its revision files."""
-        return self._iter_chain(item_id)
-
-    def is_drop_only(self, item_id: str) -> bool:
-        """Whether an item directory holds only a valid legacy drop resolution."""
-        return self._audit_drop_only(item_id)
-
-    def audit(self, *, repair: bool = False) -> dict:
-        """Replay every chain strictly and compare it with the index.
-
-        Holds the record lock for the whole run. Reports corrupt chains and
-        index divergence (at most MAX_OPEN_PAGE_ROWS IDs each, with counts),
-        for work items and, under ``insights``, for the insight and decision
-        records; ``repair`` then rebuilds a diverged index from the files
-        (work items require every chain to validate). The audit itself never
-        changes files.
-        """
-        with lock_diagnostics.operation("write"), record_lock(self.root):
-            errors = []
-            files = {}
-            unseeded = set()
-            for kind, value in self.ledger_entries(recover=False, strict=True, errors=errors):
-                if kind == "item":
-                    files[value[0]] = value
-                else:
-                    unseeded.add(value)
-            index = self._ledger.snapshot("items")
-            if index is None:
-                state, indexed, indexed_unseeded = "missing", {}, set()
-            else:
-                state, (indexed, indexed_unseeded) = index
-            divergent = sorted(item_id for item_id in set(files) | set(indexed)
-                               if files.get(item_id) != indexed.get(item_id)
-                               and item_id not in dict(errors))
-            divergent_unseeded = sorted(unseeded ^ indexed_unseeded)
-            consistent = not errors and not divergent and not divergent_unseeded and state == "complete"
-            repaired = False
-            if repair and not errors and not consistent:
-                self._ledger.rebuild("items")
-                repaired = True
-            insights = insight_index.audit(self.insights, repair=repair)
-            jobs = None
-            if "check_jobs" in self.insights.ledger.domains:
-                with lock(self.root / "locks" / "check-jobs.lock"):
-                    jobs = check_job_index.audit(self.insights.ledger, repair=repair)
-            return {"items": len(files) + len(errors), "unseeded_decisions": len(unseeded),
-                    "index": state, "consistent": consistent and insights["consistent"] and (jobs is None or jobs["consistent"]),
-                    "repaired": repaired or insights["repaired"] or bool(jobs and jobs["repaired"]),
-                    "insights": insights, **({"check_jobs": jobs} if jobs is not None else {}),
-                    "corrupt": [{"id": item_id, "error": str(exc)}
-                                for item_id, exc in errors[:MAX_OPEN_PAGE_ROWS]],
-                    "corrupt_count": len(errors),
-                    "divergent": divergent[:MAX_OPEN_PAGE_ROWS], "divergent_count": len(divergent),
-                    "divergent_unseeded": divergent_unseeded[:MAX_OPEN_PAGE_ROWS],
-                    "divergent_unseeded_count": len(divergent_unseeded)}
+        item = work_item_retirement.project(current, terminal)
+        if derive_blocked and blocked_since is not None:
+            item = {**item, "blocked_since": blocked_since}
+        return item, None if terminal else since
 
     def get(self, item_id: str) -> dict:
-        """Read one item's current record under insights.lock."""
-        with lock(self.root / "locks" / "insights.lock"):
-            return self._plain(item_id, locked=True)
+        """Read one seed and at most 255 bounded full-state events under lock.
 
-    @staticmethod
-    def _origin_decision(origin: tuple) -> dict | None:
-        """Current decision of an origin insight from its index columns."""
-        known, rev, action, linked = origin[3:]
-        if known is None:
-            return None
-        if not linked:
-            raise Denied("Malformed current work-item origin decision")
-        return {"rev": rev, "action": action}
-
-    def _origin_projection(self, item: dict, origin=None, *, current_decision=_HISTORY_UNSET) -> dict:
-        """Project origin staleness from the item's origin and the insight index.
-
-        ``origin`` holds the joined index columns (see ``_ORIGIN_SELECT``);
-        without it the lookup runs under the record lock the callers hold.
+        No list/index or mutable pointer. Unsafe, unknown, oversized or malformed
+        records raise Denied/LimitExceeded; local I/O/lock failures propagate.
         """
+        with lock(self.root / "locks" / "insights.lock"):
+            history_revisions = self._recover_temporary_writes(item_id)
+            return self._get(item_id, history_revisions=history_revisions)
+
+    def _origin_projection_impl(self, item: dict, *, readonly: bool, current_decision=_HISTORY_UNSET) -> dict:
+        """Project origin staleness with an explicit decision-recovery mode."""
         if item["origin"] is None or "work_item_id" in item["origin"]:
             return {"current_origin_rev": None, "stale": False, "redecision": None}
+        origin_id = item["origin"]["insight_id"]
         origin_rev = item["origin"]["rev"]
-        if origin is None:
-            origin = self._origin_lookup(item["origin"]["insight_id"])
-        current_rev = self._origin_rev(origin)
+        current_rev = self._origin_revision(origin_id, readonly=readonly)
         redecision = None
         if current_rev is None:
             stale = True
@@ -1655,8 +2191,10 @@ class WorkItems:
         elif current_rev == origin_rev:
             stale = False
         else:
-            decision = (self._origin_decision(origin) if current_decision is _HISTORY_UNSET
-                        else current_decision)
+            if current_decision is _HISTORY_UNSET:
+                decision = self._current_decision_impl(origin_id, include_work_item=False, readonly=readonly)
+            else:
+                decision = current_decision
             if decision is not None and decision["rev"] > current_rev:
                 raise Denied("Origin decision revision is ahead of its insight")
             redecision = (decision if decision is not None and decision["rev"] == current_rev
@@ -1666,14 +2204,29 @@ class WorkItems:
         return {"current_origin_rev": current_rev, "stale": stale,
                 "redecision": redecision}
 
-    def _projection_unlocked(self, item_id: str) -> dict:
-        """Build a bounded projection while the caller holds insights.lock."""
-        item, since = self._indexed(item_id, locked=True)
-        view = {"item": item, **self._origin_projection(item),
+    def _origin_projection(self, item: dict, *, current_decision=_HISTORY_UNSET) -> dict:
+        """Project current origin staleness from the immutable item's origin."""
+        return self._origin_projection_impl(item, readonly=False, current_decision=current_decision)
+
+    def _build_projection(self, item_id: str, *, seed_event: dict | None = None, readonly: bool,
+                          verify_snapshots: bool = True,
+                          verify_current_delivery: bool = False,
+                          history_revisions=_HISTORY_UNSET) -> dict:
+        """Build a bounded projection with an explicit recovery mode."""
+        if history_revisions is _HISTORY_UNSET:
+            history_revisions = self._history_revisions(item_id, recover=not readonly)
+        item, since = self._current_hold(item_id, seed_event=seed_event, history_revisions=history_revisions,
+                                          verify_snapshots=verify_snapshots,
+                                          verify_current_delivery=verify_current_delivery)
+        view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                 **self._hold_projection(since), **blocked_age(self, item)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
             raise LimitExceeded("Work-item projection exceeds byte bound")
         return view
+
+    def _projection_unlocked(self, item_id: str, *, seed_event: dict | None = None) -> dict:
+        """Build a projection while the caller holds insights.lock."""
+        return self._build_projection(item_id, seed_event=seed_event, readonly=False)
 
     def explain(self, item_id: str, *, after_rev=0, limit=25) -> dict:
         """Return current status/origin plus a byte-bounded ascending history page.
@@ -1747,7 +2300,7 @@ class WorkItems:
                     continue
                 snapshot_id = delivery["snapshot_id"]
                 if snapshot_id not in verified_snapshots:
-                    snapshot = self.snapshots.binding(snapshot_id)
+                    snapshot = self.snapshots.get(snapshot_id)
                     if snapshot.get("id") != snapshot_id:
                         raise Denied("Delivery does not match its immutable snapshot")
                     verified_snapshots[snapshot_id] = snapshot.get("code_digest")
@@ -1796,7 +2349,8 @@ class WorkItems:
             return self._submitter_item_status(decision["work_item_id"], decision)
 
     def _submitter_item_status(self, item_id: str, decision: dict) -> dict:
-        item, since = self._indexed(item_id, locked=True)
+        history_revisions = self._recover_temporary_writes(item_id)
+        item, since = self._current_hold(item_id, history_revisions=history_revisions)
         origin_decision = {"rev": decision["rev"], "action": decision["action"]}
         origin = self._origin_projection(item, current_decision=origin_decision)
         status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
@@ -1855,8 +2409,6 @@ class WorkItems:
                     raise Denied("Too many decision-history temporaries")
                 try:
                     info = _entry_stat(entry)
-                except FileNotFoundError:
-                    continue  # A concurrent writer finished its atomic write.
                 except OSError as exc:
                     raise Denied("Unstable decision-history temporary") from exc
                 if (not stat.S_ISREG(info.st_mode)
@@ -1906,6 +2458,10 @@ class WorkItems:
             sync_dir(history)
         return True
 
+    def prepare_decision_history(self) -> bool:
+        """Screen the event directory before writes, with insights.lock held."""
+        return self._recover_decision_history_temporaries(self.root / "decision-history")
+
     def prepare_decision_write(self, *, need_wait: bool = False) -> bool:
         """Screen every decision-transaction parent before any write, lock held.
 
@@ -1943,14 +2499,19 @@ class WorkItems:
         and ``coverage_complete``.
         Limits are 1..100 (exact int); the opaque cursor carries the last row's
         status, UTC creation-order key and ID. Rows are at most 8192 canonical
-        bytes and the complete response at most 1 MiB. Selection streams the
-        indexed active rows keeping O(limit) of them. Unresolved legacy
-        accept/modify events are counted, never guessed as open.
-        The page serves the runtime prompt projection and the explicitly granted
-        ``work_items_read`` operation. It does not transition items. Cursors
-        page a live view: changes between calls can move rows; a last-key
+        bytes and the complete response at most 1 MiB. Selection keeps O(limit)
+        rows while scanning history. Unresolved legacy accept/modify events are
+        counted, never guessed as open; hash-bound sidecars explicitly resolve them.
+        The page serves the runtime prompt projection and the explicitly granted ``work_items_read`` operation.
+        It does not transition items; it may remove recognized decision-history
+        and per-item atomic-write leftovers during recovery under the shared
+        lock. Recovery removes recognized regular orphan temporaries without
+        promotion; post-link aliases require exactly
+        one matching event inode.
+        Cursors page a live view: changes between calls can move rows; a last-key
         cursor avoids offset shifts on earlier closes but does not freeze
-        membership.
+        membership. Unsafe/malformed committed JSON, seeds or state fail closed;
+        unmatched/unsafe temporaries and unexpected names fail closed.
         """
         with lock(self.root / "locks" / "insights.lock"):
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
@@ -2129,7 +2690,7 @@ class WorkItems:
         return sort_key, row
 
     @staticmethod
-    def closed_row(item: dict) -> tuple:
+    def _closed_row(item: dict) -> tuple:
         """Build one bounded closed-page row and its newest-first key."""
         sort_key = (-_timestamp_order(item["updated_at"]), int(item["id"][3:], 16))
         row = {key: item[key] for key in ("id", "title", "status", "origin", "rev", "updated_at")}
@@ -2165,26 +2726,20 @@ class WorkItems:
             raise LimitExceeded("Closed work-item page row exceeds byte bound")
         return sort_key, row
 
-    def _active_rows(self, *, locked: bool):
-        """Yield the unseeded count, then stream every active row in ID order."""
-        with self._ledger.read("items", "insights", locked=locked) as db:
-            yield _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
-            yield from db.execute(
-                f"SELECT i.item, i.doing_since, i.blocked_since, {_ORIGIN_COLUMNS} FROM items i "
-                + _ORIGIN_JOIN.format(key="i.origin_insight")
-                + " WHERE i.status IN ('open', 'doing', 'blocked') ORDER BY i.id")
-
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False, writer_roles=None,
                         wait_resolution_role: str | None = None, _active_transform=None,
                         delivered_wait_resolution_tokens=None, wait_resolution_high_water=None,
                         operator_answer=None):
-        """Collect the bounded open page from the index.
+        """Collect the bounded open page with an explicit recovery mode.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
-        path never locks or writes. Cursor, limit, ordering, overflow and byte
-        bounds match :meth:`page_open`. Host-only opening orchestration
+        CLI path calls with ``readonly=True`` and never locks, recovers or
+        deletes. Cursor, limit, ordering, overflow and byte bounds match
+        :meth:`page_open`. Superseded historical delivery manifests are skipped,
+        but each current active delivery is checked against its exact snapshot
+        before its status or ordering is used. Host-only opening orchestration
         can supply an active transform on the unlocked readonly path; public
         read entry points never do. The returned state is used before selection,
         counting and fingerprints, so transitions cannot leave a stale page.
@@ -2209,8 +2764,10 @@ class WorkItems:
             delivered_resolution_tokens = frozenset(delivered_wait_resolution_tokens)
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
-        active = self._active_rows(locked=not readonly)
-        unseeded_decisions = next(active)
+        cacheable = (readonly or ready_only) and not IS_WINDOWS
+        events = self._iter_item_events_with_revisions(recover=not readonly,
+                                                        cache=cacheable,
+                                                        with_identity=cacheable)
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -2218,6 +2775,7 @@ class WorkItems:
         total = 0
         open_count = 0
         eligible = 0
+        unseeded_decisions = 0
         unknown_blocked = 0
         ready_sum = 0
         wait_resolution_pending = False
@@ -2230,8 +2788,97 @@ class WorkItems:
         resolution_count = 0
         resolution_max = None
         order_sum = 0
-        for entry in active:
-            item, since = self._decode(*entry[:3])
+        for row in events:
+            if cacheable:
+                event_id, event, scanned, history_key = row
+            else:
+                event_id, event, scanned = row
+                history_key = None
+            kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
+            if kind == "skip":
+                continue
+            if kind == "unseeded":
+                unseeded_decisions += 1
+                continue
+            # Reuse this safely read event; _seed still validates its complete contract.
+            history_revisions = scanned
+            if history_revisions is None:
+                if cacheable and readonly:
+                    history_revisions, history_key = self._history_revisions_readonly(seed["id"])
+                elif readonly:
+                    history_revisions = self._history_revisions(seed["id"], recover=False)
+                else:
+                    history_revisions = self._history_revisions(seed["id"], recover=True)
+                    if cacheable:
+                        history_key = self._history_identity(seed["id"])
+            # Only a full status-mode replay can populate a terminal proof.
+            # Full-history readers never consume this cache. Inventory/recovery
+            # and immutable seed binding remain mandatory on every live poll.
+            reuse_projection = cacheable and (readonly or not (
+                self.root / "work-items" / seed["id"] / "retirement.json").exists())
+            cache_key = self._projection_key(seed, history_key, "current-delivery")
+            cached = (self._projection_cache.get(seed["id"])
+                      if cacheable and history_key is not None else None)
+            if cacheable and history_key is not None:
+                self._seed(seed["id"], event, history_revisions=history_revisions)
+            # A strict readiness replay proves the same current projection and
+            # more: unlike current-delivery mode, it validates every historical
+            # delivery. Reuse it in this weaker status scan, but never use a
+            # status-only projection to satisfy readiness validation.
+            readiness_key = self._projection_key(seed, history_key, "readiness-full-history")
+            valid = cached is not None and cached[0] in (cache_key, readiness_key)
+            if valid:
+                if len(cached) == 4:
+                    valid = self._proof_unchanged(cached[3])
+                else:
+                    valid = reuse_projection and (readonly or (
+                        cached[1].get("delivery") is None
+                        and cached[1]["status"] in OPEN_STATUS_ORDER))
+            if not valid:
+                cached = None
+            full = (self._peek_full_item(seed["id"], seed_event=event,
+                                         history_revisions=history_revisions) if readonly else None)
+            # _get does not derive doing_since or legacy blocked_since.
+            if full is not None and full["status"] not in ("doing", "blocked"):
+                item, since = full, None
+            elif cached is not None:
+                item, since = cached[1], cached[2]
+            else:
+                # Evict before validation: failure must not leave a reusable proof.
+                self._projection_cache.pop(seed["id"], None)
+                sidecar = (self._sidecar_load(seed["id"], seed, history_key)
+                           if reuse_projection else None)
+                if sidecar is not None and not readonly and (
+                        sidecar[0].get("delivery") is not None
+                        or sidecar[0]["status"] in ("done", "dropped")):
+                    sidecar = None
+                if (sidecar is not None
+                        and self._history_identity(seed["id"]) != history_key):
+                    sidecar = None
+                if sidecar is not None:
+                    item, since = sidecar
+                    if (item.get("delivery") is None and "wait_resolution" not in item
+                            and item["status"] in OPEN_STATUS_ORDER):
+                        self._projection_cache[seed["id"]] = (cache_key, item, since)
+                else:
+                    proof_sources = []
+                    item, since = self._current_hold(
+                        seed["id"], seed_event=event,
+                        history_revisions=history_revisions,
+                        verify_snapshots=False, verify_current_delivery=True,
+                        proof_sources=proof_sources if cacheable else None)
+                    stable = (cacheable and history_key is not None
+                              and self._history_identity(seed["id"]) == history_key)
+                    if stable and (item["status"] in ("done", "dropped")
+                                   or "wait_resolution" in item):
+                        proof_sources = tuple(dict.fromkeys(proof_sources))
+                        if self._proof_unchanged(proof_sources):
+                            self._projection_cache[seed["id"]] = (cache_key, item, since, proof_sources)
+                    elif (stable and reuse_projection and item.get("delivery") is None
+                          and "wait_resolution" not in item):
+                        self._projection_cache[seed["id"]] = (cache_key, item, since)
+            if item["status"] not in ("open", "doing", "blocked"):
+                continue
             if _active_transform is not None:
                 transformed = _active_transform(item)
                 if transformed is not item:
@@ -2241,7 +2888,7 @@ class WorkItems:
             if (wait_resolution_role is not None and item["status"] == "open"
                     and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
                 wait_resolution_pending = True
-            view = {"item": item, **self._origin_projection(item, entry[3:]),
+            view = {"item": item, **self._origin_projection_impl(item, readonly=readonly),
                     **self._hold_projection(since), **blocked_age(self, item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
@@ -2373,22 +3020,64 @@ class WorkItems:
         return result
 
     def _page_closed_impl(self, *, limit, readonly: bool, include_items=False):
-        """Collect the newest seeded terminal items from the index.
+        """Collect the newest seeded terminal items with an explicit mode.
 
-        Internal receipt projections can retain the current items of just the
-        selected page.
+        Internal receipt projections can retain the validated current items for
+        just the selected page, without resolving their immutable sources again.
         """
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
-        with self._ledger.read("items", locked=not readonly) as db:
-            total = _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('done', 'dropped')")[0][0]
-            newest = _rows(db, "SELECT item FROM items WHERE status IN ('done', 'dropped') "
-                               "ORDER BY updated_key DESC, id LIMIT ?", (limit,))
+        cacheable = readonly and not IS_WINDOWS
+        events = self._iter_item_events_with_revisions(recover=not readonly,
+                                                        cache=cacheable,
+                                                        with_identity=cacheable)
         selected = []
-        for (raw,) in newest:
-            item = json.loads(raw)
-            sort_key, row = self.closed_row(item)
-            selected.append((None, sort_key, row, item if include_items else None))
+        total = 0
+        for row in events:
+            if cacheable:
+                event_id, event, scanned, history_key = row
+            else:
+                event_id, event, scanned = row
+                history_key = None
+            kind, seed = self._seed_for_event(event_id, event, readonly=readonly)
+            if kind != "seed":
+                continue
+            # Closed rows/events consume the current terminal state and, for
+            # done, its exact completion proof; earlier delivery snapshots
+            # are not returned. Keep the full chain replay but skip those
+            # unused manifests. _validate_transition still validates the
+            # current done snapshot strictly when it reaches the closure.
+            if history_key is None and cacheable:
+                revisions, history_key = self._history_revisions_readonly(seed["id"])
+            else:
+                revisions = (scanned if scanned is not None else
+                             self._history_revisions(seed["id"], recover=not readonly))
+            full = (self._peek_full_item(seed["id"], seed_event=event,
+                                         history_revisions=revisions) if readonly else None)
+            sidecar = (self._sidecar_load(seed["id"], seed, history_key)
+                       if full is None and cacheable and history_key is not None else None)
+            if (sidecar is not None
+                    and self._history_identity(seed["id"]) != history_key):
+                sidecar = None
+            if full is not None:
+                item = full
+            elif sidecar is not None:
+                item = sidecar[0]
+            else:
+                item = self._get(seed["id"], seed_event=event,
+                                 history_revisions=revisions,
+                                 verify_snapshots=False)
+            if item["status"] not in ("done", "dropped"):
+                continue
+            total += 1
+            if limit == 0:
+                continue
+            sort_key, row = self._closed_row(item)
+            candidate = (_ReverseKey(sort_key), sort_key, row, item if include_items else None)
+            if len(selected) < limit:
+                heapq.heappush(selected, candidate)
+            elif sort_key < selected[0][1]:
+                heapq.heapreplace(selected, candidate)
         rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
         overflow_count = max(0, total - len(rows))
         more = overflow_count > 0
@@ -2404,8 +3093,10 @@ class WorkItems:
         """Return the live open page without acquiring insights.lock.
 
         Same schema, ordering, cursor, overflow and byte bounds as
-        :meth:`page_open`, and never writes the index. A last-key cursor
-        pages a live view and does not freeze membership.
+        :meth:`page_open`, but never recovers or deletes atomic-write
+        leftovers: validated temporaries are ignored, anything unsafe or
+        unexpected fails closed. The live cursor semantics are unchanged: a
+        last-key cursor pages a live view and does not freeze membership.
         """
         return self._page_open_impl(cursor=cursor, limit=limit, readonly=True)
 
@@ -2471,7 +3162,8 @@ class WorkItems:
         existed). Rows are
         at most 8192 canonical bytes and the complete response at most 1 MiB.
         Drop-only legacy sidecars without a seed remain in the legacy audit,
-        not here.
+        not here. Validated temporaries are ignored, never deleted; anything
+        unsafe or unexpected fails closed.
         """
         return self._page_closed_impl(limit=limit, readonly=True)
 
@@ -2515,10 +3207,10 @@ class WorkItems:
                     history_revisions=history_revisions, wait=wait, snapshot_id=snapshot_id,
                     scope=scope, smoke_refs=smoke_refs)
             blocked_waiter = {}
-            current, _, blocked = self._current_hold(
-                item_id, history_revisions=history_revisions, blocked_waiter=blocked_waiter)
-            if blocked is not None:
-                current = {**current, "blocked_since": blocked}
+            history_flags = set()
+            current, previous_since = self._current_hold(
+                item_id, history_revisions=history_revisions, blocked_waiter=blocked_waiter,
+                history_flags=history_flags)
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
             resolution = None
@@ -2676,15 +3368,51 @@ class WorkItems:
                 self._require_doing_capacity(actor)
             if len(canonical(record)) > (MAX_EVENT_BYTES if resolution is not None else PREVIEW_BYTES):
                 raise LimitExceeded("Work-item event exceeds byte bound")
-            with self.committing([item_id]):
-                write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
-                           record, exclusive=True)
+            write_json(self.root / "work-items" / item_id / f"{record['rev']}.json", record, exclusive=True)
             if status in ("done", "dropped"):
                 self._wake_terminal()
+            try:
+                # Cache boundary: best-effort transition sidecar storing full
+                # source records (never a projected hold item); never fails
+                # the commit. Previous is the exact previous full source
+                # record: the seed for rev 1, otherwise the exact content
+                # read from work-items/<id>/<previous_rev>.json under the
+                # already-held record lock.
+                try:
+                    (self.root / "work-items" / item_id / "legacy.json").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    self._sidecar_remove(item_id)
+                    return record
+                if resolution is not None or "wait_resolution" in history_flags:
+                    self._sidecar_remove(item_id)
+                    return record
+                if status == "doing" and current["status"] == "doing":
+                    # A continued doing revision retains an earlier hold
+                    # start that the exact current/previous records cannot
+                    # establish. A sidecar would be unusable; keep exact.
+                    self._sidecar_remove(item_id)
+                    return record
+                new_since = (previous_since or record["updated_at"]) if status == "doing" else None
+                seed = self._seed(item_id, history_revisions=history_revisions)
+                identity = self._history_identity(item_id)
+                prev_rev = current.get("rev") if isinstance(current, dict) else None
+                if type(prev_rev) is not int:
+                    return record
+                if prev_rev == 1:
+                    previous_source = seed
+                else:
+                    previous_source = self._read(f"work-items/{item_id}/{prev_rev}.json")
+                self._sidecar_store(item_id, seed, identity, previous_source, record,
+                                    new_since, retirement=None)
+            except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                    AttributeError):
+                pass
             return record
 
     def _wake_terminal(self):
         # Non-authoritative hint for non-recursive directory watches. Admission
-        # and event delivery always read committed state, never metadata.
+        # and event delivery always replay committed records, never metadata.
         with contextlib.suppress(OSError, NotImplementedError):
             os.utime(self.root / "work-items", None, follow_symlinks=False)

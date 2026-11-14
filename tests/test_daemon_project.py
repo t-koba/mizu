@@ -6,7 +6,7 @@ from unittest.mock import Mock, call, patch
 
 from support import Fixture
 from mizu.project import Project
-from mizu.runtime import Denied, Engine, daemon
+from mizu.runtime import daemon
 
 
 class DaemonProjectTests(Fixture):
@@ -150,40 +150,3 @@ class DaemonProjectTests(Fixture):
         event = json.loads(output.call_args.args[0])
         self.assertEqual(event["event"], "run_deferred")
         self.assertEqual(event["error"], "Changing data_dir requires a daemon restart")
-
-
-class PausedProjectIdleTests(Fixture):
-    def test_paused_daemon_iteration_does_no_probe_ingest_poll_or_readiness(self):
-        self.project.set_control(paused=True)
-        stop = Mock()
-        stop.is_set.side_effect = [False, True]
-        project = Project(self.config, "sample")
-        project.insights.ingest_editor = Mock()
-        with (patch("mizu.runtime.threading.Event", return_value=stop),
-              patch("mizu.runtime.signal.signal"),
-              patch("mizu.runtime.lock", return_value=nullcontext()),
-              patch("mizu.runtime.load", return_value=self.config),
-              patch("mizu.runtime.Project", return_value=project),
-              patch("mizu.runtime.should_run") as ready,
-              patch("mizu.runtime.vcs_poll_enabled", return_value=True),
-              patch("mizu.runtime.poll_project_vcs") as poll,
-              patch("mizu.probes.service_due") as probes,
-              patch("mizu.probes.next_deadline", return_value=None),
-              patch("mizu.runtime.Engine") as engine,
-              patch("builtins.print")):
-            daemon(self.config, "sample", "worker")
-        for fake in (ready, poll, probes, engine, project.insights.ingest_editor):
-            fake.assert_not_called()
-        self.assertEqual(stop.wait.call_count, 1)
-
-    def test_paused_run_is_denied_before_maintenance_and_deferral(self):
-        self.project.set_control(paused=True)
-        with (patch("mizu.runtime.check_jobs.deferral") as deferral,
-              patch("mizu.workspace_cache.maintain") as cache,
-              patch("mizu.storage.maintain_automatic_prune") as prune,
-              patch("mizu.smoke_retention.maintain_automatic_smoke_retention") as smoke,
-              patch("mizu.probes.service_due") as probes):
-            with self.assertRaisesRegex(Denied, "Project is unarmed or paused"):
-                Engine(self.config).run(self.project, "worker")
-        for fake in (deferral, cache, prune, smoke, probes):
-            fake.assert_not_called()

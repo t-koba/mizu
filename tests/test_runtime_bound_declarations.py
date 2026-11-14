@@ -66,10 +66,13 @@ retain their format ranges.
 The `web_worker.py` include-envelope bound derives from the fixed include
 byte ceiling. `lineage.py`'s full-ref length derives from its fixed prefix and
 branch-name format bound. `work_items.py` page, cursor, row, projection,
-revision and delivered-token bounds are fixed mechanism or safety
+revision, delivered-token and sidecar bounds are fixed mechanism or safety
 contracts; its delivered-token set covers prior progress plus one opening page,
 and its page-byte aliases are inventoried against shared declared bases rather
 than treated as new independent numeric policies.
+The `work_item_read_view.py` snapshot, file and parsed-item retention budgets
+are configured policy under `[limits]`; misses repeat validated reads. Their
+exact defaults and uses are checked separately; the path-key cache stays fixed.
 The configured `[limits].wait_events_limit` applies independently to each
 structured wait/obligation delivery page; readiness existence probes still need
 only one candidate and the fixed 100-row route ceilings remain unchanged.
@@ -247,6 +250,7 @@ EXTRA_CANDIDATES = {
                                        '_MAX_FILES_WHITESPACE_RUN'}),
     'model_catalog.py': frozenset({'MAXIMUM'}),
     'web.py': frozenset({'PROBE_MAX_HEADERS'}),
+    'work_items.py': frozenset({'_SIDECAR_MAX_BYTES'}),
     'runtime.py': frozenset({'WRAP_UP_REQUESTS', 'WRAP_UP_TOOLS'}),
 }
 # Non-numeric module-level policy defaults checked by their exact literal value.
@@ -597,6 +601,9 @@ DECLARATIONS = {
         'MAX_CLOSED_PAGE_BYTES': (
             'MAX_OPEN_PAGE_BYTES', 'safety',
             'work items / closed response shares the public open-page byte ceiling'),
+        '_SIDECAR_MAX_BYTES': (
+            'PREVIEW_BYTES * 2 + 4096', 'safety',
+            'work items / bounded structural sidecar read and write for two previews plus fixed metadata'),
     },
     'work_order.py': {
         'MAX_WORK_ORDER_ITEMS': (
@@ -1041,6 +1048,7 @@ DECLARATIONS = {
             '4096', 'safety',
             'wait events / bounded receipt read'),
     },
+    'work_item_read_view.py': {},
     'work_item_seed.py': {
         'MAX_DECISION_TASKS': (
             '16', 'format',
@@ -1160,10 +1168,22 @@ CONFIGURED_SETTINGS = {
                               'VCS CI wake / unchanged-red re-wake interval default'),
     },
 }
+# Request-local retention only: cache misses repeat normal validation, so these
+# memory-versus-I/O choices are policy, not fixed correctness/safety ceilings.
 WORK_ITEM_RECORD_WAIT_SCAN = {
     'operator_record_catalog_scan_entries': (
         '2048', 'configured policy',
         'Limits / bounded exact-record closure catalog entry budget'),
+}
+WORK_ITEM_READ_VIEW_CACHE = {
+    'work_item_read_view_snapshot_cache_bytes': (
+        '32 * 1024 * 1024', 'configured policy', 'Limits / request-local validated snapshot records'),
+    'work_item_read_view_file_cache_bytes': (
+        '8 * 1024 * 1024', 'configured policy', 'Limits / request-local file records'),
+    'work_item_read_view_item_cache_bytes': (
+        '8 * 1024 * 1024', 'configured policy', 'Limits / request-local parsed-item records'),
+    'work_item_read_view_item_cache_entries': (
+        '1024', 'configured policy', 'Limits / request-local parsed-item entries'),
 }
 
 CONFIGURED = {
@@ -1682,6 +1702,11 @@ CALLS = {
             "args.get('limit', 25)", 'policy',
             'work items / legacy-page default; caller may select limit'),
     },
+    'work_item_read_view.py': {
+        ('readonly_view', 'lru_cache', 'maxsize', 0): (
+            '8192', 'safety',
+            'work items / bounded request-local path-key cache, eviction revalidates'),
+    },
     'sandbox.py': {
         ('remove_leftover', 'run', 'maximum', 0): (
             '8192', 'safety', 'sandbox / bounded leftover-container list output'),
@@ -1855,8 +1880,6 @@ TIMED_WAIT_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 RANGE_ARGUMENTS = {
-    ('insight_index.py', 'audit', 0, 0): (
-        '1', 'mechanism', 'insight audit / prior revisions start at the first'),
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         '1025', 'safety',
         'check jobs / identity search is one candidate beyond MAX_CHECK_RETAINED'),
@@ -1883,6 +1906,8 @@ RANGE_ARGUMENTS = {
     ('web.py', 'Web.fetch', 0, 0): (
         '4', 'safety',
         'web fetch / fixed redirect-hop ceiling; every hop revalidates the destination'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 0, 0): (
+        '2', 'format', 'work items / revision files begin after immutable seed revision 1'),
     ('work_items.py', 'WorkItems._iter_chain', 0, 0): (
         '2', 'format', 'work items / revision files begin after immutable seed revision 1'),
     ('work_items.py', 'WorkItems._iter_chain', 0, 1): (
@@ -1892,8 +1917,6 @@ RANGE_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 SYMBOLIC_RANGE_ARGUMENTS = {
-    ('insight_index.py', 'audit', 1, 0): (
-        'row[3]', 'mechanism', 'insight audit / prior revisions below the live revision'),
     ('admission.py', 'check_slot_exclusions', 0, 0): (
         'max(0, slots)', 'configured policy',
         'admission / one exclusion per configured parallel_checks slot'),
@@ -1948,6 +1971,9 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('work_item_seed.py', 'task_seeds', 0, 0): (
         'len(tasks)', 'mechanism',
         'work-item task manifest / visit every validated member within the 16-task contract'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 0): (
+        'len(numeric) + 2', 'format',
+        'work items / verify revision filenames form a contiguous seed-relative chain'),
     ('work_items.py', 'WorkItems._iter_chain', 1, 0): (
         'len(revisions) + 2', 'format',
         'work items / validate contiguous revision numbers after immutable seed revision 1'),
@@ -1962,6 +1988,15 @@ SYMBOLIC_RANGE_ARGUMENTS = {
 # (file, qualified scope, operand index, occurrence):
 #     (exact ast.unparse(operand), classification, owner / rationale)
 COMPARISON_BOUND_ARGUMENTS = {
+    ('_legacy_refs.py', '_WindowsAPI.open', 1, 0): (
+        '1', 'safety',
+        'legacy ref cleanup / opened file handles must identify exactly one hardlink'),
+    ('_legacy_refs.py', '_clean', 1, 0): (
+        '1', 'safety',
+        'legacy ref cleanup / unlink only single-link regular files'),
+    ('_legacy_refs.py', '_descend', 1, 0): (
+        '1', 'mechanism',
+        'legacy ref cleanup / one remaining component marks the leaf directory to clean'),
     ('role_state.py', 'RoleStateStore.read', 1, 0): (
         '1', 'format',
         'role-state envelope / persisted generations are positive exact revision numbers'),
@@ -1984,9 +2019,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('snapshot.py', 'validate_progress', 2, 0): (
         '101', 'mechanism',
         'snapshot progress / saturate the no-progress streak one above the maximum configured allowance of 100'),
-    ('snapshot.py', 'Snapshots._manifest_identity', 1, 0): (
-        '1', 'format',
-        'snapshot binding memo / witnessed manifest file has exactly one link'),
     ('snapshot.py', 'Snapshots._capture_openat', 1, 0): (
         '1', 'safety', 'snapshot capture / regular file handle must report exactly one hardlink'),
     ('snapshot.py', 'Snapshots._capture_portable', 1, 0): (
@@ -2503,6 +2535,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('work_items.py', 'WorkItems._create_id', 2, 0): (
         '128', 'safety',
         'work items / cap caller-supplied idempotency key before canonical hashing'),
+    ('work_items.py', 'WorkItems._sidecar_load', 0, 0): (
+        '3', 'mechanism',
+        'work items / delivery-binding revision cannot predate the schema that introduced it'),
     ('work_items.py', 'WorkItems._legacy_seed', 2, 0): (
         '200', 'format', 'work items / legacy title matches the public title field limit'),
     ('work_items.py', 'WorkItems._legacy_resolution', 1, 0): (
@@ -2527,6 +2562,40 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'configured policy', 'stale visibility / [limits].work_items_stale_seconds is positive'),
     ('work_items.py', 'WorkItems._create_id', 0, 0): (
         '1', 'format', 'work-item create key / the caller-supplied idempotency key is nonempty'),
+    ('work_items.py', 'WorkItems._proof_identity', 1, 0): (
+        '1', 'safety', 'proof-source cache / only an unaliased regular-file identity is eligible'),
+    ('work_items.py', 'WorkItems._validation_sources', 1, 0): (
+        '2', 'format', 'retained acceptance source / schema two binds publication evidence'),
+    ('work_items.py', 'WorkItems._sidecar_store', 1, 0): (
+        '1', 'safety', 'current-state sidecar / only a single-link regular file may be replaced'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 0): (
+        '1', 'format', 'sidecar history witness / a missing history directory represents only seed revision one'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 1): (
+        '2', 'format', 'sidecar history witness / identity is the fixed pair of directory and entries'),
+    ('work_items.py', 'WorkItems._sidecar_expected_rev', 1, 2): (
+        '1', 'format', 'sidecar history witness / no numbered history entries means seed revision one'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 0): (
+        '1', 'safety', 'current-state sidecar / reject multiply-linked cache files'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 1): (
+        '1', 'format', 'sidecar seed state / without a previous record the current revision must be one'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 2): (
+        '1', 'format', 'sidecar seed state / revision one must equal the immutable seed'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 3): (
+        '1', 'format', 'sidecar transition / previous revision one is validated as the seed'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 4): (
+        '1', 'format', 'sidecar transition / revision-one predecessor follows the seed schema'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 5): (
+        '1', 'format', 'retirement sidecar / require its exact persisted schema version'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 6): (
+        '1', 'format', 'work-item seed / the first immutable record is revision one'),
+    ('work_items.py', 'WorkItems._sidecar_load', 1, 7): (
+        '1', 'format', 'sidecar predecessor / revision one is the immutable seed record'),
+    ('work_items.py', 'WorkItems.backfill_current_states', 0, 0): (
+        '1', 'mechanism', 'sidecar backfill / a bounded scan page must request at least one item'),
+    ('work_items.py', 'WorkItems.backfill_current_states', 1, 0): (
+        '1', 'format', 'sidecar backfill / revision one uses the seed as current state'),
+    ('work_items.py', 'WorkItems.backfill_current_states', 1, 1): (
+        '2', 'format', 'sidecar backfill / revision two has the seed as its sole predecessor'),
     ('work_items.py', 'WorkItems._legacy_source', 1, 0): (
         '1', 'format', 'legacy decision origin / referenced revision is positive'),
     ('work_items.py', 'WorkItems._validate_decision_key', 1, 0): (
@@ -2543,6 +2612,10 @@ COMPARISON_BOUND_ARGUMENTS = {
         '2', 'format', 'optional work-item record / its relative path has exactly directory and file components'),
     ('work_items.py', 'WorkItems._optional_record', 1, 1): (
         '1', 'safety', 'optional work-item record / accept only an unaliased regular file'),
+    ('work_items.py', 'WorkItems._origin_revision', 1, 0): (
+        '1', 'format', 'work-item origin / referenced decision revision is positive'),
+    ('work_items.py', 'WorkItems._origin_revision', 1, 1): (
+        '1', 'format', 'work-item origin / reject zero or negative referenced revisions'),
     ('work_items.py', 'WorkItems._validate_current_decision_shape', 1, 0): (
         '1', 'format', 'current decision shape / a decision revision is positive'),
     ('work_items.py', 'WorkItems._history_revisions', 1, 0): (
@@ -2581,6 +2654,12 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'mechanism', 'open-state page / a bounded page must request at least one item'),
     ('work_items.py', 'WorkItems.transition', 1, 0): (
         '1', 'format', 'work-item transition CAS / expected revision is positive'),
+    ('work_items.py', 'WorkItems.transition', 1, 1): (
+        '1', 'format', 'work-item transition / revision-one predecessor is the immutable seed'),
+    ('work_items.py', 'WorkItems._page_open_impl', 1, 0): (
+        '4', 'mechanism', 'work items / cached projection tuple shape includes its proof witness'),
+    ('work_items.py', 'WorkItems._readiness_item', 1, 0): (
+        '4', 'mechanism', 'work items / readiness projection tuple shape includes its source-proof identities'),
     ('pi_reselection.py', 'Reselection.bind_session', 1, 0): (
         '4096', 'safety',
         'Pi reselection / bound session-file identity text before retaining it in family state'),
@@ -2649,6 +2728,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('acceptance.py', 'valid_cache_diagnostics', 1, 0): (
         '256', 'safety',
         'acceptance / only expose untrusted relative cache paths within a bounded diagnostic field'),
+    ('acceptance.py', 'job_paths', 1, 0): (
+        '1', 'safety',
+        'acceptance / reuse cached job identity only for a singly linked regular job file'),
     ('acceptance.py', 'read_job', 1, 0): (
         '32', 'format',
         'acceptance / retained job command lists follow the public 32-command protocol bound'),
@@ -3133,6 +3215,7 @@ SYMBOLIC_BOUNDS = {
         'MAX_HISTORY_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),
         'MAX_CLOSED_ROW_BYTES': frozenset({'MAX_OPEN_ROW_BYTES'}),
         'MAX_CLOSED_PAGE_BYTES': frozenset({'MAX_OPEN_PAGE_BYTES'}),
+        '_SIDECAR_MAX_BYTES': frozenset({'PREVIEW_BYTES'}),
     },
     'delegation_jobs.py': {
         'MAX_STATE_BYTES': frozenset({'MAX_BINDING_BYTES', '_INTENT_NULL_OVERHEAD',
@@ -3351,6 +3434,33 @@ def sibling():
                 found[(filename, scope, argument, occurrence)] = expression
         self.assertEqual(found, {site: entry[0] for site, entry in RANGE_ARGUMENTS.items()})
 
+    def test_work_item_read_view_cache_bounds_are_declared_and_used(self):
+        from mizu.config import TOML_INTEGER_MAX, _LIMIT_RANGES
+
+        config_tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
+        limits = next(node for node in config_tree.body
+                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
+        defaults = {node.target.id: ast.unparse(node.value) for node in limits.body
+                    if isinstance(node, ast.AnnAssign)}
+        for name, (expression, category, rationale) in WORK_ITEM_READ_VIEW_CACHE.items():
+            self.assertEqual(category, 'configured policy')
+            self.assertTrue(rationale.strip())
+            self.assertEqual(defaults[name], expression)
+            self.assertEqual(_LIMIT_RANGES[name], (1, TOML_INTEGER_MAX))
+        tree = ast.parse((ROOT / 'work_item_read_view.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'readonly_view')
+        calls = [node for node in ast.walk(function)
+                 if isinstance(node, ast.Call) and callee_name(node.func) == '_Records']
+        self.assertEqual([ast.unparse(call.args[1]) for call in calls], [
+            'limits.work_item_read_view_snapshot_cache_bytes',
+            'limits.work_item_read_view_file_cache_bytes'])
+        comparisons = {ast.unparse(node) for node in ast.walk(function)
+                       if isinstance(node, ast.Compare)}
+        self.assertIn('size > limits.work_item_read_view_item_cache_bytes', comparisons)
+        self.assertIn('len(items) >= limits.work_item_read_view_item_cache_entries', comparisons)
+        self.assertIn('item_bytes + size > limits.work_item_read_view_item_cache_bytes', comparisons)
+
     def test_record_wait_catalog_scan_bound_is_declared_and_used(self):
         from mizu.config import TOML_INTEGER_MAX, _LIMIT_RANGES
 
@@ -3491,7 +3601,7 @@ def sibling():
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
-                'budget.py', 'fs.py', 'role_state.py', 'snapshot.py'):
+                'budget.py', 'fs.py', '_legacy_refs.py', 'role_state.py', 'snapshot.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
                 'bridge.py', 'pi_durable.py', 'work_item_seed.py',
@@ -3500,7 +3610,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', 'role_state.py', 'snapshot.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', '_legacy_refs.py', 'role_state.py', 'snapshot.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

@@ -8,8 +8,7 @@ from unittest.mock import patch
 from support import Fixture
 from mizu import acceptance, smoke_retention
 from mizu.errors import Denied
-from mizu.fs import canonical, digest, lock
-from support import history_write_json as write_json
+from mizu.fs import canonical, digest, lock, write_json
 
 
 class RetainedDeliveryTests(Fixture):
@@ -127,6 +126,74 @@ class RetainedDeliveryTests(Fixture):
             self.step("done", snapshot_id=snapshot["id"])
         return (self.project.root / "snapshots" / (snapshot["id"] + ".json"),
                 self.project.root / "evidence/acceptance/objects" / (proof["receipt_id"] + ".json"))
+
+    def test_warm_terminal_ready_polls_reuse_exact_proof_not_sidecars(self):
+        if os.name == "nt":
+            self.skipTest("POSIX source witnesses")
+        self.ready_completion()
+        dropped = self.store.create(actor="worker", idempotency_key="dropped", title="Dropped")["record"]["work_item"]
+        self.store.transition(dropped["id"], expected_rev=1, status="dropped", actor="worker", reason="Settled")
+        with patch("mizu.work_items.IS_WINDOWS", True):
+            expected = self.store.page_ready()
+        with patch.object(self.store, "_iter_chain", wraps=self.store._iter_chain) as replay:
+            self.assertEqual(self.store.page_ready(), expected)
+            self.assertEqual(replay.call_count, 2)  # Sidecars cannot establish terminal proof.
+            replay.reset_mock()
+            with patch.object(self.store, "_validate_transition", wraps=self.store._validate_transition) as transition, \
+                 patch.object(self.project.snapshots, "validate_manifest", wraps=self.project.snapshots.validate_manifest) as manifest, \
+                 patch("mizu.acceptance.get", wraps=acceptance.get) as receipt:
+                for _ in range(3):
+                    self.assertEqual(self.store.page_ready(), expected)
+                self.assertEqual((replay.call_count, transition.call_count, manifest.call_count, receipt.call_count),
+                                 (0, 0, 0, 0))
+            # Full-history readers retain exact proof, even with a warm cache.
+            self.store.get(self.item["id"])
+            self.assertEqual(replay.call_count, 1)
+            replay.reset_mock()
+            with patch.object(self.store, "_proof_identity", return_value=None):
+                for _ in range(2):
+                    self.assertEqual(self.store.page_ready(), expected)
+                self.assertEqual(replay.call_count, 2)  # Unwitnessed completion never caches.
+
+    def test_terminal_proof_sources_invalidate_on_corruption_and_deletion(self):
+        manifest, receipt = self.ready_completion()
+        revision = self.project.root / "work-items" / self.item["id"] / "2.json"
+        for path in (revision, manifest, receipt):
+            saved = path.read_bytes()
+            for mutation in ("corrupt", "delete"):
+                with self.subTest(source=path.name, mutation=mutation):
+                    self.store.page_ready()  # Exact warm-up, including after restoration.
+                    if mutation == "corrupt":
+                        path.write_text("{}")
+                    else:
+                        path.unlink()
+                    with patch.object(self.store, "_iter_chain", wraps=self.store._iter_chain) as replay:
+                        with self.assertRaises(Denied):
+                            self.store.page_ready()
+                        self.assertGreater(replay.call_count, 0)
+                    self.assertNotIn(self.item["id"], self.store._projection_cache)
+                    path.write_bytes(saved)
+
+    def test_sources_changed_during_replay_are_not_stamped_with_later_identity(self):
+        if os.name == "nt":
+            self.skipTest("POSIX source witnesses")
+        manifest, receipt = self.ready_completion()
+        revision = self.project.root / "work-items" / self.item["id"] / "2.json"
+        original = self.store._current_hold
+        for path in (revision, manifest, receipt):
+            with self.subTest(source=path.name):
+                saved = path.read_bytes()
+                self.store._projection_cache.clear()
+                def changed(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    path.write_text("{}")
+                    return result
+                with patch.object(self.store, "_current_hold", side_effect=changed):
+                    self.store.page_ready()
+                self.assertNotIn(self.item["id"], self.store._projection_cache)
+                with self.assertRaises(Denied):
+                    self.store.page_ready()
+                path.write_bytes(saved)
 
     def test_wrong_code_or_scope_projection_refuses(self):
         snapshot = self.snapshot(embedded=False)

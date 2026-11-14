@@ -60,13 +60,6 @@ not ordinary schedules or admission; those can still deliver inputs earlier.
 Daemon roles reject this setting. See [configuration](configuration.md) for the
 separate `event_poll_seconds` policy and unchanged delivery/acknowledgement rules.
 
-`roles.<name>.event_wakes` narrows which wake kinds (operator record, decision,
-work item, wait, CI, operator wake, ready work, code change) may admit a
-standalone `--event` dispatch of a role; the default is all kinds. The runtime
-masks unlisted kinds in the facts passed to `evaluate_dispatch`, so a masked
-wake exits as `no-event` and consumes nothing, and a role with an empty list
-gets no event units. Continuations, schedules and daemon loops are unaffected.
-
 ## Wake sources versus delivered inputs
 
 `should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It
@@ -302,9 +295,12 @@ Per-role
 `scheduled_inputs = []` (the default) preserves open-ended periodic execution.
 Opting in with `["deferred_insights"]` requires a timed role with `insights`;
 unknown or duplicate sources are refused at config load. Before model/run-slot
-admission, the strict insight reader queries the insight index under the existing
-project record lock for any exact current defer across all sources;
-decision-delivery acknowledgements do not remove a deferral.
+admission, the strict insight reader opens at most the configured
+`limits.scheduled_input_scan_items` entries (default 1,000) under the existing
+project record lock. It stops at the first exact current defer across all
+sources; decision-delivery acknowledgements do not remove a deferral. One
+unopened entry detects overflow. If the bound is exhausted before emptiness is
+proven, it falls through to normal scheduling.
 Proven emptiness alone still does not skip: the gate reuses the authoritative
 pre-admission projection and only returns `skipped: no-scheduled-input` (with the
 current snapshot ID/code digest, without a run directory or acknowledgement)
@@ -355,30 +351,6 @@ else the policy default: `signals` uses the role-effective `cooldown_seconds`
 `periodic` uses `idle_seconds`); it affects ordinary daemon spacing only, never
 deferred `next_evaluation_at` re-entry or the `cooldown_seconds` retry policy.
 Ready work does not accelerate it.
-
-### Readiness reuse while idle
-
-Every `idle_seconds` the resident `signals` daemon evaluates readiness, which
-enumerates work-item history, check jobs and the inbox. With
-`[limits] readiness_recheck_seconds` above 0 (default 0: evaluate on every
-tick), a negative result is reused while a witness of the project state tree is
-unchanged and for at most that many seconds. The witness
-(`src/mizu/readiness_witness.py`) records inode, device and `st_mtime_ns` of every
-directory under the project root and size/identity of its top-level files,
-skipping `workspace`, `runs`, `objects`, `sessions`, `locks`, `check-cache` and
-`spool`, which readiness never reads. Mizu replaces files atomically, which
-changes the containing directory's identity, so any state write (a decision,
-inbox record, work-item revision, check-job result, control change) causes the
-next tick to evaluate. The result is stored only if the witness is identical
-before and after the evaluation and no entry is newer than 50 ms at that
-moment (timestamp granularity); an evaluation that writes state therefore costs
-one extra evaluation. A positive result, an error, a pause or disarm, and a
-configuration change always clear it. Readiness that depends on time (wait
-deadlines, CI re-wake seconds, no-progress backoff, retry-after) or on inputs
-outside the project tree (shared budget, slot and selection state under the
-data directory) is observed only at the periodic re-evaluation, so the
-configured value is the maximum added wake latency for those. Event dispatch
-(`--event`) and the other daemon policies are unchanged.
 
 ### Read-only completion cursors
 

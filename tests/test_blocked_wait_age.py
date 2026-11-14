@@ -7,10 +7,10 @@ from unittest.mock import patch
 from support import Fixture
 from mizu.config import load, TOML_INTEGER_MAX
 from mizu.errors import ConfigError, Denied
-from mizu.fs import read_json
-from support import history_write_json as write_json
+from mizu.fs import read_json, write_json
 from mizu.project import Project
 from mizu.runtime import prompt_for, prompt_delta_for
+from mizu.work_item_read_view import readonly_view
 from mizu.work_items import WorkItems
 
 START = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
@@ -153,14 +153,15 @@ class BlockedWaitAgeTests(Fixture):
             self.assertEqual((live["state"], live["reason"]), ("due", "condition_met"))
             self.assertIsNone(live["blocked_max_age_seconds"])
 
-    def test_expired_status_full_delta_prompts_and_readonly_pages_do_not_write(self):
+    def test_expired_status_full_delta_prompts_and_readonly_facade_do_not_write(self):
         with clock(0):
             item = self.block()
         self.project.status()  # Initialize unrelated check-job status lock before observing writes.
         before = {p.relative_to(self.project.root): p.read_bytes()
                   for p in self.project.root.rglob("*") if p.is_file()}
         with clock(604800), patch("mizu.work_items.lock", side_effect=AssertionError("read-only lock")):
-            row = self.store.page_open_readonly()["items"][0]
+            view = readonly_view(self.store)
+            row = view.page_open_readonly()["items"][0]
             self.assertEqual(row["blocked_age_seconds"], 604800)
             diagnostic = self.project.status()["blocked_work"]
             self.assertEqual(diagnostic["counts"]["expired"], 1)

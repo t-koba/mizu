@@ -82,9 +82,13 @@ def normalize(root, value, *, insights=None, stored=False):
 
 def _items(store):
     # Stream the authoritative history, retaining no ledger-sized collection.
-    for item in store.current_items(statuses=("blocked",)):
-        if (item.get("wait") or {}).get("kind") == KIND:
-            yield item
+    for event_id, event in store._iter_item_events(recover=False):
+        kind, seed = store._seed_for_event(event_id, event, readonly=True)
+        if kind == "seed":
+            item = store._get(seed["id"], seed_event=event,
+                              history_revisions=store._history_revisions(seed["id"], recover=False))
+            if item["status"] == "blocked" and (item.get("wait") or {}).get("kind") == KIND:
+                yield item
 
 
 def _record_id(item):
@@ -277,7 +281,8 @@ def _selected(context, tokens):
     for entry in entries:
         envelope, _ = shared.get(entry.record_id, expected_digest=entry.record_digest)
         subject = envelope["subject"]
-        item = store.current(subject["work_item"])
+        item = store._get(subject["work_item"], history_revisions=store._history_revisions(
+            subject["work_item"], recover=False))
         if item["status"] != "blocked" or item["holder"] != context.role.name or envelope != _envelope(item):
             raise Denied("Proposal waiter revision or holder changed")
         shared.received(context.role.name, entry.record_id, entry.record_digest)

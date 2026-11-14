@@ -1089,13 +1089,13 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                             # A drop-only legacy sidecar is covered evidence,
                             # not a seeded item. Validate it read-only; open
                             # sidecars continue through normal reconstruction.
-                            if project.work_items.is_drop_only(item_entry.name):
+                            if project.work_items._audit_drop_only(item_entry.name):
                                 continue
                             # Immutable append events make the internal read
                             # stable without taking the writer lock; reclaim
                             # calls this again under project quiescence.
                             item_references = set()
-                            for record in project.work_items.history(item_entry.name):
+                            for record in project.work_items._iter_chain(item_entry.name):
                                 # Every historical binding stays replayable, even
                                 # after re-binding, dropping or history eviction.
                                 resolution = record.get("wait_resolution")

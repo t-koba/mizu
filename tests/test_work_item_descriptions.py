@@ -5,8 +5,7 @@ import json
 from support import Fixture
 from mizu import work_item_events as events
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical
-from support import history_write_json as write_json
+from mizu.fs import PREVIEW_BYTES, canonical, write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
 from mizu.runtime import prompt_for, prompt_delta_for

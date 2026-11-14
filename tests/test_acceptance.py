@@ -10,8 +10,7 @@ from support import Fixture, bind_delivery
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.fs import canonical, digest, held, lock
-from support import forget_ledger, history_write_json as write_json
+from mizu.fs import canonical, digest, held, lock, write_json
 from mizu.project import Project
 from mizu.runtime import prompt_for, prompt_delta_for
 
@@ -268,8 +267,8 @@ class AcceptanceTests(Fixture):
         value = check_jobs.raw_read(self.project, job['id'])
         value['acknowledged'] = True
         write_json(path / 'job.json', value)
-        # A lowered cap, without constructing 1024 full source trees.
-        with self.capped(2):
+        # Fixed cache cap, without constructing 1024 full source trees.
+        with patch.object(Path, 'glob', return_value=[path / 'job.json'] * 1024):
             check_jobs._make_room(self.project)
         self.assertFalse(path.exists())
 
@@ -282,7 +281,9 @@ class AcceptanceTests(Fixture):
         value['acceptance_scope'] = acceptance.scope(self.project)
         value['acknowledged'] = True
         write_json(path / 'job.json', value)  # Earlier finalizer's pending producer.
-        self.assertIsNone(acceptance.recover_job(self.project, job['id']))
+        jobs = {}
+        self.assertIsNone(acceptance.recover_job(self.project, job['id'], jobs=jobs))
+        self.assertNotIn(job['id'], jobs)  # Recovery rewrote the refusal.
         self.assert_size_refusal(job)
         self.assertEqual((path / 'result.json').read_bytes(), raw)
         disposed = (path / 'job.json').read_bytes()
@@ -295,7 +296,7 @@ class AcceptanceTests(Fixture):
         self.assert_size_refusal(job)
         self.project.set_control(paused=True)
         storage.backup(self.project, self.root / 'recovered-backup.tar.gz')
-        with self.capped():
+        with patch.object(Path, 'glob', return_value=[path / 'job.json'] * 1024):
             check_jobs._make_room(self.project)
         self.assertFalse(path.exists())
 
@@ -353,7 +354,9 @@ class AcceptanceTests(Fixture):
         self.assertEqual(len(observed), 1)
         # Recover directly from producer, then remove only the index to model
         # the durable-object/index crash boundary and recover from the object.
-        receipt_id = acceptance.recover_job(self.project, job['id'])
+        jobs = {}
+        receipt_id = acceptance.recover_job(self.project, job['id'], jobs=jobs)
+        self.assertNotIn(job['id'], jobs)  # Proof acknowledgement rewrote the job.
         index = next((self.project.root / 'evidence/acceptance/index').glob('*/*.json'))
         index.unlink()
         acceptance.recover(self.project.root)
@@ -465,7 +468,6 @@ class AcceptanceTests(Fixture):
         self.symlink(outside, path)
         with self.assertRaises(Denied):
             acceptance.effective(self.project, ctx.snapshot)
-        forget_ledger(self.project.root)  # Only a rebuild re-validates retained evidence.
         with self.assertRaises(Denied):
             self.project.status()
         with self.assertRaises(Denied):
@@ -474,7 +476,6 @@ class AcceptanceTests(Fixture):
         os.link(outside, path)
         with self.assertRaises(Denied):
             acceptance.get(self.project.root, proof['receipt_id'])
-        forget_ledger(self.project.root)  # Only a rebuild re-validates retained evidence.
         with self.assertRaises(Denied):
             self.project.status()
         path.unlink()
@@ -484,7 +485,6 @@ class AcceptanceTests(Fixture):
         self.symlink(self.root / 'moved-store', store, target_is_directory=True)
         with self.assertRaises(Denied):
             acceptance.effective(self.project, ctx.snapshot)
-        forget_ledger(self.project.root)  # Only a rebuild re-validates retained evidence.
         with self.assertRaises(Denied):
             self.project.status()
         with self.assertRaises(Denied):
@@ -676,11 +676,11 @@ class AcceptanceTests(Fixture):
         value['acknowledged'] = True
         write_json(path, value)
         # Model the fixed cache cap without constructing 1024 source trees.
-        with self.capped():
+        with patch.object(Path, 'glob', return_value=[path] * 1024):
             with self.assertRaises(Busy):
                 check_jobs._make_room(self.project)
         receipt_id = acceptance.recover_job(self.project, job['id'])
-        with self.capped():
+        with patch.object(Path, 'glob', return_value=[path] * 1024):
             check_jobs._make_room(self.project)
         self.assertFalse(path.exists())
         self.assertIsNone(acceptance.recover_job(self.project, job['id']))
@@ -863,7 +863,6 @@ class AcceptanceTests(Fixture):
             path.mkdir()
             (path / 'job.json').write_bytes(b'not json')
             invalid[job_id] = 'job_json'
-        forget_ledger(self.project.root)
         result = check_jobs.run_pending(self.project, threading.Event(), sandbox_factory=FakeSandbox)
         self.assertEqual(result['processed'], 2)
         self.assertEqual(result['status'], 'idle')
@@ -882,6 +881,137 @@ class AcceptanceTests(Fixture):
         write_json(path, job)
         return job, path
 
+    def test_recovery_cache_retains_only_scheduling_fields_and_identity(self):
+        job, path = self.terminal_experiment()
+        for fields in ({}, {'created_at': '2026-01-01T00:00:00+00:00',
+                            'shared_job': 'a' * 64}):
+            with self.subTest(fields=fields):
+                value = {**job, **fields, 'commands': ['x' * 8192],
+                         'environment': 'b' * 64, 'outputs': ['y' * 8192],
+                         'arbitrary': {'nested': 'z' * 8192}}
+                write_json(path, value)
+                expected = {'created_at': fields.get('created_at', ''),
+                            'shared_job': fields.get('shared_job', ''),
+                            'status': 'completed'}
+                self.assertEqual(acceptance.job_candidate(value), expected)
+                jobs = {}
+                self.assertEqual(acceptance.recover_producers(self.project, jobs=jobs), {})
+                if acceptance._job_read_reuse():
+                    identities = {}
+                    with lock(self.project.root / 'locks/check-jobs.lock'):
+                        acceptance.job_paths(self.project, identities=identities)
+                    self.assertEqual(jobs, {job['id']: (identities[job['id']], expected)})
+                else:
+                    self.assertEqual(jobs, {})
+
+    def test_runner_reuses_only_this_invocations_validated_terminal_read(self):
+        self.terminal_experiment()
+        reads_per_pass = 1 if acceptance._job_read_reuse() else 2
+        with patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as parsed, \
+                patch('mizu.acceptance.safe_read_info', wraps=acceptance.safe_read_info) as read:
+            for invocation in (1, 2):
+                self.assertEqual(self.run_job(), {'status': 'idle'})
+                self.assertEqual(parsed.call_count, invocation * reads_per_pass)
+                self.assertEqual(read.call_count, invocation * reads_per_pass)
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_rereads_changed_status_after_recovery(self):
+        job, path = self.terminal_experiment()
+        def change(project):
+            write_json(path, {**job, 'status': 'running'})
+        with patch('mizu.workspace_cache.maintain', side_effect=change), \
+                patch('mizu.check_jobs.cleanup') as cleanup, \
+                patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+            self.assertEqual(self.run_job()['status'], 'interrupted')
+        self.assertEqual(read.call_count, 3)  # Recovery, enumeration, owner-locked read.
+        cleanup.assert_called_once()
+        self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'interrupted')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_does_not_reuse_corruption_with_restored_size_and_mtime(self):
+        job, path = self.terminal_experiment()
+        before = path.stat()
+        def corrupt(project):
+            path.write_bytes(b'x' * before.st_size)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with patch('mizu.workspace_cache.maintain', side_effect=corrupt), \
+                patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+            result = self.run_job()
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(result['invalid_producers']['entries'],
+                         [{'job_id': job['id'], 'code': 'job_json'}])
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_bypasses_reuse_without_pinned_posix_reads(self):
+        self.terminal_experiment()
+        for capability, value in (('IS_POSIX', False), ('IS_WINDOWS', True),
+                                  ('HAS_OPENAT', False), ('HAS_DIR_FD', False)):
+            with self.subTest(capability=capability), \
+                    patch.object(acceptance._platform, capability, value), \
+                    patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+                self.assertEqual(self.run_job(), {'status': 'idle'})
+                self.assertEqual(read.call_count, 2)
+
+    def test_runner_second_scan_discovers_new_deleted_and_nonproducer_paths(self):
+        job, path = self.terminal_experiment()
+        def change(project):
+            path.unlink()
+            write_json(path.parent.with_name('f' * 64) / 'job.json', {**job, 'id': 'f' * 64})
+            write_json(path.parent.with_name('unexpected') / 'job.json', {})
+        with patch('mizu.workspace_cache.maintain', side_effect=change), \
+                patch('mizu.acceptance.read_job', wraps=acceptance.read_job) as read:
+            result = self.run_job()
+        self.assertEqual([call.args[1] for call in read.call_args_list], [job['id'], 'f' * 64])
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(result['invalid_producers']['entries'][0]['code'], 'non_producer_entry')
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_runner_second_scan_refuses_unsafe_replacements(self):
+        if not acceptance._job_read_reuse():
+            self.skipTest('POSIX identity reuse only')
+        for replacement in ('symlink', 'hardlink', 'fifo', 'directory'):
+            with self.subTest(replacement=replacement):
+                job, path = self.terminal_experiment()
+                other = self.root / 'original-job.json'
+                def change(project):
+                    path.rename(other)
+                    if replacement == 'symlink':
+                        path.symlink_to(other)
+                    elif replacement == 'hardlink':
+                        os.link(other, path)
+                    elif replacement == 'fifo':
+                        os.mkfifo(path)
+                    else:
+                        path.mkdir()
+                with patch('mizu.workspace_cache.maintain', side_effect=change):
+                    with self.assertRaises(Denied):
+                        self.run_job()
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    path.unlink()
+                other.unlink()
+        self.assertFalse(FakeSandbox.calls)
+
+    def test_job_paths_identity_refuses_parent_swap_even_when_restored(self):
+        from pathlib import Path
+        if not acceptance._job_read_reuse():
+            self.skipTest('POSIX identity reuse only')
+        _, path = self.terminal_experiment()
+        original = Path.lstat
+        def swap_during_leaf_stat(leaf):
+            info = original(leaf)
+            if leaf == path:
+                moved = path.parent.with_name('moved')
+                path.parent.rename(moved)
+                moved.rename(path.parent)
+            return info
+        with lock(self.project.root / 'locks/check-jobs.lock'), \
+                patch.object(Path, 'lstat', swap_during_leaf_stat):
+            with self.assertRaisesRegex(Denied, 'path changed'):
+                acceptance.job_paths(self.project, identities={})
+
     def test_post_finalization_content_failure_is_reported_without_mutation(self):
         ctx = self.context()
         job = check_jobs.submit(ctx)
@@ -891,7 +1021,6 @@ class AcceptanceTests(Fixture):
             path = check_jobs.root(project) / job_id
             if (path / 'result.json').exists():
                 (path / 'result.json').write_bytes(b'not json')
-                forget_ledger(self.project.root)
                 before.update({name: (path / name).read_bytes() for name in ('job.json', 'result.json')})
             return original(project, job_id, **kwargs)
         with patch('mizu.acceptance.recover_job', side_effect=corrupt_then_recover):
@@ -910,10 +1039,9 @@ class AcceptanceTests(Fixture):
         value['acknowledged'] = True
         write_json(path / 'job.json', value)
         (path / 'result.json').write_bytes(b'not json')
-        forget_ledger(self.project.root)
         pending = (path / 'job.json').read_bytes()
         self.run_job()
-        with self.capped():
+        with patch.object(Path, 'glob', return_value=[path / 'job.json'] * 1024):
             with self.assertRaises(Busy):
                 check_jobs._make_room(self.project)
         self.assertEqual((path / 'job.json').read_bytes(), pending)
@@ -923,7 +1051,6 @@ class AcceptanceTests(Fixture):
         ctx, job, proof = self.produce()
         path = check_jobs.root(self.project) / job['id'] / 'job.json'
         path.write_bytes(b'not json')
-        forget_ledger(self.project.root)
         self.assertEqual(self.run_job()['invalid_producers']['total'], 1)
         self.assertEqual(acceptance.effective(self.project, ctx.snapshot), proof)
         self.assertEqual(acceptance.audit(self.project.root), 1)
@@ -933,7 +1060,6 @@ class AcceptanceTests(Fixture):
         ctx, suspect, path = self.pending_producer()
         healthy = self.queued_other(ctx)
         (path / 'result.json').write_bytes(b'not json')
-        forget_ledger(self.project.root)
         with patch('mizu.acceptance._retain', side_effect=OSError('simulated retention interruption')):
             with self.assertRaises(OSError):
                 self.run_job()
@@ -948,6 +1074,72 @@ class AcceptanceTests(Fixture):
         self.assertEqual(acceptance.audit(self.project.root), 1)
         for name, raw in before.items():
             self.assertEqual((path / name).read_bytes(), raw)
+
+    def test_producer_isolation_does_not_swallow_path_io_or_durable_failures(self):
+        ctx, job, path = self.pending_producer()
+        pending = (path / 'job.json').read_bytes()
+        result_raw = (path / 'result.json').read_bytes()
+        for error in (Denied('unsafe read'), OSError('systemic read failure'),
+                      RecursionError('read failure outside JSON parsing')):
+            with self.subTest(error=type(error).__name__):
+                with patch('mizu.acceptance.safe_read_info', side_effect=error):
+                    with self.assertRaises(type(error)) as caught:
+                        self.run_job()
+                    self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        for target in ('job.json', 'result.json'):
+            source = path / target
+            linked = self.root / 'linked-producer'
+            os.link(source, linked)
+            try:
+                with self.assertRaises(Denied) as caught:
+                    self.run_job()
+                self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+            finally:
+                linked.unlink()
+            source.rename(linked)
+            self.symlink(linked, source)
+            try:
+                with self.assertRaises(Denied) as caught:
+                    self.run_job()
+                self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+            finally:
+                source.unlink()
+                linked.rename(source)
+        with patch('mizu.acceptance.atomic_write', side_effect=Denied('write refusal')):
+            with self.assertRaises(Denied) as caught:
+                self.run_job()
+            self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        self.assertEqual((path / 'job.json').read_bytes(), pending)
+        self.assertEqual((path / 'result.json').read_bytes(), result_raw)
+        proof = acceptance.recover_job(self.project, job['id'])
+        self.object_path(proof).write_bytes(b'not json')
+        with self.assertRaises(Denied) as caught:
+            self.run_job()
+        self.assertNotIsInstance(caught.exception, acceptance.InvalidProducer)
+        with self.assertRaises(Denied):
+            acceptance.audit(self.project.root)
+
+    def test_producer_scan_refuses_shared_directory_links_and_io(self):
+        from pathlib import Path
+        self.produce()
+        base = check_jobs.root(self.project)
+        moved = self.project.root / 'moved-check-jobs'
+        base.rename(moved)
+        self.symlink(moved, base, target_is_directory=True)
+        try:
+            with self.assertRaises(Denied):
+                self.run_job()
+        finally:
+            base.unlink()
+            moved.rename(base)
+        original = Path.iterdir
+        def broken_iterdir(path):
+            if path == base:
+                raise PermissionError('shared directory unreadable')
+            return original(path)
+        with patch.object(Path, 'iterdir', broken_iterdir):
+            with self.assertRaises(PermissionError):
+                self.run_job()
 
     def test_backup_run_recovery_stays_strict(self):
         ctx = self.context()

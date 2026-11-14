@@ -300,10 +300,15 @@ def plan(project):
             scan.preflight(root / name)
         store = project.work_items
         waits = []
-        if store.unseeded_decisions():
-            raise Denied("Unresolved work-item seed")
-        for item in store.current_items(statuses=("blocked",)):
-            if item.get("wait"):
+        for event_id, event in store._iter_item_events(recover=False):
+            kind, seed = store._seed_for_event(event_id, event, readonly=True)
+            if kind == "unseeded":
+                raise Denied("Unresolved work-item seed")
+            if kind != "seed":
+                continue
+            revisions = store._history_revisions(seed["id"], recover=False)
+            item = store._get(seed["id"], seed_event=event, history_revisions=revisions)
+            if item["status"] == "blocked" and item.get("wait"):
                 waits.append(item["wait"])
         required_keys = set()
         for wait in waits:

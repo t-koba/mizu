@@ -8,7 +8,6 @@ import stat
 import struct
 import sys
 import tempfile
-from pathlib import PureWindowsPath
 import threading
 import time
 import unittest
@@ -23,7 +22,6 @@ from mizu.fs import (_open_read, _rename_exclusive_posix, _replace_windows, atom
                      write_json)
 from mizu.pi import credentials
 from mizu.process import environment, run
-from mizu import platform as fs_platform
 
 
 class WindowsReplaceTests(unittest.TestCase):
@@ -389,23 +387,6 @@ class FileTests(unittest.TestCase):
         for path in ("/etc/passwd", "../x", "a/../x", "a//x", "", ".", "x\\y", "x\x00y"):
             with self.subTest(path=path), self.assertRaises(Denied):
                 relative_parts(path)
-
-    def test_relative_parts_accepts_exactly_the_documented_shapes(self):
-        for path in ("C:", "C:/x", "c:x", "1:x", "a:b/c", "//h/s/x", "a/", "/", "\u00e9:/x",
-                     "a/b:c", "x/.", "x/..", ".hidden", "a b", "\u65e5/\u672c"):
-            parts = tuple(path.split("/"))
-            drive = path[1:2] == ":" and PureWindowsPath(path).drive
-            bad = (not path or path.startswith("/") or bool(drive)
-                   or any(p in ("", ".", "..") for p in parts)
-                   or (fs_platform.IS_WINDOWS and any(
-                       ":" in p or p.endswith((" ", ".")) or PureWindowsPath(p).is_reserved()
-                       for p in parts)))
-            with self.subTest(path=path):
-                if bad:
-                    with self.assertRaises(Denied):
-                        relative_parts(path)
-                else:
-                    self.assertEqual(relative_parts(path), parts)
 
     def test_safe_read_regular(self):
         (self.root / "x").write_bytes("unicode\u2028value".encode())

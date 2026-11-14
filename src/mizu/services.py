@@ -158,8 +158,8 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     watches: dict[str, list[str]] = {}
     for name in project.roles:
         role = config.roles[name]
-        if role.daemon or name == "operator" or not role.event_wakes:
-            continue  # An empty event_wakes list can never admit a standalone dispatch.
+        if role.daemon or name == "operator":
+            continue
         scheduled = bool(role.interval_seconds or role.calendar)
         unscheduled_on_change = bool(role.on_change and not scheduled)
         has_subscription = bool(

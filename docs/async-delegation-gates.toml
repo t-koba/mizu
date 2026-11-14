@@ -18,7 +18,7 @@ release_status = "terminal-after-proven-quiescence"
 
 # The parent can keep using only these proven non-tree Context operations.
 parent_control_plane = [
-  "fetch", "probe", "search", "insights", "decision_read", "record_read", "result_read",
+  "fetch", "probe", "search", "insights", "decision_read", "record_read",
   "work_items_read", "work_items_legacy_read", "work_items_reconcile",
   "work_items_create", "work_items_transition", "work_order", "decide",
   "submit_insight", "revise_insight", "withdraw_insight", "attach_evidence",

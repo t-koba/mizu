@@ -6,11 +6,10 @@ import os
 import uuid
 from unittest import mock
 
-from support import Fixture, forget_ledger
+from support import Fixture
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied
-from mizu.fs import lock
-from support import history_write_json as write_json
+from mizu.fs import lock, write_json
 from mizu.storage import backup, prune, reclaim
 from mizu import storage_runs as runs
 
@@ -528,7 +527,6 @@ class CompletedRunRetentionTests(Fixture):
         path = self.project.root / "work-items" / blocked["id"] / "2.json"
         saved = path.read_bytes()
         path.write_bytes(b"{")
-        forget_ledger(self.project.root)
         self.assertFalse(prune(self.project)["run_retention"]["complete"])
         with self.assertRaises(Denied):
             prune(self.project, apply=True)

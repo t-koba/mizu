@@ -314,41 +314,56 @@ caller-supplied SHA/run ID, CI environment variable nor a later branch head is
 an authority. Content digests detect missing/mixed pages; they do not authenticate
 an arbitrary externally supplied artifact or create a new CI receipt.
 
-### CI matrix
+Windows/Python 3.11, 3.12, 3.13, and 3.14 core cells run unittest in two
+stable-ID parity shards; discovery and fixtures stay unchanged. The low bit of
+the SHA-256 hash of each unique UTF-8 test ID assigns it to exactly one shard,
+preserving per-shard discovery order. Duplicate or unavailable IDs fail
+sharded discovery. Without `--test-shard`, `scripts/check.py` still runs the
+full unsharded suite. Shard receipts use `suite: "offline-shard"` and
+`test_shard`, never reusable full offline receipts. Both shards run the same
+non-unittest checks and waivers; their reports cannot substitute for the
+aggregate check.
 
-Workflow `Offline checks` runs three jobs, each green for the exact commit
-before promotion:
+Each excluded Windows matrix cell is replaced by two shard jobs and one
+aggregate under its original required name: `core (windows-latest, 3.11)`,
+`core (windows-latest, 3.12)`, `core (windows-latest, 3.13)`, or
+`core (windows-latest, 3.14)`. The aggregate
+runs with `always()` and accepts only `success` from its own two-cell matrix;
+failure, cancellation, skip or a missing result fails closed. Timing and
+managed-import diagnostic artifacts are distinct per Python version and shard.
+The 1,800-second suite-child limit and 60-minute shard scope are unchanged;
+partitioning changes only parallelism, not coverage or assertions.
 
-| Job | Cells | Purpose |
-|---|---|---|
-| `core` | Linux x Python 3.11-3.14 | The complete gate and suite on every supported interpreter; Linux/3.13 also runs the installer gate, rootless OCI integration and the sdist build |
-| `core` | macOS x 3.14; Windows x 3.14 as two shards | The complete gate and suite on each other OS |
-| `durable-contract` | Linux 3.13 | Pinned Pi SDKs provisioned, gate unwaived |
-| `delegation-recovery-smoke` | Linux 3.13 | Synthetic supervisor death and recovery on rootless OCI |
+The 3.11 split follows the exact automatic publication on `mizu` at SHA
+`c2cc6b01b365f0a5e1b09aed13c06b65ff1e5d7d`, where the unsharded
+`python-unit-and-contract-tests` child timed out at the unchanged 1,800-second
+limit without unittest failure details. This establishes that the unsharded
+gate exceeded its budget, not that a particular test failed. The split keeps
+the whole suite and timeout unchanged. The 3.14 split is based on retained
+exact-snapshot timing evidence: on SHA
+`3ca295fd30906087761b4cbf95e931230fcdaaac`, all 3,735 tests completed with
+1,781.994 seconds of summed test time, the slowest individual case took
+11.678 seconds, and the child reached the existing 1,800-second bound. This
+shows a distributed near-bound workload, not one exceptional test. The split
+reuses the already-tested 3.12 parity mechanism. The 3.13 split follows an
+exact-SHA Windows run on the main branch that hit the same 1,800-second bound
+even though the same check passed on `mizu`; the log did not identify a failing
+test. Sharding keeps the complete suite and unchanged bound, but no post-split
+runtime or total runner-cost reduction is claimed.
 
-The rule: the interpreter version is varied only where it is cheap and
-decisive (Linux, every behaviour); the operating system is varied with the
-suite whole, because platform-dependent branches (`IS_WINDOWS`, locks,
-replacement, process control) are reached from tests of many modules, not only
-the ones named for the platform. Platform behaviour has differed by OS, not by
-Python version, so macOS and Windows run once, on the newest supported Python.
-
-The Windows cell runs unittest in two stable-ID parity shards to keep its wall
-time near the other cells (`--test-shard 0|1`): the low bit of the SHA-256 of
-each unique UTF-8 test ID assigns it to one shard, discovery order preserved;
-duplicate IDs fail closed. Both shards run the same non-unittest checks.
-Shard receipts use `suite: "offline-shard"` and `test_shard` and are never
-reusable as a full offline receipt.
-
-Every core cell uploads its bounded timing summary and detail pages (per shard
-on Windows) and, on Windows, the managed-import diagnostic; artifacts are
-diagnostic, never pass/failure inputs. The suite child is bounded at 1,800
-seconds, the later phase at 1,200 seconds (each check 600 seconds, each pinned
-adapter install 300 seconds); with 60 seconds of setup and 120 seconds of
-receipt reserve the modelled path is 3,246 seconds, inside the 60-minute
-cells. Linux/3.13 adds the installer staging gate and a 600-second OCI step:
-7,146 seconds inside its 120-minute cell. `durable-contract` has a 70-minute
-scope.
+Every core cell uploads its bounded timing summary and detail pages; the
+Windows shards also retain per-shard timings and managed-import diagnostics.
+Artifacts are diagnostic, not pass/failure inputs. The shared suite-child
+limit remains 1,800 seconds; the later-phase budget is 1,200 seconds, each
+later-phase check is capped at 600 seconds, and each pinned-adapter install at
+300 seconds. These command limits accept validated values from 1 through
+86,400 seconds; CI uses the defaults. The 60-second setup and 120-second
+receipt/summary reserves give a 3,246-second modelled path, inside the standard
+60-minute Windows/POSIX cells; this is a bound calculation, not a runtime
+claim. `durable-contract` uses a 70-minute scope with its two adapter installs
+charged to the same 1,200-second later-phase budget. Ubuntu/Python 3.13 also
+runs the installer staging gate and a 600-second OCI step; the combined
+modelled path is 7,146 seconds inside its 120-minute cell.
 
 The later phase is bounded as a whole, not per child. It runs one child per
 check: the transport suite, every SDK contract suite that is not waived, one

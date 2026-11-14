@@ -77,8 +77,7 @@ class SessionDeltaTests(Fixture):
                     path.unlink()
                 def followup(ctx, prompt, _):
                     decoded = json.loads(prompt)
-                    # The task follows the stable opening keys so the shared prefix stays long.
-                    self.assertEqual(list(decoded)[:4], ['unit', 'unit_tool_surface', 'goal_digest', 'task'])
+                    self.assertEqual(next(iter(decoded)), 'task')
                     self.assertEqual(decoded['task'], step)
                     self.assertEqual(decoded['published_snapshot']['id'], snapshot['id'])
                     # Even real work cannot redeclare the identical Next to loop.

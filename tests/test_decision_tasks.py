@@ -4,12 +4,12 @@ import dataclasses
 import json
 from unittest.mock import patch
 
-from support import Fixture, forget_ledger
+from support import Fixture
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical
-from support import history_write_json as write_json
+from mizu.fs import PREVIEW_BYTES, canonical, write_json
 from mizu.insights import _decision_key
 from mizu.work_item_seed import MAX_DECISION_TASKS, task_id
+from mizu.work_item_read_view import readonly_view
 
 
 class DecisionTaskTests(Fixture):
@@ -294,8 +294,20 @@ class DecisionTaskTests(Fixture):
             seen = []
             while True:
                 expected = self.store.page_open(cursor=cursor, limit=2)
-                actual = self.store.page_open_readonly(cursor=cursor, limit=2)
+                view = readonly_view(self.store)
+                visits = []
+                original = view._iter_decision_events
+
+                def events(*, recover):
+                    for event_id, event in original(recover=recover):
+                        visits.append(event_id)
+                        yield event_id, event
+
+                with patch.object(view, "_iter_decision_events", side_effect=events) as scan:
+                    actual = view.page_open_readonly(cursor=cursor, limit=2)
                 self.assertEqual(actual, expected)
+                self.assertEqual(scan.call_count, 1)
+                self.assertEqual(len(visits), groups + unrelated)
                 self.assertEqual(actual["total"], task_count)
                 self.assertTrue(actual["coverage_complete"])
                 for row in actual["items"]:
@@ -307,7 +319,11 @@ class DecisionTaskTests(Fixture):
             expected_ids = sorted(ids, key=lambda item_id: (
                 self.store.get(item_id)["created_at"], item_id))
             self.assertEqual(seen, expected_ids)
-            self.assertEqual(self.store.count_open_readonly(), task_count)
+            visits.clear()
+            with patch.object(view, "_iter_decision_events", side_effect=events) as scan:
+                self.assertEqual(view.count_open_readonly(), task_count)
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(len(visits), groups + unrelated)
             self.assertEqual(self.store.count_open(), task_count)
 
     def test_copied_group_source_fails_key_validation(self):
@@ -318,7 +334,8 @@ class DecisionTaskTests(Fixture):
         other_key = "0" * 32 if self.key != "0" * 32 else "1" * 32
         write_json(self.event_path.with_name(f"{other_key}.json"), event)
         for reader in (self.store.page_open, self.store.count_open,
-                       self.store.page_open_readonly, self.store.count_open_readonly):
+                       readonly_view(self.store).page_open_readonly,
+                       readonly_view(self.store).count_open_readonly):
             with self.subTest(reader=reader.__name__), self.assertRaisesRegex(
                     Denied, "Invalid decision key binding"):
                 reader()
@@ -402,7 +419,6 @@ class DecisionTaskTests(Fixture):
         self.event_path.unlink()
         temporary = self.event_path.parent / ".new-abcdefgh"
         temporary.write_bytes(canonical(event))
-        forget_ledger(self.project.root)
         self.assertEqual(self.store.page_open_readonly()["total"], 0)
         self.assertTrue(temporary.exists())  # read-only scans do not recover.
         retry = self.decide(work_items=self.tasks)

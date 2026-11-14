@@ -1,0 +1,120 @@
+"""Request-scoped reuse for the read-only work-items command.
+
+The first observation of each record is authoritative for this request, not
+for later requests. This is a live, non-atomic read (as before); it never takes
+writer locks, recovers files, persists a cache, or changes a writer's store.
+Every snapshot consumed by a selected projection still passes normal full
+manifest validation once in this request. Status and closed-page replay may skip
+snapshot reads the projection does not consume, while full chain validation
+remains active. Status reads validate current active bindings, and current done
+proofs remain strict.
+Status pages can peek at an exact full-proof item already read for subscriptions;
+open-page doing/blocked rows retain their derived-age reader.
+Exceptions are never cached. Cache eviction only costs another validated read.
+"""
+from collections import OrderedDict
+from copy import copy, deepcopy
+from functools import lru_cache
+
+from .config import Limits
+from .fs import canonical
+from .work_items import _HISTORY_UNSET
+
+
+class _Records:
+    def __init__(self, read, budget, *, copy_values=True):
+        self.read, self.budget, self.copy_values = read, budget, copy_values
+        self.records = OrderedDict()
+        self.size = 0
+
+    def __call__(self, key):
+        if key in self.records:
+            value, size = self.records.pop(key)
+            self.records[key] = (value, size)
+            return deepcopy(value) if self.copy_values else value
+        value = self.read(key)
+        size = len(canonical(value))
+        if size <= self.budget:
+            while self.records and self.size + size > self.budget:
+                _, (_, old_size) = self.records.popitem(last=False)
+                self.size -= old_size
+            self.records[key] = (deepcopy(value) if self.copy_values else value, size)
+            self.size += size
+        return value
+
+
+def readonly_view(store, *, limits=None):
+    """Private read facade; discard after rendering one work-items response.
+
+    The unchanged page/receipt readers own schema, limits, evidence and failure
+    semantics. Limits select request-local serialized-byte and parsed-item count
+    budgets (48 MiB / 1024 items by default), plus Python object overhead.
+    Path checks are bounded to 8192 names.
+    Do not use this facade for writes. Records remain scoped to one response
+    or dispatch; there is no persistent validation cache or alternate reader.
+    """
+    limits = Limits() if limits is None else limits
+    view = copy(store)
+    snapshots = copy(store.snapshots)
+    snapshots._path_key = lru_cache(maxsize=8192)(snapshots._path_key)
+    read_snapshot = snapshots.get
+    # The chain validator only compares these private manifests; none are
+    # returned to the caller or changed while constructing page rows.
+    records = _Records(read_snapshot,
+                       limits.work_item_read_view_snapshot_cache_bytes, copy_values=False)
+
+    def get(snapshot_id=None):
+        # The mutable current pointer and invalid arguments always take the
+        # original path; only explicit content-addressed IDs can be memoized.
+        if not isinstance(snapshot_id, str):
+            return read_snapshot(snapshot_id)
+        return records(snapshot_id)
+
+    snapshots.get = get
+    view.snapshots = snapshots
+    view._read = _Records(view._read, limits.work_item_read_view_file_cache_bytes)
+    read_item = view._get
+    items = {}
+    item_bytes = 0
+
+    def get_item(item_id, *, seed_event=None, history_revisions=_HISTORY_UNSET,
+                 verify_snapshots=True, verify_current_delivery=False):
+        nonlocal item_bytes
+        # Cache only callers supplying an explicit history observation and
+        # seed. A changed observation or proof mode must replay the chain.
+        if (not isinstance(item_id, str) or not isinstance(seed_event, dict)
+                or not isinstance(history_revisions, (set, type(None)))
+                or type(verify_snapshots) is not bool
+                or type(verify_current_delivery) is not bool):
+            return read_item(item_id, seed_event=seed_event,
+                             history_revisions=history_revisions,
+                             verify_snapshots=verify_snapshots,
+                             verify_current_delivery=verify_current_delivery)
+        key = (item_id, canonical(seed_event),
+               None if history_revisions is None else frozenset(history_revisions),
+               verify_snapshots, verify_current_delivery)
+        if key not in items:
+            value = read_item(item_id, seed_event=seed_event,
+                              history_revisions=history_revisions,
+                              verify_snapshots=verify_snapshots,
+                              verify_current_delivery=verify_current_delivery)
+            size = len(canonical(value)) + len(key[1])
+            if size > limits.work_item_read_view_item_cache_bytes:
+                return value
+            if (len(items) >= limits.work_item_read_view_item_cache_entries
+                    or item_bytes + size > limits.work_item_read_view_item_cache_bytes):
+                items.clear()
+                item_bytes = 0
+            items[key] = value
+            item_bytes += size
+        return deepcopy(items[key])
+
+    def peek_full_item(item_id, *, seed_event, history_revisions):
+        key = (item_id, canonical(seed_event),
+               None if history_revisions is None else frozenset(history_revisions),
+               True, False)
+        return deepcopy(items[key]) if key in items else None
+
+    view._get = get_item
+    view._peek_full_item = peek_full_item
+    return view

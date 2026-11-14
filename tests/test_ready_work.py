@@ -8,13 +8,12 @@ import unittest
 from threading import Event
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, bind_delivery, without_blocked_age, index_items
+from support import Fixture, ScriptDriver, bind_delivery, without_blocked_age
 from mizu import work_items as work_items_module
 from mizu import work_item_waits as work_item_waits_module
 from mizu.errors import Denied
 from mizu.config import role_no_progress_backoff_seconds
-from mizu.fs import now, read_json
-from support import history_write_json as write_json
+from mizu.fs import now, read_json, write_json
 from mizu.runtime import (Engine, MAX_READY_WORK_AGE_SECONDS, _ready_work_age,
                           daemon, prompt_delta_for, prompt_for, should_run)
 from mizu.snapshot import PROGRESS_SIGNALS
@@ -231,9 +230,9 @@ class ReadyWorkTests(Fixture):
             self.assertIn("Ready candidate", row["title"])
             self.assertEqual(row["age_seconds"], 42)
 
-    def test_empty_ready_projection_is_present_when_the_section_is_included_without_capabilities(self):
+    def test_empty_ready_projection_is_present_without_capabilities(self):
         ctx = self.context("consult")
-        ctx.role = dataclasses.replace(ctx.role, capabilities=(), context_include=("ready_work",))
+        ctx.role = dataclasses.replace(ctx.role, capabilities=())
         for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
             self.assertEqual(json.loads(prompt)["ready_work"], {
                 "items": [], "total": 0, "overflow_count": 0, "truncated": False,
@@ -318,6 +317,123 @@ class ReadyProjectionTests(Fixture):
             return self.project.work_items.page_ready(**kwargs)
 
     @unittest.skipIf(os.name == "nt", "POSIX metadata cache")
+    def test_cold_warm_equivalence_replays_less_but_scans_every_item(self):
+        store = self.project.work_items
+        opened = self.item("open")
+        self.item("doing", "doing")
+        self.item("waiting", "blocked", {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        closed = self.item("closed")
+        store.transition(closed["id"], expected_rev=1, actor="worker", status="dropped", reason="Settled")
+        with patch.object(work_items_module, "now", return_value=now()):
+            for role in (None, "worker", "reviewer"):
+                for limit in (1, 100):
+                    with self.subTest(role=role, limit=limit):
+                        expected = self.exact(role_name=role, limit=limit)
+                        store._projection_cache.clear()
+                        with patch.object(store, "_sidecar_load", return_value=None), \
+                             patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
+                             patch.object(store, "_history_revisions", wraps=store._history_revisions) as scan:
+                            cold = store.page_ready(role_name=role, limit=limit)
+                            self.assertEqual((replay.call_count, scan.call_count), (4, 4))
+                            replay.reset_mock()
+                            scan.reset_mock()
+                            warm = store.page_ready(role_name=role, limit=limit)
+                            self.assertEqual((replay.call_count, scan.call_count), (0, 4))
+                            self.assertTrue(all(c.kwargs["recover"] for c in scan.call_args_list))
+                        self.assertEqual(cold, expected)
+                        self.assertEqual(warm, expected)
+        # A new store reuses structural sidecars, but replays the terminal proof.
+        fresh = work_items_module.WorkItems(store.root, store.snapshots, store.insights)
+        with patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
+            self.assertEqual(fresh.page_ready(limit=1)["signature"],
+                             store.page_ready(limit=1)["signature"])
+            self.assertEqual(replay.call_count, 1)
+        fresh._projection_cache.clear()
+        fresh._sidecar_path(opened["id"]).write_text("{invalid")
+        with patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
+            self.assertEqual(fresh.page_ready()["total"], 2)
+            self.assertEqual(replay.call_count, 2)
+        with patch.object(fresh, "_history_identity", return_value=None), \
+             patch.object(fresh, "_current_hold", wraps=fresh._current_hold) as replay:
+            self.assertEqual(fresh.page_ready()["total"], 2)
+            self.assertEqual(replay.call_count, 4)
+
+    def test_scale_readiness_reuses_history_but_recomputes_origin_and_waits(self):
+        # 96 items / 384 full-state revisions exercise repeated terminal proofs
+        # without making local or Windows exact-replay coverage expensive.
+        store = self.project.work_items
+        snapshots = self.project.snapshots
+        captured = snapshots.capture_files(self.project.workspace)
+        snapshot = snapshots.create(
+            captured, goal="Goal", state="State", run="run", outcome="done", summary="Verified",
+            verification={"passed": True, "code_digest": captured["code_digest"], "run": "run"})
+        snapshots.publish(snapshot)
+        proposal = self.project.insights.submit(
+            source="reviewer", title="Scale origin", body="Scope", base_snapshot=None)
+        item_count, terminal_count = 96, 24
+        items = []
+        for index in range(item_count):
+            item = store.create(
+                idempotency_key=f"scale-{index}", title=f"Scale item {index}", actor="worker",
+                origin={"insight_id": proposal["id"], "rev": 1})["record"]["work_item"]
+            items.append(item)
+            if index < terminal_count:
+                bind_delivery(self.project, item["id"], snapshot["id"])
+                store.transition(item["id"], expected_rev=3, actor="worker", status="done",
+                                 snapshot_id=snapshot["id"])
+            else:
+                store.transition(item["id"], expected_rev=1, actor="worker", status="doing")
+                store.transition(item["id"], expected_rev=2, actor="worker", status="open")
+                store.transition(item["id"], expected_rev=3, actor="worker", status="blocked",
+                                 wait={"kind": "insight_decided", "insight": proposal["id"]})
+        # Discard only disposable sidecars, never immutable history/evidence.
+        for item in items:
+            store._sidecar_path(item["id"]).unlink(missing_ok=True)
+        store = work_items_module.WorkItems(store.root, snapshots, store.insights)
+        cache_available = (
+            not work_items_module.IS_WINDOWS
+            and all(store._history_identity(item["id"]) is not None for item in items)
+            and store._proof_identity(snapshots.root, f"snapshots/{snapshot['id']}.json") is not None)
+        active_count = item_count - terminal_count
+        with patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
+             patch.object(store, "_validate_transition", wraps=store._validate_transition) as validate, \
+             patch.object(snapshots, "validate_manifest", wraps=snapshots.validate_manifest) as manifest, \
+             patch.object(store, "_origin_projection_impl", wraps=store._origin_projection_impl) as origin, \
+             patch.object(work_items_module, "liveness", wraps=work_items_module.liveness) as live:
+            cold = store.page_ready(limit=item_count)
+            cold_counts = (replay.call_count, validate.call_count, manifest.call_count)
+            self.assertEqual(cold_counts[:2], (item_count, item_count * 3))
+            self.assertEqual(cold_counts[2], terminal_count)
+            self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
+            for spy in (replay, validate, manifest, origin, live):
+                spy.reset_mock()
+            warm = store.page_ready(limit=item_count)
+            warm_counts = (replay.call_count, validate.call_count, manifest.call_count)
+            # Windows/unsupported metadata deliberately keep validating exactly.
+            self.assertEqual(warm_counts, (0, 0, 0) if cache_available else cold_counts)
+            self.assertEqual(without_blocked_age(warm), without_blocked_age(cold))
+            self.assertEqual(warm["total"], 0)
+            self.assertTrue(warm["coverage_complete"])
+            self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
+
+            # External origin/decision changes wake blocked rows without history
+            # changes. Neither origin projection nor wait liveness is cached.
+            self.project.insights.revise(proposal["id"], source="reviewer", title="Revised",
+                                         body="New scope", base_snapshot=None, expected_rev=1)
+            self.project.insights.decide(proposal["id"], "reject", "Settled", "", "run", expected_rev=2)
+            for spy in (replay, validate, manifest, origin, live):
+                spy.reset_mock()
+            changed = store.page_ready(limit=item_count)
+            self.assertEqual((origin.call_count, live.call_count), (active_count, active_count))
+            self.assertEqual({row["id"] for row in changed["items"]},
+                             {item["id"] for item in items[terminal_count:]})
+            self.assertEqual(changed["total"], active_count)
+            self.assertNotEqual(changed["signature"], warm["signature"])
+            for row in changed["items"]:
+                self.assertEqual(row["current_origin_rev"], 2)
+                self.assertFalse(row["stale"])
+                self.assertEqual(row["redecision"], {"rev": 2, "action": "reject"})
+
     def test_next_call_sees_other_store_appends_new_items_and_corruption(self):
         store = self.project.work_items
         item = self.item("existing")
@@ -368,6 +484,89 @@ class ReadyProjectionTests(Fixture):
         self.assertEqual(row["current_origin_rev"], 2)
         self.assertTrue(row["doing_stale"])
         self.assertNotEqual(before["signature"], after["signature"])
+
+    def test_live_recovery_precedes_identity_for_direct_task_and_unseeded_directories(self):
+        store = self.project.work_items
+        direct = self.item("direct")
+        proposal = self.project.insights.submit(source="reviewer", title="Task", body="Scope", base_snapshot=None)
+        decision = self.project.insights.decide(proposal["id"], "accept", "Implement", "", "run", expected_rev=1)
+        task_id = decision["work_item"]["id"]
+        store.page_ready()
+        directories = [store.root / "work-items" / item_id for item_id in
+                       (direct["id"], task_id, store._create_id("worker", "uncommitted"))]
+        for directory in directories:
+            directory.mkdir(exist_ok=True)
+            (directory / ".new-abcdefgh").write_text("orphan")
+        identity = store._history_identity
+        def after_recovery(item_id):
+            self.assertFalse((store.root / "work-items" / item_id / ".new-abcdefgh").exists())
+            return identity(item_id)
+        with patch.object(store, "_history_identity", side_effect=after_recovery), \
+             patch.object(store, "_history_revisions_readonly", side_effect=AssertionError("live scan")):
+            self.assertEqual(store.page_ready()["total"], 2)
+        self.assertTrue(all(not (d / ".new-abcdefgh").exists() for d in directories))
+        # Unknown files cannot be hidden by the now-warm projection.
+        unexpected = directories[-1] / "unexpected"
+        unexpected.write_text("unsafe")
+        with self.assertRaises(Denied):
+            store.page_ready(limit=1)
+        unexpected.unlink()
+        if os.name != "nt":
+            alias = directories[0] / ".new-abcdefgh"
+            os.link(directories[0] / "create.json", alias)
+            store.page_ready()
+            self.assertFalse(alias.exists())
+            outside = store.root / "outside.json"
+            outside.write_text("not committed")
+            os.link(outside, alias)
+            with self.assertRaises(Denied):
+                store.page_ready()
+            self.assertTrue(alias.exists())
+
+    def test_terminal_cache_keeps_historical_wait_proof_dependencies(self):
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        with patch.dict(store.vcs, poll_enabled=True, command=["unused"], ci_branch="mizu"):
+            item = self.item("historical-ci", "blocked", {
+                "kind": "publication_ci", "snapshot_id": snapshot["id"], "checks": ["core"]})
+        store.transition(item["id"], expected_rev=2, actor="worker", status="dropped", reason="Settled")
+        store.page_ready()
+        store.page_ready()
+        (self.project.root / "snapshots" / (snapshot["id"] + ".json")).unlink()
+        with patch.object(store, "_iter_chain", wraps=store._iter_chain) as replay:
+            with self.assertRaises(Denied):
+                store.page_ready()
+            self.assertGreater(replay.call_count, 0)
+
+    def test_live_delivery_replays_but_exact_terminal_proof_is_reused(self):
+        store = self.project.work_items
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snapshot = self.project.snapshots.create(
+            captured, goal="Goal", state="State", run="run", outcome="done", summary="Verified",
+            verification={"passed": True, "code_digest": captured["code_digest"], "run": "run"})
+        self.project.snapshots.publish(snapshot)
+        item = self.item("delivery")
+        bind_delivery(self.project, item["id"], snapshot["id"])
+        store.page_open_readonly()  # A readonly cache must not weaken live verification.
+        # Unsupported metadata witnesses (including Windows) retain exact replay.
+        cache_available = (
+            not work_items_module.IS_WINDOWS
+            and store._history_identity(item["id"]) is not None
+            and store._proof_identity(store.snapshots.root,
+                                     f"snapshots/{snapshot['id']}.json") is not None)
+        for status in ("doing", "done"):
+            if status == "done":
+                store.transition(item["id"], expected_rev=3, actor="worker", status="done",
+                                 snapshot_id=snapshot["id"])
+            store.page_ready()
+            with patch.object(store, "_current_hold", wraps=store._current_hold) as replay, \
+                 patch.object(store, "_validate_delivery", wraps=store._validate_delivery) as delivery:
+                store.page_ready()
+                expected_live_validation = status == "doing" or not cache_available
+                self.assertEqual(replay.call_count, int(expected_live_validation))
+                self.assertEqual(any(c.kwargs.get("verify_snapshots") for c in delivery.call_args_list),
+                                 expected_live_validation)
+
 
 class ReadySetChangeTests(Fixture):
     item = ReadyWorkTests.item
@@ -681,19 +880,26 @@ class ReadySetChangeTests(Fixture):
         store = self.project.work_items
         seed = self.item('template')
 
-        store.page_open()  # Build the index, then replace its rows with synthetic ones.
-
         def scan(count, reverse=False, limit=1):
             indices = range(count - 1, -1, -1) if reverse else range(count)
-            index_items(self.project.root, ({**seed, 'id': f'wi_{i:032x}'} for i in indices),
-                        replace=True)
-            tracemalloc.start()
-            try:
-                page = store._page_open_impl(cursor=None, limit=limit, readonly=True,
-                                             ready_only=True, role_name='worker')
-                peak = tracemalloc.get_traced_memory()[1]
-            finally:
-                tracemalloc.stop()
+
+            def rows():
+                for i in indices:
+                    row = (f'{i:032x}', {'id': f'wi_{i:032x}'}, frozenset())
+                    yield row if work_items_module.IS_WINDOWS else row + (None,)
+            events = rows()
+            with patch.object(store, '_iter_item_events_with_revisions', return_value=events), \
+                 patch.object(store, '_seed_for_event', new=lambda _, event, **kw: ('seed', event)), \
+                 patch.object(store, '_history_revisions_readonly', return_value=(None, None)), \
+                 patch.object(store, '_current_hold', new=lambda item_id, **kw: (
+                     {**seed, 'id': item_id}, None)):
+                tracemalloc.start()
+                try:
+                    page = store._page_open_impl(cursor=None, limit=limit, readonly=True,
+                                                 ready_only=True, role_name='worker')
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
             return page, peak
 
         small, small_peak = scan(10)

@@ -41,16 +41,6 @@ leave leftovers for a later refresh, with no weaker path-based deletion fallback
 empty ref-prefix parents, never the workspace or unrelated siblings. The project
 root and its ancestors remain trusted operator-owned state.
 
-The state root is never mounted into a sandbox; agents change it only through
-host operations that validate each write. Only the operator account and its
-host processes can write it, and they could equally rewrite any derived file,
-so reads do not re-authenticate history. Work-item, insight and decision records are validated when
-written and when the current-state index is built from them; `mizu work-items
-PROJECT --audit` replays every chain strictly (manifests, retained receipts,
-wait evidence) and reports accidental corruption or index divergence. Records
-carry hashes, not signatures: a consistent forgery by that account is outside
-what any check here can detect.
-
 Experiments get readonly source plus ephemeral writable work.
 Time/output bounds kill process groups and labelled containers. A finished unit
 cannot continue to call tools or acquire another provider admission.

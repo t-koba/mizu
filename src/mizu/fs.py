@@ -7,7 +7,6 @@ import datetime as dt
 import errno
 import hashlib
 import io
-import itertools
 import json
 import os
 import re
@@ -50,9 +49,7 @@ MAX_JSON_DEPTH = 64
 JSON_DEPTH_REFUSED = "JSON exceeds the nesting depth bound"
 #: One JSON string or structural bracket. A string matches whole, so a bracket
 #: inside a string never counts as nesting.
-_JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"')
-_NOT_BRACKET = re.compile(rb'[^\[\]{}]')
-_DEPTH_STEP = {0x5b: 1, 0x7b: 1, 0x5d: -1, 0x7d: -1}
+_JSON_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{}]')
 
 
 def _reject_nonfinite_constant(value: str) -> object:
@@ -76,8 +73,16 @@ def _too_deep(raw: bytes) -> bool:
     """
     if raw.count(b"{") + raw.count(b"[") <= MAX_JSON_DEPTH:
         return False
-    brackets = _NOT_BRACKET.sub(b"", _JSON_STRING.sub(b"", raw))
-    return max(itertools.accumulate(map(_DEPTH_STEP.__getitem__, brackets)), default=0) > MAX_JSON_DEPTH
+    depth = 0
+    for match in _JSON_TOKEN.finditer(raw):
+        token = match.group()
+        if token[:1] in (b"{", b"["):
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                return True
+        elif token[:1] in (b"}", b"]"):
+            depth -= 1
+    return False
 
 
 def loads_finite(raw: bytes | str, *, object_pairs_hook=None) -> Any:
@@ -437,12 +442,6 @@ def lock_policy(seconds: float, *,
         _lock_retry_interval_ms.reset(retry_token)
 
 
-def lock_timeout() -> float:
-    """The execution's lock wait policy in seconds, as used by :func:`lock`."""
-    timeout = _lock_timeout.get()
-    return _LOCAL_BLOCKING_TIMEOUT if timeout is None else timeout
-
-
 def _local_key(path: Path) -> str:
     # Canonicalize through the filesystem so aliased paths (symlinked
     # parent, `.`/`..`, case variants on Windows) share one guard entry.
@@ -567,14 +566,18 @@ def publish_pointer(root: Path, pointer: dict, *, name: str = "latest.json") -> 
     write_json(root / name, pointer)
 
 
+def publish_entry(root: Path, name: str, payload: bytes, pointer: dict) -> None:
+    """Complete an entry file first, then atomically move the latest pointer."""
+    mkdir(root)
+    atomic_write(root / name, payload)
+    publish_pointer(root, pointer)
+
+
 def relative_parts(name: str) -> tuple[str, ...]:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise Denied("Invalid relative path")
     parts = tuple(name.split("/"))
-    # A leading "/" yields an empty first component and a Windows drive needs
-    # ":" in the second position (backslashes were refused above), so pathlib
-    # runs only for the one shape it can still decide.
-    if (name[1:2] == ":" and PureWindowsPath(name).drive) or any(p in ("", ".", "..") for p in parts):
+    if PurePosixPath(name).is_absolute() or PureWindowsPath(name).drive or any(p in ("", ".", "..") for p in parts):
         raise Denied("Path must be relative, without empty, '.' or '..' components")
     if _platform.IS_WINDOWS and any(':' in p or p.endswith((' ', '.')) or
             PureWindowsPath(p).is_reserved() for p in parts):

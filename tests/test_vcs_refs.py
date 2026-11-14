@@ -104,6 +104,17 @@ class VcsRefInjectionTests(Fixture):
         with self.assertRaises(Denied):
             vcs.read_ref(self.project.root, "main")
 
+    def test_refresh_removes_legacy_workspace_tree(self):
+        legacy = self.project.workspace / "refs/remotes/upstream"
+        legacy.mkdir(parents=True)
+        (legacy / "main").write_bytes((SHA_A + "\n").encode())
+        before = self.project.snapshots.capture_files(self.project.workspace)
+        vcs.inject_refs(self.project.root, {"main": SHA_A})
+        self.assertFalse((self.project.workspace / "refs").exists())
+        after = self.project.snapshots.capture_files(self.project.workspace)
+        self.assertEqual(before["code_digest"], after["code_digest"])
+        self.assertEqual(vcs.read_ref(self.project.root, "main"), SHA_A)
+
     def test_reserved_prefix_reported_without_moving_digest(self):
         legacy = self.project.workspace / "refs/remotes/upstream"
         legacy.mkdir(parents=True)

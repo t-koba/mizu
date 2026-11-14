@@ -6,7 +6,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from support import Fixture, ROOT, forget_ledger, history_write_json
+from support import Fixture, ROOT
 from mizu import insight_archive
 from mizu.errors import Denied
 from mizu.fs import canonical, read_json, write_json
@@ -19,7 +19,6 @@ class InsightTombstoneTests(Fixture):
         item = self.project.insights.submit(source="searcher", title="Lost title", body="Lost body",
                                             base_snapshot=self.project.snapshots.get()["id"], insight_id=key)
         (self.project.root / "inbox" / f"{key}.json").unlink()
-        forget_ledger(self.project.root)
         path = self.project.root / "insight-ids" / f"{key}.json"
         value = read_json(path)
         if rev is not None:
@@ -37,7 +36,7 @@ class InsightTombstoneTests(Fixture):
     def test_summary_known_metadata_no_fabricated_content_and_default_reads(self):
         item, path, identity = self.lost(rev=4)
         # Neither a stray decision nor references can recreate a lost body.
-        history_write_json(self.project.root / "decisions" / path.name,
+        write_json(self.project.root / "decisions" / path.name,
                    {"id": item["id"], "rev": 4, "action": "accept", "work_item": {"id": "not-real"}})
         identity.update(title="Do not copy", base_snapshot=item["base_snapshot"], work_item="not-real")
         write_json(path, identity)
@@ -64,7 +63,6 @@ class InsightTombstoneTests(Fixture):
         decision = self.project.insights.decide(insight["id"], "accept", "Reviewed", "", "run",
                                                 expected_rev=1)
         (self.project.root / "inbox" / f"{insight['id']}.json").unlink()
-        forget_ledger(self.project.root)
         self.page()
         status = self.project.work_items.submitter_status(insight["id"])
         self.assertIsNotNone(status)
@@ -104,7 +102,6 @@ class InsightTombstoneTests(Fixture):
         insight_archive.store(self.project.root, archived, decision, {"original": "binding"})
         before = self.rows()
         (self.project.root / "inbox" / f'{archived["id"]}.json').unlink()
-        forget_ledger(self.project.root)
         page = self.page()["items"]
         self.assertEqual(self.rows()[0], before[0])
         self.assertEqual(len(page), 2)

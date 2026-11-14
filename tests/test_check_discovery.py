@@ -6,15 +6,12 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from support import Fixture, forget_ledger, history_write_json
+from support import Fixture
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
 from mizu.errors import CaptureLimitExceeded, Denied
-from mizu.fs import canonical, digest, held
+from mizu.fs import canonical, digest, held, write_json
 from mizu.runtime import Engine, prompt_for, prompt_delta_for, should_run
-
-
-write_json = history_write_json
 
 
 class DiscoveryTests(Fixture):
@@ -42,7 +39,6 @@ class DiscoveryTests(Fixture):
         return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
 
     def cache_bytes(self):
-        forget_ledger(self.project.root)  # Tests edit records directly; a rebuild validates them.
         return {p.relative_to(self.project.root): p.read_bytes()
                 for p in check_jobs.root(self.project).rglob('*.json')}
 
@@ -342,7 +338,6 @@ class DiscoveryTests(Fixture):
     def test_oversized_job_is_visible_not_silently_drained(self):
         ctx, job = self.queue()
         self.leaf(job).write_bytes(b'x' * (self.config.limits.file_bytes + 1))
-        forget_ledger(self.project.root)
         before = self.leaf(job).read_bytes()
         self.assertEqual(acceptance.discover(self.project)[1], {job['id']: 'job_file_bytes'})
         self.assertFalse(check_jobs.pending(self.project, 'worker'))
@@ -356,7 +351,6 @@ class DiscoveryTests(Fixture):
             self.skipTest('Symlinks unavailable: ' + str(exc))
 
     def assert_unsafe(self):
-        forget_ledger(self.project.root)  # Only an index build reads the unsafe layout.
         with self.assertRaises(Denied):
             acceptance.discover(self.project)
         with self.assertRaises(Denied):
@@ -415,18 +409,15 @@ class DiscoveryTests(Fixture):
             if path == check_jobs.root(self.project):
                 raise OSError('simulated directory I/O failure')
             return original(path)
-        forget_ledger(self.project.root)
         with patch.object(Path, 'iterdir', enumerate_paths):
             with self.assertRaises(OSError):
                 acceptance.discover(self.project)
             with self.assertRaises(OSError):
                 self.run_job()
-        forget_ledger(self.project.root)
-        with patch('mizu.acceptance.safe_read', side_effect=OSError('simulated read failure')):
+        with patch('mizu.acceptance.safe_read_info', side_effect=OSError('simulated read failure')):
             with self.assertRaises(OSError):
                 acceptance.discover(self.project)
-        forget_ledger(self.project.root)
-        with patch('mizu.acceptance.safe_read', side_effect=Denied('unsafe shared path')):
+        with patch('mizu.acceptance.safe_read_info', side_effect=Denied('unsafe shared path')):
             with self.assertRaisesRegex(Denied, 'unsafe shared path'):
                 acceptance.discover(self.project)
 
@@ -482,19 +473,16 @@ class DiscoveryTests(Fixture):
         outside = self.root / 'outside-result.json'
         result.replace(outside)
         os.link(outside, result)
-        forget_ledger(self.project.root)  # Evidence is re-validated when the index is rebuilt.
         with self.assertRaises(Denied):
             acceptance.discover(self.project)
         result.unlink()
         self.symlink(outside, result)
-        forget_ledger(self.project.root)  # Evidence is re-validated when the index is rebuilt.
         with self.assertRaises(Denied):
             acceptance.discover(self.project)
         result.unlink()
         outside.replace(result)
         receipt_id = acceptance.recover_job(self.project, job['id'])
         (self.project.root / f'evidence/acceptance/objects/{receipt_id}.json').write_bytes(b'not json')
-        forget_ledger(self.project.root)  # Evidence is re-validated when the index is rebuilt.
         with self.assertRaises(Denied):
             acceptance.discover(self.project)
 

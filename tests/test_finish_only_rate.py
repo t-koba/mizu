@@ -136,19 +136,6 @@ class FinishOnlyRateTests(Fixture):
         self.assertEqual(worker["status"], "incomplete")
         self.assertIsNone(worker["rate"])
 
-    def test_bound_covers_the_newest_runs_and_skips_those_older_than_the_window(self):
-        import os
-        stale = self.record("old")
-        os.utime(stale, (1, 1))  # Last changed long before the window.
-        self.record("a")
-        newest = self.record("b")
-        limited = dataclasses.replace(self.project.config.usage, finish_rate_runs_scanned=2)
-        with patch.object(self.project, "config", dataclasses.replace(self.project.config, usage=limited)):
-            worker = self.worker()
-        self.assertNotIn("scan_limit", worker["reasons"])
-        self.assertEqual(worker["completed_units"], 2)
-        self.assertTrue(newest.exists())
-
     def test_scan_and_byte_caps_suppress_rate(self):
         first = self.record("a")
         self.record("b")

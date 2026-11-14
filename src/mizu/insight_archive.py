@@ -293,19 +293,6 @@ def read(root: Path, insight_id: str, *, include_unavailable: bool = False) -> d
         return record
 
 
-def latest(root: Path, *, recover: bool) -> list:
-    """Newest row of every archived insight as (id, record JSON) pairs.
-
-    ``recover`` callers hold insights.lock and may recover a hot journal; the
-    others use the no-recovery read-only path.
-    """
-    with (_connect(root) if recover else _immutable_connect(root)) as db:
-        if db is None:
-            return []
-        return db.execute("SELECT id, record FROM insights i WHERE rev="
-                          "(SELECT MAX(rev) FROM insights WHERE id=i.id)").fetchall()
-
-
 def prefixes(root: Path, prefix: str) -> list[str]:
     """At most two distinct matches: enough to refuse ambiguous reads."""
     with _connect(root) as db:

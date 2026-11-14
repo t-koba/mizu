@@ -73,8 +73,9 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
         raise Denied("Retirement cannot change scope, evidence, references or waits")
     state = {}
     current = None
+    has_resolution = False
     for current in store._iter_chain(item_id, history_revisions=history_revisions, retirement=state):
-        pass
+        has_resolution |= "wait_resolution" in current
     from .work_items import MAX_REVISIONS
     if current["rev"] != MAX_REVISIONS or current["status"] not in ("open", "doing", "blocked"):
         raise Denied("Retirement requires an exhausted nonterminal work item")
@@ -92,7 +93,20 @@ def retire(store, item_id, *, expected_rev, status, actor, reason, history_revis
         from .smoke_refs import require_pairs
         require_pairs(store.root, current.get("smoke_refs", []))
         project(current, record)  # Refuse an unreadable projection before committing.
-        with store.committing([item_id]):
-            write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
+        write_json(store.root / "work-items" / item_id / "retirement.json", record, exclusive=True)
         store._wake_terminal()
+    if has_resolution:
+        store._sidecar_remove(item_id)
+        return project(current, record)
+    try:
+        # Cache boundary: store the exact retirement binding with the last two
+        # ordinary source records; never fails the commit or retry.
+        seed = store._seed(item_id, history_revisions=history_revisions)
+        identity = store._history_identity(item_id)
+        previous = store._read(f"work-items/{item_id}/{current['rev'] - 1}.json")
+        store._sidecar_store(item_id, seed, identity, previous, current, None,
+                             retirement=record)
+    except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+            AttributeError):
+        pass
     return project(current, record)

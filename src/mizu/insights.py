@@ -68,8 +68,6 @@ from .config import (DEFAULT_DECISION_PROJECTION_RECORDS, MAX_DECISION_PROJECTIO
                      MAX_INSIGHT_HISTORY_ENTRIES)
 from .smoke_refs import record_lock, project_record_lock, validate_refs, require_pairs
 from . import insight_archive, wait_events, lock_diagnostics
-from .insight_index import INSIGHTS, InsightSource, generation as _generation
-from .ledger import Ledger, rows as _rows
 from .work_item_waits import WAIT_KINDS, normalize_wait
 from .errors import Busy, Denied, LimitExceeded
 from .shared_records import Delivery, KindPolicy, RECEIPT_BYTES, RECORD_BYTES, SharedRecords
@@ -443,9 +441,6 @@ class Insights:
                  decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES,
                  history_entries: int = 1000):
         self.root, self.maximum = root, maximum
-        #: Current-state index shared with the work items of the same project.
-        self.ledger = Ledger(root)
-        self.ledger.attach(INSIGHTS, InsightSource(self))
         self.retention_days = retention_days
         self.open_work_items = open_work_items
         self.producer_inputs_per_source = producer_inputs_per_source
@@ -537,7 +532,7 @@ class Insights:
             if not explicit:
                 best = None
                 best_key = None
-                for key, _, item in self._live_entries(pending=True, locked=True):
+                for key, _, item in self._live_entries(pending=True):
                     if (not isinstance(key[0], str) or item.get("source") != source
                             or item.get("title") != title or item.get("body") != body
                             or any(item.get(k, default) != metadata[k] or (k in specified and k not in item)
@@ -602,8 +597,7 @@ class Insights:
                 return _normalize(old)
             record = {**payload, "created_at": now(), "rev": 1, "evidence": []}
             record["updated_at"] = record["created_at"]
-            with self.ledger.write("insights", [f"i:{insight_id}"]):
-                write_json(path, record, exclusive=True)
+            write_json(path, record, exclusive=True)
             write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": record["created_at"]}, exclusive=True)
             return record
 
@@ -712,8 +706,7 @@ replacement insight without implying rejected substance.
             record = {**payload, "evidence": [],
                       "created_at": old.get("created_at"), "rev": current_rev + 1,
                       "updated_at": stamped}
-            with self.ledger.write("insights", [f"i:{insight_id}"]):
-                write_json(path, record)
+            write_json(path, record)
             sha = digest(canonical(payload))
             write_json(self.root / "insight-ids" / f"{insight_id}.json",
                        {"id": insight_id, "sha256": sha, "created_at": record["created_at"]})
@@ -857,78 +850,59 @@ replacement insight without implying rejected substance.
                 entry.update(smoke_refs=smoke_refs, rev=rev)
             entries.append(entry)
             record = {**current, "evidence": entries, "updated_at": entry["created_at"]}
-            with self.ledger.write("insights", [f"i:{insight_id}"]):
-                write_json(self.root / "inbox" / f"{insight_id}.json", record)
+            write_json(self.root / "inbox" / f"{insight_id}.json", record)
             return _normalize(record)
 
-    def _refuse_malformed(self, db) -> None:
-        """Fail-closed readers never answer while a live record or its decision is unreadable."""
-        if _rows(db, "SELECT 1 FROM insights WHERE live=1 AND valid=0 LIMIT 1"):
-            raise Denied("Malformed live insight record")
-        if _rows(db, "SELECT 1 FROM insights i JOIN decisions d ON d.insight_id=i.id "
-                     "WHERE i.live=1 AND d.valid=0 LIMIT 1"):
-            raise Denied("Malformed live insight decision")
-
-    @staticmethod
-    def _listing(item: dict, decision) -> dict:
-        """Bounded list summary of one live record with its effective decision."""
-        record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
-        record.update(insight_metadata(item))
-        if "origin" not in record:
-            record["origin"] = None
-        record["rev"] = _rev_of(item)
-        if item.get("updated_at"):
-            record["updated_at"] = item["updated_at"]
-        record["decision"] = decision
-        try:
-            entries = item.get("evidence") if isinstance(item.get("evidence"), list) else []
-            record["evidence_count"] = len(entries)
-            stamps = [e.get("created_at") for e in entries
-                      if isinstance(e, dict) and isinstance(e.get("created_at"), str)]
-            if stamps:
-                record["evidence_updated_at"] = max(stamps)
-        except (AttributeError, TypeError, ValueError):
-            record["evidence_count"] = 0
-        return record
-
-    #: Live, readable records with the decision that binds their current revision.
-    _LIVE = ("FROM insights i LEFT JOIN decisions d "
-             "ON d.insight_id = i.id AND d.rev = i.rev AND d.valid = 1 "
-             "WHERE i.live = 1 AND i.valid = 1 AND NOT EXISTS ("
-             "SELECT 1 FROM decisions x WHERE x.insight_id = i.id AND x.valid = 0)")
-
-    @classmethod
-    def _live_filter(cls, pending: bool, action: str | None):
-        where, params = cls._LIVE, []
-        if pending:
-            where += " AND (d.insight_id IS NULL OR d.action = 'defer')"
-        if action is not None:
-            where += " AND d.action = ?"
-            params.append(action)
-        return where, params
-
-    def _live_entries(self, *, pending: bool = False, action: str | None = None,
-                      locked: bool = False):
-        """Yield ``(key, summary, raw record)`` of live inputs, oldest first."""
-        where, params = self._live_filter(pending, action)
-        with self.ledger.read("insights", locked=locked) as db:
-            found = _rows(db, f"SELECT i.item, d.record {where} ORDER BY i.created_at, i.id", params)
-        for raw, decision in found:
-            item = json.loads(raw)
-            record = self._listing(item, json.loads(decision) if decision else None)
-            yield (record["created_at"], record["id"], f"{record['id']}.json"), record, item
+    def _live_entries(self, *, pending: bool = False, action: str | None = None):
+        """Shared projection; keep the raw body for full-generation hashing."""
+        for path in (self.root / "inbox").glob("*.json"):
+            if path.is_symlink():
+                continue
+            try:
+                item = read_json(path)
+                identifier(item["id"])
+                item_rev = _rev_of(item)
+                decision_path = self.root / "decisions" / f"{item['id']}.json"
+                raw_decision = None if decision_path.is_symlink() else read_json(decision_path)
+                decision = _effective_decision(item_rev, raw_decision)
+                if pending and decision and decision["action"] != "defer":
+                    continue
+                if action is not None and (not decision or decision.get("action") != action):
+                    continue
+                record = {k: item[k] for k in ("id", "source", "origin", "title", "created_at", "base_snapshot") if k in item}
+                record.update(insight_metadata(item))
+                if "origin" not in record:
+                    record["origin"] = None
+                record["rev"] = item_rev
+                if item.get("updated_at"):
+                    record["updated_at"] = item["updated_at"]
+                record["decision"] = decision
+                try:
+                    entries = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+                    record["evidence_count"] = len(entries)
+                    stamps = [e.get("created_at") for e in entries
+                              if isinstance(e, dict) and isinstance(e.get("created_at"), str)]
+                    if stamps:
+                        record["evidence_updated_at"] = max(stamps)
+                except (AttributeError, TypeError, ValueError):
+                    record["evidence_count"] = 0
+                key = (record["created_at"], record["id"], path.name)
+                yield key, record, item
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
+                continue
 
     def projection(self, *, pending: bool = True, limit: int = 30, action: str | None = None) -> dict:
-        """The newest ``limit`` live summaries, oldest first, with the matching total."""
-        where, params = self._live_filter(pending, action)
-        with self.ledger.read("insights", locked=False) as db:
-            total = _rows(db, f"SELECT COUNT(*) {where}", params)[0][0]
-            found = (_rows(db, f"SELECT i.item, d.record {where} "
-                               "ORDER BY i.created_at DESC, i.id DESC LIMIT ?", [*params, limit])
-                     if limit > 0 else [])
-        items = [self._listing(json.loads(raw), json.loads(decision) if decision else None)
-                 for raw, decision in reversed(found)]
-        return {"items": items, "total": total, "truncated": total > len(items)}
+        heap = []
+        total = 0
+        for key, record, _ in self._live_entries(pending=pending, action=action):
+            total += 1
+            if limit > 0:
+                entry = (*key, record)
+                if len(heap) < limit:
+                    heapq.heappush(heap, entry)
+                elif key > heap[0][:3]:
+                    heapq.heapreplace(heap, entry)
+        return {"items": [entry[3] for entry in sorted(heap)], "total": total, "truncated": total > len(heap)}
 
     def list(self, *, pending: bool = True, limit: int = 30) -> list[dict]:
         return self.projection(pending=pending, limit=limit)["items"]
@@ -956,7 +930,7 @@ replacement insight without implying rejected substance.
         expires = state["expires"] if state else stamp + self.cursor_ttl_seconds
         with lock_diagnostics.operation("page"), lock(self.root / "locks" / "insights.lock"):
             if scope == "live":
-                entries = list(self._live_entries(locked=True))
+                entries = sorted(self._live_entries(), key=lambda entry: entry[0])
                 generation = digest(canonical([[key, record, raw] for key, record, raw in entries]))
                 if state and state["generation"] != generation:
                     raise Denied("Stale insight live cursor; restart pagination")
@@ -1068,74 +1042,158 @@ replacement insight without implying rejected substance.
         raise Denied("Insight not found")
 
     def scan_source(self, source: str) -> list[dict]:
-        """Return every readable inbox record carrying the given source.
+        """Return every inbox record carrying the given source.
 
-        Normalized records; callers filter further by id shape, since a source
-        alone never implies a record kind.
+        Normalized records, malformed files skipped: the same tolerant
+        enumeration as ``generation``. Callers filter further by id
+        shape; a source alone never implies a record kind.
         """
-        with self.ledger.read("insights", locked=False) as db:
-            found = _rows(db, "SELECT item FROM insights WHERE live=1 AND valid=1 AND source=?",
-                          (source,))
-        return [_normalize(json.loads(raw)) for (raw,) in found]
+        out = []
+        for path in (self.root / "inbox").glob("*.json"):
+            if path.is_symlink():
+                continue
+            try:
+                item = read_json(path)
+                identifier(item["id"])
+                if item.get("source") == source:
+                    out.append(_normalize(item))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
+                continue
+        return out
 
-    def has_current_defer(self) -> bool:
-        """Whether any live insight has an exact current defer decision.
+    def _current_live_decision(self, path, item):
+        """Read and validate the decision only when it binds this live revision."""
+        decision_path = self.root / "decisions" / path.name
+        try:
+            decision_path.lstat()
+        except FileNotFoundError:
+            return None
+        decision = json.loads(safe_read(
+            self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
+        if (not isinstance(decision, dict) or decision.get("id") != item["id"]
+                or decision.get("action") not in ("accept", "modify", "reject", "defer", "withdraw")):
+            raise Denied("Malformed live insight decision")
+        decision_rev = decision.get("rev", 1)
+        if type(decision_rev) is not int or decision_rev < 1:
+            raise Denied("Malformed live insight decision revision")
+        if decision_rev != item.get("rev", 1):
+            return None
+        return decision
 
-        Answers from the index under the project record lock; an unreadable
-        live record or decision raises rather than undercount.
+    def has_current_defer(self, *, max_entries: int) -> bool:
+        """Prove whether any live insight has an exact current defer decision.
+
+        Opens at most ``max_entries`` inbox entries under the project record
+        lock and returns immediately on the first current defer. A single
+        un-opened directory-entry lookahead detects overflow; if the bound is
+        exhausted before an empty result is proven, raises
+        ``LimitExceeded`` so callers keep the ordinary scheduled path. Unsafe,
+        unreadable, vanished or malformed records also fail closed.
         """
+        if type(max_entries) is not int or max_entries < 1:
+            raise Denied("max_entries must be a positive integer")
         with lock_diagnostics.operation("read"), project_record_lock(self.root):
-            with self.ledger.read("insights", locked=True) as db:
-                self._refuse_malformed(db)
-                return bool(_rows(db, "SELECT 1 FROM insights i JOIN decisions d "
-                                      "ON d.insight_id = i.id AND d.rev = i.rev "
-                                      "WHERE i.live = 1 AND d.action = 'defer' LIMIT 1"))
+            inbox = self.root / "inbox"
+            if not insight_archive._directory(inbox):
+                return False
+            # A missing parent is normal; an unsafe existing parent is not.
+            insight_archive._directory(self.root / "decisions")
+            for index, path in enumerate(inbox.iterdir()):
+                if index >= max_entries:
+                    raise LimitExceeded("Scheduled-input insight scan bound exhausted")
+                if path.suffix != ".json":
+                    continue
+                item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
+                if not isinstance(item, dict):
+                    raise Denied("Malformed live insight record")
+                identifier(item.get("id"))
+                if item["id"] != path.stem:
+                    raise Denied("Live insight filename does not match ID")
+                identifier(item.get("source"))
+                item_rev = item.get("rev", 1)
+                if type(item_rev) is not int or item_rev < 1:
+                    raise Denied("Malformed live insight revision")
+                decision = self._current_live_decision(path, item)
+                if decision is not None and decision["action"] == "defer":
+                    return True
+        return False
 
     def unresolved_counts(self, sources, *, kind=None, addressee=None, is_answered=None) -> dict:
         """Count live unresolved inputs for each named source, fail-closed.
 
-        Undecided plus deferred revisions count, resolved and archive-only
-        history do not. Optional kind/addressee filters select exact metadata.
-        ``is_answered`` optionally excludes only inputs for which a caller has
-        exact completion evidence; it changes no stored decision or record.
-        An unreadable live record or decision raises rather than undercount;
-        a missing decision only leaves its input unresolved. Unknown or
-        malformed requested sources raise.
+        One consistent read-only inbox scan under the project record lock;
+        per-record byte bounds apply, but this producer-accounting API retains
+        its existing full-scan behavior. The scheduled timer gate uses the
+        separately bounded :meth:`has_current_defer` reader. Undecided plus
+        deferred revisions count, resolved and archive-only history do not.
+        Optional kind/addressee filters select exact metadata without using the
+        tolerant prompt listing for a negative liveness claim. ``is_answered``
+        optionally excludes only inputs for which a caller has exact completion
+        evidence; it changes no stored decision or record. Each inbox row is safely
+        read within ``self.maximum`` and each decision within the decision
+        event bound. Unsafe, unreadable, vanished or malformed live entries
+        raise rather than undercount; a missing decision only leaves its
+        input unresolved. Unknown or malformed requested sources raise.
+        Tolerant prompt/list paths (``_live_entries``, ``generation``,
+        ``list``) are unchanged.
         """
         names = list(sources)
         for name in names:
             identifier(name)
         wanted = set(names)
         counts = {name: 0 for name in wanted}
-        where = ("FROM insights i LEFT JOIN decisions d ON d.insight_id = i.id AND d.rev = i.rev "
-                 "WHERE i.live = 1 AND (d.insight_id IS NULL OR d.action = 'defer')")
-        params = []
-        for column, value in (("kind", kind), ("addressee", addressee)):
-            if value is not None:
-                where += f" AND i.{column} = ?"
-                params.append(value)
         with lock_diagnostics.operation("read"), project_record_lock(self.root):
-            with self.ledger.read("insights", locked=True) as db:
-                self._refuse_malformed(db)
-                if is_answered is None:
-                    for source, count in _rows(
-                            db, f"SELECT i.source, COUNT(*) {where} GROUP BY i.source", params):
-                        if source in wanted:
-                            counts[source] = count
-                else:
-                    for source, raw in _rows(db, f"SELECT i.source, i.item {where}", params):
-                        if source in wanted and not is_answered(json.loads(raw)):
-                            counts[source] += 1
+            inbox = self.root / "inbox"
+            if not insight_archive._directory(inbox):
+                return counts
+            # iterdir propagates listing failures rather than glob's tolerant
+            # handling. Do not skip a vanished row: its source is unknown.
+            for path in sorted(inbox.iterdir()):
+                if path.suffix != ".json":
+                    continue
+                item = json.loads(safe_read(self.root, f"inbox/{path.name}", self.maximum))
+                if not isinstance(item, dict):
+                    raise Denied("Malformed live insight record")
+                identifier(item.get("id"))
+                if item["id"] != path.stem:
+                    raise Denied("Live insight filename does not match ID")
+                # Every live record carries a valid source and revision;
+                # otherwise admission must hold rather than guess.
+                identifier(item.get("source"))
+                item_rev = item.get("rev", 1)
+                if type(item_rev) is not int or item_rev < 1:
+                    raise Denied("Malformed live insight revision")
+                decision = self._current_live_decision(path, item)
+                if decision is not None and decision["action"] != "defer":
+                    continue
+                source = item["source"]
+                if source in wanted:
+                    metadata = insight_metadata(item) if kind is not None or addressee is not None else {}
+                    if ((kind is None or metadata.get("kind") == kind)
+                            and (addressee is None or metadata.get("addressee") == addressee)
+                            and not (is_answered is not None and is_answered(item))):
+                        counts[source] += 1
         return counts
 
     def unresolved_count(self, source: str) -> int:
-        """Single-source wrapper over :meth:`unresolved_counts`."""
+        """Single-source wrapper over :meth:`unresolved_counts`.
+
+        Same fail-closed single scan; kept for single-producer callers.
+        """
         return self.unresolved_counts([source])[source]
 
     def generation(self) -> str:
-        """Inbox generation: changes exactly when a live record's content identity does."""
-        with self.ledger.read("insights", locked=False) as db:
-            return _generation(db)
+        parts = []
+        for path in (self.root / "inbox").glob("*.json"):
+            if path.is_symlink():
+                continue
+            try:
+                item = read_json(path)
+                identifier(item["id"])
+                parts.append(f"{item['id']}:{_rev_of(item)}:{_content_sha(item)}:{_evidence_sha(item.get('evidence'))}")
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, Denied):
+                continue
+        return digest(canonical(sorted(parts)))
 
     def decide(self, insight_id: str, action: str, reason: str, revisit: str, run: str, wait=None,
                expected_rev: int | None = None, work_item_intent: str | None = None,
@@ -1210,8 +1268,7 @@ replacement insight without implying rejected substance.
                 # original event (including its run) and repair only a stale pointer.
                 if current_decision != existing:
                     store.prepare_decision_write(need_wait=False)
-                    with lock(self.root / "locks" / "decisions.lock"), \
-                            self.ledger.write("insights", [f"d:{insight_id}"]):
+                    with lock(self.root / "locks" / "decisions.lock"):
                         write_json(raw, existing)
                 return existing
             if prior is not None and prior.get("action") in ("accept", "modify", "reject"):
@@ -1279,13 +1336,29 @@ replacement insight without implying rejected substance.
                 _validate_keyed_substantive_event(record, insight_id, rev, key, current["title"])
             store.prepare_decision_write(need_wait=(registered is not None))
             with lock(self.root / "locks" / "decisions.lock"):
-                tasks = "work_items" in record
-                with store.committing([seed["id"] for seed in seeds],
-                                         source_event=event_id if tasks else None):
-                    write_json(self.root / "decision-history" / f"{event_id}.json", record,
-                               exclusive=True)
-                with self.ledger.write("insights", [f"d:{insight_id}"]):
-                    write_json(self.root / "decisions" / f"{insight_id}.json", record)
+                write_json(self.root / "decision-history" / f"{event_id}.json", record, exclusive=True)
+                try:
+                    # Cache boundary: best-effort seed sidecars (previous None,
+                    # current exact immutable seed); never fails the commit.
+                    seeds = record.get("work_items", [record["work_item"]] if "work_item" in record else [])
+                    if not isinstance(seeds, list):
+                        raise ValueError("Invalid work-item seed list")
+                    for seed in seeds:
+                        try:
+                            if not isinstance(seed, dict):
+                                continue
+                            seed_id = seed.get("id")
+                            if not isinstance(seed_id, str):
+                                continue
+                            identity = store._history_identity(seed_id)
+                            store._sidecar_store(seed_id, seed, identity, None, seed, None)
+                        except (OSError, ValueError, TypeError, Denied, LimitExceeded,
+                                UnicodeError, AttributeError):
+                            pass
+                except (OSError, ValueError, TypeError, Denied, LimitExceeded, UnicodeError,
+                        AttributeError):
+                    pass
+                write_json(self.root / "decisions" / f"{insight_id}.json", record)
                 if registered is not None:
                     registered = {**registered, "owner": insight_id, "rev": rev,
                                   "decision": record, "registered_at": now(), "run": run,
@@ -1657,8 +1730,7 @@ replacement insight without implying rejected substance.
             self._work_item_store().prepare_decision_write(need_wait=False)
             with lock(self.root / "locks" / "decisions.lock"):
                 write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
-                with self.ledger.write("insights", [f"d:{insight_id}"]):
-                    write_json(self.root / "decisions" / f"{insight_id}.json", record)
+                write_json(self.root / "decisions" / f"{insight_id}.json", record)
         return record
 
     def _decision_token(self, role_name: str, payload: dict) -> str:
@@ -1939,35 +2011,75 @@ replacement insight without implying rejected substance.
         return retained, total
 
     def _pending_insight_envelopes_locked(self, configured_roles, role_name, *, paths=None):
-        """Stream exact current candidates for one configured recipient from the index.
+        """Stream exact current-source candidates for one configured recipient.
 
-        Candidates are live revisions without an effective decision (including
-        a deferral, which keeps its decision delivery) addressed to the role,
-        whether by its own submission (``writer``) or by name. Unrelated and
-        decided inbox history is never scanned, and legacy omissions never
-        invent a route. ``paths`` restricts the candidates to those records.
-        An unreadable live record or decision refuses the read.
+        Each source read is individually bounded and callers bound retained
+        projections/pages; do not cap unrelated inbox history before routing
+        filters, since old human/decided items must not prevent a configured
+        role from seeing its own pending attention. Legacy omissions never
+        invent a route. Omission scans the whole inbox; callers may run that
+        full scan outside the project record lock and revalidate selected
+        ``paths`` under it. A selected path is still fully validated before
+        its event is returned.
         """
         identifier(role_name)
-        stems = None if paths is None else [path.stem for path in paths]
-        with self.ledger.read("insights", locked=False) as db:
-            self._refuse_malformed(db)
-            found = _rows(db, "SELECT i.item FROM insights i LEFT JOIN decisions d "
-                              "ON d.insight_id = i.id AND d.rev = i.rev "
-                              "WHERE i.live = 1 AND d.insight_id IS NULL AND "
-                              "((i.addressee = 'writer' AND i.source = ?) OR i.addressee = ?) "
-                              "ORDER BY i.id", (role_name, role_name))
-        for (raw,) in found:
-            item = json.loads(raw)
-            if stems is not None and item["id"] not in stems:
+        inbox = self.root / "inbox"
+        if not insight_archive._directory(inbox):
+            return
+        for path in (inbox.iterdir() if paths is None else paths):
+            if path.suffix != ".json":
                 continue
+            try:
+                raw = safe_read_managed(self.root, f"inbox/{path.name}", self.maximum)
+            except Denied:
+                # A retention sweep may archive a decided inbox copy between
+                # the directory listing and this read. That source is gone,
+                # not unsafe; skip it and keep the remaining candidates.
+                if self._source_missing(path):
+                    continue
+                raise
+            item = json.loads(raw)
+            if type(item) is not dict or item.get("id") != path.stem:
+                raise Denied("Malformed pending insight source")
+            identifier(item["id"])
+            identifier(item.get("source"))
+            rev = item.get("rev", 1)
+            if type(rev) is not int or rev < 1:
+                raise Denied("Malformed pending insight revision")
             metadata = insight_metadata(item)
-            addressee = metadata["addressee"]
+            addressee = metadata.get("addressee")
+            if addressee is None or addressee == "operator":
+                continue
             target = item["source"] if addressee == "writer" else addressee
-            if target not in configured_roles or target != role_name:
+            if (target == "operator" or target not in configured_roles
+                    or target != role_name):  # human writer alias remains host-only
+                continue
+            decision_path = self.root / "decisions" / path.name
+            try:
+                decision_path.lstat()
+            except FileNotFoundError:
+                decision = None
+            else:
+                try:
+                    decision = json.loads(safe_read_managed(
+                        self.root, f"decisions/{path.name}", MAX_DECISION_EVENT_BYTES))
+                except Denied:
+                    if self._source_missing(decision_path):
+                        decision = None
+                    else:
+                        raise
+                if decision is not None and (
+                        type(decision) is not dict or decision.get("id") != item["id"]
+                        or type(decision.get("rev", 1)) is not int or decision.get("rev", 1) < 1
+                        or decision.get("action") not in _DECISION_ACTIONS | {"withdraw"}):
+                    raise Denied("Malformed pending insight decision")
+            effective = _effective_decision(rev, decision)
+            if effective is not None:
+                # Decisions (including deferrals) retain their existing delivery
+                # policy; attention is reopened by a new insight revision.
                 continue
             payload = {k: item[k] for k in ("title", "body", "source", "created_at")}
-            payload.update(insight=item["id"], rev=_rev_of(item), kind="insight.pending",
+            payload.update(insight=item["id"], rev=rev, kind="insight.pending",
                            target=target, addressee=addressee)
             payload.update({("insight_kind" if k == "kind" else k): v
                             for k, v in metadata.items() if k != "addressee"})
@@ -1980,6 +2092,49 @@ replacement insight without implying rejected substance.
             if len(canonical(envelope)) > INSIGHT_PENDING_POLICY.maximum:
                 raise LimitExceeded("Pending insight envelope exceeds byte bound")
             yield envelope["id"], envelope
+
+    def _pending_source_fingerprint(self, role_name):
+        """Metadata witness for sources the legacy pending scan reads.
+
+        The full scan runs without the exclusive record lock. A before/after
+        mismatch means a concurrent source change, so the caller falls back to
+        the exact locked scan rather than presenting a stale or incomplete
+        page. Entries are included, not only their directories.
+        """
+        names = ("inbox", "decisions", "decision-receipts",
+                 f"decision-receipts/{role_name}")
+        parts = []
+        for name in names:
+            path = self.root / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                parts.append((name, None, ()))
+                continue
+            except OSError:
+                return None
+            if not stat.S_ISDIR(info.st_mode):
+                return None
+            entries = []
+            try:
+                with os.scandir(path) as scanned:
+                    for entry in scanned:
+                        try:
+                            entry_info = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            return None
+                        entries.append((entry.name, entry_info.st_mode,
+                                        entry_info.st_nlink, entry_info.st_mtime_ns,
+                                        entry_info.st_ctime_ns, entry_info.st_size))
+            except FileNotFoundError:
+                parts.append((name, None, ()))
+                continue
+            except OSError:
+                return None
+            entries.sort()
+            parts.append((name, (info.st_mtime_ns, info.st_ctime_ns, info.st_size),
+                          tuple(entries)))
+        return tuple(parts)
 
     def _pending_insight_events_exact(self, role_name, configured_roles, limit):
         """Exact locked selection; caller holds the project record lock."""
@@ -2008,15 +2163,77 @@ replacement insight without implying rejected substance.
     def pending_insight_events(self, role_name, configured_roles, *, limit=10):
         """Legacy exact receipts, same count bound and fail-closed receipt reader.
 
-        Candidates come from the index under the project record lock, so a
-        concurrent change is never delivered stale or incomplete; only each
-        candidate's receipt is read from its file.
+        The source scan runs without the project record lock; the lock is
+        taken only to recheck selected source rows and receipts, or to run the
+        exact fallback when the before/after metadata witness changed or an
+        unlocked read refuses an overlapping replacement. A changed source
+        therefore never becomes a stale or incomplete page.
         """
         identifier(role_name)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied("Pending insight event limit must be in [1, 100]")
-        with lock_diagnostics.operation("list"), project_record_lock(self.root):
-            return self._pending_insight_events_exact(role_name, configured_roles, limit)
+        with lock_diagnostics.operation("list"):
+            before = self._pending_source_fingerprint(role_name)
+            diagnostics = []
+
+            def eligible():
+                for _, envelope in self._pending_insight_envelopes_locked(configured_roles, role_name):
+                    payload = envelope["payload"]
+                    if payload["target"] != role_name:
+                        continue
+                    event = dict(payload, ack_token=self._decision_token(role_name, payload))
+                    try:
+                        received = self._decision_received(role_name, event)
+                    except CorruptDecisionReceipt as corrupt:
+                        if len(diagnostics) < self.decision_receipt_diagnostics:
+                            diagnostics.append({"event": event["event"], "ack_token": event["ack_token"],
+                                                "action": "pending", "reason": corrupt.reason})
+                        continue
+                    if not received:
+                        yield (dt.datetime.fromisoformat(event["created_at"]),
+                               event, envelope)
+
+            try:
+                selected = heapq.nsmallest(limit, eligible(),
+                                           key=lambda row: (row[0], row[1]["event"]))
+            except Denied:
+                # A concurrent atomic replacement can make a handle-bound
+                # POSIX read refuse between open and its final fstat. The
+                # unlocked generation is no longer trustworthy; run the exact
+                # locked scan for a fresh page instead of failing the caller.
+                with project_record_lock(self.root):
+                    return self._pending_insight_events_exact(
+                        role_name, configured_roles, limit)
+            after = self._pending_source_fingerprint(role_name)
+            if before is None or before != after:
+                with project_record_lock(self.root):
+                    return self._pending_insight_events_exact(role_name, configured_roles, limit)
+            with project_record_lock(self.root):
+                # A source may have changed after the post-scan sample but
+                # before this lock; recheck the metadata witness now that no
+                # writer can move it.
+                if self._pending_source_fingerprint(role_name) != after:
+                    return self._pending_insight_events_exact(
+                        role_name, configured_roles, limit)
+                fresh = []
+                for _, event, envelope in selected:
+                    payload = envelope["payload"]
+                    path = self.root / "inbox" / f"{payload['insight']}.json"
+                    current = list(self._pending_insight_envelopes_locked(
+                        configured_roles, role_name, paths=[path]))
+                    if len(current) != 1 or current[0][1] != envelope:
+                        return self._pending_insight_events_exact(
+                            role_name, configured_roles, limit)
+                    try:
+                        received = self._decision_received(role_name, event)
+                    except CorruptDecisionReceipt:
+                        return self._pending_insight_events_exact(
+                            role_name, configured_roles, limit)
+                    if received:
+                        return self._pending_insight_events_exact(
+                            role_name, configured_roles, limit)
+                    fresh.append(event)
+                return fresh, diagnostics
 
     def _source_missing(self, path):
         try:
@@ -2535,12 +2752,13 @@ replacement insight without implying rejected substance.
                     write_json(identity_path,
                                {"id": item["id"], "sha256": digest(canonical(payload)),
                                 "created_at": item["created_at"]}, exclusive=True)
-                    with self.ledger.write("insights", [f"i:{path.stem}"]):
-                        insight_archive.store(self.root, record, decision, read_json(identity_path))
-                        with contextlib.suppress(OSError):
-                            path.unlink()
-                            removed += 1
+                    insight_archive.store(self.root, record, decision, read_json(identity_path))
                 except (OSError, ValueError, AttributeError, KeyError, TypeError, Denied):
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
                     continue
         return removed
 

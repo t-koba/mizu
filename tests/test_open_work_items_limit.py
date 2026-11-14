@@ -1,10 +1,10 @@
 """Open-work seed transactions use the ledger and its shared record lock."""
 import multiprocessing
 
-from support import Fixture, bind_delivery, forget_ledger
+from support import Fixture, bind_delivery
 from mizu.config import load
 from mizu.errors import ConfigError, Denied, OpenWorkItemsFull
-from support import history_write_json as write_json
+from mizu.fs import write_json
 from mizu.insights import Insights, _decision_key
 from mizu.project import Project
 
@@ -209,7 +209,6 @@ class OpenWorkItemsLimitTests(Fixture):
         item = self.create()["record"]["work_item"]
         directory = self.project.root / "work-items" / item["id"]
         (directory / "3.json").write_text("{}")
-        forget_ledger(self.project.root)
         with self.assertRaisesRegex(Denied, "Gapped"):
             self.create("extra")
         self.assertFalse((self.project.root / "work-items" /
