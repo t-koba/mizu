@@ -765,50 +765,22 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
         marker = '      - name: Upload managed-import diagnostic\n'
         parts = workflow.split(marker)
-        self.assertEqual(len(parts), 6,
-                         'expected core-matrix and Windows-3.11–3.14 shard diagnostic blocks')
-        core_upload = parts[1].split('  windows-311-shards:', 1)[0]
-        shard_uploads = (
-            ('3.11', parts[2].split('  windows-311-core:', 1)[0]),
-            ('3.12', parts[3].split('  windows-312-core:', 1)[0]),
-            ('3.13', parts[4].split('  windows-313-core:', 1)[0]),
-            ('3.14', parts[5].split('  windows-314-core:', 1)[0]),
-        )
-        exact_path = ['path: private-validation/project-import-diagnostic.json']
-        # Core matrix cell: Windows-only condition with a per-cell artifact name.
-        self.assertEqual([line.strip() for line in core_upload.splitlines()
+        self.assertEqual(len(parts), 2, 'expected one diagnostic block, in the core job')
+        upload = parts[1].split('  durable-contract:', 1)[0]
+        self.assertEqual([line.strip() for line in upload.splitlines()
                           if line.strip().startswith('if:')],
                          ["if: always() && runner.os == 'Windows'"])
-        core_uses = [line.strip() for line in core_upload.splitlines()
-                     if line.strip().startswith('uses: actions/upload-artifact@')]
-        self.assertEqual(len(core_uses), 1)
-        self.assertRegex(core_uses[0], UPLOAD_ARTIFACT_USE)
-        self.assertEqual([line.strip() for line in core_upload.splitlines() if 'path:' in line],
-                         exact_path)
-        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}',
-                      core_upload)
-        for version in ('3.11', '3.12', '3.13', '3.14'):
-            self.assertNotIn(f'project-import-diagnostic-windows-latest-{version}-shard',
-                             core_upload)
-        self.assertIn('retention-days: 7', core_upload)
-        self.assertIn('if-no-files-found: ignore', core_upload)
-        for version, shard_upload in shard_uploads:
-            with self.subTest(version=version):
-                # Shard jobs run on Windows, so use bare always() and distinct names.
-                self.assertEqual([line.strip() for line in shard_upload.splitlines()
-                                  if line.strip().startswith('if:')], ['if: always()'])
-                shard_uses = [line.strip() for line in shard_upload.splitlines()
-                              if line.strip().startswith('uses: actions/upload-artifact@')]
-                self.assertEqual(len(shard_uses), 1)
-                self.assertRegex(shard_uses[0], UPLOAD_ARTIFACT_USE)
-                self.assertEqual([line.strip() for line in shard_upload.splitlines()
-                                  if 'path:' in line], exact_path)
-                artifact = (f'name: project-import-diagnostic-windows-latest-{version}'
-                            '-shard-${{ matrix.shard }}')
-                self.assertIn(artifact, shard_upload)
-                self.assertNotIn('${{ matrix.os }}', shard_upload)
-                self.assertIn('retention-days: 7', shard_upload)
-                self.assertIn('if-no-files-found: ignore', shard_upload)
+        uses = [line.strip() for line in upload.splitlines()
+                if line.strip().startswith('uses: actions/upload-artifact@')]
+        self.assertEqual(len(uses), 1)
+        self.assertRegex(uses[0], UPLOAD_ARTIFACT_USE)
+        self.assertEqual([line.strip() for line in upload.splitlines() if 'path:' in line],
+                         ['path: private-validation/project-import-diagnostic.json'])
+        # Shards of one cell must not overwrite each other's artifact.
+        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}'
+                      "${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}", upload)
+        self.assertIn('retention-days: 7', upload)
+        self.assertIn('if-no-files-found: ignore', upload)
 
 
 class UnittestFailureSummaryTests(unittest.TestCase):
