@@ -685,7 +685,7 @@ class RecoveryReservationTests(unittest.TestCase):
             events = group / 'cgroup.events'
             events.write_text('populated 1\n')  # surviving descendant, no direct process
             (group / 'cgroup.procs').write_text('')
-            observed = mock.Mock(reason='exited', exit_code=0, survivors=(), stdout=(
+            observed = mock.Mock(reason='exited', exit_code=0, survivors=(), stderr='', stdout=(
                 'LoadState=loaded\nActiveState=inactive\nControlGroup=' + binding['scope']['cgroup'] + '\n'))
             product_proof = _scope_empty
             def proof(saved, **kwargs):
