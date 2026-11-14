@@ -40,10 +40,12 @@ outcome evidence is retained. Daily rows distinguish `unresolved`, `unknown`,
 A later dispatch requires an **explicit** next `attempt` (same receipt, commit
 and workflows), and a validated predecessor outcome of `not_dispatched` or
 `unknown`. Existing request identities, idempotent replay and the attempt range
-1–9223372036854775807 are unchanged. After an unknown predecessor, the later dispatch
-marker, outcome and daily/run-activity rows carry `possibly_duplicate_spend: true`,
-including when the later adapter fails. Legacy omitted flags mean false; omitted
-attempts still mean attempt one. Unknown permits another request but does not
+1–9223372036854775807 are unchanged. After any attempt becomes `unknown`, every
+subsequent explicit attempt carries `possibly_duplicate_spend: true` in its
+dispatch marker, outcome and daily/run-activity rows, even through intervening
+adapter-confirmed `not_dispatched` attempts: a later no-spend result cannot erase
+earlier uncertainty. This also applies when a later adapter fails. Legacy omitted
+flags mean false; omitted attempts still mean attempt one. Unknown permits another request but does not
 prove success, register or complete covered CI waits, or satisfy retained
 acceptance. The request grant, work-item wait lifecycle and acceptance rules
 below are unchanged.

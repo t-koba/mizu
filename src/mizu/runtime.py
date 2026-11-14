@@ -1667,7 +1667,8 @@ class Context:
             if previous is None or previous.get("outcome") not in ("not_dispatched", "unknown"):
                 raise Denied("A new CI attempt requires the preceding attempt's terminal "
                              "no-dispatch or unknown outcome")
-            possibly_duplicate_spend = previous.get("outcome") == "unknown"
+            possibly_duplicate_spend = (previous.get("outcome") == "unknown"
+                                        or previous.get("possibly_duplicate_spend", False))
         duplicate_fields = {"possibly_duplicate_spend": True} if possibly_duplicate_spend else {}
         # The covered items are checked before the provider is called, so a
         # coverage that cannot take the wait never spends a run.

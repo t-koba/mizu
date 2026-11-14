@@ -46,7 +46,7 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # [ci_requests]
 # unknown_after_seconds = 86400 # Conservative 24-hour grace before terminal unknown.
 # Strict positive whole seconds, <= 9223372036854775807; explicit request paths only.
-# Unknown retains audit evidence; a later numbered request may duplicate spend.
+# Unknown retains audit evidence; duplicate-spend risk carries through later attempts.
 # Read budgets shared by ci_requests and ci_costs: integers
 # 1..min(9223372036854775807, sys.maxsize). os.listdir still materializes/sorts
 # all names, so these do not bound directory memory.

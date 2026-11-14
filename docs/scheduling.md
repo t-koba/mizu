@@ -711,9 +711,11 @@ listed as `unresolved` until an explicit request/replay reaches
 `[ci_requests].unknown_after_seconds` (default 86,400 seconds). At that bound,
 a valid marker with no valid outcome becomes immutable `unknown`: a run may
 have been spent, and the row does not claim either success or no spend. A later
-explicit attempt may follow `not_dispatched` or `unknown`; after `unknown`, the
-attempt is marked `possibly_duplicate_spend`. This is a conservative 24-hour
-grace for exact adapter evidence, not a provider deadline. Read-only listings
+explicit attempt may follow `not_dispatched` or `unknown`; after `unknown`,
+`possibly_duplicate_spend` remains true on every subsequent attempt, including
+through intervening `not_dispatched` outcomes. A no-spend result cannot erase an
+earlier unknown attempt's possible spend. This is a conservative 24-hour grace
+for exact adapter evidence, not a provider deadline. Read-only listings
 and status polling never settle markers, and no request is retried automatically.
 An unreadable or invalid outcome stays unresolved, never inferred from absent
 provider status. The listing is bounded (`total`, `truncated` and `scan_stopped`);

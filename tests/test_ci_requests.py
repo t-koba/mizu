@@ -264,6 +264,32 @@ class CiRequestTests(Fixture):
                     vcs.request_runs_via({"request_grant": True}, SHA, ["ci"],
                                          request_id=identity, attempt=2)
 
+    def test_duplicate_spend_risk_survives_an_intervening_no_dispatch_attempt(self):
+        store, first_id, _ = self.pending_marker()
+        second_id = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)
+        second_ctx = self.context({"outcome": "not_dispatched", "request_id": second_id,
+                                   "attempt": 2, "reason_code": "provider_rejected"})
+        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
+            second = self.request(second_ctx, attempt=2)
+        self.assertEqual(store.outcome(first_id)["outcome"], "unknown")
+        self.assertEqual(second["outcome"], "not_dispatched")
+        third_ctx = self.context(runs())
+        third = self.request(third_ctx, attempt=3)
+        self.assertEqual(third["runs"][0]["run_id"], "run-1")
+        rows = {row["attempt"]: row for day in store.daily()["days"] for row in day["items"]}
+        for attempt, ctx, result, state in ((2, second_ctx, second, "not_dispatched"),
+                                            (3, third_ctx, third, "resolved")):
+            with self.subTest(attempt=attempt):
+                self.assertTrue(result["possibly_duplicate_spend"])
+                identity = result["request_id"]
+                self.assertTrue(store.outcome(identity)["possibly_duplicate_spend"])
+                self.assertTrue(store.dispatched(identity)["possibly_duplicate_spend"])
+                self.assertEqual(rows[attempt]["state"], state)
+                self.assertTrue(rows[attempt]["possibly_duplicate_spend"])
+                activity = ctx.ci_request_summary()["requests"][0]
+                self.assertEqual((activity["attempt"], activity["state"]), (attempt, state))
+                self.assertTrue(activity["possibly_duplicate_spend"])
+
     def test_terminal_no_dispatch_is_durable_and_replays_without_a_provider_call(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
         payload = {"outcome": "not_dispatched", "request_id": identity, "attempt": 1,
