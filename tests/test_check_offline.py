@@ -2500,9 +2500,9 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Linux runs every Python; macOS and Windows run the oldest once.
         self.assertIn('os: [ubuntu-24.04]', workflow)
         self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
-        self.assertIn('- os: macos-latest\n            python: "3.11"', workflow)
-        self.assertIn('- os: windows-latest\n            python: "3.11"\n            shard: "0"', workflow)
-        self.assertIn('- os: windows-latest\n            python: "3.11"\n            shard: "1"', workflow)
+        self.assertIn('- os: macos-latest\n            python: "3.14"', workflow)
+        self.assertIn('- os: windows-latest\n            python: "3.14"\n            shard: "0"', workflow)
+        self.assertIn('- os: windows-latest\n            python: "3.14"\n            shard: "1"', workflow)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         self.assertIn('--report private-validation/offline.json', workflow)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
