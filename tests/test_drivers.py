@@ -376,7 +376,8 @@ class SyntheticEngineTests(Fixture):
                         self.assertIsNone(ctx.finished)
                         self.assertEqual(ctx.request_count, 2 if guard == 'tools' else 1)
                     finally:
-                        self.project.set_control(paused=False)
+                        if guard == 'paused':
+                            self.project.set_control(paused=False)
 
     def test_checkpoint_is_writer_only_and_ephemeral_runs_cannot_claim(self):
         for engine in ('codex', 'claude'):
