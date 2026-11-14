@@ -68,8 +68,8 @@ def main():
             item_id=f'item-{n:05d}'
             project.insights.submit(source='benchmark',title='synthetic',body='x'*128,
                                     base_snapshot=None,insight_id=item_id)
-            write_json(project.root/'decisions'/f'{item_id}.json',
-                       {'id':item_id,'created_at':stamp,'action':'reject','reason':'synthetic'})
+            project.insights.decide(item_id, 'reject', 'synthetic', 'never', 'benchmark',
+                                    expected_rev=1)
             write_json(project.root/'runs'/f'run-{n:05d}'/'result.json',
                        {'run':f'run-{n:05d}','finished_at':stamp,'status':'completed',
                         'model':{'engine':'codex','provider':'synthetic','model':'synthetic',
