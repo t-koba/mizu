@@ -82,6 +82,168 @@ class CiRequestTests(Fixture):
         self.assertEqual(stored["runs"][0]["head_sha"], SHA)
         self.assertIsNotNone(CiRequests(self.project.root).dispatched(identity))
 
+    def pending_marker(self, **fields):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        store = CiRequests(self.project.root, self.config.ci_requests)
+        marker = {"request_id": identity, "publication_id": self.receipt["publication_id"],
+                  "sha": SHA, "workflows": ["ci"],
+                  "dispatched_at": "2026-10-20T00:00:00+00:00", **fields}
+        store.mark_dispatch(identity, marker)
+        return store, identity, marker
+
+    def test_unknown_settles_on_explicit_request_at_configured_bound_and_is_immutable(self):
+        self.config = dataclasses.replace(
+            self.config, ci_requests=dataclasses.replace(self.config.ci_requests,
+                                                        unknown_after_seconds=60))
+        store, identity, marker = self.pending_marker()
+        ctx = self.context(runs())
+        self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unresolved")
+        self.assertIsNone(store.outcome(identity))
+        with patch("mizu.runtime.now", return_value="2026-10-20T00:00:59.999999+00:00"):
+            with self.assertRaisesRegex(Denied, "unresolved"):
+                self.request(ctx)
+        self.assertIsNone(store.outcome(identity))
+        # An offset-aware timestamp at exactly sixty elapsed seconds qualifies.
+        with patch("mizu.runtime.now", return_value="2026-10-20T09:01:00+09:00"), \
+                patch("mizu.runtime._vcs.request_runs_via") as adapter:
+            result = self.request(ctx)
+        adapter.assert_not_called()
+        self.assertEqual((result["outcome"], result["reason_code"], result["runs"]),
+                         ("unknown", "dispatch_outcome_timeout", []))
+        self.assertTrue(result["replayed"])
+        self.assertEqual(ctx.ci_request_summary()["total"], 0)
+        self.assertEqual(result["unknown_after_seconds"], 60)
+        self.assertEqual(store.dispatched(identity), marker)
+        original = store._path(identity, "request").read_bytes()
+        ctx.config = dataclasses.replace(ctx.config, ci_requests=dataclasses.replace(
+            ctx.config.ci_requests, unknown_after_seconds=86400))
+        with patch("mizu.runtime.now", return_value="2026-11-20T00:00:00+00:00"):
+            self.assertEqual(self.request(ctx), result)
+        self.assertEqual(store._path(identity, "request").read_bytes(), original)
+        with self.assertRaisesRegex(Denied, "Immutable object conflict"):
+            store.record_outcome(identity, {"outcome": "dispatched"})
+        self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unknown")
+
+    def test_retry_waits_for_unknown_and_records_duplicate_spend_everywhere(self):
+        store, identity, _ = self.pending_marker()
+        ctx = self.context(runs())
+        with patch("mizu.runtime.now", return_value="2026-10-20T23:59:59+00:00"):
+            with self.assertRaisesRegex(Denied, "preceding"):
+                self.request(ctx, attempt=2)
+        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
+            result = self.request(ctx, attempt=2)
+        self.assertEqual(store.outcome(identity)["outcome"], "unknown")
+        self.assertTrue(result["possibly_duplicate_spend"])
+        self.assertTrue(store.dispatched(result["request_id"])["possibly_duplicate_spend"])
+        rows = {row["attempt"]: row for day in store.daily()["days"] for row in day["items"]}
+        self.assertEqual((rows[1]["state"], rows[2]["state"]), ("unknown", "resolved"))
+        self.assertFalse(rows[1]["possibly_duplicate_spend"])
+        self.assertTrue(rows[2]["possibly_duplicate_spend"])
+        self.assertTrue(ctx.ci_request_summary()["requests"][0]["possibly_duplicate_spend"])
+        outcome_path = store._path(result["request_id"], "request")
+        for flag in (None, False, 1):
+            tampered = {**result}
+            tampered.pop("replayed")
+            tampered.pop("coverage")
+            if flag is None:
+                tampered.pop("possibly_duplicate_spend")
+            else:
+                tampered["possibly_duplicate_spend"] = flag
+            outcome_path.write_text(json.dumps(tampered))
+            with self.assertRaises(Denied):
+                store.outcome(result["request_id"])
+        outcome_path.write_text(json.dumps({key: value for key, value in result.items()
+                                           if key not in ("replayed", "coverage")}))
+        self.assertTrue(self.request(ctx, attempt=2)["replayed"])
+        with self.assertRaisesRegex(Denied, "preceding"):
+            self.request(ctx, attempt=3)
+
+    def test_duplicate_spend_flag_survives_later_adapter_failure(self):
+        store, _, _ = self.pending_marker()
+        ctx = self.context({"malformed": True})
+        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
+            with self.assertRaises(Denied):
+                self.request(ctx, attempt=2)
+        row = next(row for day in store.daily()["days"] for row in day["items"]
+                   if row["attempt"] == 2)
+        self.assertEqual(row["state"], "unresolved")
+        self.assertTrue(row["possibly_duplicate_spend"])
+        self.assertTrue(ctx.ci_request_summary()["requests"][0]["possibly_duplicate_spend"])
+        # An unresolved current attempt still blocks, even though its predecessor is terminal.
+        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:01+00:00"):
+            with self.assertRaisesRegex(Denied, "unresolved"):
+                self.request(ctx, attempt=2)
+
+    def test_unknown_neither_registers_nor_completes_covered_waits(self):
+        ctx = self.context({"malformed": True}, poll_enabled=True)
+        covered = self.covered_item()
+        before = self.project.work_items.get(covered["id"])
+        with patch("mizu.runtime.now", return_value="2026-10-20T00:00:00+00:00"):
+            with self.assertRaises(Denied):
+                self.request_covered(ctx, [covered])
+        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
+            result = self.request_covered(ctx, [covered])
+        self.assertEqual(result["outcome"], "unknown")
+        self.assertEqual(ctx.ci_request_summary()["requests"][0]["state"], "unknown")
+        self.assertEqual(result["coverage"]["not_applied"], [covered["id"]])
+        self.assertEqual(self.project.work_items.get(covered["id"]), before)
+
+    def test_exact_adapter_outcomes_before_bound_are_never_replaced(self):
+        for workflow, expected in (("ci", None), ("rejected", "not_dispatched")):
+            with self.subTest(outcome=expected):
+                identity = request_id(self.receipt["publication_id"], SHA, [workflow])
+                payload = runs() if expected is None else {
+                    "outcome": expected, "request_id": identity, "attempt": 1,
+                    "reason_code": "provider_rejected"}
+                ctx = self.context(payload)
+                with patch("mizu.runtime.now", return_value="2026-10-20T00:00:00+00:00"):
+                    result = self.request(ctx, workflows=[workflow])
+                self.assertEqual(result.get("outcome"), expected)
+                with patch("mizu.runtime.now", return_value="2026-11-20T00:00:00+00:00"):
+                    replay = self.request(ctx, workflows=[workflow])
+                self.assertEqual(replay.get("outcome"), expected)
+                self.assertNotIn("possibly_duplicate_spend", replay)
+
+    def test_invalid_marker_or_existing_outcome_never_becomes_unknown(self):
+        store, identity, marker = self.pending_marker()
+        marker_path = store._path(identity, "dispatch")
+        for changes in ({"dispatched_at": "2026-10-20T00:00:00"},
+                        {"request_id": "0" * 64}, {"attempt": True},
+                        {"possibly_duplicate_spend": True}, {"extra": 1}):
+            with self.subTest(changes=changes):
+                marker_path.write_text(json.dumps({**marker, **changes}))
+                with self.assertRaises(Denied):
+                    store.settle_unknown(identity, "2026-11-20T00:00:00+00:00")
+                self.assertIsNone(store.outcome(identity))
+        marker_path.write_text(json.dumps(marker))
+        outcome_path = store._path(identity, "request")
+        for raw in ('{', json.dumps({"outcome": "unknown"})):
+            outcome_path.write_text(raw)
+            with self.assertRaises(Denied):
+                store.settle_unknown(identity, "2026-11-20T00:00:00+00:00")
+            self.assertEqual(outcome_path.read_text(), raw)
+
+    def test_unknown_validation_binds_marker_bound_reason_time_and_duplicate_flag(self):
+        store, identity, marker = self.pending_marker()
+        result = store.settle_unknown(identity, "2026-10-21T00:00:00+00:00")
+        outcome_path = store._path(identity, "request")
+        for changes in ({"dispatch_digest": "0" * 64}, {"unknown_after_seconds": True},
+                        {"unknown_after_seconds": 86401}, {"unknown_after_seconds": 0},
+                        {"requested_at": "2026-10-20T23:59:59+00:00"},
+                        {"requested_at": "2026-10-21T00:00:00"},
+                        {"reason_code": "provider_rejected"}, {"runs": runs()["runs"]},
+                        {"possibly_duplicate_spend": True}):
+            with self.subTest(changes=changes):
+                outcome_path.write_text(json.dumps({**result, **changes}))
+                with self.assertRaises(Denied):
+                    store.settle_unknown(identity, "2026-11-20T00:00:00+00:00")
+                self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unresolved")
+        outcome_path.write_text(json.dumps(result))
+        store._path(identity, "dispatch").write_text(json.dumps(
+            {**marker, "dispatched_at": "2026-10-19T00:00:00+00:00"}))
+        with self.assertRaises(Denied):
+            store.outcome(identity)
+
     def test_adapter_request_and_no_dispatch_echo_bind_the_explicit_attempt(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)
         payload = {"outcome": "not_dispatched", "request_id": identity, "attempt": 2,

@@ -1213,6 +1213,7 @@ def dispatch_evidence_policy(raw: dict) -> DispatchEvidence:
 
 @dataclasses.dataclass(frozen=True)
 class CiRequestEvidence:
+    unknown_after_seconds: int = 86400
     name_processing_limit: int = 10000
     record_limit: int = 1000
 
@@ -1223,7 +1224,7 @@ def ci_request_evidence_policy(raw: dict) -> CiRequestEvidence:
     return CiRequestEvidence(**{
         field.name: number(
             raw.get(field.name, field.default), f"ci_requests.{field.name}",
-            1, MAX_USAGE_POLICY_COUNT)
+            1, TOML_INTEGER_MAX if field.name == "unknown_after_seconds" else MAX_USAGE_POLICY_COUNT)
         for field in fields
     })
 

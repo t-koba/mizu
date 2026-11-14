@@ -706,15 +706,19 @@ lists the project's recorded CI requests from local durable evidence, grouped
 by UTC day: each day row counts the requests made on that day and names the
 work items they covered, next to the request's own identity, workflows and
 provider run identities. An attempt is dated by its dispatch marker: the day the adapter was called,
-and a later answer never moves it, whether or not the provider created a run. Each row also names its explicit attempt number. An unknown outcome is
-listed as `unresolved`: the marker shows the adapter attempt began, and a run
-may have been spent, so that attempt is never retried blindly. A typed, exact-attempt `not_dispatched` result records that
-no run was created; only then may a caller explicitly increment the attempt.
-An unreadable outcome remains `unresolved` with no provider run. The listing is
-a bounded page (`total`, `truncated` and `scan_stopped`, as the publication
-listing is); unreadable or invalid records are not returned unvalidated, a
-dispatch whose marker cannot be validated is not listed at all, and no
-provider is contacted.
+and a later answer never moves it, whether or not the provider created a run. Each row also names its explicit attempt number. A dispatch with no outcome is
+listed as `unresolved` until an explicit request/replay reaches
+`[ci_requests].unknown_after_seconds` (default 86,400 seconds). At that bound,
+a valid marker with no valid outcome becomes immutable `unknown`: a run may
+have been spent, and the row does not claim either success or no spend. A later
+explicit attempt may follow `not_dispatched` or `unknown`; after `unknown`, the
+attempt is marked `possibly_duplicate_spend`. This is a conservative 24-hour
+grace for exact adapter evidence, not a provider deadline. Read-only listings
+and status polling never settle markers, and no request is retried automatically.
+An unreadable or invalid outcome stays unresolved, never inferred from absent
+provider status. The listing is bounded (`total`, `truncated` and `scan_stopped`);
+invalid records are not returned unvalidated, a dispatch whose marker cannot be
+validated is not listed, and no provider is contacted.
 
 Runner wall time is separate from this local count view. `vcs_read` with
 `ci_costs` derives an explicitly partial observed subtotal for a page of
@@ -722,9 +726,11 @@ Runner wall time is separate from this local count view. `vcs_read` with
 It reuses one exact publication-bound status observation per receipt within
 the page and retains its evidence reference. Typed workflow-run/job/attempt/
 repository identity is required for attribution; terminal `not_dispatched`
-attempts trigger no status read and contribute no run timing. Legacy identityless
-checks, unresolved dispatches, missing/unavailable status, missing durations
-and running checks remain visible, never converted into zero time. Checks are
+attempts trigger no status read and contribute no run timing. `unknown` attempts
+have no known run IDs, so their possible spend is not converted to zero or
+attributed without matching identity. Legacy identityless checks, unresolved
+attempts, missing/unavailable status, missing durations and running checks
+remain visible, never converted into zero time. Checks are
 attributed to the UTC dispatch day even across midnight. Identical execution
 tuples are deduplicated within the page; attempts remain distinct, conflicts
 are excluded. Page/scan truncation is visible. Pagination is positional and
@@ -738,11 +744,11 @@ exact schema, bounds, repository attestation and failure behavior. Existing
 A run's own record names the CI requests that run made. The run record
 carries `ci_requests`: the entries for the requests, each with the request
 identity, the UTC day it was made, its workflows, the work items it covered
-and whether it is `resolved`, `not_dispatched` or `unresolved`, plus the
-attempt number and a bounded reason code for no-spend attempts. An attempt is
-named before the adapter call, because a CI run may have been spent from there
-on; a terminal no-spend response later changes its state without erasing the
-attempt. The day it was made is the day it was dispatched, and the answer that
+and whether it is `resolved`, `not_dispatched`, `unknown` or `unresolved`,
+plus the attempt number, bounded reason code, and `possibly_duplicate_spend`
+flag. An attempt is named before the adapter call, because a CI run may have
+been spent from there on; terminal outcomes update its state without erasing
+the attempt. The day it was made is the day it was dispatched, and the answer that
 arrives later does not move it. The list holds at
 most 16 entries and the total is reported beside it, so a truncated list is
 visible rather than silent. A replay of an already recorded request made no
@@ -761,9 +767,9 @@ that wait, and its holder keeps the completion decision, green or red. A
 `not_dispatched` attempt registers no waits and leaves the covered items
 unchanged; its response marks all requested coverage `not_applied`. A replay never spends
 a second run: successful outcomes return the recorded result and can complete
-a coverage whose registration was interrupted. A no-spend outcome remains a
-terminal no-run record; only an explicit next attempt after it can call the
-adapter again. Coverage never applies to no-spend outcomes. A replay reports the requested items the recorded request does not
+a coverage whose registration was interrupted. A no-spend or terminal unknown outcome remains an immutable record; only an
+explicit next attempt after it can call the adapter again. Unknown does not
+register or complete covered CI waits. Coverage never applies to no-spend outcomes. A replay reports the requested items the recorded request does not
 cover as not applied, and the recorded request's coverage governs the rest:
 the comparison is by item identity, so the same items in another order are
 the same coverage. Covering work items needs the

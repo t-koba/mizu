@@ -1,16 +1,13 @@
-"""Durable CI request records; one request per published commit.
+"""Durable CI request attempts at exact published commits.
 
 A CI request asks the provider for one run per workflow at an exact
-published commit. The record is create-only: a dispatch marker is written
-before the provider is called and the outcome follows it. A timed-out
-dispatch remains unresolved and is never retried blindly. The adapter receives
-the SHA, workflow set, durable request ID and explicit attempt; returned run IDs
-are stored under that request locally but are not provider-attested as its outcome.
-An exact-SHA status row may prove a check result but cannot resolve
-the marker. A typed adapter result may close an attempt as ``not_dispatched``
-only when it attests that no run was created; only that terminal outcome
-permits an explicitly numbered later attempt. Missing, malformed, timed-out
-or otherwise uncertain outcomes remain unresolved and block retries.
+published commit. Create-only dispatch markers precede adapter calls; immutable
+outcomes follow them. An exact-SHA status row cannot resolve a marker. A typed
+adapter result may attest ``not_dispatched`` (no spend) or bind provider runs.
+On an explicit request, an absent outcome may become terminal ``unknown`` after
+the configured grace period. Unknown retains uncertainty and all evidence; it
+permits an explicitly numbered later attempt marked as possibly duplicate spend.
+Malformed evidence fails closed, and no path automatically retries dispatches.
 
 Records live in the project's evidence tree, outside the workspace.
 """
@@ -21,7 +18,7 @@ import os
 import re
 from pathlib import Path
 
-from .config import CiRequestEvidence
+from .config import CiRequestEvidence, TOML_INTEGER_MAX
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
 from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
@@ -29,6 +26,7 @@ from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 #: Bounded record size (8 KiB), like the other evidence records.
 RECORD_BYTES = 8192
 REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
+UNKNOWN_REASON = "dispatch_outcome_timeout"
 DISPATCH_FILE = re.compile(r"([0-9a-f]{64})\.dispatch\.json\Z")
 
 
@@ -37,7 +35,7 @@ def request_id(publication_id: str, sha: str, workflows: list[str], attempt: int
 
     Attempt one preserves the original identity. Later attempts have distinct
     immutable records; the runtime permits them only after the preceding
-    no-spend outcome. Workflow order does not change either identity.
+    terminal no-spend or unknown outcome. Workflow order does not change identity.
     """
     if type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT:
         raise Denied("Invalid CI request attempt")
@@ -81,6 +79,35 @@ class CiRequests:
             raise Denied("Invalid or unbound CI request outcome")
         return record
 
+    def settle_unknown(self, identity: str, observed_at: str) -> dict | None:
+        """Lazily settle an expired, valid marker on an explicit request only.
+
+        Existing outcomes (including corrupt ones) are never replaced. The
+        local policy outcome records its bound and exact marker digest, not a
+        provider result. Read-side listings never invoke this method.
+        """
+        recorded = self.outcome(identity)
+        if recorded is not None:
+            return recorded
+        marker = self.dispatched(identity)
+        if marker is None:
+            return None
+        if _unresolved_summary(marker, identity) is None:
+            raise Denied("Invalid CI dispatch marker")
+        observed = dt.datetime.fromisoformat(observed_at)
+        if observed.tzinfo is None:
+            raise Denied("CI settlement requires an aware timestamp")
+        age = ((observed - dt.datetime.fromisoformat(marker["dispatched_at"]))
+               // dt.timedelta(seconds=1))
+        if age < self.policy.unknown_after_seconds:
+            return None
+        record = {key: value for key, value in marker.items() if key != "dispatched_at"}
+        record.update(outcome="unknown", reason_code=UNKNOWN_REASON, runs=[],
+                      requested_at=observed_at, dispatch_digest=digest(canonical(marker)),
+                      unknown_after_seconds=self.policy.unknown_after_seconds)
+        self.record_outcome(identity, record)
+        return record
+
     def dispatched(self, identity: str) -> dict | None:
         """The marker written before the adapter call, if an attempt began."""
         return self._read(identity, "dispatch")
@@ -90,7 +117,7 @@ class CiRequests:
         self._write(identity, "dispatch", record)
 
     def record_outcome(self, identity: str, record: dict) -> None:
-        """Write the terminal adapter outcome for a marked attempt."""
+        """Write an immutable adapter or local policy outcome for a marked attempt."""
         self._write(identity, "request", record)
 
     def _write(self, identity: str, kind: str, record: dict) -> None:
@@ -110,11 +137,11 @@ class CiRequests:
         is the day the adapter call began, and a later answer never moves it,
         so the day comes from the marker in every state. Each item
         names the request, its workflows, the provider runs it produced and
-        whether the request is ``resolved``, ``not_dispatched`` or
-        ``unresolved``: an unknown outcome may have spent a CI run, so it is
-        listed rather than hidden, while only the terminal no-spend outcome
-        permits a later explicit attempt. An unreadable result remains
-        unresolved, not a reason to hide the request. The rows
+        whether the request is ``resolved``, ``not_dispatched``, ``unknown``
+        or ``unresolved``. Terminal unknown may have spent a CI run; a later
+        explicit attempt is flagged ``possibly_duplicate_spend``. No-spend
+        and unknown both permit a later explicit attempt. An unreadable result
+        remains unresolved, not a reason to hide the request. The rows
         are chronological and the page holds at most ``limit`` requests.
         Bounds: at most 100 attempts per page; policy bounds post-listing
         name processing and candidate-record validation (defaults 10000/1000).
@@ -142,7 +169,8 @@ class CiRequests:
             day["covered_items"] += len(row["covered"])
             day["items"].append({key: row[key] for key in
                                  ("request_id", "publication_id", "sha", "workflows",
-                                  "runs", "covered", "state", "attempt", "reason_code")})
+                                  "runs", "covered", "state", "attempt", "reason_code",
+                                  "possibly_duplicate_spend")})
         return {"days": days, "total": len(rows), "truncated": len(rows) > len(page),
                 "scan_stopped": scan_stopped}
 
@@ -226,18 +254,37 @@ def _validated_outcome(record: dict, identity: str, marker: dict,
     if marker_row is None:
         marker_row = _unresolved_summary(marker, identity)
     if (marker_row is None or record.get("covered", []) != marker.get("covered", [])
-            or record.get("attempt", 1) != marker_row["attempt"]):
+            or record.get("attempt", 1) != marker_row["attempt"]
+            or record.get("possibly_duplicate_spend", False) != marker_row["possibly_duplicate_spend"]):
         return None
+    if record.get("outcome") == "unknown":
+        bound = record.get("unknown_after_seconds")
+        if (type(bound) is not int or not 1 <= bound <= TOML_INTEGER_MAX
+                or record.get("dispatch_digest") != digest(canonical(marker))):
+            return None
+        try:
+            observed = dt.datetime.fromisoformat(record["requested_at"])
+            dispatched = dt.datetime.fromisoformat(marker["dispatched_at"])
+            if (observed - dispatched) // dt.timedelta(seconds=1) < bound:
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
     return _summary(record, identity, marker_row)
 
 
 def _summary(record: dict, identity: str, marker: dict) -> dict | None:
-    """Validate a dispatched-run or terminal no-spend outcome."""
+    """Validate a run-bound, no-spend or local unknown outcome."""
     common = {"request_id", "publication_id", "sha", "workflows", "requested_at"}
     outcome = record.get("outcome")
     not_dispatched = outcome == "not_dispatched"
-    fields = common | {"attempt", "covered", "outcome"}
-    if not_dispatched:
+    unknown = outcome == "unknown"
+    fields = common | {"attempt", "covered", "outcome", "possibly_duplicate_spend"}
+    if unknown:
+        fields |= {"reason_code", "runs", "dispatch_digest", "unknown_after_seconds"}
+        if record.get("reason_code") != UNKNOWN_REASON or record.get("runs") != []:
+            return None
+        runs = []
+    elif not_dispatched:
         fields |= {"reason_code", "runs"}
         if (record.get("reason_code") not in ("pre_dispatch_refusal", "provider_rejected")
                 or record.get("runs") != []):
@@ -254,7 +301,8 @@ def _summary(record: dict, identity: str, marker: dict) -> dict | None:
     if (not common <= set(record) or set(record) - fields
             or record["request_id"] != identity
             or type(record.get("attempt", 1)) is not int
-            or record.get("attempt", 1) != marker.get("attempt", 1)):
+            or record.get("attempt", 1) != marker.get("attempt", 1)
+            or type(record.get("possibly_duplicate_spend", False)) is not bool):
         return None
     requested = record["requested_at"]
     if not isinstance(requested, str) or len(requested) > 64:
@@ -291,19 +339,24 @@ def _summary(record: dict, identity: str, marker: dict) -> dict | None:
             "publication_id": record["publication_id"], "sha": record["sha"],
             "workflows": list(workflows), "runs": runs, "covered": items,
             "attempt": marker.get("attempt", 1),
-            "state": "not_dispatched" if not_dispatched else "resolved",
+            "state": "unknown" if unknown else "not_dispatched" if not_dispatched else "resolved",
+            "possibly_duplicate_spend": marker.get("possibly_duplicate_spend", False),
             "reason_code": record.get("reason_code")}
 
 
 def _unresolved_summary(record: dict, identity: str) -> dict | None:
     """One dispatch marker without an outcome, as a day row, or None."""
     fields = {"request_id", "publication_id", "sha", "workflows", "dispatched_at"}
-    if not fields <= set(record) or set(record) - (fields | {"covered", "attempt"}):
+    if (not fields <= set(record)
+            or set(record) - (fields | {"covered", "attempt", "possibly_duplicate_spend"})):
         return None
     if record["request_id"] != identity:
         return None
     attempt = record.get("attempt", 1)
     if type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT:
+        return None
+    duplicate = record.get("possibly_duplicate_spend", False)
+    if type(duplicate) is not bool or (duplicate and attempt == 1):
         return None
     dispatched = record["dispatched_at"]
     if not isinstance(dispatched, str) or len(dispatched) > 64:
@@ -341,4 +394,4 @@ def _unresolved_summary(record: dict, identity: str) -> dict | None:
             "request_id": identity, "publication_id": record["publication_id"],
             "sha": record["sha"], "workflows": list(workflows), "runs": [],
             "covered": items, "attempt": attempt, "state": "unresolved",
-            "reason_code": None}
+            "reason_code": None, "possibly_duplicate_spend": duplicate}

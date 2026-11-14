@@ -775,10 +775,12 @@ class Context:
         return _run_activity.activity_summary(self)
 
     def record_ci_request(self, request_id, date, workflows, covered, *, state="unresolved",
-                          attempt=1, reason_code=None):
+                          attempt=1, reason_code=None, possibly_duplicate_spend=False,
+                          existing_only=False):
         return _run_activity.record_ci_request(
             self, request_id, date, workflows, covered, state=state,
-            attempt=attempt, reason_code=reason_code)
+            attempt=attempt, reason_code=reason_code,
+            possibly_duplicate_spend=possibly_duplicate_spend, existing_only=existing_only)
 
     def ci_request_summary(self) -> dict:
         return _run_activity.ci_request_summary(self)
@@ -1623,15 +1625,29 @@ class Context:
         # request and replays its recorded outcome.
         workflows = sorted(str(name) for name in args["workflows"])
         attempt = args.get("attempt", 1)
-        requests = CiRequests(self.project.root)
+        requests = CiRequests(self.project.root, self.config.ci_requests)
         identity = ci_request_id(receipt["publication_id"], sha, workflows, attempt)
         # A request may cover work items: each covered item waits for the
         # request's result through a receipt-pinned CI wait, and its holder
         # keeps the completion decision.
         covered = self._covered_waits(args.get("covered"), receipt)
-        recorded = requests.outcome(identity)
+
+        def settle(identity):
+            recorded = requests.settle_unknown(identity, now())
+            if recorded is not None and recorded.get("outcome") == "unknown":
+                marker = requests.dispatched(identity)
+                self.record_ci_request(
+                    identity, marker["dispatched_at"][:10], workflows,
+                    [entry["id"] for entry in recorded.get("covered", [])],
+                    state="unknown", attempt=recorded.get("attempt", 1),
+                    reason_code=recorded["reason_code"],
+                    possibly_duplicate_spend=recorded.get("possibly_duplicate_spend", False),
+                    existing_only=True)
+            return recorded
+
+        recorded = settle(identity)
         if recorded is not None:
-            if recorded.get("outcome") == "not_dispatched":
+            if recorded.get("outcome") in ("not_dispatched", "unknown"):
                 coverage = {"registered": [], "waiting": [], "moved": [], "refused": [],
                             "not_applied": [entry["id"] for entry in covered]}
             else:
@@ -1643,12 +1659,16 @@ class Context:
             return {**recorded, "replayed": True, "coverage": coverage}
         if requests.dispatched(identity) is not None:
             raise Denied("An earlier CI request for this publication is unresolved; "
-                         "re-observe the CI status before requesting again")
+                         "retry explicitly after the configured unknown-outcome grace period")
+        possibly_duplicate_spend = False
         if attempt > 1:
             previous_id = ci_request_id(receipt["publication_id"], sha, workflows, attempt - 1)
-            previous = requests.outcome(previous_id)
-            if previous is None or previous.get("outcome") != "not_dispatched":
-                raise Denied("A new CI attempt requires the preceding attempt's terminal no-dispatch outcome")
+            previous = settle(previous_id)
+            if previous is None or previous.get("outcome") not in ("not_dispatched", "unknown"):
+                raise Denied("A new CI attempt requires the preceding attempt's terminal "
+                             "no-dispatch or unknown outcome")
+            possibly_duplicate_spend = previous.get("outcome") == "unknown"
+        duplicate_fields = {"possibly_duplicate_spend": True} if possibly_duplicate_spend else {}
         # The covered items are checked before the provider is called, so a
         # coverage that cannot take the wait never spends a run.
         self._coverage_state(covered, identity, register=False)
@@ -1664,9 +1684,10 @@ class Context:
             requests.mark_dispatch(identity, {
                 "request_id": identity, "publication_id": receipt["publication_id"],
                 "sha": sha, "workflows": workflows, "dispatched_at": dispatched_at,
-                "attempt": attempt, "covered": covered_records})
+                "attempt": attempt, "covered": covered_records, **duplicate_fields})
             self.record_ci_request(identity, dispatched_at[:10], workflows,
-                                   covered_ids, state="unresolved", attempt=attempt)
+                                   covered_ids, state="unresolved", attempt=attempt,
+                                   possibly_duplicate_spend=possibly_duplicate_spend)
 
         response = _vcs.request_runs_via(
             self.config.vcs, sha, workflows, request_id=identity, attempt=attempt,
@@ -1675,13 +1696,15 @@ class Context:
         record = {"request_id": identity, "publication_id": receipt["publication_id"],
                   "sha": sha, "workflows": workflows, "runs": [] if not_dispatched else response,
                   "requested_at": now(), "attempt": attempt, "covered": covered_records,
+                  **duplicate_fields,
                   **({"outcome": "not_dispatched", "reason_code": response["reason_code"]}
                      if not_dispatched else {})}
         requests.record_outcome(identity, record)
         state = "not_dispatched" if not_dispatched else "resolved"
         self.record_ci_request(identity, dispatched_at[:10], workflows, covered_ids,
                                state=state, attempt=attempt,
-                               reason_code=record.get("reason_code"))
+                               reason_code=record.get("reason_code"),
+                               possibly_duplicate_spend=possibly_duplicate_spend)
         evidence_id, evidence = self._new_invocation_evidence("vcs-request")
         write_json(self.run_dir / evidence,
                    {**record, "trust": "external-untrusted", "evidence_id": evidence_id})

@@ -6,6 +6,48 @@ Independent review must approve both the implementation and the project's actual
 equivalence declaration before activation. It does not deploy, request CI, alter
 CI waits, mutate another project's ledger, or satisfy a smoke/promotion gate.
 
+## CI dispatch uncertainty (independent of acceptance)
+
+CI requests remain grant-controlled and pinned to a publication receipt, exact
+commit and workflow set. Before the adapter call, Mizu writes an immutable
+`*.dispatch.json` marker; its `*.request.json` outcome is also create-only.
+An adapter response with validated run bindings yields `resolved`; a typed,
+request/attempt-bound no-run attestation yields `not_dispatched` with reason
+`pre_dispatch_refusal` or `provider_rejected`. Neither status absence nor a green
+status proves whether a dispatch occurred.
+
+An adapter timeout, interruption or unusable response can leave a valid marker
+with no outcome. `[ci_requests].unknown_after_seconds` is a strict positive
+whole-second integer (1–9223372036854775807), default **86400 (24 hours)**. This
+is a conservative grace period for obtaining exact adapter evidence before
+accepting permanent uncertainty, not a provider deadline or a no-spend claim.
+On an explicit request/replay of that attempt, or an explicit request for its
+immediate successor, Mizu compares the marker's timezone-aware `dispatched_at`
+to the current time. At or beyond the bound, an absent outcome becomes terminal
+`outcome: "unknown"`, reason `dispatch_outcome_timeout`, with empty `runs` (no
+known run IDs, **not** evidence of no spend). It records the applied
+`unknown_after_seconds`, settlement time in `requested_at`, and `dispatch_digest`
+(SHA-256 of canonical marker JSON). Validation checks that binding and elapsed
+bound. Existing outcomes are never overwritten, even after a policy change;
+invalid markers or corrupt outcomes fail closed rather than being replaced.
+Exact valid adapter evidence recorded before settlement remains authoritative.
+
+Read-only daily/cost views and status polling never settle markers. There is no
+background retry, provider-absence inference, deletion or TTL. All marker and
+outcome evidence is retained. Daily rows distinguish `unresolved`, `unknown`,
+`not_dispatched` and `resolved`, dated by the original dispatch UTC day.
+
+A later dispatch requires an **explicit** next `attempt` (same receipt, commit
+and workflows), and a validated predecessor outcome of `not_dispatched` or
+`unknown`. Existing request identities, idempotent replay and the attempt range
+1–9223372036854775807 are unchanged. After an unknown predecessor, the later dispatch
+marker, outcome and daily/run-activity rows carry `possibly_duplicate_spend: true`,
+including when the later adapter fails. Legacy omitted flags mean false; omitted
+attempts still mean attempt one. Unknown permits another request but does not
+prove success, register or complete covered CI waits, or satisfy retained
+acceptance. The request grant, work-item wait lifecycle and acceptance rules
+below are unchanged.
+
 ## Project policy
 
 The operator may add this table to private `project.toml` (illustrative only;

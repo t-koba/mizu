@@ -80,18 +80,20 @@ def activity_summary(context) -> dict:
 
 
 def record_ci_request(context, request_id, date, workflows, covered, *, state="unresolved",
-                      attempt=1, reason_code=None):
-    """Record or update one bounded per-run CI request attempt."""
+                      attempt=1, reason_code=None, possibly_duplicate_spend=False, existing_only=False):
+    """Record/update a per-run attempt; settlements only update existing entries."""
     with context.mutex:
         entry = {"request_id": request_id, "date": date,
                  "workflows": list(workflows), "covered": list(covered),
-                 "attempt": attempt, "reason_code": reason_code, "state": state}
+                 "attempt": attempt, "reason_code": reason_code, "state": state,
+                 "possibly_duplicate_spend": possibly_duplicate_spend}
         for existing in context.ci_requests:
             if existing["request_id"] == request_id:
                 # Preserve the date fixed when the request was dispatched.
                 existing.update({**entry, "date": existing["date"]})
                 return
-        context.ci_requests.append(entry)
+        if not existing_only:
+            context.ci_requests.append(entry)
 
 
 def ci_request_summary(context) -> dict:

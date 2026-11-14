@@ -1156,7 +1156,7 @@ detected bound without declaring it:
 | **Decisions** | `defer` requires a revisit value (`insights.py`) | always | Accountability floor: a deferral without a revisit condition parks work with no observable trigger; worker policy defers only with a revisit trigger |
 | **Completion** | `done` requires passing acceptance commands on the exact code digest (`runtime.py`) | always | Publication integrity floor: a goal cannot be declared done without binding proof to the final unchanged tree; never weakened to pass |
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
-| **CI request** | `vcs_request` requires the role capability and `[vcs] request_grant` | always | A request targets a completed publication receipt, never a branch head, and returned runs must bind to that commit. Dispatch markers keep uncertain attempts from being retried; only a typed, exact-attempt `not_dispatched` result permits an explicit next attempt. The run's own record names each attempt, day, outcome and covered items, so CI activity is visible per unit |
+| **CI request** | `vcs_request` requires the role capability and `[vcs] request_grant`; `[ci_requests].unknown_after_seconds` defaults to 86,400 seconds | always | A request targets a completed publication receipt, never a branch head, and returned runs must bind to that commit. A valid dispatch marker with no valid outcome becomes immutable `unknown` only on an explicit request/replay after the configured 24-hour grace; a later explicit attempt is allowed and marked as possibly duplicating spend. Read-only status/listing never settle it, and there is no automatic retry. The run's own record names each attempt, day, outcome and covered items, so CI activity is visible per unit |
 
 `on_change` is orthogonal to scheduling: it skips execution when the published
 `code_digest` is unchanged, so state-only republications do not reschedule it.
@@ -2053,7 +2053,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `attach_evidence` | Append an attributed evidence entry to any open insight (bound to the read rev, title/body/rev unchanged; at most 16 entries of 8192 chars each; no role holds it by default) |
 | `report` | Stage a Markdown document for static artifact publication |
 | `sync` | Refresh upstream refs via the trusted VCS adapter (writable workspace only); merges stay as workspace edits followed by verification |
-| `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; the `publications` op lists the project's recorded publication receipts from local durable evidence (exact `code_digest`, `branch` or `published_sha` filters, one bounded page with `total`, `truncated` and `scan_stopped`, where `total` is a lower bound once a scan bound stopped the search) and contacts no provider; the `ci_requests` op lists the recorded CI requests grouped by UTC day, with the work items each request covered and whether each attempt is resolved, terminally `not_dispatched` or unresolved, so CI activity is visible per day; `ci_costs` derives a bounded, explicitly partial observed runner-wall-seconds view using exact publication-bound status reads (see below); never publishes (read roles may hold it) |
+| `vcs_read` | Read CI status, logs, PR comments, external proposals, exact-revision proposal content, and CI-recorded artifact files via the trusted VCS adapter; the `publications` op lists the project's recorded publication receipts from local durable evidence (exact `code_digest`, `branch` or `published_sha` filters, one bounded page with `total`, `truncated` and `scan_stopped`, where `total` is a lower bound once a scan bound stopped the search) and contacts no provider; the `ci_requests` op lists the recorded CI requests grouped by UTC day, with the work items each request covered and whether each attempt is resolved, terminally `not_dispatched`, terminally `unknown`, or unresolved, plus duplicate-spend risk, so CI activity is visible per day; `ci_costs` derives a bounded, explicitly partial observed runner-wall-seconds view using exact publication-bound status reads (see below); never publishes (read roles may hold it) |
 | `vcs_publish` | Push a branch or open a PR via the trusted VCS adapter behind a recorded human `GO <branch>` approval (writable workspace only; consultation roles cannot hold it) |
 | `vcs_retire` | Retire an owned temporary integration branch at an exact expected sha behind the configured `retire_grant` (read workspace suffices: integration authority is the capability plus the grant, never source-write access; consultation roles cannot hold it; never combines with `decide` (ordinary `submit_insight` is allowed but can never mint an operator-channel approval)) |
 | `vcs_dispose` | Close or merge an external proposal at exact assessed endpoints behind per-action grants (`close_grant`; `merge_grant` plus human `GO <branch>` for merge); also permits an explicit `close_if_adopted` action with exact proposal/target pins, `close_grant`, and the separate host-adapter `[vcs] close_adopted` gate. Role capability plus both gates are required; a valid `closed: false` adapter receipt is retained without retry/refetch/merge. Read workspace suffices; consultation roles cannot hold it; never combines with `decide`; observation never closes automatically |
@@ -2461,23 +2461,28 @@ exact `code_digest`, `branch` or `published_sha` filters and returns one bounded
 `external-untrusted`. Run-local `vcs-read/` and `vcs-publish/` evidence paths
 are named in tool responses.
 
-Local CI-request evidence reads have a separate `[ci_requests]` policy owner,
-shared by the `ci_requests` daily listing and `ci_costs` view. Omission uses
-these defaults; unknown keys, booleans and non-integers are rejected.
+`[ci_requests]` owns the explicit unknown-dispatch settlement bound and the
+local evidence read budgets shared by the `ci_requests` daily listing and
+`ci_costs` view. Omission uses these defaults; unknown keys, booleans and
+non-integers are rejected.
 
 | Setting | Default | Range | Effect |
 |---|---:|---|---|
+| `unknown_after_seconds` | 86400 | 1–9223372036854775807 | On an explicit request/replay only, settle a valid marker with no outcome as immutable terminal `unknown` after the configured grace; no read-side mutation, status-absence inference or automatic retry |
 | `name_processing_limit` | 10000 | 1–`MAX_USAGE_POLICY_COUNT` | Names processed after listing/sorting, including non-record names |
 | `record_limit` | 1000 | 1–`MAX_USAGE_POLICY_COUNT` | Unique candidate records validated; internal cost offsets are 0 through `record_limit - 1` |
 
-`MAX_USAGE_POLICY_COUNT` is `min(9223372036854775807, sys.maxsize)`, an integer
-representation bound, not a resource budget. The daily page maximum remains
-100 and the cost page maximum remains 8; public tool schema bounds are
-independent and unchanged. This policy does not affect request writes or CI
-dispatch. The reader still materializes and sorts the complete `os.listdir`
-result before processing the configured prefix, so it does **not** bound
-directory-listing memory. `scan_stopped` flags omitted names or candidates;
-`total` counts validated dispatches, a lower bound when scanning stops.
+The 24-hour default is a conservative grace for exact adapter evidence before
+permitting a potentially duplicate later request; it is not a provider deadline
+or a claim that no run was spent. `MAX_USAGE_POLICY_COUNT` is
+`min(9223372036854775807, sys.maxsize)`, an integer representation bound, not a
+resource budget. The daily page maximum remains 100 and the cost page maximum
+remains 8; public tool schema bounds are independent and unchanged. Read-budget
+settings do not affect request writes or dispatch. The reader still materializes
+and sorts the complete `os.listdir` result before processing the configured
+prefix, so it does **not** bound directory-listing memory. `scan_stopped` flags
+omitted names or candidates; `total` counts validated dispatches, a lower bound
+when scanning stops.
 
 Local publication-receipt reads have an independent `[publication_evidence]`
 policy owner, shared by the CLI listing, runtime `publications` operation and
