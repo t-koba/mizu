@@ -1,10 +1,12 @@
 """Current-state index: crash repair, concurrency, rebuild equality and audit."""
 import contextlib
 import json
+import os
 import random
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -28,6 +30,69 @@ def index_rows(root):
             "SELECT 1 FROM sqlite_master WHERE name='insights'").fetchone() else []
         decisions = db.execute("SELECT * FROM decisions ORDER BY insight_id").fetchall() if insights else []
     return items, unseeded, intents, insights, decisions
+
+
+class LedgerPathTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "project"
+        self.root.mkdir()
+        self.ledger = ledger_module.Ledger(self.root)
+        self.outside = self.root.parent / "outside.sqlite3"
+        with contextlib.closing(sqlite3.connect(self.outside)) as db, db:
+            db.execute("CREATE TABLE original(value)")
+
+    def assert_link_refused(self):
+        before = self.outside.read_bytes()
+        for create in (False, True):
+            with self.subTest(create=create):
+                with self.assertRaises(Denied), self.ledger._connect(create=create) as db:
+                    if db is not None:
+                        db.execute("CREATE TABLE probe(value)")
+                self.assertEqual(self.outside.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in self.outside.parent.iterdir()),
+                         ["outside.sqlite3", "project"])
+
+    def test_symlink_refused_without_changing_target(self):
+        try:
+            self.ledger.path.symlink_to(self.outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Symlinks unavailable: {exc}")
+        self.assert_link_refused()
+
+    def test_hardlink_refused_without_changing_target(self):
+        try:
+            os.link(self.outside, self.ledger.path)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Hardlinks unavailable: {exc}")
+        self.assert_link_refused()
+
+    def test_dangling_symlink_refused(self):
+        self.outside.unlink()
+        try:
+            self.ledger.path.symlink_to(self.outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Symlinks unavailable: {exc}")
+        for create in (False, True):
+            with self.subTest(create=create), self.assertRaises(Denied):
+                with self.ledger._connect(create=create):
+                    pass
+        self.assertFalse(self.outside.exists())
+
+    def test_nonregular_path_refused_before_sqlite(self):
+        self.ledger.path.mkdir()
+        for create in (False, True):
+            with self.subTest(create=create), patch.object(ledger_module.sqlite3, "connect") as connect:
+                with self.assertRaises(Denied), self.ledger._connect(create=create):
+                    pass
+                connect.assert_not_called()
+
+    def test_unavailable_metadata_is_not_a_missing_index(self):
+        for create in (False, True):
+            with self.subTest(create=create), patch.object(Path, "lstat", side_effect=PermissionError):
+                with self.assertRaises(Denied), self.ledger._connect(create=create):
+                    pass
 
 
 class LedgerTests(Fixture):

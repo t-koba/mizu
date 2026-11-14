@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import re
 import sqlite3
+import stat
 from pathlib import Path
 
 from .errors import Denied
@@ -85,9 +86,20 @@ class Ledger:
 
     @contextlib.contextmanager
     def _connect(self, *, create: bool):
-        if not create and not self.path.exists():
-            yield None
-            return
+        # SQLite opens by pathname, so reject unsafe existing entries before
+        # connecting; they are not a missing/unusable derived-index fallback.
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            if not create:
+                yield None
+                return
+        except OSError as exc:
+            raise Denied("Ledger index path unavailable") from exc
+        else:
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                raise Denied("Ledger index must be a regular, non-linked file")
         try:
             db = sqlite3.connect(self.path.as_uri() + ("?mode=rwc" if create else "?mode=rw"),
                                  uri=True, timeout=lock_timeout(), isolation_level=None)
