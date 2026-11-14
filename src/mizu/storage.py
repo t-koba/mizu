@@ -45,7 +45,7 @@ MEMBERS = (
     "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",
     "decision-authority.json", "decision-activation-plan.json", "decision-activation-report.json",
     "decision-history", "decision-cursors", "decision-receipts", "work-items", "work-item-receipts",
-    "obligation-receipts", "shared-records", "shared-record-receipts", "waits", "runs", "sessions",
+    "obligation-receipts", "shared-records", "shared-record-receipts", "delivery-settlements", "waits", "runs", "sessions",
     "evidence", "artifacts", "health", "role-state", "observed", "maintenance", "spool", "selection",
 )
 
@@ -137,6 +137,22 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
                          json.dumps(acceptance.producer_diagnostics(invalid), sort_keys=True))
         acceptance.audit(project.root)
         role_state_present, role_state_manifest, role_state_identity = _role_state_backup_manifest(project.root)
+        # The generic tar filter omits links. Never let that silently erase a
+        # protected evidence root or a run named by a settlement record.
+        from . import delivery_settlement, storage_runs
+        protected_roots = ("runs", "shared-records", "shared-record-receipts",
+                           delivery_settlement.DIRECTORY, "maintenance")
+        for name in protected_roots:
+            path = project.root / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if (not stat.S_ISDIR(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                raise Denied("Backup refused: unsafe evidence directory")
+        scan = storage_runs.Scan(project.root)
+        delivery_settlement.backup_preflight(project.root, scan)
         captured = project.snapshots.capture_files(project.workspace)
         checkpoint = project.snapshots.create(captured, goal=project.goal, state=project.snapshots.get()["state"],
                                               run=None, outcome="wait", summary="Operator backup checkpoint; not published")
@@ -149,18 +165,33 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
             # precede the link so the new name never points at unwritten data.
             with lock(project.root / "locks/acceptance.lock"), temporary.open("w+b") as raw:
                 with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
-                    # All members are regular files or directories; no symlink dereferencing.
-                    # Regenerable render output (index.html) is not evidence: back it up never.
-                    # Reproducible run inputs live under runs/ only; source trees may
-                    # legitimately contain input/ or controller/ directories.
+                    # Unsafe evidence links may not disappear while their settlement
+                    # pins remain. Unrelated links and regenerable output stay omitted.
+                    # Run inputs are reproducible; source trees may also contain input/
+                    # or controller/ directories, so exclude only those under runs/.
                     include = MEMBERS
                     def safe(info):
                         parts = Path(info.name).parts
-                        if not (info.isfile() or info.isdir()):
+                        if Path(info.name).name == "index.html":
                             return None
                         if len(parts) >= 3 and parts[0] == "runs" and parts[2] in ("input", "controller"):
                             return None
-                        if Path(info.name).name == "index.html":
+                        protected = (parts and parts[0] in {
+                            "runs", "shared-records", "shared-record-receipts",
+                            "delivery-settlements", "maintenance"})
+                        if protected:
+                            source = project.root.joinpath(*parts)
+                            try:
+                                source_info = source.lstat()
+                            except OSError as exc:
+                                raise Denied("Backup refused: unsafe evidence member") from exc
+                            mode = source_info.st_mode
+                            reparse = getattr(source_info, "st_file_attributes", 0) & 0x400
+                            if (reparse or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
+                                    or (stat.S_ISREG(mode) and source_info.st_nlink != 1)
+                                    or not (info.isfile() or info.isdir())):
+                                raise Denied("Backup refused: unsafe evidence member")
+                        elif not (info.isfile() or info.isdir()):
                             return None
                         info.uid = info.gid = 0
                         info.uname = info.gname = ""
@@ -509,11 +540,18 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     cache_seconds = _web_cache_seconds(project)
     from . import storage_runs
     with quiescent(project, require_pause=False):
+        from . import delivery_settlement
+        run_scan = storage_runs.Scan(project.root)
+        settlement_pins, settled_deliveries, settlement_temps = delivery_settlement.inventory(
+            project.root, run_scan)
         leftovers = storage_runs.quarantines(project)
+        if any(set(runs) & settlement_pins for path, runs in leftovers
+               if path.name.startswith("retired-")):
+            raise Denied("Unresolved delivery settlement references committed run quarantine")
         if apply:
             storage_runs.recover_staging(project, leftovers)
             leftovers = storage_runs.quarantines(project)
-        run_plan = storage_runs.plan(project)
+        run_plan = storage_runs.plan(project, settlement_pins=settlement_pins, scan=run_scan)
         run_preview = storage_runs.preview(run_plan)
         run_preview["quarantine_count"] = len(leftovers)
         run_preview["quarantines"] = [p.name for p, _ in leftovers[:storage_runs.PREVIEW_ROWS]]
@@ -528,7 +566,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
         for run_dir in sorted((project.root / "runs").glob("*")):
             if not run_dir.is_dir() or run_dir.is_symlink():
                 continue
-            if run_dir.name in retiring:
+            if run_dir.name in retiring or run_dir.name in settlement_pins:
                 continue
             finished = (run_dir / "result.json").exists() or (run_dir / "error.json").exists() or (run_dir / "consultation.json").exists()
             if finished and (run_dir / "input").is_dir():
@@ -569,6 +607,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
         if apply and len(canonical(removed)) > storage_runs.MAX_BYTES:
             raise Denied("Prune audit exceeds byte bound")
         if apply:
+            delivery_settlement.recover(project.root, settled_deliveries, settlement_temps)
             # Persist the bounded complete plan before any destructive action.
             intent = project.root / "maintenance" / f"prune-runs-{uuid.uuid4().hex}.json"
             write_json(intent, run_plan)

@@ -65,7 +65,7 @@ class Scan:
                 result.append(Path(entry.path))
         return sorted(result)
 
-    def record(self, path):
+    def raw(self, path):
         info = path.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or getattr(info, "st_file_attributes", 0) & 0x400):
@@ -74,7 +74,10 @@ class Scan:
         self.bytes += len(raw)
         if self.bytes > MAX_BYTES:
             raise LimitExceeded("Run-reference byte bound exceeded")
-        value = loads_finite(raw)
+        return raw
+
+    def record(self, path):
+        value = loads_finite(self.raw(path))
         if not isinstance(value, dict):
             raise Denied("Malformed run-reference record")
         return value
@@ -130,7 +133,11 @@ def _evidence(record, pin):
 
 
 def _terminal(run, started, records, clock):
-    """Validate known lifecycle envelopes, not opaque model/log payloads."""
+    """Validate lifecycle envelopes, not delivery effects or opaque payloads.
+
+    plan separately roots unresolved delivery_settlement records; this status
+    predicate is never evidence that a SharedRecords receipt effect settled.
+    """
     try:
         if (not started or started.get("run") != run or not RUN_ID.fullmatch(run)
                 or not isinstance(started.get("snapshot"), str)
@@ -193,14 +200,20 @@ def _terminal(run, started, records, clock):
         return False
 
 
-def plan(project):
+def plan(project, *, settlement_pins=None, scan=None):
     """Recomputed under locks on every preview/apply. Bounds close globally."""
     root = project.root
-    scan = Scan(root)
+    scan = scan if scan is not None else Scan(root)
     days = project.config.limits.run_retention_days
     if type(days) is not int or not 0 <= days <= 3650:
         raise Denied("Invalid run_retention_days (expected 0–3650)")
     clock = time.time()
+    if settlement_pins is None:
+        from . import delivery_settlement
+        try:
+            settlement_pins, _, _ = delivery_settlement.inventory(root, scan)
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError) as exc:
+            return {"complete": False, "days": days, "components": [], "reason": str(exc)[:256]}
     if not days:
         # No new expiry needs live references. The caller still independently
         # validates and recovers committed/uncommitted quarantine under locks.
@@ -256,6 +269,9 @@ def plan(project):
             if days and _terminal(run, started, records, clock):
                 if clock - _stamp(started["started_at"]) > days * 86400:
                     eligible.add(run)
+
+        for run in settlement_pins:
+            pin(run)
 
         # Pending scheduler continuations own both their source evidence and
         # any already-created successor. The reserved ID can precede its run

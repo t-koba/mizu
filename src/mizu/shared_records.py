@@ -496,7 +496,8 @@ class SharedRecords:
                 "next_offset": end if end < len(text) else None,
                 "text": text[offset:end]}
 
-    def _manifest(self, role: str, manifest: tuple[Delivery, ...]) -> dict[str, Delivery]:
+    @staticmethod
+    def _manifest(role: str, manifest: tuple[Delivery, ...]) -> dict[str, Delivery]:
         if not isinstance(manifest, tuple) or len(manifest) > MANIFEST_ROWS:
             raise Denied("Invalid frozen shared record manifest")
         allowed = {}

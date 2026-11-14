@@ -544,14 +544,78 @@ For the active `insight.decision` pilot, `decision_page_bytes` is an explicit pe
 | Operator answers and notices | Trusted host CLI writes `answer` and `operator.notice` directly to SharedRecords as `operator.cli`; no model writer. | Answers bind an exact Insight ID/revision and route to the authenticated source role. Notices route only to their explicit validated addressee. Both use manifest-scoped `record_read` and explicit `finish.ack_events`. Notice writer closure/supersession appends an immutable closure event; neither kind uses Insight decisions. Pending eligible records can be a configured wake source through existing scheduler gates; no new scheduler service. | 32768-character content, 140000-byte envelopes, 20 aggregate references plus pending/truncation metadata; permanent immutable record/closure/receipt audit. See operator CLI and configuration above. |
 | Publication blockers | Publication intent/receipt records are host VCS evidence, bound to approval, run, whole-capture `code_digest`, public-source projection and exact published SHA. A failed operation is also a run/tool result; the inspected product path has no distinct durable `publication.blocker` inbox. | A future blocker record must be emitted only from a validated host publication outcome, bind the exact publication attempt/receipt or source snapshot, and route under explicit policy. It cannot grant approval, reinterpret `code_digest`, or infer a task/dependency from an error message. Publication approval and adapter reconciliation remain unchanged. | Publication receipts are immutable project evidence; failures remain run evidence. No common blocker retention or acknowledgement policy exists. |
 
+### Runtime delivery settlement
+
+Actual scheduled executions receiving SharedRecords-backed deliveries register a
+host-only `delivery-settlements/RUN_ID.json` before model dispatch. The record
+binds the actual 32-hex run ID, role, and exact decision (only under active shared
+authority), operator, CI and proposal manifests. Each binding retains the role,
+record ID, whole-record digest and acknowledgement token. Empty deliveries,
+readiness checks, previews and non-dispatched selector waits create no pins.
+The generic `freeze()` operation itself remains an in-memory operation, not a
+registration API for arbitrary host consumers.
+
+The canonical envelope is exactly `{record, digest}`, where `digest` is SHA-256
+of the canonical `record`. Record schema 1 has exactly `schema`, `run`, `role`,
+`manifests`, `selected`, `effects`, `closed` and `finalized`. The three family maps
+use exactly `decision`, `operator`, `ci` and `proposal`. `selected` is initially
+null (no receipt-finalization selection boundary), then lists the exact selected
+tokens per family. Each delivered token initially has an `unresolved` effect.
+Live finalization explicitly records `not-selected` for unselected tokens, and
+`check-join` or `bounded` for selected CI/proposal tokens whose existing completion
+semantics require no receipt. These are skipped effects, not acknowledgements.
+A required effect becomes `succeeded` only after its existing source-specific
+receipt operation returns normally. A partial batch or suppressed exception
+leaves unresolved effects; recovery never bypasses current-source validation or
+infers success by finding a receipt from another execution.
+
+`finalized` records completion of the host finalization path. Separately,
+`closed` records Context authority revocation under its mutex, idle joined/tool
+operations and successful exec cleanup. Both must be durable and every effect
+resolved before removing a pin. A result status, finish-intent, publication,
+acknowledgement omission, timeout or absent active pointer/process proves neither
+boundary. A fault before selection leaves all manifest effects unresolved; run
+and finish evidence remain available without manufacturing a selection from them.
+Interrupted/unrecoverable records intentionally remain pinned without expiry or
+automatic repair, even when a later run handles the same delivery.
+
+Each canonical envelope uses the existing 1 MiB frame bound; each family retains
+the existing 512-entry manifest bound. Registration fails before dispatch rather
+than truncating. Maintenance shares its existing aggregate run-reference scan
+budgets with this inventory. Corrupt, unsafe, unknown or over-budget registry data
+blocks pruning globally, including committed quarantine deletion. Unresolved
+records protect the run component and its run-local input/log evidence from
+storage pruning; normal read-only workspace materializations remain reproducible
+from the run's retained snapshot. Backup and restore retain registry bytes,
+including corrupt evidence, alongside runs and SharedRecords. Backup refuses
+unsafe protected roots, unsafe/unknown or over-budget settlement registries, missing
+settlement run targets, missing/digest-mismatched manifest sources or receipts for
+`succeeded` effects, and unsafe members in included run, SharedRecords, receipt and
+maintenance evidence, rather than silently omitting them through its general archive
+filter. Generated `index.html` and
+reproducible run `input`/`controller` trees remain excluded. No role-facing
+read/write tool or grant is added.
+
+Registration, updates and Context closure use existing execution exclusions;
+maintenance uses its existing quiescent exclusions. No new cross-store lock or
+source-lock/receipt-lock ordering is introduced. Atomic file publication uses
+`fs.atomic_write`'s existing platform durability guarantees (no stronger Windows
+power-loss claim). After a crash between terminal settlement and unlink, normal
+storage-prune apply revalidates the exact record, flushes its directory and
+replays cleanup idempotently before retiring run evidence. Recognized uncommitted
+atomic-write temporaries never authorize dispatch and are removed under those
+same maintenance exclusions after a complete bounded scan. There is no replay
+of unresolved receipt effects and no SharedRecords collector or deletion path.
+
 ### Reference and release inventory
 
 `SharedRecords` has no delete/prune operation, so no stored kind is currently
 reclaimable. Operator and host record declarations require permanent retention.
-`freeze()` returns an in-memory unit manifest; reads and acknowledgements remain
-valid after source movement, but that live reference is not durably registered.
-A collector without active-manifest tracking could invalidate an in-flight read
-or acknowledgement.
+Runtime delivery pins now cover the four source families above. They establish
+only the execution lifetime boundary, not a complete source/receipt/backup
+reference index. Reads and acknowledgements retain their existing per-family
+source-current semantics. Other host consumers of `freeze()` must provide their
+own lifetime owner before any future collector could reclaim their records.
 
 | Kind or family | Authoritative references | Current release path |
 |---|---|---|
@@ -564,17 +628,16 @@ or acknowledgement.
 | Configured role-authored records | Authenticated writer and opaque payload/subject; external references are not discoverable by Mizu. | No source adapter can prove release; retain permanently. |
 | Per-role acknowledgement receipts | Exact role, record ID, and record digest; acknowledgement is audit evidence, not a release signal. | No receipt-deletion path exists; keep the record while any receipt remains. |
 
-Backups include both `shared-records` and `shared-record-receipts`; restore can
-reintroduce them. Backup retention/removal is not integrated with a live-record
+Backups include `shared-records`, `shared-record-receipts` and runtime delivery
+settlements; restore can reintroduce them. Backup retention/removal is not integrated with a live-record
 reference index, so a future collector must treat each retained backup as a
 reference and rebuild those references on restore. **No current kind is proven
 eligible for deletion.**
 
 A bounded implementation must make references source-owned and exact, with a
 per-record reverse index so work follows changed references rather than scanning
-the store. Register each frozen unit manifest durably before delivery; release
-that pin only after the unit is terminal and acknowledgement effects settle.
-Unsettled or unrecoverable units keep their pins. Source owners add references
+the store. Runtime execution pins supply one prerequisite, not that index;
+unsettled or unrecoverable units keep those pins. Source owners must add references
 before committing source events (an orphan pin only leaks) and release them only
 after the source change commits (a lost release only leaks). A collector may
 remove only an explicitly eligible kind whose complete per-record index has no

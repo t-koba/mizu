@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .delegation_jobs import DelegationJobs, _WorkspaceLease
-from . import decision_delivery, delegation_gates, lineage, operator_records
+from . import decision_delivery, delegation_gates, lineage, operator_records, delivery_settlement
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
@@ -3335,6 +3335,9 @@ class Engine:
                             or terminal_events or wait_events or ci_failures)
                     or new_obligation or (role.workspace == "write" and prior_wait_expired))
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
+                # A pin must be durable before dispatch-adjacent delivery state
+                # changes, so a setup failure cannot consume an unseen wake.
+                delivery_settlement.register(context)
                 dispatch_evidence.capture_projection(context, role.profile, prompt_mode,
                                                      session_key, rotation, session_dir)
                 decoded = json.loads(prompt)
@@ -3752,14 +3755,17 @@ class Engine:
                                     context, "wait_resolution_high_water", _READY_WORK_UNSET)))
                     if role.workspace == "write":
                         write_json(project.root / "observed" / f"{role_name}.json", observed)
+                delivery_settlement.begin(context, finished)
                 selected_tokens = set(finished.get("ack_events", []))
                 operator_records.acknowledge(context, selected_tokens &
                     {entry.ack_token for entry in context.operator_record_manifest})
+                delivery_settlement.succeeded(context, "operator")
                 selected_decisions = [e for e in context.decision_events if e["ack_token"] in selected_tokens]
                 if selected_decisions:
                     if context.shared_decisions:
                         decision_delivery.acknowledge(context, selected_tokens &
                                                       {e["ack_token"] for e in selected_decisions})
+                        delivery_settlement.succeeded(context, "decision")
                     else:
                         with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                             project.insights.acknowledge_decisions(
@@ -3785,8 +3791,10 @@ class Engine:
                             project.insights.root, role_name, selected_obligations)
                 with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
                     ci_waits.complete(context, finished)
+                    delivery_settlement.succeeded(context, "ci")
                 with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
                     proposal_waits.complete(context, finished)
+                    delivery_settlement.succeeded(context, "proposal")
                 if check_wait is not None:
                     check_jobs.set_wait(project, role_name, check_wait["id"], check_wait["wait_until"], continuation={
                         "run": run_id, "snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
@@ -3801,6 +3809,7 @@ class Engine:
                 # succeeds: an interrupted finish must remain runnable.
                 if role.workspace != "write" and not finished.get("wait_for_check"):
                     write_json(project.root / "observed" / f"{role_name}.json", observed)
+                delivery_settlement.finalized(context)
                 return result
             except BaseException as exc:
                 if continuation is not None and context is None:
@@ -3934,6 +3943,8 @@ class Engine:
                         context._slot_lease = False
                         context.closed = True
                     context.close_exec()
+                    with contextlib.suppress(MizuError, OSError, ValueError):
+                        delivery_settlement.closed(context)
                 with contextlib.suppress(OSError):
                     active.unlink(missing_ok=True)
                 # Read-only inputs are reproducible from the content-addressed snapshot.
