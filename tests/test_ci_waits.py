@@ -955,6 +955,7 @@ class PublicationCiWaitTests(CiWaitFixture):
                          {"snapshot_id": self.snapshot["id"], "code_digest": self.snapshot["code_digest"],
                           "publication_id": receipt["publication_id"], "sha": SHA})
         self.assertEqual(event["conclusion"], "failure")
+        self.assertEqual(event["snapshot_relation"], "exact")
         ci_waits.complete(context, {"outcome": "wait", "summary": "Not handled"})
         self.assertEqual(self.delivery_context().wait_events, context.wait_events)
         self.acknowledge_delivery(context)
@@ -1132,6 +1133,7 @@ class PublicationCiWaitTests(CiWaitFixture):
         event = context.wait_events[0]
         self.assertEqual(event['observed_snapshot'],
                          {'snapshot_id': child['id'], 'code_digest': child['code_digest']})
+        self.assertEqual(event['snapshot_relation'], 'strict_descendant')
         self.assertEqual(event['snapshot_id'], item['wait']['snapshot_id'])
         self.assertEqual(event['code_digest'], item['wait']['code_digest'])
         self.assertEqual(event['publication_id'], receipt['publication_id'])
@@ -1159,6 +1161,52 @@ class PublicationCiWaitTests(CiWaitFixture):
                                      snapshot_id=child['id'])
         self.assertEqual(done['status'], 'done')
 
+
+    def test_legacy_acked_snapshot_event_is_not_redelivered_under_relation_identity(self):
+        item = self.block()
+        self.receipt_for()
+        self.poll_until_observed()
+        path = ci_waits._path(self.store, item)
+        source = read_json(path)
+        source.pop("snapshot_relation")
+        write_json(path, source)  # a valid pre-relation immutable result
+        event = ci_waits._evidence(self.store, item)
+        self.assertEqual(event["snapshot_relation"], "exact")
+        legacy_event = {key: value for key, value in event.items()
+                        if key != "snapshot_relation"}
+        legacy = ci_waits._envelope(item, legacy_event)
+        shared = ci_waits.shared_store(self.store)
+        record_digest = shared.put(legacy, writer="host.ci")
+        manifest = shared.freeze("worker", [legacy["id"]])
+        shared.acknowledge("worker", [{"role": "worker", "record_id": legacy["id"],
+                                        "record_digest": record_digest,
+                                        "ack_token": manifest[0].ack_token}],
+                           manifest=manifest)
+
+        events, _ = ci_waits.delivery(self.store, "worker")
+        self.assertEqual(events, [])
+
+    def test_pending_legacy_snapshot_event_is_reissued_with_relation_identity(self):
+        item = self.block()
+        self.receipt_for()
+        self.poll_until_observed()
+        path = ci_waits._path(self.store, item)
+        source = read_json(path)
+        source.pop("snapshot_relation")
+        write_json(path, source)  # a valid pre-relation immutable result
+        event = ci_waits._evidence(self.store, item)
+        legacy_event = {key: value for key, value in event.items()
+                        if key != "snapshot_relation"}
+        legacy = ci_waits._envelope(item, legacy_event)
+        shared = ci_waits.shared_store(self.store)
+        shared.put(legacy, writer="host.ci")
+
+        events, _ = ci_waits.delivery(self.store, "worker")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["snapshot_relation"], "exact")
+        self.assertNotEqual(events[0]["record_id"], legacy["id"])
+        self.assertTrue(events[0]["record_id"].endswith(":snapshot-relation-v1"))
+
     def test_disabled_descendants_preserve_exact_resolution_and_evidence_shape(self):
         item = self.block()
         child = self.descendant('child')
@@ -1171,10 +1219,12 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.poll_until_observed()
         event = self.delivery_context().wait_events[0]
         self.assertNotIn('observed_snapshot', event)
+        self.assertEqual(event['snapshot_relation'], 'exact')
         self.assertEqual(event['snapshot_id'], item['wait']['snapshot_id'])
         self.assertEqual(set(ci_waits._read(self.store, item)), {
             'kind', 'trust', 'work_item', 'rev', 'holder', 'publication_id', 'branch', 'sha',
-            'snapshot_id', 'code_digest', 'wait_digest', 'checks', 'conclusion', 'observed_at'})
+            'snapshot_id', 'code_digest', 'snapshot_relation', 'wait_digest', 'checks',
+            'conclusion', 'observed_at'})
 
     def test_descendant_ancestry_is_strict_complete_and_edge_bounded(self):
         item = self.block()
@@ -1334,6 +1384,7 @@ class PublicationCiWaitTests(CiWaitFixture):
         original = ci_waits._read(self.store, item)
         path = ci_waits._path(self.store, item)
         for changes in ({'sha': 'e' * 40}, {'publication_id': 'e' * 64},
+                        {'snapshot_relation': 'exact'},
                         {'observed_snapshot': {'snapshot_id': child['id'], 'code_digest': 'f' * 64}},
                         {'observed_snapshot': {'snapshot_id': None, 'code_digest': child['code_digest']}}):
             with self.subTest(changes=changes):

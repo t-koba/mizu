@@ -112,6 +112,7 @@ def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_d
     if publication_id is None:
         return None
     return {**wait, "publication_id": receipt["publication_id"], "sha": receipt["published_sha"],
+            "snapshot_relation": "strict_descendant" if observed_snapshot is not None else "exact",
             **({"observed_snapshot": observed_snapshot} if observed_snapshot is not None else {})}
 
 
@@ -273,6 +274,11 @@ def _evidence(store, item, *, sync=True):
               "wait_digest", "checks", "conclusion", "observed_at"}
     if wait["kind"] == "publication_ci":
         fields |= {"snapshot_id", "code_digest"}
+        if "snapshot_relation" in record:
+            fields.add("snapshot_relation")
+        relation = wait["snapshot_relation"]
+        if record.get("snapshot_relation", relation) != relation:
+            raise Denied("CI snapshot relation differs from validated evidence")
     if "observed_snapshot" in wait:
         fields.add("observed_snapshot")
         binding += ("observed_snapshot",)
@@ -291,7 +297,10 @@ def _evidence(store, item, *, sync=True):
     # Recover a previous post-rename directory-sync failure before delivery.
     if sync:
         sync_dir(_path(store, item).parent)
-    return {**record, "evidence_digest": digest(canonical(record))}
+    event = {**record}
+    if wait["kind"] == "publication_ci":
+        event["snapshot_relation"] = wait["snapshot_relation"]
+    return {**event, "evidence_digest": digest(canonical(record))}
 
 
 def _conclusion(rows):
@@ -396,10 +405,37 @@ def shared_store(store):
 
 
 def _envelope(item, event):
-    return {"schema": 1, "id": f"ci-wait:{item['id']}:{item['rev']}",
+    identity = f"ci-wait:{item['id']}:{item['rev']}"
+    if "snapshot_relation" in event:
+        identity += ":snapshot-relation-v1"
+    return {"schema": 1, "id": identity,
             "kind": "ci.wait", "created_at": item["updated_at"], "writer": "host.ci",
             "subject": {key: item[key] for key in ("rev", "holder")} | {"work_item": item["id"]},
             "payload": event}
+
+
+_LEGACY_ACKNOWLEDGED = object()
+
+
+def _legacy_acknowledged(shared, envelope):
+    """Do not redeliver a receipted snapshot result under its versioned identity."""
+    event = envelope["payload"]
+    if "snapshot_relation" not in event:
+        return False
+    identity = envelope["id"].removesuffix(":snapshot-relation-v1")
+    legacy = {**envelope, "id": identity,
+              "payload": {key: value for key, value in event.items()
+                          if key != "snapshot_relation"}}
+    if any(shared._read(name, RECORD_BYTES) is not None
+           for name in shared._record_names(identity)):
+        _, computed = shared.get(identity)
+        if computed != digest(canonical(legacy)):
+            raise Denied("Legacy shared CI evidence differs from its source")
+        return shared.received(envelope["subject"]["holder"], identity, computed)
+    if shared._read(shared._receipt_name(envelope["subject"]["holder"], identity),
+                    RECEIPT_BYTES) is not None:
+        raise Denied("Legacy shared CI receipt has no record")
+    return False
 
 
 def _existing(shared, envelope):
@@ -414,6 +450,8 @@ def _existing(shared, envelope):
     if shared._read(shared._receipt_name(envelope["subject"]["holder"], envelope["id"]),
                     RECEIPT_BYTES) is not None:
         raise Denied("Shared CI receipt has no record")
+    if _legacy_acknowledged(shared, envelope):
+        return _LEGACY_ACKNOWLEDGED
     return None
 
 
@@ -429,7 +467,10 @@ def evidence(store, item, *, sync=False):
     shared = shared_store(store)
     envelope = _envelope(item, event)
     shared._validate(envelope)
-    return envelope, _existing(shared, envelope)
+    existing = _existing(shared, envelope)
+    if existing is _LEGACY_ACKNOWLEDGED:
+        return None
+    return envelope, existing
 
 
 def _shared_ack_corrupt(store, item):
@@ -665,7 +706,7 @@ def poll(config, project, state, *, now, interval, reader=None):
                         continue
                     binding = ("publication_id", "branch", "sha")
                     if wait["kind"] == "publication_ci":
-                        binding += ("snapshot_id", "code_digest")
+                        binding += ("snapshot_id", "code_digest", "snapshot_relation")
                     if "observed_snapshot" in wait:
                         binding += ("observed_snapshot",)
                     record = {"kind": "ci", "trust": "external-untrusted",

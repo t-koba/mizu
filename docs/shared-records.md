@@ -1415,9 +1415,14 @@ evidence; this cutover is the active runtime path. The obsolete
 older host configurations.
 
 The route uses immutable `ci-wait:<item>:<blocked-rev>` identities in the
-existing shared store, writer `host.ci`, subject `{work_item, rev, holder}` and
-blocked-revision `updated_at` event time. The payload is exactly the validated
-external-untrusted terminal source event including its evidence digest. Only
+existing shared store for receipt-pinned CI results. Snapshot-bound results with
+a host-verified `snapshot_relation` use the versioned identity
+`ci-wait:<item>:<blocked-rev>:snapshot-relation-v1`; an already receipted
+legacy snapshot event is not delivered again under the new identity. Both use
+writer `host.ci`, subject `{work_item, rev, holder}` and blocked-revision
+`updated_at` event time. The payload is exactly the validated external-untrusted
+terminal source event including its evidence digest and, for snapshot-bound
+results, the exact/strict-descendant relation. Only
 current eligible sources without an exact explicit generic receipt enter the
 oldest-first bounded page (ten rows or the existing generic 1 MiB frame measured
 against the actual serialized `wait_events` prompt contribution). Full payloads

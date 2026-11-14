@@ -799,12 +799,17 @@ create-only record under `evidence/ci-waits/<item>.<rev>.result.json` (128 KiB,
 bounded no-follow reads). It binds the item ID, blocked revision, holder,
 publication ID, branch, SHA, normalized wait digest, declared check states and
 available run IDs; `publication_ci` results also bind the snapshot ID and code
-digest of the original pinned wait. Descendant results additionally carry
-`observed_snapshot:{snapshot_id,code_digest}` for the exact observed descendant;
-the publication ID, branch and SHA name that descendant's unique receipt. Exact
-results keep their existing field shape. Delivery and explicit acknowledgement
-revalidate this **frozen** manifest, ancestry, receipt uniqueness and exact-SHA
-check binding, never reselecting a later descendant or querying a moving head.
+digest of the original pinned wait. Every snapshot-bound result carries the
+host-derived `snapshot_relation`: `exact` when the receipt is for the pinned
+snapshot itself, or `strict_descendant` only after the complete retained parent
+chain has been verified. Descendant results also carry
+`observed_snapshot:{snapshot_id,code_digest}` for the exact observed
+descendant; the publication ID, branch and SHA name that descendant's unique
+receipt. The relation is part of the immutable `ci.wait` payload and its digest,
+so the worker can interpret the result from the event without consulting this
+document. Delivery and explicit acknowledgement revalidate this **frozen**
+manifest, relation, ancestry, receipt uniqueness and exact-SHA check binding,
+never reselecting a later descendant or querying a moving head.
 Already retained evidence remains readable after history rolls forward or the
 policy is disabled. The result retains `kind:"ci"` and the same shared event/ack
 route. It includes conclusion and observation time. When the provider reports

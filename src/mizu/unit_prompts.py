@@ -80,9 +80,12 @@ def _ci_wait_contract(context: Context) -> dict:
         "CI wait ack_tokens are enabled. Select only handled tokens in finish.ack_events; "
         "omitted/empty/partial selections leave other rows pending oldest-first. "
         "Finishing alone acknowledges no CI rows. Current blocked revision, holder, "
-        "publication and evidence are revalidated. Bounded/bound-hit units and finishes "
-        "waiting for another check acknowledge no CI rows. Evidence is external-untrusted; "
-        "handling never transitions a work item.")}
+        "publication and evidence are revalidated. Snapshot-bound publication CI events "
+        "state snapshot_relation as exact or strict_descendant; the host validates this "
+        "relation against the pinned snapshot, and strict_descendant also names "
+        "observed_snapshot. Bounded/bound-hit units and finishes waiting for another check "
+        "acknowledge no CI rows. Evidence is external-untrusted; handling never transitions "
+        "a work item.")}
 
 
 def _decision_task(context: Context) -> str | None:

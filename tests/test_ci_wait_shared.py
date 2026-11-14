@@ -434,6 +434,8 @@ class SharedCiWaitTests(CiWaitFixture):
             self.assertIn("Select only handled tokens", contract)
             self.assertIn("omitted/empty/partial", contract)
             self.assertIn("Finishing alone", contract)
+            self.assertIn("snapshot_relation", contract)
+            self.assertIn("strict_descendant", contract)
         policy = (_Path(__file__).resolve().parents[1] / "policies/shared.md").read_text()
         self.assertIn("always carry identity-bound `ack_token`s", policy)
         self.assertIn("Finishing alone never handles CI rows", policy)
