@@ -2499,11 +2499,27 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_matrix_scope_timeouts_gates_and_jobs_preserved(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        # The 3x4 matrix, timeouts, installer step, and durable job are preserved.
-        self.assertIn('os: [ubuntu-24.04, macos-latest, windows-latest]', workflow)
+        # Ubuntu covers every supported Python; other platforms use 3.14,
+        # with Windows split into two stable-ID shards.
+        self.assertIn('os: [ubuntu-24.04]', workflow)
         self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
+        matrix_include = (
+            '        include:\n'
+            '          - os: macos-latest\n'
+            '            python: "3.14"\n'
+            '          - os: windows-latest\n'
+            '            python: "3.14"\n'
+            '            shard: "0"\n'
+            '          - os: windows-latest\n'
+            '            python: "3.14"\n'
+            '            shard: "1"')
+        self.assertIn(matrix_include, workflow)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        self.assertIn('run: python scripts/check.py --report private-validation/offline.json', workflow)
+        shard_command = (
+            "run: python scripts/check.py ${{ matrix.shard && "
+            "format('--test-shard {0} ', matrix.shard) || '' }}--report "
+            "private-validation/offline.json")
+        self.assertIn(shard_command, workflow)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
         self.assertIn('run: ./scripts/test-install.sh private-validation/offline.json', workflow)
