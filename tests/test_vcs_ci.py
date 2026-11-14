@@ -42,7 +42,7 @@ class CiLogSelectorTests(Fixture):
     def test_exact_selector_and_omission_preserve_request_and_response(self):
         for sha in (SHA_A, "b" * 64):
             for selector in ({}, {"check": "x"}, {"check": "é" * 256},
-                             {"check": "Offline checks / core (macos-latest, 3.13)"}):
+                             {"check": "Offline checks / platform-compatibility (macos-latest, 3.11)"}):
                 args = {"op": "log", "branch": "main", "sha": sha, **selector}
                 with self.subTest(args=args):
                     out = self.ctx.handle("vcs_read", args)

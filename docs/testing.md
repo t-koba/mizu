@@ -316,39 +316,48 @@ an arbitrary externally supplied artifact or create a new CI receipt.
 
 ### CI matrix
 
-Workflow `Offline checks` runs three jobs, each green for the exact commit
+Workflow `Offline checks` runs four jobs, each green for the exact commit
 before promotion:
 
 | Job | Cells | Purpose |
 |---|---|---|
-| `core` | Linux x Python 3.11-3.14 | The complete gate and suite on every supported interpreter; Linux/3.13 also runs the installer gate, rootless OCI integration and the sdist build |
-| `core` | macOS x 3.14; Windows x 3.14 as two shards | The complete gate and suite on each other OS |
+| `core` | Linux x Python 3.11–3.14; macOS x 3.14; Windows x 3.14 as two stable-ID shards | The complete gate and suite; Linux/3.13 also runs the installer gate, rootless OCI integration and the sdist build |
+| `platform-compatibility` | macOS x 3.11; Windows x 3.11 as two stable-ID shards | Focused tests of OS-dependent runtime behavior at the oldest supported interpreter; no unrelated full-suite repeat |
 | `durable-contract` | Linux 3.13 | Pinned Pi SDKs provisioned, gate unwaived |
 | `delegation-recovery-smoke` | Linux 3.13 | Synthetic supervisor death and recovery on rootless OCI |
 
-The rule: the interpreter version is varied only where it is cheap and
-decisive (Linux, every behaviour); the operating system is varied with the
-suite whole, because platform-dependent branches (`IS_WINDOWS`, locks,
-replacement, process control) are reached from tests of many modules, not only
-the ones named for the platform. Platform behaviour has differed by OS, not by
-Python version, so macOS and Windows run once, on the newest supported Python.
+Coverage follows evidence, not a fixed cross-product: the full suite runs on
+Linux for every supported Python and on macOS/Windows for newest Python 3.14;
+oldest Python 3.11 remains on every OS, but its non-Linux cells run only the
+platform-specific tests that distinguish host locks, symlink-safe reads,
+filesystem replacement/exclusive publication, snapshot traversal and process
+launch. These tests use the existing stable test IDs. This exercises the OS
+branches and their oldest-interpreter interactions without paying for tests
+whose behavior cannot vary along that combination. Linux still supplies full
+oldest-version coverage, and all existing validation gates and timeouts remain
+on the complete `core` cells.
 
-The Windows cell runs unittest in two stable-ID parity shards to keep its wall
-time near the other cells (`--test-shard 0|1`): the low bit of the SHA-256 of
-each unique UTF-8 test ID assigns it to one shard, discovery order preserved;
-duplicate IDs fail closed. Both shards run the same non-unittest checks.
-Shard receipts use `suite: "offline-shard"` and `test_shard` and are never
-reusable as a full offline receipt.
+The complete Windows suite at Python 3.14 stays split into two stable-ID parity
+shards (`--test-shard 0|1`): the low bit of the SHA-256 of each unique UTF-8
+test ID assigns it to one shard, discovery order preserved; duplicate IDs fail
+closed. The selected oldest-version Windows tests use the same ID-parity
+partition, so each focused test runs once across the two shards. Compatibility
+cells record only their selected unittest outcomes and bounded timing sidecar;
+they do not create a reusable full-gate receipt. Full `core` shards retain
+`suite: "offline-shard"` receipts, which are never reusable as full offline
+receipts.
 
 Every core cell uploads its bounded timing summary and detail pages (per shard
-on Windows) and, on Windows, the managed-import diagnostic; artifacts are
+on Windows) and, on Windows, the managed-import diagnostic. Compatibility
+cells upload only their bounded per-test timing sidecar; artifacts are
 diagnostic, never pass/failure inputs. The suite child is bounded at 1,800
 seconds, the later phase at 1,200 seconds (each check 600 seconds, each pinned
 adapter install 300 seconds); with 60 seconds of setup and 120 seconds of
 receipt reserve the modelled path is 3,246 seconds, inside the 60-minute
-cells. Linux/3.13 adds the installer staging gate and a 600-second OCI step:
-7,146 seconds inside its 120-minute cell. `durable-contract` has a 70-minute
-scope.
+complete-suite cells. The compatibility job has a 15-minute outer bound for
+its focused host tests. Linux/3.13 adds the installer staging gate and a
+600-second OCI step: 7,146 seconds inside its 120-minute cell.
+`durable-contract` has a 70-minute scope.
 
 The later phase is bounded as a whole, not per child. It runs one child per
 check: the transport suite, every SDK contract suite that is not waived, one

@@ -10,13 +10,10 @@ concurrency:
   cancel-in-progress: true
 jobs:
   core:
-    # Linux runs the complete suite on every supported Python (the behavioural
-    # evidence); Linux/3.13 also stages the installer, builds the sdist and runs
-    # rootless OCI. macOS and Windows run the complete suite once, on the newest
-    # supported Python: platform behaviour varies by OS, not by interpreter
-    # version. The Windows cell is split in two stable-ID parity shards to keep
-    # its wall time near that of the other cells; every shard runs the full
-    # non-unittest gate.
+    # Linux runs the full suite on every supported Python; Linux/3.13 also
+    # stages the installer, builds the sdist and runs rootless OCI. macOS and
+    # Windows run the full suite on newest Python; oldest-version platform-only
+    # behavior is covered by the focused compatibility job below.
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || (matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && 120 || 60) }}
     strategy:
@@ -92,6 +89,53 @@ jobs:
           path: private-validation/project-import-diagnostic.json
           retention-days: 7
           if-no-files-found: ignore
+  platform-compatibility:
+    # Only oldest-Python tests that touch OS-dependent runtime behavior; no
+    # unrelated suite duplication. Windows preserves stable-ID parity shards.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+            shard: "0"
+          - os: windows-latest
+            python: "3.11"
+            shard: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Oldest-version platform-specific tests
+        # These tests exercise host locks, filesystem replacement and traversal,
+        # plus process launch, at the oldest supported interpreter.
+        run: >-
+          python scripts/check_unittest.py platform-compatibility-failures.jsonl
+          --test-timings platform-compatibility-timings.jsonl
+          ${{ matrix.shard && format('--test-shard {0}', matrix.shard) || '' }}
+          --test-id test_platform.PlatformContractTests.test_single_source_of_truth
+          --test-id test_platform.PortablePrimitiveTests.test_lock_contention_portable
+          --test-id test_platform.PortablePrimitiveTests.test_safe_read_refuses_symlink_portable
+          --test-id test_platform.PortablePrimitiveTests.test_safe_read_managed_survives_portable_replacement
+          --test-id test_platform.PortablePrimitiveTests.test_process_run_portable
+          --test-id test_primitives.FileTests.test_atomic_replace_and_private_mode
+          --test-id test_primitives.FileTests.test_exclusive_publication_is_safe_before_cleanup
+          --test-id test_snapshot_concurrency.SnapshotConcurrencyTests.test_capture_skips_hardlinks_in_both_traversal_backends
+      - name: Upload platform compatibility timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: platform-compatibility-${{ matrix.os }}-${{ matrix.python }}${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}
+          path: platform-compatibility-timings.jsonl
+          retention-days: 7
+          if-no-files-found: warn
   durable-contract:
     # Authoritative durable coverage: the pinned Pi SDK is provisioned here in
     # a network-enabled setup step, then the whole gate runs unwaived and

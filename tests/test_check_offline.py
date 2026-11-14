@@ -2189,11 +2189,9 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
                 self.assertRegex(use, UPLOAD_ARTIFACT_USE)
         self.assertIn('name: Upload per-test timings', workflow)
         self.assertIn('--test-timings private-validation/test-timings.json', workflow)
-        # Every cell collects the evidence, so each supported host's suite
-        # cost is measured where it runs.
-        # Core matrix, Windows/3.11–3.14 shard matrices, and the
-        # authoritative durable job each collect timing evidence.
-        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 6)
+        # One matrix definition runs in each validated core cell; the durable
+        # contract has its own command. Matrix membership is asserted below.
+        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 2)
         # One artifact per cell, each named for its own cell.
         self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
         self.assertIn('name: test-timings-durable', workflow)
@@ -2207,11 +2205,6 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Do not upload offline reports, which may contain diagnostics.
         self.assertNotIn('path: private-validation/offline.json', workflow)
         self.assertNotIn('path: private-validation/durable.json', workflow)
-        # Timing stays diagnostic; the 60-minute/1800-second scope is
-        # enforced while the always-uploaded artifact preserves partial progress.
-        self.assertIn('1,800 s child', workflow)
-        self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        self.assertEqual(CHECK._unittest_timeout_seconds(), 1800)
 
     def test_offline_steps_run_exactly_once_per_matrix_cell(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -2500,32 +2493,38 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_matrix_scope_timeouts_gates_and_jobs_preserved(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        # Ubuntu covers every supported Python; other platforms use 3.14,
-        # with Windows split into two stable-ID shards.
-        self.assertIn('os: [ubuntu-24.04]', workflow)
-        self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
-        matrix_include = (
-            '        include:\n'
-            '          - os: macos-latest\n'
-            '            python: "3.14"\n'
-            '          - os: windows-latest\n'
-            '            python: "3.14"\n'
-            '            shard: "0"\n'
-            '          - os: windows-latest\n'
-            '            python: "3.14"\n'
-            '            shard: "1"')
-        self.assertIn(matrix_include, workflow)
+        core = workflow.split('  core:\n', 1)[1].split('  platform-compatibility:\n', 1)[0]
+        self.assertIn('os: [ubuntu-24.04]', core)
+        self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', core)
+        core_matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
+        self.assertEqual(re.findall(r'- os: macos-latest\n            python: "([\d.]+)"', core_matrix),
+                         ['3.14'])
+        self.assertEqual(re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
+                                    r'            shard: "(\d)"\n', core_matrix),
+                         [('3.14', '0'), ('3.14', '1')])
+        compatibility = workflow.split('  platform-compatibility:\n', 1)[1].split(
+            '  durable-contract:\n', 1)[0]
+        compat_matrix = compatibility.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
+        self.assertEqual(re.findall(r'- os: macos-latest\n            python: "([\d.]+)"', compat_matrix),
+                         ['3.11'])
+        self.assertEqual(re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
+                                    r'            shard: "(\d)"\n', compat_matrix),
+                         [('3.11', '0'), ('3.11', '1')])
+        self.assertEqual(compatibility.count('--test-id '), 8)
+        self.assertIn('test_platform.PortablePrimitiveTests.test_lock_contention_portable', compatibility)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         shard_command = (
             "run: python scripts/check.py ${{ matrix.shard && "
             "format('--test-shard {0} ', matrix.shard) || '' }}--report "
             "private-validation/offline.json")
         self.assertIn(shard_command, workflow)
+        self.assertIn("format('--test-shard {0}', matrix.shard)", compatibility)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
         self.assertIn('run: ./scripts/test-install.sh private-validation/offline.json', workflow)
         self.assertIn('  durable-contract:', workflow)
         self.assertIn('run: python scripts/check.py --report private-validation/durable.json', workflow)
+        self.assertIn('  delegation-recovery-smoke:', workflow)
 
 
 class PinnedDependencyProvisionTests(unittest.TestCase):

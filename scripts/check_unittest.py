@@ -21,8 +21,10 @@ read. Timings are evidence only and never change the gate outcome. A killed
 child leaves its last start without a stop, which the parent reports as an
 unfinished entry with elapsed duration at child exit/timeout. Unittest's own
 progress/error display is sanitized too; arbitrary output from tests still streams normally. Discovery and verbosity
-match `unittest discover -s tests -v`. The optional `--test-shard 0|1`
-partitions discovery by SHA-256 stable-ID parity; omission remains unsharded.
+match `unittest discover -s tests -v`. Repeated `--test-id` runs an explicit
+stable-ID set instead of discovery; `--test-shard 0|1` partitions either set
+by SHA-256 parity, preserving order and fixtures. `--test-timings PATH` records
+bounded selected-test timing evidence with a local monotonic origin.
 """
 from __future__ import annotations
 
@@ -90,6 +92,9 @@ class ShardLoader(unittest.TestLoader):
 
     def discover(self, *args, **kwargs):
         return select_shard(super().discover(*args, **kwargs), self.shard)
+
+    def loadTestsFromNames(self, names, module=None):
+        return select_shard(super().loadTestsFromNames(names, module), self.shard)
 
 
 WRAPPER_TRACE_TEST = ('test_install_ci.InstallWrapperCITests.'
@@ -269,15 +274,27 @@ def main():
     # A script normally starts with scripts/ on sys.path; -m unittest starts
     # with the working directory. Preserve root-level test-helper imports.
     sys.path[0] = os.getcwd()
+    sys.path.insert(0, str(ROOT / 'src'))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('sidecar')
     parser.add_argument('timing_path', nargs='?')
     parser.add_argument('timing_origin', nargs='?', type=float)
     parser.add_argument('--fail-fast', action='store_true')
     parser.add_argument('--test-shard', type=int, choices=(0, 1))
+    parser.add_argument('--test-id', action='append', default=[],
+                        help='Run this exact stable unittest ID; may be repeated')
+    parser.add_argument('--test-timings',
+                        help='Write bounded timing evidence and start its monotonic clock here')
     args = parser.parse_args()
-    fd = os.open(args.sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     timing_path, timing_origin = args.timing_path, args.timing_origin
+    if args.test_timings is not None:
+        if timing_path is not None or timing_origin is not None:
+            parser.error('--test-timings cannot be combined with positional timing arguments')
+        timing_path, timing_origin = args.test_timings, time.monotonic()
+    Path(args.sidecar).parent.mkdir(parents=True, exist_ok=True)
+    if timing_path is not None:
+        Path(timing_path).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(args.sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as sidecar, ExitStack() as stack:
         timing = None
         if timing_path is not None:
@@ -300,9 +317,14 @@ def main():
                     SafeTextTestResult, sidecar=sidecar, timing=timing,
                     timing_origin=timing_origin), **kwargs)
 
-        unittest.main(module=None,
-                      argv=[sys.argv[0], 'discover', '-s', 'tests', '-v'] + (['-f'] if args.fail_fast else []),
-                      testRunner=Runner,
+        if args.test_id:
+            sys.path.insert(0, str(Path.cwd() / 'tests'))
+            unittest_args = [sys.argv[0], *args.test_id, '-v']
+        else:
+            unittest_args = [sys.argv[0], 'discover', '-s', 'tests', '-v']
+        if args.fail_fast:
+            unittest_args.append('-f')
+        unittest.main(module=None, argv=unittest_args, testRunner=Runner,
                       testLoader=(unittest.defaultTestLoader if args.test_shard is None
                                   else ShardLoader(args.test_shard)))
 

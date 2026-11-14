@@ -84,6 +84,42 @@ class TestIdShardTests(unittest.TestCase):
             self.assertFalse(observed[1] & observed[2])
             self.assertEqual(observed[0], observed[1] | observed[2])
 
+    def test_selected_test_ids_shard_exactly_and_record_bounded_timings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tests = root / 'tests'
+            tests.mkdir()
+            ids = [f'test_sample.Sample.test_{i}' for i in range(8)]
+            (tests / 'test_sample.py').write_text(
+                'import unittest\n'
+                'class Sample(unittest.TestCase):\n'
+                '    @classmethod\n'
+                '    def setUpClass(cls): cls.ready = True\n'
+                '    @classmethod\n'
+                '    def tearDownClass(cls): assert cls.ready\n' + ''.join(
+                    f'    def test_{i}(self): self.assertTrue(self.ready)\n' for i in range(8)),
+                encoding='utf-8')
+            observed = []
+            for shard in (0, 1):
+                failure, timing = root / f'fail-{shard}', root / f'time-{shard}'
+                command = [sys.executable, str(ROOT / 'scripts/check_unittest.py'),
+                           str(failure), '--test-timings', str(timing)]
+                for identifier in ids:
+                    command += ['--test-id', identifier]
+                command += ['--test-shard', str(shard)]
+                child = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
+                self.assertEqual(child.returncode, 0, child.stderr)
+                self.assertEqual(failure.read_text(), '')
+                records = [json.loads(line) for line in timing.read_text().splitlines()]
+                starts = [row['test'] for row in records if row['event'] == 'start']
+                stops = [row['test'] for row in records if row['event'] == 'stop']
+                self.assertEqual(starts, stops)
+                self.assertTrue(starts)
+                observed.append(set(starts))
+            expected = set(ids)
+            self.assertFalse(observed[0] & observed[1])
+            self.assertEqual(observed[0] | observed[1], expected)
+
     def test_gate_default_is_full_and_shards_cannot_supply_reusable_receipts(self):
         # Fake subprocesses test argv forwarding and report identity, not gates.
         for shard in (None, 0, 1):
@@ -127,19 +163,42 @@ class WindowsShardWorkflowTests(unittest.TestCase):
         self.jobs = dict(re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
                                    self.workflow, re.M | re.S))
 
-    def test_windows_runs_the_full_suite_once_as_two_shards_of_one_cell(self):
+    def test_full_and_oldest_platform_cells_use_only_evidence_based_tests(self):
         core = self.jobs['core']
+        compatibility = self.jobs['platform-compatibility']
         self.assertTrue(self.workflow.startswith('name: Offline checks\n'))
         self.assertIn('    runs-on: ${{ matrix.os }}\n', core)
         self.assertNotRegex(core, r'(?m)^    name:')
-        matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
-        windows = re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
-                             r'            shard: "(\d)"\n', matrix)
-        self.assertEqual(windows, [('3.14', '0'), ('3.14', '1')])
-        self.assertEqual(matrix.count('windows-latest'), 2)
+        core_matrix = core.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
+        full_windows = re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
+                                  r'            shard: "(\d)"\n', core_matrix)
+        self.assertEqual(full_windows, [('3.14', '0'), ('3.14', '1')])
+        self.assertEqual(core_matrix.count('windows-latest'), 2)
+        self.assertEqual(re.findall(r'- os: macos-latest\n            python: "([\d.]+)"', core_matrix),
+                         ['3.14'])
         self.assertNotIn('--suite-child-timeout', core)
-        # The shard flag exists only where a cell declares a shard, and the
-        # two shards of the one cell publish distinct artifacts.
-        self.assertEqual(self.workflow.count('matrix.shard && format('), 3)
         self.assertIn("format('--test-shard {0} ', matrix.shard)", core)
         self.assertNotIn('continue-on-error', core)
+
+        compat_matrix = compatibility.split('      matrix:\n', 1)[1].split('    steps:\n', 1)[0]
+        self.assertEqual(re.findall(r'- os: macos-latest\n            python: "([\d.]+)"', compat_matrix),
+                         ['3.11'])
+        oldest_windows = re.findall(r'- os: windows-latest\n            python: "([\d.]+)"\n'
+                                    r'            shard: "(\d)"\n', compat_matrix)
+        self.assertEqual(oldest_windows, [('3.11', '0'), ('3.11', '1')])
+        self.assertIn("format('--test-shard {0}', matrix.shard)", compatibility)
+        test_ids = re.findall(r'--test-id (\S+)', compatibility)
+        self.assertEqual(test_ids, [
+            'test_platform.PlatformContractTests.test_single_source_of_truth',
+            'test_platform.PortablePrimitiveTests.test_lock_contention_portable',
+            'test_platform.PortablePrimitiveTests.test_safe_read_refuses_symlink_portable',
+            'test_platform.PortablePrimitiveTests.test_safe_read_managed_survives_portable_replacement',
+            'test_platform.PortablePrimitiveTests.test_process_run_portable',
+            'test_primitives.FileTests.test_atomic_replace_and_private_mode',
+            'test_primitives.FileTests.test_exclusive_publication_is_safe_before_cleanup',
+            'test_snapshot_concurrency.SnapshotConcurrencyTests.test_capture_skips_hardlinks_in_both_traversal_backends'])
+        shard_counts = [sum(hashlib.sha256(test_id.encode()).digest()[-1] % 2 == shard
+                            for test_id in test_ids) for shard in (0, 1)]
+        self.assertTrue(all(shard_counts))
+        self.assertIn('platform-compatibility-timings.jsonl', compatibility)
+        self.assertEqual(self.workflow.count('matrix.shard && format('), 5)

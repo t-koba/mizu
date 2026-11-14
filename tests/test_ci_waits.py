@@ -282,12 +282,12 @@ class CiWaitTests(CiWaitFixture):
                 read()
 
     def test_diagnosis_is_exact_current_bounded_and_pure(self):
-        name = "Offline checks / core (windows-latest, 3.13)"
+        name = "Offline checks / platform-compatibility (windows-latest, 3.11, 0)"
         wait = self.block(wait={**self.wait, "checks": [name]})["wait"]
         exact = {"check": name, "sha": SHA, "state": "success", "run": "run-1"}
         cases = [
             ([], "absent", 0, 0),
-            ([{**exact, "check": "core (windows-latest, 3.13)"}], "absent", 0, 0),
+            ([{**exact, "check": "platform-compatibility (windows-latest, 3.11, 0)"}], "absent", 0, 0),
             ([exact, exact], "duplicate", 2, 0),
             ([exact, {**exact, "sha": "d" * 40}], "duplicate", 2, 1),
             ([{**exact, "state": "queued"}], "nonterminal", 1, 0),

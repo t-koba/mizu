@@ -6,7 +6,7 @@
 
 | 対象 | コマンド／操作 | 記録する証跡 | 今回 |
 |---|---|---|---|
-| Python 3.11..3.14 × Linux、Python 3.14 × macOS/Windows | CIの6組（Windowsは2分割）で scripts/check.py | OS、Python、実行件数、成功／失敗／skip、CIログURL | ローカルLinux 3.14のみ実施。CIの結果は未取得 |
+| Linux 3.11..3.14・macOS/Windows 3.14 のフルgate、macOS/Windows 3.11 のOS依存テスト | CIの10 Pythonセル。Windowsは各バージョンを安定IDで2分割し、3.11は選択した互換テストだけを実行 | OS、Python、テスト範囲、実行件数、成功／失敗／skip、CIログURL | ローカルLinuxで選択したOS互換8テストと matrix/shard 回帰を通過。現在の snapshot の compileall と自動CIは未取得 |
 | 導入・復元 | scripts/test-install.sh | 終了コード、検査種別、paused/unarmed復元 | 実施 |
 | 管理下SDK・app-serverの公開機能契約 | python scripts/check-cli.py --report private-validation/cli.json | 公開API・listen機能 | 実施 |
 | 課金providerでのMCP・実推論 | 運用者設定で smoke --live --engine codex/claude/pi | run証跡、MCP接続、finish、要求モデル | 未実施 |
