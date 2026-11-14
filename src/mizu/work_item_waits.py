@@ -192,9 +192,12 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                 return result("receipt_bound", f"{kind}_receipt_route")
             if item["status"] != "blocked" or not item["holder"] or item["wait"] != wait:
                 raise Denied("Terminal readiness requires the current held waiter")
-            from . import ci_waits, proposal_waits
-            route = proposal_waits if kind == "proposal_merged" else ci_waits
-            observed = route.terminal_evidence(store, item)
+            if kind == "proposal_merged":
+                from . import proposal_waits
+                observed = proposal_waits.evidence(store, item)
+            else:
+                from . import ci_waits
+                observed = ci_waits.terminal_evidence(store, item)
             if observed is None:
                 return result("pending", "terminal_evidence_absent")
             envelope, computed = observed
