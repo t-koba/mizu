@@ -186,6 +186,15 @@ class ScopeTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self.proof()
 
+    def test_systemd_properties_must_be_complete_and_stderr_free(self):
+        complete = self.state().stdout
+        for result in (Result(0, complete[:-1], '', 'exited', 0),
+                       Result(0, complete, 'warning', 'exited', 0),
+                       Result(0, complete.replace('\n', '\r\n'), '', 'exited', 0)):
+            with self.subTest(result=result), mock.patch.object(self, 'query', return_value=result):
+                with self.assertRaises(Denied):
+                    self.proof()
+
     def test_non_linux_remains_unproven(self):
         with mock.patch('mizu.delegation_scope.sys.platform', 'darwin'):
             with self.assertRaises(Denied):

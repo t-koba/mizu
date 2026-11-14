@@ -16,6 +16,7 @@ import stat
 import sys
 
 from .delegation_jobs import _binding
+from .delegation_systemd import _fields as _systemd_fields
 from .errors import Denied
 
 
@@ -42,17 +43,11 @@ def _scope_empty(binding, *, query, maximum, cgroup_root=Path('/sys/fs/cgroup'))
 
     result = query(scope['unit'])  # identity validated before any host query
     if (result.reason != 'exited' or type(result.exit_code) is not int
-            or result.exit_code not in (0, 1) or result.survivors
+            or result.exit_code not in (0, 1) or result.survivors or result.stderr
             or len(result.stdout.encode('utf-8')) > maximum):
         raise Denied('Unobservable delegation systemd scope')
-    fields = {}
-    for line in result.stdout.splitlines():
-        key, sep, value = line.partition('=')
-        if not sep or key in fields:
-            raise Denied('Malformed delegation systemd scope')
-        fields[key] = value
-    if (set(fields) != {'LoadState', 'ActiveState', 'ControlGroup'}
-            or fields['LoadState'] not in ('loaded', 'not-found')
+    fields = _systemd_fields(result.stdout, ('LoadState', 'ActiveState', 'ControlGroup'))
+    if (fields['LoadState'] not in ('loaded', 'not-found')
             or fields['ActiveState'] not in ('active', 'activating', 'deactivating',
                                               'reloading', 'failed', 'inactive')
             or fields['ControlGroup'] not in ('', scope['cgroup'])
