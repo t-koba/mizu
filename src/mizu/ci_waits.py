@@ -58,7 +58,7 @@ def normalize_publication(value, *, snapshots, branch=None, stored=False):
             or value.get("kind") != "publication_ci"):
         raise Denied("Invalid work-item publication CI wait fields")
     _check_names(value["checks"])
-    snapshot = snapshots.get(value["snapshot_id"])
+    snapshot = snapshots.binding(value["snapshot_id"])
     if not stored and snapshot["id"] not in snapshots._history_ids():
         raise Denied("Publication CI wait requires retained published history")
     from .vcs import check_branch
@@ -144,13 +144,9 @@ def _check_names(checks):
 
 
 def _items(store):
-    for event_id, event in store._iter_item_events(recover=False):
-        kind, seed = store._seed_for_event(event_id, event, readonly=True)
-        if kind == "seed":
-            item = store._get(seed["id"], seed_event=event,
-                              history_revisions=store._history_revisions(seed["id"], recover=False))
-            if item["status"] == "blocked" and (item.get("wait") or {}).get("kind") in ("ci", "publication_ci"):
-                yield item
+    for item in store.current_items(statuses=("blocked",)):
+        if (item.get("wait") or {}).get("kind") in ("ci", "publication_ci"):
+            yield item
 
 
 def _path(store, item, suffix="result"):
@@ -519,7 +515,7 @@ def _selected(context, tokens):
         envelope, _ = shared.get(entry.record_id, expected_digest=entry.record_digest)
         store = context.project.work_items
         item_id = envelope["subject"]["work_item"]
-        item = store._get(item_id, history_revisions=store._history_revisions(item_id, recover=False))
+        item = store.current(item_id)
         if (item["status"] != "blocked" or item["holder"] != context.role.name
                 or item["rev"] != envelope["subject"]["rev"]
                 or (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci")):
@@ -662,8 +658,7 @@ def poll(config, project, state, *, now, interval, reader=None):
                 if rows is None:
                     continue
                 with lock(project.root / "locks" / "insights.lock"):
-                    current = project.work_items._get(item["id"], history_revisions=
-                        project.work_items._history_revisions(item["id"], recover=False))
+                    current = project.work_items.current(item["id"])
                     if current != item or _evidence(project.work_items, current) is not None:
                         continue
                     if _candidate_wait(project.work_items, current["wait"], candidate) != wait:

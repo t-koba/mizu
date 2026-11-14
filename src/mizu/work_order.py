@@ -604,10 +604,7 @@ def status_for_project(project, *, role_name: str | None = None) -> dict:
 def _is_actionable_locked(project, role_name: str, item_id: str, published_snapshot) -> bool:
     """Locked ready check mirroring page_ready holder/wait policy."""
     store = project.work_items
-    revisions = store._recover_temporary_writes(item_id)
-    if revisions is None:
-        raise Denied("Unknown work-order item")
-    item = store._get(item_id, history_revisions=revisions)
+    item = store.current(item_id)
     status = item.get("status")
     if status not in ("open", "doing", "blocked"):
         return False

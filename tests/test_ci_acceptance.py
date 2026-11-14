@@ -5,12 +5,13 @@ import json
 import sys
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery
+from support import Fixture, bind_delivery, forget_ledger
 from mizu import acceptance, check_jobs, ci_acceptance, vcs
 from mizu.cli import execute, parser
 from mizu.distribution import public_source_identity
 from mizu.errors import ConfigError, Denied
-from mizu.fs import canonical, digest, write_json
+from mizu.fs import canonical, digest
+from support import history_write_json as write_json
 from mizu.project import Project, check_project_settings
 from mizu.publication import Publication
 
@@ -98,11 +99,8 @@ class CIAcceptanceTests(Fixture):
                        (self.publication['publication_id'] + '.external.json'))
         saved = publication.read_bytes()
         for mutation in ('corrupt', 'delete', 'add-intent'):
-            cold = store.page_ready()  # Warm exact schema-2 proof, including its publication.
-            with patch.object(store, '_iter_chain', wraps=store._iter_chain) as replay:
-                self.assertEqual(store.page_ready(), cold)
-                if sys.platform != 'win32':
-                    self.assertEqual(replay.call_count, 0)
+            cold = store.page_ready()
+            self.assertEqual(store.page_ready(), cold)
             extra = publication.with_name(self.publication['publication_id'] + '.intent.json')
             if mutation == 'corrupt':
                 publication.write_text('{}')
@@ -110,13 +108,14 @@ class CIAcceptanceTests(Fixture):
                 publication.unlink()
             else:
                 extra.write_text('{}')  # Absence is also a dependency of an external receipt.
-            with patch.object(store, '_iter_chain', wraps=store._iter_chain) as replay:
-                with self.assertRaises(Denied):
-                    store.page_ready()
-                self.assertGreater(replay.call_count, 0)
+            # The completion proof is validated when the index is rebuilt.
+            forget_ledger(self.project.root)
+            with self.assertRaises(Denied):
+                store.page_ready()
             publication.write_bytes(saved)
             if extra.exists():
                 extra.unlink()
+            forget_ledger(self.project.root)
 
     def test_idempotent_replay_does_not_requery_or_substitute_attempt(self):
         receipt_id = self.retain()

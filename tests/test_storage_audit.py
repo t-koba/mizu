@@ -7,9 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
-from support import Fixture, bind_delivery
+from support import Fixture, bind_delivery, forget_ledger
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import canonical, digest, safe_read_stream, write_json
+from mizu.fs import canonical, digest, safe_read_stream
+from support import history_write_json as write_json
+from mizu import fs
 from mizu.snapshot_manifest import decoded_path_limit, file_member_limit, read_manifest
 from mizu.storage import (_AUDIT_JSON_BYTES,
                           _session_accounting, audit, reclaim)
@@ -118,7 +120,8 @@ class StorageAuditTests(Fixture):
                  "run": "synthetic-run", "created_at": "2024-01-01T00:00:00+00:00"}
         history = self.project.root / "decision-history" / f"{event_id}.json"
         history.parent.mkdir(parents=True, exist_ok=True)
-        write_json(history, event)
+        # The reconciliation below indexes exactly this event's entry.
+        fs.write_json(history, event)
         record = self.project.work_items.reconcile(
             event_id, expected_action="accept", outcome="drop",
             reason="Synthetic drop for audit coverage", actor="worker")["record"]
@@ -179,14 +182,12 @@ class StorageAuditTests(Fixture):
 
     def test_synthetic_malformed_incomplete_and_unexpected_drop_records_fail_closed(self):
         malformed_dir, _ = self.synthetic_drop(2)
-        (malformed_dir / "legacy.json").write_bytes(b"{not-json")
-
         incomplete_dir, record = self.synthetic_drop(3)
+        unexpected_dir, _ = self.synthetic_drop(4)
+        (malformed_dir / "legacy.json").write_bytes(b"{not-json")
         incomplete = dict(record)
         incomplete.pop("reason")
         write_json(incomplete_dir / "legacy.json", incomplete)
-
-        unexpected_dir, _ = self.synthetic_drop(4)
         temporary = unexpected_dir / ".new-abcdefgh"
         temporary.write_bytes(b"synthetic interrupted append")
         (unexpected_dir / "2.json").write_bytes(b"{}")
@@ -253,6 +254,7 @@ class StorageAuditTests(Fixture):
         temporary = item_dir / ".new-leftover"
         temporary.write_bytes(b"partial")
         self.assertGreater(audit(self.project)["work_item_events_skipped"], 0)
+        forget_ledger(self.project.root)  # A locked rebuild or write recovers it.
         self.assertEqual(self.project.work_items.get(item_id), decision["work_item"])
         self.assertFalse(temporary.exists())
         self.assertEqual(audit(self.project)["work_item_events_skipped"], 0)
@@ -278,7 +280,7 @@ class StorageAuditTests(Fixture):
         self.assertIn(item, str(refused.exception))
 
     def test_run_reference_protects_snapshot(self):
-        from mizu.fs import write_json
+        from support import history_write_json as write_json
         run = self.project.root / "runs" / "probe"
         run.mkdir(parents=True)
         captured = self.project.snapshots.capture_files(self.project.workspace)
@@ -396,7 +398,7 @@ class StorageReclaimTests(Fixture):
         self.assertEqual(again["objects"], [])
 
     def test_apply_protects_run_referenced_snapshot(self):
-        from mizu.fs import write_json
+        from support import history_write_json as write_json
         run = self.project.root / "runs" / "probe"
         run.mkdir(parents=True)
         captured = self.project.snapshots.capture_files(self.project.workspace)

@@ -765,50 +765,22 @@ class ProjectImportDiagnosticExportTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
         marker = '      - name: Upload managed-import diagnostic\n'
         parts = workflow.split(marker)
-        self.assertEqual(len(parts), 6,
-                         'expected core-matrix and Windows-3.11–3.14 shard diagnostic blocks')
-        core_upload = parts[1].split('  windows-311-shards:', 1)[0]
-        shard_uploads = (
-            ('3.11', parts[2].split('  windows-311-core:', 1)[0]),
-            ('3.12', parts[3].split('  windows-312-core:', 1)[0]),
-            ('3.13', parts[4].split('  windows-313-core:', 1)[0]),
-            ('3.14', parts[5].split('  windows-314-core:', 1)[0]),
-        )
-        exact_path = ['path: private-validation/project-import-diagnostic.json']
-        # Core matrix cell: Windows-only condition with a per-cell artifact name.
-        self.assertEqual([line.strip() for line in core_upload.splitlines()
+        self.assertEqual(len(parts), 2, 'expected one diagnostic block, in the core job')
+        upload = parts[1].split('  durable-contract:', 1)[0]
+        self.assertEqual([line.strip() for line in upload.splitlines()
                           if line.strip().startswith('if:')],
                          ["if: always() && runner.os == 'Windows'"])
-        core_uses = [line.strip() for line in core_upload.splitlines()
-                     if line.strip().startswith('uses: actions/upload-artifact@')]
-        self.assertEqual(len(core_uses), 1)
-        self.assertRegex(core_uses[0], UPLOAD_ARTIFACT_USE)
-        self.assertEqual([line.strip() for line in core_upload.splitlines() if 'path:' in line],
-                         exact_path)
-        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}',
-                      core_upload)
-        for version in ('3.11', '3.12', '3.13', '3.14'):
-            self.assertNotIn(f'project-import-diagnostic-windows-latest-{version}-shard',
-                             core_upload)
-        self.assertIn('retention-days: 7', core_upload)
-        self.assertIn('if-no-files-found: ignore', core_upload)
-        for version, shard_upload in shard_uploads:
-            with self.subTest(version=version):
-                # Shard jobs run on Windows, so use bare always() and distinct names.
-                self.assertEqual([line.strip() for line in shard_upload.splitlines()
-                                  if line.strip().startswith('if:')], ['if: always()'])
-                shard_uses = [line.strip() for line in shard_upload.splitlines()
-                              if line.strip().startswith('uses: actions/upload-artifact@')]
-                self.assertEqual(len(shard_uses), 1)
-                self.assertRegex(shard_uses[0], UPLOAD_ARTIFACT_USE)
-                self.assertEqual([line.strip() for line in shard_upload.splitlines()
-                                  if 'path:' in line], exact_path)
-                artifact = (f'name: project-import-diagnostic-windows-latest-{version}'
-                            '-shard-${{ matrix.shard }}')
-                self.assertIn(artifact, shard_upload)
-                self.assertNotIn('${{ matrix.os }}', shard_upload)
-                self.assertIn('retention-days: 7', shard_upload)
-                self.assertIn('if-no-files-found: ignore', shard_upload)
+        uses = [line.strip() for line in upload.splitlines()
+                if line.strip().startswith('uses: actions/upload-artifact@')]
+        self.assertEqual(len(uses), 1)
+        self.assertRegex(uses[0], UPLOAD_ARTIFACT_USE)
+        self.assertEqual([line.strip() for line in upload.splitlines() if 'path:' in line],
+                         ['path: private-validation/project-import-diagnostic.json'])
+        # Shards of one cell must not overwrite each other's artifact.
+        self.assertIn('name: project-import-diagnostic-${{ matrix.os }}-${{ matrix.python }}'
+                      "${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}", upload)
+        self.assertIn('retention-days: 7', upload)
+        self.assertIn('if-no-files-found: ignore', upload)
 
 
 class UnittestFailureSummaryTests(unittest.TestCase):
@@ -2219,11 +2191,11 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn('--test-timings private-validation/test-timings.json', workflow)
         # Every cell collects the evidence, so each supported host's suite
         # cost is measured where it runs.
-        # Core matrix, Windows/3.11–3.14 shard matrices, and the
-        # authoritative durable job each collect timing evidence.
-        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 6)
-        # One artifact per cell, each named for its own cell.
-        self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}', workflow)
+        # The core matrix and the authoritative durable job each collect timing evidence.
+        self.assertEqual(workflow.count('--test-timings private-validation/test-timings.json'), 2)
+        # One artifact per cell (and shard), each named for its own cell.
+        self.assertIn('name: test-timings-${{ matrix.os }}-${{ matrix.python }}'
+                      "${{ matrix.shard && format('-shard-{0}', matrix.shard) || '' }}", workflow)
         self.assertIn('name: test-timings-durable', workflow)
         upload = workflow.split('name: Upload per-test timings', 1)[1].split('      - name:', 1)[0]
         self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith('path:')],
@@ -2235,9 +2207,8 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Do not upload offline reports, which may contain diagnostics.
         self.assertNotIn('path: private-validation/offline.json', workflow)
         self.assertNotIn('path: private-validation/durable.json', workflow)
-        # Timing stays diagnostic; the 60-minute/1800-second scope is
-        # enforced while the always-uploaded artifact preserves partial progress.
-        self.assertIn('1,800 s child', workflow)
+        # Timing stays diagnostic; the job scope is enforced while the
+        # always-uploaded artifact preserves partial progress.
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
         self.assertEqual(CHECK._unittest_timeout_seconds(), 1800)
 
@@ -2257,8 +2228,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         # Two runs on one cell would exceed that cell's job budget and
         # lose the timing evidence it exists for.
         self.assertIsNone(condition(gate))
-        # One declaration for the normal matrix and one in each Windows shard job.
-        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 5)
+        self.assertEqual(workflow.count('name: Offline core and transport contracts'), 1)
         self.assertIn('--test-timings private-validation/test-timings.json', gate)
 
     def test_timings_artifact_survives_timeout_with_only_evidence(self):
@@ -2527,11 +2497,14 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
 
     def test_matrix_scope_timeouts_gates_and_jobs_preserved(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
-        # The 3x4 matrix, timeouts, installer step, and durable job are preserved.
-        self.assertIn('os: [ubuntu-24.04, macos-latest, windows-latest]', workflow)
+        # Linux runs every Python; macOS and Windows run the oldest once.
+        self.assertIn('os: [ubuntu-24.04]', workflow)
         self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', workflow)
+        self.assertIn('- os: macos-latest\n            python: "3.14"', workflow)
+        self.assertIn('- os: windows-latest\n            python: "3.14"\n            shard: "0"', workflow)
+        self.assertIn('- os: windows-latest\n            python: "3.14"\n            shard: "1"', workflow)
         self.assertIn(CORE_SCOPE_EXPRESSION, workflow)
-        self.assertIn('run: python scripts/check.py --report private-validation/offline.json', workflow)
+        self.assertIn('--report private-validation/offline.json', workflow)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
         self.assertIn('run: ./scripts/test-install.sh private-validation/offline.json', workflow)

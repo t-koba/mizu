@@ -47,13 +47,19 @@ if (process.argv.includes('--check-contract')) {
   const authority = cfg.reselection ? modelAuthority() : null;
   const meter = meterRuntime(modelRuntime, bridge, undefined, model => authority?.check(model));
   if (cfg.resources.some(r => !['extension','skill','prompt','theme'].includes(r.kind))) throw new Error('Unsupported Pi resource kind');
-  const factories = [{ name: 'mizu', factory: pi => register(pi, bridge, { requireAuthority: true, authoritySections: cfg.authority_sections }) }];
+  const factories = [{ name: 'mizu', factory: pi => register(pi, bridge, { requireAuthority: true, authoritySections: cfg.authority_sections, systemCwd: cfg.promptCwd }) }];
   if (cfg.options.codemode) factories.push({ name: 'codemode', factory: createCodemodeExtension(), builtin: true });
   if (cfg.options.toolSearch) factories.push({ name: 'tool-search', factory: createToolSearchExtension(), builtin: true });
   if (Object.keys(cfg.mcp_servers).length) factories.push({ name: 'mcp', builtin: true,
     factory: createMcpExtension({ loadConfig: () => ({ servers: Object.entries(cfg.mcp_servers).map(([name, config]) =>
       ({ name, config, source: 'mizu-profile', scope: 'extension' })), errors: [], autoEnableCodemode: Boolean(cfg.options.codemode) }) }) });
-  const manager = cfg.resume ? SessionManager.open(cfg.resume, cfg.sessionDir, cfg.cwd) : SessionManager.create(cfg.cwd, cfg.sessionDir);
+  // The SDK sends its session id as the provider prompt_cache_key and names the
+  // transcript file after it. cacheKey (a digest stable per project, role,
+  // profile and model) makes units that share a prefix share one cache
+  // partition; each unit still has its own session directory and file, and a
+  // resumed session keeps the id of its file.
+  const manager = cfg.resume ? SessionManager.open(cfg.resume, cfg.sessionDir, cfg.cwd)
+    : SessionManager.create(cfg.cwd, cfg.sessionDir, cfg.cacheKey ? { id: cfg.cacheKey } : undefined);
   const runtime = await createAgentSessionRuntime(async ({ cwd, agentDir, sessionManager }) => {
     const settingsManager = SettingsManager.inMemory(cfg.options.settings ?? {});
     const paths = kind => cfg.resources.filter(r => r.kind === kind).map(r => r.path);

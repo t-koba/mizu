@@ -187,8 +187,7 @@ def finish_only_rates(project, *, as_of=None) -> dict:
         used_bytes += allowance
         raw = safe_read(project.root, name, allowance)
         used_bytes -= allowance - len(raw)
-        loads_finite(raw)
-        value = json.loads(raw, object_pairs_hook=unique_object)
+        value = loads_finite(raw, object_pairs_hook=unique_object)
         if not isinstance(value, dict):
             raise ValueError("not an object")
         return value
@@ -212,112 +211,125 @@ def finish_only_rates(project, *, as_of=None) -> dict:
         runs = project.root / "runs"
         if not real_dir(runs):
             raise OSError("unsafe runs directory")
-        with os.scandir(runs) as entries:
-            for entry in entries:
-                if scanned >= rate_run_limit or used_bytes >= MAX_RATE_BYTES:
-                    issue("scan_limit")
-                    break
-                scanned += 1
-                if not real_dir(Path(entry.path)):
-                    issue("unsafe_run_entry")
-                    continue
-                name = entry.name
-                if not ID.fullmatch(name):
-                    issue("invalid_identity")
-                    continue
+        with os.scandir(runs) as scanned_entries:
+            # Newest first by directory change time, which a run advances when
+            # it writes its result: an entry last changed before the window
+            # cannot have finished inside it, so the bound covers the recent
+            # runs rather than an arbitrary sample.
+            entries = []
+            for entry in scanned_entries:
                 try:
-                    record = read(f"runs/{name}/result.json")
-                except (OSError, ValueError, Denied, LimitExceeded, RecursionError) as exc:
-                    # Child records live in consultation/delegation.json, not
-                    # result.json. Only a genuinely absent result may be
-                    # excluded when the stored started identity is internally
-                    # consistent with a child; malformed/unsafe results remain
-                    # incomplete. Local records are not authenticated.
-                    missing_result = (isinstance(exc, FileNotFoundError)
-                                      or isinstance(exc, Denied)
-                                      and isinstance(exc.__cause__, FileNotFoundError))
-                    try:
-                        started = read(f"runs/{name}/started.json")
-                    except (OSError, ValueError, Denied, LimitExceeded, RecursionError):
-                        issue("unavailable_record")
-                        continue
-                    if started.get("run") != name:
-                        issue("invalid_identity")
-                        continue
-                    child_role = started.get("role")
-                    if (not isinstance(child_role, str) or not ID.fullmatch(child_role)
-                            or child_role not in roles):
-                        issue("invalid_identity")
-                        continue
-                    parent = started.get("parent_run")
-                    if parent is None:
-                        issue("unavailable_result", child_role)
-                        continue
-                    if (not isinstance(parent, str) or not ID.fullmatch(parent)
-                            or parent == name):
-                        issue("invalid_identity", child_role)
-                        continue
-                    if not real_dir(runs / parent):
-                        issue("invalid_identity", child_role)
-                        continue
-                    if missing_result:
-                        continue
-                    issue("unavailable_result", child_role)
-                    continue
-                role = record.get("role")
-                if not isinstance(role, str) or not ID.fullmatch(role):
-                    issue("invalid_identity")
-                    continue
-                if role not in roles:
-                    continue
-                if record.get("parent_run") is not None:
-                    issue("invalid_identity", role)
-                    continue
-                if record.get("run") != name:
-                    # A mismatched run id cannot be attributed to this role
-                    # from the untrusted record alone.
-                    issue("invalid_identity")
-                    continue
-                status = record.get("status")
-                if status in ("prepared", "bounded", "interrupted"):
-                    continue
-                if status not in ("completed", "waiting"):
-                    issue("invalid_status", role)
-                    continue
+                    entries.append((entry.stat(follow_symlinks=False).st_mtime, entry))
+                except OSError:
+                    entries.append((float("inf"), entry))
+            entries.sort(key=lambda pair: pair[0], reverse=True)
+        for changed, entry in entries:
+            if changed < start.timestamp():
+                break
+            if scanned >= rate_run_limit or used_bytes >= MAX_RATE_BYTES:
+                issue("scan_limit")
+                break
+            scanned += 1
+            if not real_dir(Path(entry.path)):
+                issue("unsafe_run_entry")
+                continue
+            name = entry.name
+            if not ID.fullmatch(name):
+                issue("invalid_identity")
+                continue
+            try:
+                record = read(f"runs/{name}/result.json")
+            except (OSError, ValueError, Denied, LimitExceeded, RecursionError) as exc:
+                # Child records live in consultation/delegation.json, not
+                # result.json. Only a genuinely absent result may be
+                # excluded when the stored started identity is internally
+                # consistent with a child; malformed/unsafe results remain
+                # incomplete. Local records are not authenticated.
+                missing_result = (isinstance(exc, FileNotFoundError)
+                                  or isinstance(exc, Denied)
+                                  and isinstance(exc.__cause__, FileNotFoundError))
                 try:
                     started = read(f"runs/{name}/started.json")
                 except (OSError, ValueError, Denied, LimitExceeded, RecursionError):
-                    issue("unavailable_record", role)
+                    issue("unavailable_record")
                     continue
-                if started.get("run") != name or started.get("role") != role:
-                    # Conflicting role/run identities are unattributable.
+                if started.get("run") != name:
                     issue("invalid_identity")
                     continue
-                if started.get("parent_run") is not None:
-                    issue("invalid_identity", role)
+                child_role = started.get("role")
+                if (not isinstance(child_role, str) or not ID.fullmatch(child_role)
+                        or child_role not in roles):
+                    issue("invalid_identity")
                     continue
-                try:
-                    stamp = record["finished_at"]
-                    if not isinstance(stamp, str) or len(stamp) > 64:
-                        raise ValueError("invalid time")
-                    finished = dt.datetime.fromisoformat(stamp)
-                    if finished.tzinfo is None or finished.utcoffset() is None:
-                        raise ValueError("naive time")
-                except (KeyError, ValueError, TypeError):
-                    issue("invalid_finished_at", role)
+                parent = started.get("parent_run")
+                if parent is None:
+                    issue("unavailable_result", child_role)
                     continue
-                if not start <= finished < end:
+                if (not isinstance(parent, str) or not ID.fullmatch(parent)
+                        or parent == name):
+                    issue("invalid_identity", child_role)
                     continue
-                row = roles[role]
-                row["completed_units"] += 1
-                if (any(record.get(key) is not False for key in ("truncated", "incomplete") if key in record)
-                        or not activity_valid(record.get("activity"))):
-                    issue("incomplete_activity", role)
+                if not real_dir(runs / parent):
+                    issue("invalid_identity", child_role)
                     continue
-                counts = record["activity"]["counts"]
-                if not any(key.startswith("tool_call:") and key != "tool_call:finish" and value > 0
-                           for key, value in counts.items()):
-                    row["finish_only_units"] += 1
+                if missing_result:
+                    continue
+                issue("unavailable_result", child_role)
+                continue
+            role = record.get("role")
+            if not isinstance(role, str) or not ID.fullmatch(role):
+                issue("invalid_identity")
+                continue
+            if role not in roles:
+                continue
+            if record.get("parent_run") is not None:
+                issue("invalid_identity", role)
+                continue
+            if record.get("run") != name:
+                # A mismatched run id cannot be attributed to this role
+                # from the untrusted record alone.
+                issue("invalid_identity")
+                continue
+            status = record.get("status")
+            if status in ("prepared", "bounded", "interrupted"):
+                continue
+            if status not in ("completed", "waiting"):
+                issue("invalid_status", role)
+                continue
+            try:
+                started = read(f"runs/{name}/started.json")
+            except (OSError, ValueError, Denied, LimitExceeded, RecursionError):
+                issue("unavailable_record", role)
+                continue
+            if started.get("run") != name or started.get("role") != role:
+                # Conflicting role/run identities are unattributable.
+                issue("invalid_identity")
+                continue
+            if started.get("parent_run") is not None:
+                issue("invalid_identity", role)
+                continue
+            try:
+                stamp = record["finished_at"]
+                if not isinstance(stamp, str) or len(stamp) > 64:
+                    raise ValueError("invalid time")
+                finished = dt.datetime.fromisoformat(stamp)
+                if finished.tzinfo is None or finished.utcoffset() is None:
+                    raise ValueError("naive time")
+            except (KeyError, ValueError, TypeError):
+                issue("invalid_finished_at", role)
+                continue
+            if not start <= finished < end:
+                continue
+            row = roles[role]
+            row["completed_units"] += 1
+            if (any(record.get(key) is not False for key in ("truncated", "incomplete") if key in record)
+                    or not activity_valid(record.get("activity"))):
+                issue("incomplete_activity", role)
+                continue
+            counts = record["activity"]["counts"]
+            if not any(key.startswith("tool_call:") and key != "tool_call:finish" and value > 0
+                       for key, value in counts.items()):
+                row["finish_only_units"] += 1
     except OSError:
         issue("unavailable_runs")
 

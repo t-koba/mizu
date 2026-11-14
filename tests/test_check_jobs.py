@@ -10,7 +10,8 @@ from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
 from mizu.errors import Busy, Denied
-from mizu.fs import held, lock, read_json, write_json
+from mizu.fs import held, lock, read_json
+from support import forget_ledger, history_write_json as write_json
 from mizu.process import Result
 from mizu.sandbox import cleanup
 
@@ -474,12 +475,12 @@ class JobTests(Fixture):
         record = read_json(path); record['status'] = 'running'; write_json(path, record)
         check_jobs.cancel(ctx, job['id'])
         check_jobs.acknowledge(self.project, 'worker', {job['id']})
-        with patch('pathlib.Path.glob', return_value=[path] * 1024):
+        with self.capped():
             with self.assertRaises(Busy):
                 check_jobs._make_room(self.project)
         self.assertTrue(path.exists())
         record = read_json(path); record['status'] = 'cancelled'; write_json(path, record)
-        with patch('pathlib.Path.glob', return_value=[path] * 1024):
+        with self.capped():
             check_jobs._make_room(self.project)
         self.assertFalse(path.exists())
 
@@ -2052,6 +2053,7 @@ class CacheInputTests(Fixture):
             first = check_jobs.submit(ctx)
             path = check_jobs.root(self.project) / first['id'] / 'job.json'
             path.write_text('{invalid')
+            forget_ledger(self.project.root)
             with self.assertRaises(Denied):
                 check_jobs.submit(ctx, fresh=True)
 
@@ -3023,6 +3025,7 @@ class TerminalResultWakeTests(Fixture):
             self.mark(job, role='reviewer')
         path = check_jobs.root(self.project) / job['id'] / 'wake.json'
         path.write_text('not JSON')
+        forget_ledger(self.project.root)
         self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
         ctx = self.context()
         self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'completed')

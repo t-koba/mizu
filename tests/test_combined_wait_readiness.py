@@ -6,7 +6,8 @@ from support import Fixture, bind_delivery
 from mizu import ci_waits, proposal_waits, vcs
 from mizu.distribution import public_source_identity
 from mizu.errors import Denied
-from mizu.fs import read_json, write_json
+from mizu.fs import read_json
+from support import history_write_json as write_json
 from mizu.platform import IS_WINDOWS
 from mizu.project import Project
 from mizu.publication import Publication
@@ -99,65 +100,6 @@ class CombinedWaitReadinessTests(CombinedFixture):
             seed["id"], expected_rev=3, status="blocked", actor="worker",
             wait=self.ci_wait)
 
-    def test_readiness_cache_behavior_matches_platform_and_invalidates_on_change(self):
-        self._delivered_ci_wait("warm-proof")
-        self.store._projection_cache.clear()
-        with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay, \
-             patch.object(self.project.snapshots, "validate_manifest",
-                          wraps=self.project.snapshots.validate_manifest) as manifest:
-            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-            self.assertEqual(replay.call_count, 1)
-            self.assertGreater(manifest.call_count, 0)
-            replay.reset_mock()
-            manifest.reset_mock()
-            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-            if IS_WINDOWS:
-                # Windows intentionally bypasses the local metadata cache.
-                self.assertEqual(replay.call_count, 1)
-                self.assertGreater(manifest.call_count, 0)
-            else:
-                self.assertEqual(replay.call_count, 0)
-                self.assertEqual(manifest.call_count, 0)
-
-            self._delivered_ci_wait("changed-proof")
-            replay.reset_mock()
-            manifest.reset_mock()
-            self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-            # POSIX replays only the new chain; Windows deliberately replays
-            # both chains because its metadata-cache fast path is disabled.
-            self.assertEqual(replay.call_count, 2 if IS_WINDOWS else 1)
-            self.assertGreater(manifest.call_count, 0)
-
-            manifest_path = (self.project.root / "snapshots" /
-                             f"{self.project.snapshots.get()['id']}.json")
-            manifest_path.write_text("{corrupt\n")
-            replay.reset_mock()
-            with self.assertRaises((Denied, ValueError)):
-                _receipt_wait_due(self.store, "worker", limit=1)
-            self.assertEqual(replay.call_count, 1)
-
-    def test_readiness_projection_reuses_stronger_status_cache_and_invalidates(self):
-        if IS_WINDOWS:
-            self.skipTest("POSIX metadata cache")
-        item = self._delivered_ci_wait("cross-mode-proof")
-        self.store._projection_cache.clear()
-        writers = {name for name in self.project.roles
-                   if self.project.config.roles[name].workspace == "write"}
-        self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-        cached = self.store._projection_cache[item["id"]]
-        self.assertEqual(cached[0][2], "readiness-full-history")
-        with patch.object(self.store, "_sidecar_load", wraps=self.store._sidecar_load) as sidecar:
-            status = self.store.open_state_readonly(limit=10, writer_roles=writers)
-            self.assertEqual(sidecar.call_count, 0)
-        self.assertTrue(status["blocked_work"]["coverage_complete"])
-        self.assertIn(item["id"], [row["id"] for row in status["blocked_work"]["items"]])
-
-        history = self.project.root / "work-items" / item["id"] / "3.json"
-        history.write_text("{}")
-        status = self.store.open_state_readonly(limit=10, writer_roles=writers)
-        self.assertFalse(status["blocked_work"]["coverage_complete"])
-        self.assertEqual(status["blocked_work"]["diagnostic"], "unreadable")
-
     def test_readiness_reuse_preserves_legacy_blocked_wait_age(self):
         item = self.block_ci("legacy-blocked-age")
         history = self.project.root / "work-items" / item["id"] / f"{item['rev']}.json"
@@ -177,26 +119,6 @@ class CombinedWaitReadinessTests(CombinedFixture):
 
         self.assertEqual((after["blocked_since"], after["blocked_age_seconds"], after["state"]),
                          (before["blocked_since"], before["blocked_age_seconds"], before["state"]))
-
-    def test_readiness_cache_is_bound_to_snapshot_policy(self):
-        self._delivered_ci_wait("policy-proof")
-        self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-        original = self.project.snapshots.max_files
-        with patch.object(self.store, "_current_hold", wraps=self.store._current_hold) as replay:
-            self.project.snapshots.max_files = original + 1
-            try:
-                self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-            finally:
-                self.project.snapshots.max_files = original
-            self.assertEqual(replay.call_count, 1)
-
-    def test_readiness_cache_replays_corrupt_transition_history(self):
-        item = self._delivered_ci_wait("corrupt-history")
-        self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
-        history = self.project.root / "work-items" / item["id"] / "3.json"
-        history.write_text("{}")
-        with self.assertRaises((Denied, ValueError)):
-            _receipt_wait_due(self.store, "worker", limit=1)
 
     def test_ci_positive_plus_proposal_corruption_returns_true(self):
         ci_item = self.block_ci("ci-good")
@@ -283,18 +205,14 @@ class CombinedWaitReadinessTests(CombinedFixture):
     def test_late_inventory_failure_after_candidate_still_raises(self):
         item = self.block_ci("late-good")
         self.assertEqual(self.ci_poll()["observed"], 1)
-        original = self.store._iter_item_events_with_revisions
+        original = self.store.current_items
 
-        def fail_late(*, recover, cache=False, with_identity=False):
-            yielded = False
-            for row in original(recover=recover, cache=cache, with_identity=with_identity):
+        def fail_late(**kwargs):
+            for row in original(**kwargs):
                 yield row
-                if not yielded:
-                    yielded = True
-                    raise Denied("late inventory failure")
+                raise Denied("late inventory failure")
 
-        with patch.object(self.store, "_iter_item_events_with_revisions",
-                          side_effect=fail_late):
+        with patch.object(self.store, "current_items", side_effect=fail_late):
             with self.assertRaises(Denied):
                 _receipt_wait_due(self.store, "worker", limit=1)
 
@@ -388,25 +306,3 @@ class CombinedWaitReadinessTests(CombinedFixture):
         after = sorted(p.relative_to(self.project.root)
                        for p in self.project.root.rglob("*") if p.is_file())
         self.assertEqual(before, after)
-
-    def test_exactly_one_traversal_and_ready_work_unchanged(self):
-        self.block_ci("count-me")
-        self.assertEqual(self.ci_poll()["observed"], 1)
-        ready_before = self.store.page_ready(limit=1)
-        self.assertGreaterEqual(ready_before["total"], 0)
-        original = self.store._iter_item_events_with_revisions
-        calls = {"n": 0}
-
-        def counting(*, recover, cache=False, with_identity=False):
-            calls["n"] += 1
-            yield from original(recover=recover, cache=cache, with_identity=with_identity)
-
-        with patch.object(self.store, "_iter_item_events_with_revisions",
-                          side_effect=counting):
-            with patch.object(self.store, "page_ready",
-                              side_effect=AssertionError("ready-work separate")):
-                self.assertTrue(_receipt_wait_due(self.store, "worker", limit=1))
-        self.assertEqual(calls["n"], 1)
-        # Ready-work validation still runs on its own path with recovery.
-        ready_after = self.store.page_ready(limit=1)
-        self.assertEqual(ready_before["signature"], ready_after["signature"])

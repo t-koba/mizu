@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import dataclasses
 import json
 import os
@@ -35,6 +36,49 @@ def write_fixture_json(path: Path, value: object) -> None:
     """Write an exclusive JSON fixture without exercising production durability."""
     with path.open("xb") as stream:
         stream.write(canonical(value))
+
+
+def forget_ledger(root: Path) -> None:
+    """Drop the derived work-item index after a fixture edits history files directly.
+
+    Product writes keep the index current; history written or changed outside
+    them is only seen after a rebuild, which validates every chain again.
+    """
+    from mizu.ledger import NAME
+    for suffix in ("", "-wal", "-shm"):
+        (Path(root) / (NAME + suffix)).unlink(missing_ok=True)
+
+
+def history_write_json(path, value, **kwargs):
+    """Write a record outside the product's writers, as an older release or an edit would.
+
+    The project's derived index is dropped so the next read rebuilds it from
+    the files and validates them again.
+    """
+    from mizu.fs import write_json
+    from mizu.ledger import NAME
+    write_json(path, value, **kwargs)
+    for ancestor in Path(path).parents:
+        if (ancestor / NAME).exists():
+            forget_ledger(ancestor)
+
+
+def index_items(root, items, *, replace=False):
+    """Put synthetic current records straight into the derived index (scale tests)."""
+    import sqlite3
+    from mizu.ledger import NAME
+    from mizu.work_item_index import COLUMNS
+    from mizu.work_items import _timestamp_order
+    rows = [(item["id"], item["rev"], item["status"], item["holder"],
+             _timestamp_order(item["created_at"]), _timestamp_order(item["updated_at"]),
+             (item["origin"] or {}).get("insight_id"), (item["origin"] or {}).get("rev"),
+             (item.get("wait") or {}).get("kind"), None, item.get("blocked_since"), None,
+             canonical(item).decode()) for item in items]
+    with contextlib.closing(sqlite3.connect(Path(root) / NAME)) as db, db:
+        if replace:
+            db.execute("DELETE FROM items")
+        db.executemany(f"INSERT OR REPLACE INTO items({', '.join(COLUMNS)}) "
+                       f"VALUES ({', '.join('?' * len(COLUMNS))})", rows)
 
 
 def without_blocked_age(value):
@@ -124,6 +168,18 @@ def set_project_target(fixture, target):
 
 
 class Fixture(unittest.TestCase):
+    @contextlib.contextmanager
+    def capped(self, retained=1):
+        """Run with the retained check-job cap lowered, so eviction is needed."""
+        import dataclasses
+        original = self.project.config
+        self.project.config = dataclasses.replace(
+            original, limits=dataclasses.replace(original.limits, check_retained=retained))
+        try:
+            yield
+        finally:
+            self.project.config = original
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="mizu-test-")
         self.addCleanup(self.temporary.cleanup)

@@ -395,16 +395,9 @@ unobserved code change where subscribed; generic snapshot wakes and
 progress-only continuation remain outside the event probe. See
 [scheduling](scheduling.md) for the complete ordering.
 
-On local POSIX, readiness reuses a fully validated work-item projection and
-its referenced snapshot proof on unchanged history, but rechecks the no-follow
-metadata identity of every retained history entry and distinct evidence path
-on each poll. This keeps chain replay and manifest parsing off that path while
-leaving identity-probe I/O proportional to retained paths, not only changed
-state. Windows deliberately bypasses this cache and revalidates the full chain
-and proofs each poll. The per-path checks on cache-enabled systems preserve
-detection of per-file metadata changes in the untrusted local-record model;
-removing them without trusted change-tracking or immutability would weaken
-fail-closed behavior.
+Readiness reads current work-item state from the ledger index (below), so
+a poll costs one indexed query for the blocked items plus the route-owned CI
+and proposal evidence reads; it replays no history and reopens no manifest.
 Legacy snapshots without progress keep their previous admission behavior.
 Schema 1 records the six observed booleans,
 the selected signal names, role ID, aggregate progress boolean, saturated
@@ -612,66 +605,67 @@ substantive decision. Old events are never rewritten.
 `transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
 snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the two
 page modes through the existing `work_items_read` grant and exposes transition
-only through its separately granted operation described below. `get()` and
-the chain replay used by `projection()`, `explain()`, and transition resolve an
-item seed directly from `decision-history/<event-hex>.json` or
-`work-items/<item-id>/create.json`, validating the immutable seed without scanning
-the inbox or wider decision history. Origin staleness separately checks current origin records and any
-legacy decision binding; `page_open()` enumerates decision history and direct
-creation directories to build its inventory with O(limit) retained rows. The event's title is the immutable title authority, not the
-subsequently revisable insight.
-A read-only open page may reuse a validated sidecar projection stored outside
-`work-items/<id>/` while the canonical seed digest and every entry's metadata
-in that item's directory are unchanged, on local POSIX where ctime is a
-metadata-change witness. The sidecar is a local POSIX metadata-witness fast
-path; the exact history replay is the fallback, and Windows bypasses sidecar
-reuse. The sidecar stores full source records (the immutable seed for rev 1,
-otherwise the exact previous and current revision records) and is never
-trusted alone: the stored current is compared byte-for-structure with the
-exact source record at its rev (one revision file read), and the stored
-previous with the seed or its exact source record (one more read at most);
-a retired item also compares the exact retirement file. The exact source
-records are revalidated with the same seed/transition checks as a status-only
-read, including the recorded delivery and scope fields. For a nonterminal
-item, a valid sidecar hit does not reopen the referenced snapshot manifest;
-the delivery relationship was checked when the binding was written. A
-completed sidecar hit still revalidates its exact current delivery manifest
-and any retained acceptance receipt before the item is treated as closed;
-transitions to done also validate the exact snapshot and completion proof. A
-miss or stale sidecar takes exact replay, which rechecks the current delivery
-against the snapshot. The returned
-item is derived via the existing retirement projection. Normal terminal and retired
-items retain their sidecar, so both the open/status scan and the closed page
-classify them without replaying closed history. Origin staleness and hold
-state are recomputed on every call. The identity
-is sampled with the revision read; a post-replay mismatch is a concurrent
-append and is never cached. Any missing, malformed, unsafe, stale or
-mismatched sidecar, a changed seed, a new or changed revision, a non-regular
-entry or any unexpected directory shape bypasses the reuse and runs the
-complete chain validation. A continued doing-to-doing revision removes its
-sidecar: the earlier hold start is not present in the current and previous
-source records, so the page stays on exact replay rather than inventing a
-doing age. The locked recovery path never uses this read-only
-sidecar. Direct-seed reuse likewise rechecks the legacy sidecar and the
-decision-history ID collision on every lookup, so a conflicting source added
-after a cache warm still fails closed. Legacy items without a sidecar keep
-using exact replay; the read-only CLI default never writes, while the explicit
-`mizu work-items --backfill N` maintenance variant takes the record lock and
-builds at most N missing terminal or nonterminal sidecars from their exact
-source records.
+only through its separately granted operation described below. Other modules
+use only the public seams `current`, `current_items`, `unseeded_decisions`,
+`closed_items`, `history`, `committing` and `audit`. The event's title is the
+immutable title authority, not the subsequently revisable insight.
 
-On Windows the bypass is deliberate, not a missing cache: directory metadata
-is not a trustworthy invalidation witness there, so every current-state reader
-uses the exact-chain reader. With the Windows branch forced on the development
-host, a synthetic 100-item ledger measured 0.24-0.28 s per status, page,
-blocked-state or prompt reader at 575 retained revisions and 0.33-0.40 s at
-1,575 revisions (experiment `c8179ef08d14482aa79ed41318affb92`). The cost is
-linear in retained revisions; each item's history is bounded by the
-256-revision chain limit, the configured open-work cap bounds newly seeded
-inventory when enabled, and the 100-row page limit bounds returned rows rather
-than the scan. The `WorkItems` exact-chain readers own this platform trade-off.
-The sample is a synthetic forced-branch measurement, not a native Windows
-performance claim.
+### Current-state index
+
+The revision files, the inbox and the decision files are the durable history.
+The index has two domains with separate tables, schema numbers and build
+state: work items (below) and insights. The insight domain holds `insights`
+(one row per known insight: the live inbox record with its source, kind,
+addressee, creation time, content identity and exact record, or the newest
+archived revision; unreadable inbox files are rows marked invalid) and
+`decisions` (one row per current decision pointer, marked valid when readable
+with a known action and revision, and linked when it also has the full
+persisted shape and equals its immutable `decision-history` event). The inbox
+generation is a digest of an epoch (the contents at build time) and a
+sequence that advances in the transaction of each write that changes a live
+record's content identity. Writes (`submit`, `revise`, `attach_evidence`,
+`decide`, `withdraw`, archival) use the same intent, file, replay protocol with
+keys `i:ID` and `d:ID`. Counts, listings, pages, `scan_source`, the deferral
+gate, origin staleness (a join of items, insights and decisions) and event
+origin routing are indexed queries; fail-closed readers refuse while an
+invalid row exists.
+
+The revision files are the durable, append-only history. Current state is read
+only from the per-project ledger index `ledger.sqlite3` in the project root
+(stdlib SQLite, WAL journal, `synchronous=FULL`, connections opened per
+operation with the configured lock timeout as busy timeout). Its `items` table
+holds one row per seeded item: ID, revision, status, holder, creation and
+update order keys, origin insight and revision, wait kind, the derived doing
+start and blocked start, the task decision that carries a task seed, and the
+complete current record. `unseeded` lists legacy accept/modify decisions that
+no reconciliation resolved; `meta` holds the schema version and whether the
+build completed; `intents` holds announced writes. Page, count, readiness,
+closed, event and wait reads are indexed queries; origin staleness, hold ages
+and wait liveness are still computed from the current record on every read.
+
+Every commit of a work-item record (direct creation, decision seeding,
+legacy reconciliation, transition, wait resolution, retirement) runs inside
+`WorkItems.committing(ids)` under the record lock: it commits an intent row,
+the caller writes its file, and the named items are then replayed once from
+their files, with full chain validation, into their rows while the intents are
+removed in the same transaction. Invariant: an item without an intent row has
+the row its committed files replay to. A crash between the steps leaves the
+intent; the next locked use replays exactly those items, and a reader that
+sees an intent replays them into a private in-memory copy, so no read returns
+a state no committed revision had. A missing database, an older schema or an
+interrupted build is rebuilt from the files by the next process that holds the
+record lock (installation needs no step), committing item by item so an
+interrupted build resumes; readers meanwhile build a private in-memory index
+and never write the file. The index is derived: backups exclude it and a
+restored project rebuilds it on first locked use.
+
+Full-chain validation runs when a record is written, when the index is built
+and in `WorkItems.audit` (`mizu work-items PROJECT --audit`), which holds the
+record lock, replays every chain in the strictest mode (every delivery
+manifest, retained receipt and stored wait evidence) and compares the result
+with the index. It reports corrupt chains and divergent rows without changing
+anything; `--repair` rebuilds the index when every chain validates. Reads
+never revalidate history.
 
 Both direct creation and decision seeding call the same lock-held
 `WorkItems.create_seed` preflight: title, optional description and typed origin validation, source/ID
@@ -685,10 +679,10 @@ transaction). Committed retries use a shared storage/chain validator without
 rechecking the live origin. Project wires this service to Insights; standalone
 Insights readers do not instantiate it.
 
-Reads and mutations share `locks/insights.lock` with insight revisions and
-seed creation. A positive non-bool expected revision must match; each change
-exclusively atomically appends the full state to
-`work-items/<item-id>/<next-rev>.json`. There is no mutable index or pointer.
+Mutations share `locks/insights.lock` with insight revisions and seed
+creation. A positive non-bool expected revision must match against a full
+replay of the item's chain; each change exclusively atomically appends the
+full state to `work-items/<item-id>/<next-rev>.json` and updates its index row.
 Reconstruction requires consecutive revisions, with at most 256 revisions
 including the seed and 128 KiB per seed/event record. Every revision states the
 scope in force for the item at that revision: a revision that supplies one sets
@@ -703,8 +697,8 @@ be recorded in an earlier transition. An item whose seed has no scope must recor
 a new closure cannot introduce a scope. Older unmarked history remains readable. The compact page rows
 carry the scope in force as a bounded preview. Unsafe links, unknown IDs,
 malformed/oversized records, gaps and exhausted bounds fail closed; a stale
-CAS writes nothing and must be re-read, not blindly retried. `get()` and
-`transition()` recover under the shared lock by removing only recognized
+CAS writes nothing and must be re-read, not blindly retried. Writes and index
+builds recover under the shared lock by removing only recognized
 regular `.new-<8-char>` atomic-write leftovers; an uncommitted temporary is
 never promoted, and a post-link alias
 is removed only when it matches one committed revision, direct creation record,
@@ -1278,8 +1272,8 @@ runtime adds an optional compact `work_item_status` for the original submitter
 when the current decision is accept/modify and its seeded item (including a
 validated open legacy reconciliation) exists. The projection includes item ID,
 status, revision, holder, update time and current-origin staleness, plus only
-small relevant status details. It reuses WorkItems decision, sidecar and chain
-validation; pending, other decisions, drop-only/unresolved legacy records,
+small relevant status details. It reads the item from the
+ledger index and validates the current decision; pending, other decisions, drop-only/unresolved legacy records,
 other roles and all list paths keep their existing response shape. This is
 observational only: no reconciliation, transition, progress accounting,
 scheduling or wakeup, and it adds no insights/work-item grant. A work-item
@@ -1534,13 +1528,13 @@ command blindly, run `git reset --hard`, or manufacture a successful observation
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
 references, capability-gated pending insights and acceptance commands, the
-always-present bounded `open_work_items` page, then trailing volatile `run`,
+bounded `open_work_items` page for roles holding a work-item capability (`roles.<name>.context_sections` restores or removes optional sections), then trailing volatile `run`,
 `now`, and `timezone` fields so repeated stable content forms a longer cacheable
 prefix); sealing
 is directed by the `finish` tool contract. Each run
 records `prompt_projection.json` with the sent counts (`recent_snapshots`,
 `pending_insights`, `acceptance_commands`) and `prompt_bytes` as evidence for
-reliability review. Its `open_work_items` metadata records only `shown`, `total`,
+reliability review. Its `open_work_items` metadata (null when the role's prompt carries no inventory) records only `shown`, `total`,
 `overflow_count`, `unseeded_decisions`, and `coverage_complete`, never item text.
 All work judgment lives in the role policies under `policies/`. Likewise the `report`
 fallback document (used by `mizu report` with no LLM) and the smoke probe goal

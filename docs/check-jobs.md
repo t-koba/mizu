@@ -202,6 +202,13 @@ one-day maximum caps the configured fallback cadence; a runner that is still
 active can extend the effective recovery time. Operators may choose a faster
 whole-second interval when appropriate. Changing this service policy does not change daemon
 readiness or claim lower idle cost; the default preserves the existing cadence.
+Current job state lives in the project ledger index (`ledger.sqlite3`, domain
+`check_jobs`): one row per entry of `check-jobs/` with the exact record, its
+role, status, acknowledgement and wake marker, and whether its retained
+evidence validated. Records and evidence are validated when a job is written,
+when the index is built and in `mizu work-items PROJECT --audit` (section
+`check_jobs`), never on a read. Runner recovery acts only on jobs whose row
+shows a scope without its receipt; evicting a job directory removes its row.
 Install and enable those units before
 enabling model use of the capability. Other platforms can invoke the same
 bounded command from an operator-managed runner; they do not yet have generated

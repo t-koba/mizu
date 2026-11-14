@@ -8,14 +8,16 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks
+from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks, forget_ledger
 from mizu import fs, insight_archive, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, LimitExceeded, MissingFinish
-from mizu.fs import canonical, digest, lock, read_json, write_json
+from mizu.fs import canonical, digest, lock, read_json
+from support import history_write_json as write_json
 from mizu.runtime import Engine, _role_events_due, prompt_for, prompt_delta_for
 from mizu.services import event_watches, render
+from mizu.platform import IS_WINDOWS
 from mizu.work_items import _timestamp_order
 
 
@@ -66,69 +68,6 @@ class WorkItemEventTests(Fixture):
     def finish(self, ctx, **kwargs):
         return ctx.handle("finish", {"outcome": "wait", "summary": "Handled selected events",
                                      "state": "Continue remaining work", **kwargs})
-
-    def test_closed_pages_validate_current_done_snapshot_not_older_delivery_manifests(self):
-        _, seed = self.seed()
-
-        def published_snapshot(label):
-            captured = self.project.snapshots.capture_files(self.project.workspace)
-            verification = {"passed": True, "code_digest": captured["code_digest"], "run": label}
-            snapshot = self.project.snapshots.create(
-                captured, goal="Goal", state="State", run=label, outcome="done",
-                summary=f"{label} delivery", verification=verification)
-            self.project.snapshots.publish(snapshot)
-            return snapshot
-
-        historical = published_snapshot("historical")
-        bind_delivery(self.project, seed["id"], historical["id"])
-        current = published_snapshot("current")
-        self.store.transition(seed["id"], expected_rev=3, status="doing", actor="worker",
-                              snapshot_id=current["id"])
-        completed = self.store.transition(seed["id"], expected_rev=4, status="done", actor="worker",
-                                          reason="Verified", snapshot_id=current["id"])
-        original_get = self.project.snapshots.get
-
-        with patch.object(self.project.snapshots, "get", wraps=original_get) as get:
-            strict = self.store.get(seed["id"])
-            self.assertEqual(strict, completed)
-            self.assertEqual([call.args[0] for call in get.call_args_list],
-                             [historical["id"], current["id"], current["id"]])
-
-        with patch.object(self.project.snapshots, "get", wraps=original_get) as get:
-            closed = self.store.page_closed_readonly(limit=10)
-            self.assertEqual(closed["total"], 1)
-            self.assertEqual(closed["items"][0]["id"], seed["id"])
-            self.assertEqual(closed["items"][0]["snapshot_id"], current["id"])
-            self.assertEqual([call.args[0] for call in get.call_args_list], [current["id"]])
-
-        with patch.object(self.project.snapshots, "get", wraps=original_get) as get:
-            events_page = events.closed_page(self.store, self.subscribed_config().roles)
-            self.assertEqual(events_page["total"], 1)
-            self.assertEqual(events_page["items"][0]["id"], seed["id"])
-            self.assertEqual([call.args[0] for call in get.call_args_list], [current["id"]])
-
-        with patch.object(self.project.snapshots, "get", side_effect=Denied("current snapshot unavailable")) as get:
-            with self.assertRaisesRegex(Denied, "current snapshot unavailable"):
-                self.store.page_closed_readonly(limit=10)
-            # A terminal sidecar hit may retry the exact validation after the
-            # unavailable snapshot; both attempts name only the current proof.
-            self.assertGreaterEqual(get.call_count, 1)
-            self.assertEqual({call.args[0] for call in get.call_args_list}, {current["id"]})
-        with patch.object(self.project.snapshots, "get", side_effect=Denied("current snapshot unavailable")) as get:
-            with self.assertRaisesRegex(Denied, "current snapshot unavailable"):
-                events.closed_page(self.store, self.subscribed_config().roles)
-            self.assertGreaterEqual(get.call_count, 1)
-            self.assertEqual({call.args[0] for call in get.call_args_list}, {current["id"]})
-
-        # Unused snapshot reads do not weaken the complete structural replay.
-        binding_path = self.project.root / "work-items" / seed["id"] / "3.json"
-        binding = read_json(binding_path)
-        binding["title"] = "Tampered history"
-        write_json(binding_path, binding)
-        with patch.object(self.project.snapshots, "get", side_effect=AssertionError("unused snapshot")) as get:
-            with self.assertRaises(Denied):
-                self.store.page_closed_readonly(limit=10)
-            get.assert_not_called()
 
     def test_explicit_partial_empty_omitted_and_restart_receipts(self):
         from mizu.project import Project
@@ -211,6 +150,7 @@ class WorkItemEventTests(Fixture):
         token = ctx.work_item_events[0]["ack_token"]
         # Current routing/payload changed: retained identity alone is not enough.
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         self.assertNotEqual(self.delivered(sources="any")[0]["ack_token"], token)
         with self.assertRaises(Denied):
             self.finish(ctx, ack_events=[token])
@@ -444,6 +384,7 @@ class WorkItemEventTests(Fixture):
         # Removing the supported origin body is a legacy routing hole, not an
         # invitation to fall back to transition actor (or the identity sidecar).
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         self.assertEqual(self.page()["events"], [])
         self.assertEqual(self.page("worker")["events"], [])
         unknown = self.page("searcher", sources="any")
@@ -465,6 +406,7 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(identity["id"], proposal["id"])
         insight_archive.store(self.project.root, body, {}, identity)
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         self.assertEqual(self.page()["events"], [original])
         events.acknowledge(self.store, "reviewer", [original])
         self.assertEqual(self.page()["acknowledged"], 1)
@@ -847,10 +789,11 @@ class WorkItemEventTests(Fixture):
                                                            status="dropped", actor="worker", reason="Retired"))
         return proposals, decisions, items
 
-    def test_grouped_cli_readers_share_one_scan_with_exact_role_parity(self):
+    def test_grouped_cli_readers_keep_exact_role_parity(self):
         proposals, _, _ = self.grouped_terminal_fixture()
         # Unknown routing is included only by any-source subscribers.
         (self.project.root / "inbox" / f"{proposals[0]['id']}.json").unlink()
+        forget_ledger(self.project.root)
         template = self.config.roles["reviewer"]
         roles = {name: dataclasses.replace(template, work_item_events=actions, work_item_sources=route)
                  for name, actions, route in
@@ -876,29 +819,16 @@ class WorkItemEventTests(Fixture):
                 name: events._received(self.store, name, item) for name in sorted(roles)
                 if payload["type"] in roles[name].work_item_events
                 and (roles[name].work_item_sources == "any" or payload["origin_source"] == name)}
-        original = self.store._iter_decision_events
-        counts = [0, 0]
-        def counted(**kwargs):
-            counts[0] += 1
-            for entry in original(**kwargs):
-                counts[1] += 1
-                yield entry
-        with patch.object(self.store, "_iter_decision_events", side_effect=counted), \
-                patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
+        with patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
                 patch.object(events, "write_json", side_effect=AssertionError("read write")):
             self.assertEqual(events.closed_page(self.store, roles, limit=8), base)
-            self.assertEqual(counts, [1, 28])
             for limit in (1, 4, 8):
-                counts[:] = [0, 0]
                 result = events.progress(self.store, roles, limit=limit)
                 self.assertEqual(result["roles"], expected[:limit])
                 self.assertEqual(result["truncated"], limit < 8)
-                self.assertEqual(counts, [1, 28])
-            counts[:] = [0, 0]
             limited = events.closed_page(self.store, roles, limit=1)
             self.assertEqual(limited["items"], base["items"][:1])
             self.assertEqual((limited["total"], limited["overflow_count"]), (8, 7))
-            self.assertEqual(counts, [1, 28])
 
     def test_shared_cli_scan_still_rejects_source_chain_and_receipt_corruption(self):
         _, decisions, items = self.grouped_terminal_fixture(groups=1, unrelated=0)
@@ -1002,6 +932,7 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {"reviewer": True})
         # Once the submitter is unknown, only any can match (not actor worker).
         (self.project.root / "inbox" / f"{rows[0]['origin']['insight_id']}.json").unlink()
+        forget_ledger(self.project.root)
         output = execute(args)
         self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {})
         self.file.write_text(text.replace('[roles.searcher]\nwork_item_events = ["done"]',
@@ -1065,6 +996,7 @@ class WorkItemEventTests(Fixture):
         self.project.set_control(wake_generation="")  # no pending operator wake
         proposal, _ = self.terminal(source="searcher")
         (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
+        forget_ledger(self.project.root)
         own = Engine(self.subscribed_config(), driver=ScriptDriver(finish_with_event_acks))
         self.assertEqual(own.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
         engine = Engine(self.subscribed_config(work_item_sources="any"), driver=ScriptDriver(finish_with_event_acks))
