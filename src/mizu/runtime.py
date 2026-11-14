@@ -4462,7 +4462,7 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
                         or item["holder"] != role.name or item["wait"]["kind"] != kind):
                     unknown = True
                     continue
-                if ci_waits.evidence(store, item) is not None:
+                if ci_waits.terminal_evidence(store, item) is not None:
                     continue
                 wait = ci_waits._resolved(store, item["wait"])
                 if wait is None:

@@ -455,22 +455,36 @@ def _existing(shared, envelope):
     return None
 
 
-def evidence(store, item, *, sync=False):
-    """Current terminal envelope, independent of notification acknowledgement.
-
-    Callers hold the item lock. Readiness uses the read-only path; delivery
-    also recovers source directory sync and persists the envelope separately.
-    """
+def _terminal_observation(store, item, *, sync=False):
     event = _evidence(store, item, sync=sync)
     if event is None:
         return None
     shared = shared_store(store)
     envelope = _envelope(item, event)
     shared._validate(envelope)
-    existing = _existing(shared, envelope)
-    if existing is _LEGACY_ACKNOWLEDGED:
+    return envelope, _existing(shared, envelope)
+
+
+def terminal_evidence(store, item, *, sync=False):
+    """Current immutable terminal result, whether or not its notice was acked."""
+    observed = _terminal_observation(store, item, sync=sync)
+    if observed is None:
         return None
-    return envelope, existing
+    envelope, existing = observed
+    return envelope, None if existing is _LEGACY_ACKNOWLEDGED else existing
+
+
+def evidence(store, item, *, sync=False):
+    """Current notification candidate, suppressing receipted legacy identity.
+
+    Readiness and delivery use this view to avoid redelivery. Terminal
+    settlement uses :func:`terminal_evidence` so acknowledgement cannot erase
+    the durable CI outcome.
+    """
+    observed = _terminal_observation(store, item, sync=sync)
+    if observed is None or observed[1] is _LEGACY_ACKNOWLEDGED:
+        return None
+    return observed
 
 
 def _shared_ack_corrupt(store, item):

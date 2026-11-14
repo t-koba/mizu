@@ -158,7 +158,7 @@ class CiWaitTests(CiWaitFixture):
         self.assertEqual(live["outcome"], "failure")
         self.assertEqual(set(live["evidence"]), {"record_digest"})
         self.assertLess(len(canonical(live)), 512)
-        with patch("mizu.ci_waits.evidence", side_effect=AssertionError("other holder")):
+        with patch("mizu.ci_waits.terminal_evidence", side_effect=AssertionError("other holder")):
             self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
         context = self.delivery_context()
         self.assertEqual(live["evidence"], {"record_digest": context.wait_events[0]["record_digest"]})
@@ -875,7 +875,7 @@ class PublicationCiWaitTests(CiWaitFixture):
             with self.assertRaisesRegex(Denied, "Reopen"):
                 self.store.transition(item["id"], expected_rev=item["rev"], status="blocked", actor="worker",
                                        wait=self.wait, scope="Rebind", reason="Try again")
-            with patch("mizu.ci_waits.evidence", side_effect=Denied("corrupt exact receipt")):
+            with patch("mizu.ci_waits.terminal_evidence", side_effect=Denied("corrupt exact receipt")):
                 page = self.store.page_ready(role_name="worker")
                 self.assertEqual((page["total"], page["unknown_blocked"]), (0, 1))
         self.assertEqual(self.store.get(item["id"]), item)
@@ -1185,6 +1185,18 @@ class PublicationCiWaitTests(CiWaitFixture):
 
         events, _ = ci_waits.delivery(self.store, "worker")
         self.assertEqual(events, [])
+
+        current = self.store.get(item["id"])
+        self.assertIsNone(ci_waits.evidence(self.store, current, sync=False))
+        terminal = ci_waits.terminal_evidence(self.store, current, sync=False)
+        self.assertIsNotNone(terminal)
+        from mizu.work_item_waits import liveness
+        live = liveness(self.store, current["wait"], self.project.snapshots.get(), item=current)
+        payload = terminal[0]["payload"]
+        expected = (payload["conclusion"] if payload["kind"] == "ci"
+                    else payload["outcome"]["outcome"])
+        self.assertEqual((live["state"], live["reason"], live["outcome"]),
+                         ("terminal", "receipt_route_terminal", expected))
 
     def test_pending_legacy_snapshot_event_is_reissued_with_relation_identity(self):
         item = self.block()
