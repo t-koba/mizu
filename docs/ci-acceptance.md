@@ -16,39 +16,36 @@ request/attempt-bound no-run attestation yields `not_dispatched` with reason
 `pre_dispatch_refusal` or `provider_rejected`. Neither status absence nor a green
 status proves whether a dispatch occurred.
 
-An adapter timeout, interruption or unusable response can leave a valid marker
-with no outcome. `[ci_requests].unknown_after_seconds` is a strict positive
-whole-second integer (1–9223372036854775807), default **86400 (24 hours)**. This
-is a conservative grace period for obtaining exact adapter evidence before
-accepting permanent uncertainty, not a provider deadline or a no-spend claim.
-On an explicit request/replay of that attempt, or an explicit request for its
-immediate successor, Mizu compares the marker's timezone-aware `dispatched_at`
-to the current time. At or beyond the bound, an absent outcome becomes terminal
-`outcome: "unknown"`, reason `dispatch_outcome_timeout`, with empty `runs` (no
-known run IDs, **not** evidence of no spend). It records the applied
-`unknown_after_seconds`, settlement time in `requested_at`, and `dispatch_digest`
-(SHA-256 of canonical marker JSON). Validation checks that binding and elapsed
-bound. Existing outcomes are never overwritten, even after a policy change;
-invalid markers or corrupt outcomes fail closed rather than being replaced.
-Exact valid adapter evidence recorded before settlement remains authoritative.
+An adapter timeout, interruption or unusable response leaves the marker
+unresolved. Repeating `vcs_request` for that exact attempt explicitly queries the
+configured adapter with `op: "reconcile_runs"`, never `request_runs`. The query
+carries the exact `request_id`, `attempt`, `sha` and workflow set. Both runs and
+no-dispatch answers require exact request/attempt echoes. Runs must cover every
+workflow at the marker SHA; no-dispatch preserves the bounded reason above.
+A typed `unknown`, malformed, failed or lost answer leaves the attempt unresolved
+and writes no terminal outcome. Adapter timeout/output bounds and cancellation
+apply. There is no background query, automatic retry, provider-absence inference
+or elapsed-time settlement. Only a durable `not_dispatched` result permits an
+explicit next numbered attempt; a query never authorizes redispatch by itself.
 
-Read-only daily/cost views and status polling never settle markers. There is no
-background retry, provider-absence inference, deletion or TTL. All marker and
-outcome evidence is retained. Daily rows distinguish `unresolved`, `unknown`,
-`not_dispatched` and `resolved`, dated by the original dispatch UTC day.
+Legacy `outcome: "unknown"`, reason `dispatch_outcome_timeout`, remains validated
+against its original marker digest, recorded elapsed bound and timestamp, but is
+now unresolved/reconcilable. Neither the marker nor its `*.request.json` is
+replaced or deleted. A successful query writes a create-only `*.resolution.json`
+sidecar with `dispatch_digest`, `legacy_outcome_digest` (SHA-256 of canonical
+marker and legacy outcome JSON respectively), and `outcome` (the validated new
+provider result record). Readers validate both digests and the effective outcome
+against the marker. Missing/invalid resolution stays unresolved; corrupt evidence
+fails closed. Existing `possibly_duplicate_spend` flags remain validated and
+visible; new dispatches do not create or propagate that legacy flag.
 
-A later dispatch requires an **explicit** next `attempt` (same receipt, commit
-and workflows), and a validated predecessor outcome of `not_dispatched` or
-`unknown`. Existing request identities, idempotent replay and the attempt range
-1–9223372036854775807 are unchanged. After any attempt becomes `unknown`, every
-subsequent explicit attempt carries `possibly_duplicate_spend: true` in its
-dispatch marker, outcome and daily/run-activity rows, even through intervening
-adapter-confirmed `not_dispatched` attempts: a later no-spend result cannot erase
-earlier uncertainty. This also applies when a later adapter fails. Legacy omitted
-flags mean false; omitted attempts still mean attempt one. Unknown permits another request but does not
-prove success, register or complete covered CI waits, or satisfy retained
-acceptance. The request grant, work-item wait lifecycle and acceptance rules
-below are unchanged.
+Read-only daily/cost views and status polling never settle markers or contact the
+reconciliation operation. Evidence is retained, without TTL or deletion. Daily
+rows show `unresolved`, `not_dispatched` or `resolved`, dated by the original
+UTC dispatch day, using a validated resolution when present. Uncertainty never
+registers/completes covered CI waits or satisfies acceptance. Validated runs can
+reconcile the originally recorded coverage; no-spend leaves it unchanged. The
+request grant, work-item wait lifecycle and acceptance rules below are unchanged.
 
 ## Project policy
 

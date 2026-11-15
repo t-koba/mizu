@@ -1874,16 +1874,46 @@ def request_runs_via(settings: dict, sha: str, workflows, *, request_id: str, at
     external-untrusted; ``before_invoke`` retains ``invoke``'s point-of-no-return
     contract.
     """
+    return _ci_runs_via(settings, "request_runs", sha, workflows,
+                        request_id=request_id, attempt=attempt, cancel=cancel,
+                        before_invoke=before_invoke)
+
+
+def reconcile_runs_via(settings: dict, sha: str, workflows, *, request_id: str,
+                       attempt: int = 1, cancel=lambda: False) -> list[dict] | dict:
+    """Query one existing attempt, never dispatch. Exact identity echoes required.
+
+    Runs and typed no-dispatch use the dispatch response schema, with mandatory
+    request/attempt echoes also for runs. A typed unknown contains only outcome
+    and those echoes. Unknown, malformed or lost answers leave evidence unresolved.
+    The configured adapter timeout/output bounds and cancellation apply as usual.
+    """
+    return _ci_runs_via(settings, "reconcile_runs", sha, workflows,
+                        request_id=request_id, attempt=attempt, cancel=cancel)
+
+
+def _ci_runs_via(settings, op, sha, workflows, *, request_id, attempt,
+                 cancel, before_invoke=None):
     if not isinstance(settings, dict) or settings.get("request_grant") is not True:
         raise Denied("CI requests are not granted in VCS configuration")
     validate_ci_request(sha, workflows)
     if (not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{64}", request_id)
             or type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT):
         raise Denied("Invalid CI request attempt identity")
-    data = invoke(settings, {"op": "request_runs", "sha": sha,
+    data = invoke(settings, {"op": op, "sha": sha,
                              "workflows": list(workflows), "request_id": request_id,
                              "attempt": attempt},
                   cancel=cancel, before_invoke=before_invoke)
+    if op == "reconcile_runs":
+        if (data.get("request_id") != request_id or type(data.get("attempt")) is not int
+                or data["attempt"] != attempt):
+            raise Denied("Invalid CI reconciliation identity")
+        if data.get("outcome") == "unknown":
+            if set(data) != {"outcome", "request_id", "attempt"}:
+                raise Denied("Invalid CI reconciliation outcome")
+            raise Denied("CI request remains unresolved")
+        if "outcome" not in data and set(data) != {"request_id", "attempt", "runs"}:
+            raise Denied("Invalid CI reconciliation runs")
     if data.get("outcome") == "not_dispatched":
         if (set(data) != {"outcome", "request_id", "attempt", "reason_code"}
                 or data["request_id"] != request_id or type(data["attempt"]) is not int

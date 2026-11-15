@@ -707,18 +707,17 @@ by UTC day: each day row counts the requests made on that day and names the
 work items they covered, next to the request's own identity, workflows and
 provider run identities. An attempt is dated by its dispatch marker: the day the adapter was called,
 and a later answer never moves it, whether or not the provider created a run. Each row also names its explicit attempt number. A dispatch with no outcome is
-listed as `unresolved` until an explicit request/replay reaches
-`[ci_requests].unknown_after_seconds` (default 86,400 seconds). At that bound,
-a valid marker with no valid outcome becomes immutable `unknown`: a run may
-have been spent, and the row does not claim either success or no spend. A later
-explicit attempt may follow `not_dispatched` or `unknown`; after `unknown`,
-`possibly_duplicate_spend` remains true on every subsequent attempt, including
-through intervening `not_dispatched` outcomes. A no-spend result cannot erase an
-earlier unknown attempt's possible spend. This is a conservative 24-hour grace
-for exact adapter evidence, not a provider deadline. Read-only listings
-and status polling never settle markers, and no request is retried automatically.
-An unreadable or invalid outcome stays unresolved, never inferred from absent
-provider status. The listing is bounded (`total`, `truncated` and `scan_stopped`);
+listed as `unresolved` until an explicit same-attempt request obtains validated
+runs or typed `not_dispatched` from the adapter's non-dispatch `reconcile_runs`
+query. Unknown/malformed/lost answers leave it unresolved. Time never settles
+an attempt or authorizes another dispatch; only durable `not_dispatched` permits
+an explicit next numbered attempt. Legacy timeout-unknown records stay immutable
+and unresolved until a digest-bound resolution sidecar supplies a validated
+provider answer (see [CI dispatch uncertainty](ci-acceptance.md#ci-dispatch-uncertainty-independent-of-acceptance)).
+Legacy `possibly_duplicate_spend` flags remain visible but are not newly created.
+Read-only listings and status polling never settle markers, and no request is
+retried automatically. An unreadable or invalid outcome stays unresolved,
+never inferred from absent provider status. The listing is bounded (`total`, `truncated` and `scan_stopped`);
 invalid records are not returned unvalidated, a dispatch whose marker cannot be
 validated is not listed, and no provider is contacted.
 
@@ -728,7 +727,7 @@ Runner wall time is separate from this local count view. `vcs_read` with
 It reuses one exact publication-bound status observation per receipt within
 the page and retains its evidence reference. Typed workflow-run/job/attempt/
 repository identity is required for attribution; terminal `not_dispatched`
-attempts trigger no status read and contribute no run timing. `unknown` attempts
+attempts trigger no status read and contribute no run timing. Unresolved attempts (including legacy timeout-unknown)
 have no known run IDs, so their possible spend is not converted to zero or
 attributed without matching identity. Legacy identityless checks, unresolved
 attempts, missing/unavailable status, missing durations and running checks
@@ -746,7 +745,8 @@ exact schema, bounds, repository attestation and failure behavior. Existing
 A run's own record names the CI requests that run made. The run record
 carries `ci_requests`: the entries for the requests, each with the request
 identity, the UTC day it was made, its workflows, the work items it covered
-and whether it is `resolved`, `not_dispatched`, `unknown` or `unresolved`,
+and whether it is `resolved`, `not_dispatched` or `unresolved` (legacy run
+records may still say `unknown`),
 plus the attempt number, bounded reason code, and `possibly_duplicate_spend`
 flag. An attempt is named before the adapter call, because a CI run may have
 been spent from there on; terminal outcomes update its state without erasing
@@ -754,7 +754,8 @@ the attempt. The day it was made is the day it was dispatched, and the answer th
 arrives later does not move it. The list holds at
 most 16 entries and the total is reported beside it, so a truncated list is
 visible rather than silent. A replay of an already recorded request made no
-new run, so it adds nothing to the list.
+new run, so it adds nothing to the list. An explicit unresolved-attempt query
+records its validated resolution as an observation, not a new dispatch.
 
 A CI request may cover work items. `vcs_request` takes an optional `covered`
 list of at most 16 entries, each naming a work item, the revision it is
@@ -769,9 +770,9 @@ that wait, and its holder keeps the completion decision, green or red. A
 `not_dispatched` attempt registers no waits and leaves the covered items
 unchanged; its response marks all requested coverage `not_applied`. A replay never spends
 a second run: successful outcomes return the recorded result and can complete
-a coverage whose registration was interrupted. A no-spend or terminal unknown outcome remains an immutable record; only an
-explicit next attempt after it can call the adapter again. Unknown does not
-register or complete covered CI waits. Coverage never applies to no-spend outcomes. A replay reports the requested items the recorded request does not
+a coverage whose registration was interrupted. An unresolved-attempt query can
+also reconcile this recorded coverage after validating runs; uncertainty cannot
+register or complete waits. Only durable no-spend permits a new dispatch attempt. Coverage never applies to no-spend outcomes. A replay reports the requested items the recorded request does not
 cover as not applied, and the recorded request's coverage governs the rest:
 the comparison is by item identity, so the same items in another order are
 the same coverage. Covering work items needs the

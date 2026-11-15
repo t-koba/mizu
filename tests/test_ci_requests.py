@@ -12,7 +12,7 @@ from support import Fixture, ScriptDriver
 from mizu.ci_requests import (CiRequests, _summary, _unresolved_summary,
                               request_id)
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import mkdir, read_json
+from mizu.fs import canonical, digest, mkdir, read_json
 from mizu.protocol import tool_definitions
 from mizu.project import Project
 from mizu.publication import Publication
@@ -83,7 +83,7 @@ class CiRequestTests(Fixture):
         self.assertIsNotNone(CiRequests(self.project.root).dispatched(identity))
 
     def pending_marker(self, **fields):
-        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"], fields.get("attempt", 1))
         store = CiRequests(self.project.root, self.config.ci_requests)
         marker = {"request_id": identity, "publication_id": self.receipt["publication_id"],
                   "sha": SHA, "workflows": ["ci"],
@@ -91,104 +91,129 @@ class CiRequestTests(Fixture):
         store.mark_dispatch(identity, marker)
         return store, identity, marker
 
-    def test_unknown_settles_on_explicit_request_at_configured_bound_and_is_immutable(self):
-        self.config = dataclasses.replace(
-            self.config, ci_requests=dataclasses.replace(self.config.ci_requests,
-                                                        unknown_after_seconds=60))
-        store, identity, marker = self.pending_marker()
-        ctx = self.context(runs())
-        self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unresolved")
-        self.assertIsNone(store.outcome(identity))
-        with patch("mizu.runtime.now", return_value="2026-10-20T00:00:59.999999+00:00"):
-            with self.assertRaisesRegex(Denied, "unresolved"):
-                self.request(ctx)
-        self.assertIsNone(store.outcome(identity))
-        # An offset-aware timestamp at exactly sixty elapsed seconds qualifies.
-        with patch("mizu.runtime.now", return_value="2026-10-20T09:01:00+09:00"), \
-                patch("mizu.runtime._vcs.request_runs_via") as adapter:
-            result = self.request(ctx)
-        adapter.assert_not_called()
-        self.assertEqual((result["outcome"], result["reason_code"], result["runs"]),
-                         ("unknown", "dispatch_outcome_timeout", []))
-        self.assertTrue(result["replayed"])
-        self.assertEqual(ctx.ci_request_summary()["total"], 0)
-        self.assertEqual(result["unknown_after_seconds"], 60)
-        self.assertEqual(store.dispatched(identity), marker)
-        original = store._path(identity, "request").read_bytes()
-        ctx.config = dataclasses.replace(ctx.config, ci_requests=dataclasses.replace(
-            ctx.config.ci_requests, unknown_after_seconds=86400))
-        with patch("mizu.runtime.now", return_value="2026-11-20T00:00:00+00:00"):
-            self.assertEqual(self.request(ctx), result)
-        self.assertEqual(store._path(identity, "request").read_bytes(), original)
-        with self.assertRaisesRegex(Denied, "Immutable object conflict"):
-            store.record_outcome(identity, {"outcome": "dispatched"})
-        self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unknown")
+    def legacy_unknown(self, store, identity, marker):
+        record = {key: value for key, value in marker.items() if key != "dispatched_at"}
+        record.update(outcome="unknown", reason_code="dispatch_outcome_timeout", runs=[],
+                      requested_at="2026-10-21T00:00:00+00:00", unknown_after_seconds=86400,
+                      dispatch_digest=digest(canonical(marker)))
+        store.record_outcome(identity, record)
+        return record
 
-    def test_retry_waits_for_unknown_and_records_duplicate_spend_everywhere(self):
-        store, identity, _ = self.pending_marker()
-        ctx = self.context(runs())
-        with patch("mizu.runtime.now", return_value="2026-10-20T23:59:59+00:00"):
+    def test_reconciliation_binds_runs_without_dispatch_and_replays(self):
+        store, identity, marker = self.pending_marker()
+        ctx = self.context({**runs(), "request_id": identity, "attempt": 1})
+        with patch("mizu.runtime._vcs.request_runs_via") as dispatch, \
+                patch("mizu.vcs.invoke", wraps=vcs.invoke) as invoke:
+            result = self.request(ctx)
+        dispatch.assert_not_called()
+        self.assertEqual(invoke.call_args.args[1], {
+            "op": "reconcile_runs", "request_id": identity, "attempt": 1,
+            "sha": SHA, "workflows": ["ci"]})
+        self.assertEqual(result["runs"], runs()["runs"])
+        self.assertEqual(store.dispatched(identity), marker)
+        self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "resolved")
+        with patch("mizu.vcs.invoke") as invoke:
+            self.assertEqual(self.request(ctx), result)
             with self.assertRaisesRegex(Denied, "preceding"):
                 self.request(ctx, attempt=2)
-        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
-            result = self.request(ctx, attempt=2)
-        self.assertEqual(store.outcome(identity)["outcome"], "unknown")
-        self.assertTrue(result["possibly_duplicate_spend"])
-        self.assertTrue(store.dispatched(result["request_id"])["possibly_duplicate_spend"])
-        rows = {row["attempt"]: row for day in store.daily()["days"] for row in day["items"]}
-        self.assertEqual((rows[1]["state"], rows[2]["state"]), ("unknown", "resolved"))
-        self.assertFalse(rows[1]["possibly_duplicate_spend"])
-        self.assertTrue(rows[2]["possibly_duplicate_spend"])
-        self.assertTrue(ctx.ci_request_summary()["requests"][0]["possibly_duplicate_spend"])
-        outcome_path = store._path(result["request_id"], "request")
-        for flag in (None, False, 1):
-            tampered = {**result}
-            tampered.pop("replayed")
-            tampered.pop("coverage")
-            if flag is None:
-                tampered.pop("possibly_duplicate_spend")
-            else:
-                tampered["possibly_duplicate_spend"] = flag
-            outcome_path.write_text(json.dumps(tampered))
-            with self.assertRaises(Denied):
-                store.outcome(result["request_id"])
-        outcome_path.write_text(json.dumps({key: value for key, value in result.items()
-                                           if key not in ("replayed", "coverage")}))
-        self.assertTrue(self.request(ctx, attempt=2)["replayed"])
-        with self.assertRaisesRegex(Denied, "preceding"):
-            self.request(ctx, attempt=3)
+        invoke.assert_not_called()
 
-    def test_duplicate_spend_flag_survives_later_adapter_failure(self):
-        store, _, _ = self.pending_marker()
-        ctx = self.context({"malformed": True})
-        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
-            with self.assertRaises(Denied):
-                self.request(ctx, attempt=2)
-        row = next(row for day in store.daily()["days"] for row in day["items"]
-                   if row["attempt"] == 2)
-        self.assertEqual(row["state"], "unresolved")
-        self.assertTrue(row["possibly_duplicate_spend"])
-        self.assertTrue(ctx.ci_request_summary()["requests"][0]["possibly_duplicate_spend"])
-        # An unresolved current attempt still blocks, even though its predecessor is terminal.
-        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:01+00:00"):
-            with self.assertRaisesRegex(Denied, "unresolved"):
-                self.request(ctx, attempt=2)
+    def test_reconciliation_unknown_malformed_or_lost_never_authorizes_dispatch(self):
+        store, identity, marker = self.pending_marker()
+        good = {**runs(), "request_id": identity, "attempt": 1}
+        bad = [
+            {"outcome": "unknown", "request_id": identity, "attempt": 1},
+            {"outcome": "unknown"},
+            {"outcome": "unknown", "request_id": identity, "attempt": 1, "runs": []},
+            {}, runs(), {**good, "request_id": "0" * 64}, {**good, "attempt": 2},
+            {**good, "attempt": True}, {**good, "extra": 1},
+            {**good, **runs(head_sha=OTHER_SHA)}, {**good, **runs(workflow="other")},
+            {**good, "runs": []},
+            {"outcome": "not_dispatched", "request_id": identity, "attempt": 2,
+             "reason_code": "provider_rejected"},
+            {"outcome": "not_dispatched", "request_id": identity, "attempt": 1,
+             "reason_code": "unbounded arbitrary reason"},
+            Denied("adapter call lost")]
+        for payload in bad:
+            with self.subTest(payload=payload), \
+                    patch("mizu.runtime._vcs.request_runs_via") as dispatch, \
+                    patch("mizu.vcs.invoke", **({"side_effect": payload} if isinstance(payload, Exception)
+                                              else {"return_value": payload})):
+                ctx = self.context({})
+                with patch("mizu.runtime.now", return_value="2036-10-21T00:00:00+00:00"):
+                    with self.assertRaises(Denied):
+                        self.request(ctx)
+                    with self.assertRaisesRegex(Denied, "preceding"):
+                        self.request(ctx, attempt=2)
+                dispatch.assert_not_called()
+                self.assertIsNone(store.outcome(identity))
+                self.assertEqual(store.dispatched(identity), marker)
+                self.assertFalse(store._path(identity, "request").exists())
+                self.assertFalse(store._path(identity, "resolution").exists())
+                self.assertIsNone(store.dispatched(request_id(self.receipt["publication_id"],
+                                                             SHA, ["ci"], 2)))
+                self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unresolved")
 
-    def test_unknown_neither_registers_nor_completes_covered_waits(self):
+    def test_reconciled_no_dispatch_alone_authorizes_next_attempt(self):
+        store, identity, _ = self.pending_marker()
+        ctx = self.context({"outcome": "not_dispatched", "request_id": identity,
+                            "attempt": 1, "reason_code": "provider_rejected"})
+        with patch("mizu.runtime._vcs.request_runs_via") as dispatch:
+            result = self.request(ctx)
+        dispatch.assert_not_called()
+        self.assertEqual(result["reason_code"], "provider_rejected")
+        self.assertEqual(store.outcome(identity)["outcome"], "not_dispatched")
+        second = self.request(self.context(runs()), attempt=2)
+        self.assertNotIn("possibly_duplicate_spend", second)
+        self.assertNotIn("possibly_duplicate_spend", store.dispatched(second["request_id"]))
+        self.assertTrue(self.request(self.context({}), attempt=2)["replayed"])
+
+    def test_unknown_query_neither_registers_nor_completes_covered_waits(self):
         ctx = self.context({"malformed": True}, poll_enabled=True)
         covered = self.covered_item()
         before = self.project.work_items.get(covered["id"])
-        with patch("mizu.runtime.now", return_value="2026-10-20T00:00:00+00:00"):
-            with self.assertRaises(Denied):
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [covered])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        ctx = self.context({"outcome": "unknown", "request_id": identity, "attempt": 1},
+                           poll_enabled=True)
+        with patch("mizu.runtime._vcs.request_runs_via") as dispatch:
+            with self.assertRaisesRegex(Denied, "unresolved"):
                 self.request_covered(ctx, [covered])
-        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
-            result = self.request_covered(ctx, [covered])
-        self.assertEqual(result["outcome"], "unknown")
-        self.assertEqual(ctx.ci_request_summary()["requests"][0]["state"], "unknown")
+        dispatch.assert_not_called()
+        self.assertEqual(self.project.work_items.get(covered["id"]), before)
+        self.assertIsNone(CiRequests(self.project.root).outcome(identity))
+        ctx = self.context({"outcome": "not_dispatched", "request_id": identity,
+                            "attempt": 1, "reason_code": "provider_rejected"}, poll_enabled=True)
+        result = self.request_covered(ctx, [covered])
         self.assertEqual(result["coverage"]["not_applied"], [covered["id"]])
         self.assertEqual(self.project.work_items.get(covered["id"]), before)
 
-    def test_exact_adapter_outcomes_before_bound_are_never_replaced(self):
+    def test_reconciled_runs_apply_only_the_recorded_coverage(self):
+        ctx = self.context({}, poll_enabled=True)
+        covered = self.covered_item()
+        other = self.covered_item("other")
+        with self.assertRaises(Denied):
+            self.request_covered(ctx, [covered])
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        ctx = self.context({**runs(), "request_id": identity, "attempt": 1}, poll_enabled=True)
+        with patch("mizu.runtime._vcs.request_runs_via") as dispatch:
+            result = self.request_covered(ctx, [other])
+        dispatch.assert_not_called()
+        self.assertEqual(result["coverage"]["not_applied"], [other["id"]])
+        item = self.project.work_items.get(covered["id"])
+        self.assertEqual((item["status"], item["rev"], item["holder"]), ("blocked", 2, "worker"))
+        self.assertEqual(item["wait"]["sha"], SHA)
+        self.assertEqual(self.project.work_items.get(other["id"])["status"], "open")
+
+    def test_reconciliation_requires_the_request_grant_before_querying(self):
+        _, identity, _ = self.pending_marker()
+        with patch("mizu.vcs.invoke") as invoke:
+            with self.assertRaises(Denied):
+                vcs.reconcile_runs_via({"request_grant": False}, SHA, ["ci"], request_id=identity)
+        invoke.assert_not_called()
+
+    def test_exact_adapter_outcomes_are_never_replaced(self):
         for workflow, expected in (("ci", None), ("rejected", "not_dispatched")):
             with self.subTest(outcome=expected):
                 identity = request_id(self.receipt["publication_id"], SHA, [workflow])
@@ -196,36 +221,37 @@ class CiRequestTests(Fixture):
                     "outcome": expected, "request_id": identity, "attempt": 1,
                     "reason_code": "provider_rejected"}
                 ctx = self.context(payload)
-                with patch("mizu.runtime.now", return_value="2026-10-20T00:00:00+00:00"):
-                    result = self.request(ctx, workflows=[workflow])
-                self.assertEqual(result.get("outcome"), expected)
-                with patch("mizu.runtime.now", return_value="2026-11-20T00:00:00+00:00"):
+                result = self.request(ctx, workflows=[workflow])
+                with patch("mizu.vcs.invoke") as invoke:
                     replay = self.request(ctx, workflows=[workflow])
-                self.assertEqual(replay.get("outcome"), expected)
+                invoke.assert_not_called()
+                self.assertEqual(replay, {**result, "replayed": True})
                 self.assertNotIn("possibly_duplicate_spend", replay)
 
-    def test_invalid_marker_or_existing_outcome_never_becomes_unknown(self):
+    def test_invalid_marker_or_existing_outcome_cannot_be_reconciled(self):
         store, identity, marker = self.pending_marker()
         marker_path = store._path(identity, "dispatch")
         for changes in ({"dispatched_at": "2026-10-20T00:00:00"},
                         {"request_id": "0" * 64}, {"attempt": True},
                         {"possibly_duplicate_spend": True}, {"extra": 1}):
-            with self.subTest(changes=changes):
+            with self.subTest(changes=changes), patch("mizu.vcs.invoke") as invoke:
                 marker_path.write_text(json.dumps({**marker, **changes}))
                 with self.assertRaises(Denied):
-                    store.settle_unknown(identity, "2026-11-20T00:00:00+00:00")
-                self.assertIsNone(store.outcome(identity))
+                    self.request(self.context(runs()))
+                invoke.assert_not_called()
         marker_path.write_text(json.dumps(marker))
         outcome_path = store._path(identity, "request")
         for raw in ('{', json.dumps({"outcome": "unknown"})):
             outcome_path.write_text(raw)
-            with self.assertRaises(Denied):
-                store.settle_unknown(identity, "2026-11-20T00:00:00+00:00")
+            with patch("mizu.vcs.invoke") as invoke:
+                with self.assertRaises(Denied):
+                    self.request(self.context(runs()))
+                invoke.assert_not_called()
             self.assertEqual(outcome_path.read_text(), raw)
 
-    def test_unknown_validation_binds_marker_bound_reason_time_and_duplicate_flag(self):
+    def test_legacy_unknown_validation_binds_marker_bound_reason_time_and_duplicate_flag(self):
         store, identity, marker = self.pending_marker()
-        result = store.settle_unknown(identity, "2026-10-21T00:00:00+00:00")
+        result = self.legacy_unknown(store, identity, marker)
         outcome_path = store._path(identity, "request")
         for changes in ({"dispatch_digest": "0" * 64}, {"unknown_after_seconds": True},
                         {"unknown_after_seconds": 86401}, {"unknown_after_seconds": 0},
@@ -236,13 +262,71 @@ class CiRequestTests(Fixture):
             with self.subTest(changes=changes):
                 outcome_path.write_text(json.dumps({**result, **changes}))
                 with self.assertRaises(Denied):
-                    store.settle_unknown(identity, "2026-11-20T00:00:00+00:00")
+                    store.outcome(identity)
                 self.assertEqual(store.daily()["days"][0]["items"][0]["state"], "unresolved")
         outcome_path.write_text(json.dumps(result))
         store._path(identity, "dispatch").write_text(json.dumps(
             {**marker, "dispatched_at": "2026-10-19T00:00:00+00:00"}))
         with self.assertRaises(Denied):
             store.outcome(identity)
+
+    def test_legacy_unknown_resolution_is_immutable_and_bound_to_both_records(self):
+        for attempt, outcome in ((1, "runs"), (2, "not_dispatched")):
+            with self.subTest(outcome=outcome):
+                store, identity, marker = self.pending_marker(
+                    attempt=attempt, **({"possibly_duplicate_spend": True} if attempt == 2 else {}))
+                legacy = self.legacy_unknown(store, identity, marker)
+                original = store._path(identity, "request").read_bytes()
+                self.assertIsNone(store.outcome(identity))
+                row = next(row for row in store.page()["items"] if row["request_id"] == identity)
+                self.assertEqual(row["state"], "unresolved")
+                unknown = {"outcome": "unknown", "request_id": identity, "attempt": attempt}
+                with self.assertRaises(Denied):
+                    self.request(self.context(unknown), attempt=attempt)
+                self.assertFalse(store._path(identity, "resolution").exists())
+                with self.assertRaisesRegex(Denied, "preceding"):
+                    self.request(self.context(runs()), attempt=attempt + 1)
+                payload = {"request_id": identity, "attempt": attempt}
+                payload.update(runs() if outcome == "runs" else
+                               {"outcome": outcome, "reason_code": "pre_dispatch_refusal"})
+                with patch("mizu.runtime._vcs.request_runs_via") as dispatch:
+                    result = self.request(self.context(payload), attempt=attempt)
+                dispatch.assert_not_called()
+                self.assertEqual(store._path(identity, "request").read_bytes(), original)
+                self.assertEqual(store.dispatched(identity), marker)
+                effective = store.outcome(identity)
+                self.assertEqual(effective["runs"], result["runs"])
+                sidecar_path = store._path(identity, "resolution")
+                sidecar = read_json(sidecar_path)
+                self.assertEqual(sidecar["dispatch_digest"], digest(canonical(marker)))
+                self.assertEqual(sidecar["legacy_outcome_digest"], digest(canonical(legacy)))
+                with self.assertRaisesRegex(Denied, "Immutable object conflict"):
+                    store._write(identity, "resolution", {**sidecar, "dispatch_digest": "0" * 64})
+                expected = "resolved" if outcome == "runs" else "not_dispatched"
+                day_row = next(row for day in store.daily()["days"] for row in day["items"]
+                               if row["request_id"] == identity)
+                self.assertEqual(day_row["state"], expected)
+                row = next(row for row in store.page()["items"] if row["request_id"] == identity)
+                self.assertEqual(row["state"], expected)
+                self.assertEqual(row["possibly_duplicate_spend"], attempt == 2)
+                for changes in ({"dispatch_digest": "0" * 64},
+                                {"legacy_outcome_digest": "0" * 64},
+                                {"outcome": legacy}, {"extra": 1},
+                                {"outcome": {**effective, "sha": OTHER_SHA}},
+                                {"outcome": {**effective, "possibly_duplicate_spend": 1}},
+                                {"outcome": {**effective, "possibly_duplicate_spend": not (attempt == 2)}}):
+                    sidecar_path.write_text(json.dumps({**sidecar, **changes}))
+                    with self.assertRaises(Denied):
+                        store.outcome(identity)
+                    row = next(row for row in store.page()["items"] if row["request_id"] == identity)
+                    self.assertEqual(row["state"], "unresolved")
+                sidecar_path.write_text(json.dumps(sidecar))
+                with patch("mizu.vcs.invoke") as invoke:
+                    self.assertTrue(self.request(self.context({}), attempt=attempt)["replayed"])
+                invoke.assert_not_called()
+                if attempt == 2:
+                    next_result = self.request(self.context(runs()), attempt=3)
+                    self.assertNotIn("possibly_duplicate_spend", next_result)
 
     def test_adapter_request_and_no_dispatch_echo_bind_the_explicit_attempt(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)
@@ -263,32 +347,6 @@ class CiRequestTests(Fixture):
                 with self.assertRaises(Denied):
                     vcs.request_runs_via({"request_grant": True}, SHA, ["ci"],
                                          request_id=identity, attempt=2)
-
-    def test_duplicate_spend_risk_survives_an_intervening_no_dispatch_attempt(self):
-        store, first_id, _ = self.pending_marker()
-        second_id = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)
-        second_ctx = self.context({"outcome": "not_dispatched", "request_id": second_id,
-                                   "attempt": 2, "reason_code": "provider_rejected"})
-        with patch("mizu.runtime.now", return_value="2026-10-21T00:00:00+00:00"):
-            second = self.request(second_ctx, attempt=2)
-        self.assertEqual(store.outcome(first_id)["outcome"], "unknown")
-        self.assertEqual(second["outcome"], "not_dispatched")
-        third_ctx = self.context(runs())
-        third = self.request(third_ctx, attempt=3)
-        self.assertEqual(third["runs"][0]["run_id"], "run-1")
-        rows = {row["attempt"]: row for day in store.daily()["days"] for row in day["items"]}
-        for attempt, ctx, result, state in ((2, second_ctx, second, "not_dispatched"),
-                                            (3, third_ctx, third, "resolved")):
-            with self.subTest(attempt=attempt):
-                self.assertTrue(result["possibly_duplicate_spend"])
-                identity = result["request_id"]
-                self.assertTrue(store.outcome(identity)["possibly_duplicate_spend"])
-                self.assertTrue(store.dispatched(identity)["possibly_duplicate_spend"])
-                self.assertEqual(rows[attempt]["state"], state)
-                self.assertTrue(rows[attempt]["possibly_duplicate_spend"])
-                activity = ctx.ci_request_summary()["requests"][0]
-                self.assertEqual((activity["attempt"], activity["state"]), (attempt, state))
-                self.assertTrue(activity["possibly_duplicate_spend"])
 
     def test_terminal_no_dispatch_is_durable_and_replays_without_a_provider_call(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
@@ -421,7 +479,8 @@ class CiRequestTests(Fixture):
         ctx = self.context(runs())
         with self.assertRaises(Denied):
             self.request(ctx)
-        self.assertIsNone(CiRequests(self.project.root).outcome(identity))
+        with self.assertRaises(Denied):
+            CiRequests(self.project.root).outcome(identity)
 
     def test_the_provider_grant_is_required(self):
         ctx = self.context(runs(), request_grant=False)

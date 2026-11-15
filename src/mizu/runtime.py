@@ -1632,22 +1632,35 @@ class Context:
         # keeps the completion decision.
         covered = self._covered_waits(args.get("covered"), receipt)
 
-        def settle(identity):
-            recorded = requests.settle_unknown(identity, now())
-            if recorded is not None and recorded.get("outcome") == "unknown":
-                marker = requests.dispatched(identity)
-                self.record_ci_request(
-                    identity, marker["dispatched_at"][:10], workflows,
-                    [entry["id"] for entry in recorded.get("covered", [])],
-                    state="unknown", attempt=recorded.get("attempt", 1),
-                    reason_code=recorded["reason_code"],
-                    possibly_duplicate_spend=recorded.get("possibly_duplicate_spend", False),
-                    existing_only=True)
-            return recorded
+        def retain_response(marker, response):
+            not_dispatched = isinstance(response, dict)
+            record = {key: value for key, value in marker.items() if key != "dispatched_at"}
+            record.update(runs=[] if not_dispatched else response, requested_at=now())
+            if not_dispatched:
+                record.update(outcome="not_dispatched", reason_code=response["reason_code"])
+            requests.resolve(identity, record)
+            self.record_ci_request(
+                identity, marker["dispatched_at"][:10], marker["workflows"],
+                [entry["id"] for entry in marker.get("covered", [])],
+                state="not_dispatched" if not_dispatched else "resolved",
+                attempt=marker.get("attempt", 1), reason_code=record.get("reason_code"),
+                possibly_duplicate_spend=marker.get("possibly_duplicate_spend", False))
+            evidence_id, evidence = self._new_invocation_evidence("vcs-request")
+            write_json(self.run_dir / evidence,
+                       {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
+            return record
 
-        recorded = settle(identity)
+        recorded = requests.outcome(identity)
+        marker = requests.dispatched(identity)
+        if recorded is None and marker is not None:
+            # Re-observe this exact attempt; this operation cannot dispatch.
+            response = _vcs.reconcile_runs_via(
+                self.config.vcs, marker["sha"], marker["workflows"],
+                request_id=identity, attempt=marker.get("attempt", 1),
+                cancel=self.tools_cancelled)
+            recorded = retain_response(marker, response)
         if recorded is not None:
-            if recorded.get("outcome") in ("not_dispatched", "unknown"):
+            if recorded.get("outcome") == "not_dispatched":
                 coverage = {"registered": [], "waiting": [], "moved": [], "refused": [],
                             "not_applied": [entry["id"] for entry in covered]}
             else:
@@ -1657,19 +1670,12 @@ class Context:
                 coverage["not_applied"] = [entry["id"] for entry in covered
                                            if entry["id"] not in recorded_ids]
             return {**recorded, "replayed": True, "coverage": coverage}
-        if requests.dispatched(identity) is not None:
-            raise Denied("An earlier CI request for this publication is unresolved; "
-                         "retry explicitly after the configured unknown-outcome grace period")
-        possibly_duplicate_spend = False
         if attempt > 1:
             previous_id = ci_request_id(receipt["publication_id"], sha, workflows, attempt - 1)
-            previous = settle(previous_id)
-            if previous is None or previous.get("outcome") not in ("not_dispatched", "unknown"):
-                raise Denied("A new CI attempt requires the preceding attempt's terminal "
-                             "no-dispatch or unknown outcome")
-            possibly_duplicate_spend = (previous.get("outcome") == "unknown"
-                                        or previous.get("possibly_duplicate_spend", False))
-        duplicate_fields = {"possibly_duplicate_spend": True} if possibly_duplicate_spend else {}
+            previous = requests.outcome(previous_id)
+            if previous is None or previous.get("outcome") != "not_dispatched":
+                raise Denied("A new CI attempt requires the preceding attempt's durable "
+                             "no-dispatch outcome")
         # The covered items are checked before the provider is called, so a
         # coverage that cannot take the wait never spends a run.
         self._coverage_state(covered, identity, register=False)
@@ -1678,37 +1684,23 @@ class Context:
         covered_records = [entry["record"] for entry in covered]
         covered_ids = [entry["id"] for entry in covered]
 
+        marker = {"request_id": identity, "publication_id": receipt["publication_id"],
+                  "sha": sha, "workflows": workflows, "dispatched_at": dispatched_at,
+                  "attempt": attempt, "covered": covered_records}
+
         def before_invoke():
             # The dispatch marker is the point of no return: from here the run
             # may have spent a CI run, so the run's own record names the
             # request now, and no later failure can drop it.
-            requests.mark_dispatch(identity, {
-                "request_id": identity, "publication_id": receipt["publication_id"],
-                "sha": sha, "workflows": workflows, "dispatched_at": dispatched_at,
-                "attempt": attempt, "covered": covered_records, **duplicate_fields})
+            requests.mark_dispatch(identity, marker)
             self.record_ci_request(identity, dispatched_at[:10], workflows,
-                                   covered_ids, state="unresolved", attempt=attempt,
-                                   possibly_duplicate_spend=possibly_duplicate_spend)
+                                   covered_ids, state="unresolved", attempt=attempt)
 
         response = _vcs.request_runs_via(
             self.config.vcs, sha, workflows, request_id=identity, attempt=attempt,
             cancel=self.tools_cancelled, before_invoke=before_invoke)
         not_dispatched = isinstance(response, dict)
-        record = {"request_id": identity, "publication_id": receipt["publication_id"],
-                  "sha": sha, "workflows": workflows, "runs": [] if not_dispatched else response,
-                  "requested_at": now(), "attempt": attempt, "covered": covered_records,
-                  **duplicate_fields,
-                  **({"outcome": "not_dispatched", "reason_code": response["reason_code"]}
-                     if not_dispatched else {})}
-        requests.record_outcome(identity, record)
-        state = "not_dispatched" if not_dispatched else "resolved"
-        self.record_ci_request(identity, dispatched_at[:10], workflows, covered_ids,
-                               state=state, attempt=attempt,
-                               reason_code=record.get("reason_code"),
-                               possibly_duplicate_spend=possibly_duplicate_spend)
-        evidence_id, evidence = self._new_invocation_evidence("vcs-request")
-        write_json(self.run_dir / evidence,
-                   {**record, "trust": "external-untrusted", "evidence_id": evidence_id})
+        record = retain_response(marker, response)
         if not_dispatched:
             coverage = {"registered": [], "waiting": [], "moved": [], "refused": [],
                         "not_applied": covered_ids}

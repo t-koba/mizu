@@ -4,9 +4,9 @@ A CI request asks the provider for one run per workflow at an exact
 published commit. Create-only dispatch markers precede adapter calls; immutable
 outcomes follow them. An exact-SHA status row cannot resolve a marker. A typed
 adapter result may attest ``not_dispatched`` (no spend) or bind provider runs.
-On an explicit request, an absent outcome may become terminal ``unknown`` after
-the configured grace period. Unknown retains uncertainty and all evidence; it
-permits an explicitly numbered later attempt marked as possibly duplicate spend.
+An explicit query may reconcile an unresolved dispatch without dispatching again.
+Legacy timeout-unknown evidence remains immutable and unresolved until a validated
+provider answer is recorded in a digest-bound resolution sidecar.
 Malformed evidence fails closed, and no path automatically retries dispatches.
 
 Records live in the project's evidence tree, outside the workspace.
@@ -35,7 +35,7 @@ def request_id(publication_id: str, sha: str, workflows: list[str], attempt: int
 
     Attempt one preserves the original identity. Later attempts have distinct
     immutable records; the runtime permits them only after the preceding
-    terminal no-spend or unknown outcome. Workflow order does not change identity.
+    durable no-spend outcome. Workflow order does not change identity.
     """
     if type(attempt) is not int or not 1 <= attempt <= MAX_CI_REQUEST_ATTEMPT:
         raise Denied("Invalid CI request attempt")
@@ -70,43 +70,50 @@ class CiRequests:
         return record
 
     def outcome(self, identity: str) -> dict | None:
-        """The recorded outcome, after validating it against its dispatch."""
+        """Validated effective result; legacy timeout-unknown remains unresolved."""
+        marker = self.dispatched(identity)
+        if marker is not None and _unresolved_summary(marker, identity) is None:
+            raise Denied("Invalid CI dispatch marker")
         record = self._read(identity, "request")
+        resolution = self._read(identity, "resolution")
         if record is None:
+            if resolution is not None:
+                raise Denied("Unbound CI request resolution")
             return None
-        marker = self._read(identity, "dispatch")
         if marker is None or _validated_outcome(record, identity, marker) is None:
             raise Denied("Invalid or unbound CI request outcome")
-        return record
+        if record.get("outcome") != "unknown":
+            if resolution is not None:
+                raise Denied("Unexpected CI request resolution")
+            return record
+        if resolution is None:
+            return None
+        if (set(resolution) != {"dispatch_digest", "legacy_outcome_digest", "outcome"}
+                or resolution["dispatch_digest"] != digest(canonical(marker))
+                or resolution["legacy_outcome_digest"] != digest(canonical(record))
+                or not isinstance(resolution["outcome"], dict)):
+            raise Denied("Invalid or unbound CI request resolution")
+        effective = resolution["outcome"]
+        if (effective.get("outcome") == "unknown"
+                or _validated_outcome(effective, identity, marker) is None):
+            raise Denied("Invalid CI request resolution outcome")
+        return effective
 
-    def settle_unknown(self, identity: str, observed_at: str) -> dict | None:
-        """Lazily settle an expired, valid marker on an explicit request only.
-
-        Existing outcomes (including corrupt ones) are never replaced. The
-        local policy outcome records its bound and exact marker digest, not a
-        provider result. Read-side listings never invoke this method.
-        """
-        recorded = self.outcome(identity)
-        if recorded is not None:
-            return recorded
+    def resolve(self, identity: str, record: dict) -> None:
+        """Retain a provider answer without replacing legacy timeout evidence."""
+        if self.outcome(identity) is not None:
+            raise Denied("CI request is already resolved")
         marker = self.dispatched(identity)
-        if marker is None:
-            return None
-        if _unresolved_summary(marker, identity) is None:
-            raise Denied("Invalid CI dispatch marker")
-        observed = dt.datetime.fromisoformat(observed_at)
-        if observed.tzinfo is None:
-            raise Denied("CI settlement requires an aware timestamp")
-        age = ((observed - dt.datetime.fromisoformat(marker["dispatched_at"]))
-               // dt.timedelta(seconds=1))
-        if age < self.policy.unknown_after_seconds:
-            return None
-        record = {key: value for key, value in marker.items() if key != "dispatched_at"}
-        record.update(outcome="unknown", reason_code=UNKNOWN_REASON, runs=[],
-                      requested_at=observed_at, dispatch_digest=digest(canonical(marker)),
-                      unknown_after_seconds=self.policy.unknown_after_seconds)
-        self.record_outcome(identity, record)
-        return record
+        if (marker is None or record.get("outcome") == "unknown"
+                or _validated_outcome(record, identity, marker) is None):
+            raise Denied("Invalid CI request resolution outcome")
+        legacy = self._read(identity, "request")
+        if legacy is None:
+            self.record_outcome(identity, record)
+        else:
+            self._write(identity, "resolution", {
+                "dispatch_digest": digest(canonical(marker)),
+                "legacy_outcome_digest": digest(canonical(legacy)), "outcome": record})
 
     def dispatched(self, identity: str) -> dict | None:
         """The marker written before the adapter call, if an attempt began."""
@@ -117,7 +124,7 @@ class CiRequests:
         self._write(identity, "dispatch", record)
 
     def record_outcome(self, identity: str, record: dict) -> None:
-        """Write an immutable adapter or local policy outcome for a marked attempt."""
+        """Write an immutable adapter outcome for a marked attempt."""
         self._write(identity, "request", record)
 
     def _write(self, identity: str, kind: str, record: dict) -> None:
@@ -137,10 +144,10 @@ class CiRequests:
         is the day the adapter call began, and a later answer never moves it,
         so the day comes from the marker in every state. Each item
         names the request, its workflows, the provider runs it produced and
-        whether the request is ``resolved``, ``not_dispatched``, ``unknown``
-        or ``unresolved``. Terminal unknown may have spent a CI run; a later
-        explicit attempt is flagged ``possibly_duplicate_spend``. No-spend
-        and unknown both permit a later explicit attempt. An unreadable result
+        whether the request is ``resolved``, ``not_dispatched`` or
+        ``unresolved``. Legacy timeout-unknown is unresolved until a validated
+        resolution exists. Only no-spend permits a later explicit attempt.
+        Legacy ``possibly_duplicate_spend`` flags remain visible. An unreadable result
         remains unresolved, not a reason to hide the request. The rows
         are chronological and the page holds at most ``limit`` requests.
         Bounds: at most 100 attempts per page; policy bounds post-listing
@@ -211,13 +218,9 @@ class CiRequests:
                 break
             identity = match.group(1)
             try:
-                record = self._read(identity, "request")
+                record = self.outcome(identity)
             except (Denied, LimitExceeded, OSError):
-                # An unreadable, oversized or invalid outcome is never listed
-                # unvalidated, and it never denies the records beside it. It
-                # is also no reason to hide the request: the dispatch marker
-                # below still proves an adapter attempt began and may have
-                # reached the provider.
+                # Invalid outcomes and resolutions never hide valid markers.
                 record = None
             try:
                 marker = self._read(identity, "dispatch")

@@ -1184,7 +1184,6 @@ CONFIGURED = {
         'cache_affinity_runs': ('200', 'configured policy', 'usage / affinity history window'),
     },
     'CiRequestEvidence': {
-        'unknown_after_seconds': ('86400', 'configured policy', 'CI requests / explicit unknown-outcome settlement grace'),
         'name_processing_limit': ('10000', 'configured policy', 'CI requests / name-processing budget after os.listdir materializes all names'),
         'record_limit': ('1000', 'configured policy', 'CI requests / candidate-record validation budget'),
     },
@@ -2408,8 +2407,8 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format',
         'CI dispatch record / covered work-item revisions use positive persisted revision numbers'),
     ('ci_requests.py', '_validated_outcome', 0, 0): (
-        '1', 'configured policy',
-        'CI request outcome / unknown-outcome grace is a positive configured duration'),
+        '1', 'format',
+        'Legacy CI timeout outcome / validate the stored positive duration without applying time policy'),
     ('ci_waits.py', 'terminal', 1, 0): (
         '1', 'safety',
         'CI terminal observation / each declared check name must match exactly one result'),
