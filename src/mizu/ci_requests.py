@@ -26,8 +26,9 @@ from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 
 #: Ordinary CI evidence-record read bound; markers and outcomes keep this cap.
 RECORD_BYTES = 8192
-#: Only no-dispatch outcomes with a validated diagnostic may use the larger cap.
-CI_DIAGNOSTIC_RECORD_BYTES = 16384
+#: 64 KiB covers the 8 KiB envelope, sixfold JSON escaping, and resolution wrapper.
+CI_DIAGNOSTIC_RECORD_BYTES = 65536
+#: The diagnostic tail plus its fixed external-untrusted label.
 MAX_CI_DIAGNOSTIC_BYTES = ADAPTER_DIAGNOSTIC_BYTES_MAX + 128
 REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
 UNKNOWN_REASON = "dispatch_outcome_timeout"
@@ -58,13 +59,26 @@ class CiRequests:
     def _path(self, identity: str, kind: str) -> Path:
         return self.root / f"{identity}.{kind}.json"
 
+    @staticmethod
+    def _has_diagnostic_outcome(record: dict, kind: str) -> bool:
+        if kind == "request":
+            outcome = record
+        elif kind == "resolution":
+            outcome = record.get("outcome")
+        else:
+            outcome = None
+        return (isinstance(outcome, dict) and outcome.get("outcome") == "not_dispatched"
+                and "diagnostic" in outcome)
+
     def _read(self, identity: str, kind: str) -> dict | None:
         path = self._path(identity, kind)
         try:
-            path.lstat()
+            info = path.lstat()
         except FileNotFoundError:
             return None
-        maximum = CI_DIAGNOSTIC_RECORD_BYTES if kind == "request" else RECORD_BYTES
+        maximum = RECORD_BYTES
+        if (kind in {"request", "resolution"} and info.st_size > RECORD_BYTES):
+            maximum = CI_DIAGNOSTIC_RECORD_BYTES
         raw = safe_read(self.root, path.name, maximum)
         try:
             record = loads_finite(raw)
@@ -72,10 +86,8 @@ class CiRequests:
             raise Denied(f"Invalid CI request record: {identity}") from exc
         if not isinstance(record, dict):
             raise Denied(f"Invalid CI request record: {identity}")
-        if (kind == "request" and len(raw) > RECORD_BYTES
-                and (record.get("outcome") != "not_dispatched"
-                     or "diagnostic" not in record)):
-            raise LimitExceeded(f"CI request record exceeds {RECORD_BYTES} bytes")
+        if len(raw) > RECORD_BYTES and not self._has_diagnostic_outcome(record, kind):
+            raise LimitExceeded(f"CI {kind} record exceeds {RECORD_BYTES} bytes")
         return record
 
     def outcome(self, identity: str) -> dict | None:
@@ -159,6 +171,10 @@ class CiRequests:
         self._write(identity, "request", record)
 
     def _write(self, identity: str, kind: str, record: dict) -> None:
+        maximum = (CI_DIAGNOSTIC_RECORD_BYTES
+                   if self._has_diagnostic_outcome(record, kind) else RECORD_BYTES)
+        if len(canonical(record)) > maximum:
+            raise LimitExceeded(f"CI {kind} record exceeds {maximum} bytes")
         mkdir(self.root)
         write_json(self._path(identity, kind), record, exclusive=True)
         sync_dir(self.root)

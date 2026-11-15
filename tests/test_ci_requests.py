@@ -18,6 +18,7 @@ from mizu.project import Project
 from mizu.publication import Publication
 from mizu.distribution import public_source_identity
 from mizu import vcs
+from mizu.process import adapter_text_diagnostic
 from mizu.runtime import Context, Engine
 
 SHA = "a" * 40
@@ -497,16 +498,31 @@ class CiRequestTests(Fixture):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["diagnostic"], expected)
 
-    def test_maximum_typed_diagnostic_fits_bounded_ci_record(self):
+    def test_maximum_control_diagnostic_roundtrips_with_worst_case_escaping(self):
         store, identity, marker = self.pending_marker()
         record = {key: value for key, value in marker.items() if key != "dispatched_at"}
-        diagnostic = "x" * 8192
+        diagnostic = adapter_text_diagnostic("\x01" * 8192, source="VCS", maximum_bytes=8192)
         record.update(outcome="not_dispatched", reason_code="pre_dispatch_refusal", runs=[],
                       requested_at="2026-10-21T00:00:00+00:00", diagnostic=diagnostic)
         store.record_outcome(identity, record)
         stored = store.outcome(identity)
         self.assertEqual(stored["diagnostic"], diagnostic)
+        self.assertGreater(store._path(identity, "request").stat().st_size, RECORD_BYTES)
         self.assertLessEqual(store._path(identity, "request").stat().st_size,
+                             CI_DIAGNOSTIC_RECORD_BYTES)
+
+    def test_maximum_control_diagnostic_roundtrips_in_legacy_resolution_sidecar(self):
+        store, identity, marker = self.pending_marker()
+        self.legacy_unknown(store, identity, marker)
+        record = {key: value for key, value in marker.items() if key != "dispatched_at"}
+        diagnostic = adapter_text_diagnostic("\x01" * 8192, source="VCS", maximum_bytes=8192)
+        record.update(outcome="not_dispatched", reason_code="provider_rejected", runs=[],
+                      requested_at="2026-10-21T00:00:00+00:00", diagnostic=diagnostic)
+        store.resolve(identity, record)
+        stored = store.outcome(identity)
+        self.assertEqual(stored["diagnostic"], diagnostic)
+        self.assertGreater(store._path(identity, "resolution").stat().st_size, RECORD_BYTES)
+        self.assertLessEqual(store._path(identity, "resolution").stat().st_size,
                              CI_DIAGNOSTIC_RECORD_BYTES)
 
     def test_terminal_no_dispatch_is_durable_and_replays_without_a_provider_call(self):

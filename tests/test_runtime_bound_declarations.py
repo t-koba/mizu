@@ -501,8 +501,8 @@ DECLARATIONS = {
     'ci_requests.py': {
         'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded ordinary evidence-record read'),
         'CI_DIAGNOSTIC_RECORD_BYTES': (
-            '16384', 'safety',
-            'CI requests / bounded no-dispatch diagnostic record read with its envelope'),
+            '65536', 'safety',
+            'CI requests / bounded JSON-escaped no-dispatch diagnostic and resolution-sidecar read'),
     },
     'reviews.py': {
         'RECORD_BYTES': ('4096', 'safety', 'typed review / bounded cursor and immutable run receipt reads'),
