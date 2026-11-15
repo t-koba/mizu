@@ -555,7 +555,9 @@ retries fail. Old single-seed/no-work events keep their exact shapes. Task
 seeds inherit any decision-level scope and remain unheld. Tasks without waits
 keep the open seed shape. Tasks with one existing observable wait (`deadline`,
 `code_change`, `insight_decided`, `dependency`; not `ci`) start blocked with the
-normalized wait in that same immutable event. Raw specs, including waits, bind
+normalized wait in that same immutable event (new `insight_decided` task waits
+are normalized to Insight-subject `object_resolved`; historical manifests keep
+their old shape). Raw specs, including waits, bind
 IDs and exact replay; first commit captures the code-change baseline in
 `work_item_waits`, and replay validates that manifest against the blocked seeds
 without rebasing. Other waits must strictly correspond to their normalized raw
@@ -832,13 +834,13 @@ and explicit reason/wait/snapshot/verification fields (null when absent).
 Actor is trusted internal attribution, not a new authorization grant. `doing`
 assigns the actor as holder, `blocked` preserves the holder or assigns the
 actor, and other statuses clear it. New transitions to `blocked` require a
-supported structured wait: an Insights-style wait (stored only, no scheduler
-wake), a work-item-only `record_closed` wait on an exact declared operator
-question from its current holder (bounded read-only closure evidence; unknown
-stays unknown), or a `ci` wait pinned to a completed immutable publication
+supported structured wait: a deadline, code-change or exact dependency-result wait, a work-item-only
+`object_resolved` wait on an Insight, exact declared operator question from its
+current holder, or work item (unknown evidence stays unknown), or a `ci` wait pinned to a completed immutable publication
 receipt. Historical blocked records without waits remain readable and are never
-rewritten or released automatically. These waits never assign work or change
-status by becoming due. The CI wait wakes only
+rewritten or released automatically. These waits never assign work. Under configured wait-resolution policy,
+proven object/code-change waits may reopen only their holder with immutable
+proof; read-only liveness itself never changes status or the target object. The CI wait wakes only
 its current holder on retained terminal evidence, without changing item status.
 Dropping requires a nonempty reason. A new completion revalidates the
 immutable snapshot manifest named by its earlier delivery binding; it need not
@@ -936,11 +938,16 @@ on a doing-to-doing transition with unchanged scope (the binding event stores
 `snapshot_id` exactly equal to that binding and valid embedded or retained
 acceptance proof. The live workspace may have advanced independently.
 `dropped` requires a reason, and new `blocked` transitions require the same
-structured wait schema and normalization semantics as `decide`, a work-item-only
-record closure wait (`{kind:"record_closed", subject:{type:"record", kind, id, digest}}`),
+deadline, code-change or exact dependency-result wait, a work-item-only
+object wait (`{kind:"object_resolved", subject}` with Insight `{type:"insight",id}`,
+record `{type:"record",kind,id,digest}`, or work-item `{type:"work_item",id}`),
 or a work-item-only CI wait (`{kind:"ci", publication_id, checks}` or
 `{kind:"publication_ci", snapshot_id, checks}`). Historical blocked
-records without waits remain readable and are not rewritten. CI wait results use
+records without waits, and historical `insight_decided`/`record_closed` bytes,
+remain readable and are not rewritten. Object waits require substantive Insight
+decision, exact authenticated answer, or validated `done`/`dropped` target
+history respectively. They reject self/cyclic work-item edges and fail closed
+on uncertain traversal; missing is impossible only when established. CI wait results use
 the host event path only to wake the holder; they never change item status.
 Receipt-ID CI waits
 validate a completed immutable publication receipt at registration and on stored reads,

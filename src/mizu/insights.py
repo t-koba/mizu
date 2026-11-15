@@ -1254,7 +1254,8 @@ replacement insight without implying rejected substance.
             if inherited_refs and action in ("accept", "modify"):
                 record["smoke_refs"] = inherited_refs
             if work_items is not None:
-                normalized_waits = [self._normalize_wait(task.get("wait"), "defer")
+                from .object_waits import consolidate
+                normalized_waits = [consolidate(self._normalize_wait(task.get("wait"), "defer"))
                                     for task in work_items]
                 record["work_item_specs"] = work_items
                 if any(wait is not None for wait in normalized_waits):

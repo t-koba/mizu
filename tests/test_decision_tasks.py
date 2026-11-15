@@ -440,7 +440,7 @@ class DecisionTaskTests(Fixture):
         ids = [seed["id"] for seed in seeds]
         expected = [{"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"}, waits[1],
                     {"kind": "code_change", "digest": baseline},
-                    {"kind": "insight_decided", "target": target["id"]}, waits[4]]
+                    {"kind": "object_resolved", "subject": {"type": "insight", "id": target["id"]}}, waits[4]]
         self.assertEqual(event["work_item_specs"], tasks)  # Raw, not normalized.
         self.assertEqual([s["wait"] for s in seeds[1:]], expected)
         self.assertEqual([s["status"] for s in seeds], ["open"] + ["blocked"] * 5)

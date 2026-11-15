@@ -321,8 +321,12 @@ def plan(project, *, settlement_pins=None, scan=None):
         for item in store.current_items(statuses=("blocked",)):
             if item.get("wait"):
                 waits.append(item["wait"])
+        from .object_waits import subject_of
         required_keys = set()
         for wait in waits:
+            subject = subject_of(wait)
+            if subject is not None and subject['type'] == 'insight':
+                wait = {'kind': 'insight_decided', 'target': subject['id']}
             if wait["kind"] not in ("dependency", "insight_decided"):
                 continue
             required = wait.get("requires")

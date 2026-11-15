@@ -182,9 +182,12 @@ def task_seeds(event: dict) -> list:
                              **({"scope": event["scope"]} if "scope" in event else {}))
         if "wait" in task:
             normalized = stored_wait(normalized)
-            if (normalized["kind"] != task["wait"]["kind"]
-                    or (normalized["kind"] != "code_change"
-                        and normalized != normalize_wait(task["wait"], "defer"))):
+            from .object_waits import consolidate
+            raw_normalized = (normalize_wait(task["wait"], "defer")
+                              if task["wait"]["kind"] != "code_change" else None)
+            if ((task["wait"]["kind"] == "code_change" and normalized["kind"] != "code_change")
+                    or (raw_normalized is not None
+                        and normalized not in (raw_normalized, consolidate(raw_normalized)))):
                 raise Denied("Task wait does not match raw decision manifest")
             expected.update(status="blocked", wait=normalized)
         elif normalized is not None:

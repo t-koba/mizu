@@ -1138,7 +1138,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                                 # Every historical binding stays replayable, even
                                 # after re-binding, dropping or history eviction.
                                 resolution = record.get("wait_resolution")
-                                if resolution is not None:
+                                if resolution is not None and "snapshot_id" in resolution["evidence"]:
                                     item_references.add(resolution["evidence"]["snapshot_id"])
                                 delivery = record.get("delivery")
                                 if delivery is not None:

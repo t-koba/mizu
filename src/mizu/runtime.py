@@ -4564,7 +4564,7 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
 
 _WRITER_CONVERTIBLE_WAIT_KINDS = frozenset((
     "deadline", "code_change", "insight_decided", "dependency",
-    "ci", "publication_ci", "proposal_merged", "record_closed"))
+    "ci", "publication_ci", "proposal_merged", "record_closed", "object_resolved"))
 
 
 def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,

@@ -26,7 +26,7 @@ class RecordWaitTests(Fixture):
         question = self.context().handle('record_write', ARGS)
         self.subject = dict(type='record', kind=question['record']['kind'],
                             id=question['record']['id'], digest=question['record_digest'])
-        self.wait = dict(kind='record_closed', subject=self.subject)
+        self.wait = dict(kind='object_resolved', subject=self.subject)
 
     def held(self, key='wait', actor='worker'):
         seed = self.store.create(actor=actor, idempotency_key=key, title=key)['record']['work_item']
@@ -70,6 +70,57 @@ class RecordWaitTests(Fixture):
         with self.assertRaisesRegex(Denied, 'changed'):
             self.store.transition(item['id'], expected_rev=item['rev'], actor='worker', status='doing')
 
+    def test_resolution_selects_exact_immutable_answer_and_replay_ignores_catalog(self):
+        from mizu import work_item_resolution as resolution
+        item = self.block()
+        self.answer('first')
+        resolution.reconcile(self.project, 'reviewer', limit=20)
+        self.assertEqual(self.store.get(item['id']), item)
+        resolution.reconcile(self.project, 'worker', limit=20)
+        opened = self.store.get(item['id'])
+        self.assertEqual((opened['status'], opened['holder']), ('open', 'worker'))
+        proof = opened['wait_resolution']['evidence']
+        self.assertEqual((proof['state'], proof['rev']), ('answered', self.subject['digest']))
+        self.answer('another')
+        self.config.operator_records['answer']['enabled'] = False
+        self.config.record_kinds.clear()
+        with patch('mizu.operator_records.catalog', side_effect=Denied('Unavailable')):
+            resolution.validate(self.store, item, opened)
+            self.assertEqual(list(self.store.history(item['id']))[-1], opened)
+        for field, value in (('rev', 'f' * 64), ('state', 'closed'), ('digest', '0' * 64),
+                             ('event', 'operator/sample/missing')):
+            forged = copy.deepcopy(opened)
+            forged['wait_resolution']['evidence'][field] = value
+            with self.subTest(field=field), self.assertRaises((Denied, FileNotFoundError)):
+                resolution.validate(self.store, item, forged)
+        self.assertEqual(records.pending(self.project, self.config.roles['worker'])[0]['pending_count'], 0)
+
+    def test_answer_discovery_is_rechecked_and_unknown_does_not_reopen(self):
+        from mizu import work_item_resolution as resolution
+        item = self.block()
+        self.answer()
+        self.assertIsNotNone(resolution.observe(self.store, item))
+        with patch.object(records, 'catalog', side_effect=OSError('Unavailable')):
+            resolution.reconcile(self.project, 'worker', limit=20)
+        self.assertEqual(self.store.get(item['id']), item)
+        missing = {**item, 'wait': {**item['wait'], 'subject': {**self.subject,
+                   'id': 'role/worker/role.question/missing'}}}
+        self.assertEqual(self.state(missing), 'unknown')
+
+    def test_historical_record_wait_replays_without_rewriting(self):
+        from support import history_write_json as write_json
+        from mizu import work_item_resolution as resolution
+        item = self.block(wait=dict(kind='record_closed', subject=self.subject))
+        self.assertEqual(item['wait']['kind'], 'object_resolved')
+        item['wait']['kind'] = 'record_closed'
+        write_json(self.store.root / 'work-items' / item['id'] / f"{item['rev']}.json", item)
+        self.answer()
+        resolution.reconcile(self.project, 'worker', limit=20)
+        opened = self.store.get(item['id'])
+        self.assertEqual(opened['status'], 'open')
+        self.assertEqual(list(self.store.history(item['id']))[-2], item)
+        resolution.validate(self.store, item, opened)
+
     def test_registration_requires_current_holder_exact_question_and_route(self):
         item = self.held()
         for change in ({'id': 'role/worker/role.question/missing'}, {'digest': 'f' * 64},
@@ -95,7 +146,9 @@ class RecordWaitTests(Fixture):
         self.assertEqual(self.store.get(item['id']), item)
 
     def test_normalized_history_and_work_item_only_schema(self):
-        self.assertEqual(normalize_record_wait(self.wait), self.wait)
+        legacy = dict(kind='record_closed', subject=self.subject)
+        self.assertEqual(normalize_record_wait(legacy), legacy)
+        self.assertEqual(stored_wait(legacy), legacy)
         self.assertEqual(stored_wait(self.wait), self.wait)
         validate(self.wait, WORK_ITEM_WAIT_SCHEMA)
         with self.assertRaises(Denied):

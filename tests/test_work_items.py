@@ -305,7 +305,7 @@ class WorkItemTests(Fixture):
         view = self.store.explain(self.item_id)
         self.assertEqual(view["item"]["status"], "blocked")
         self.assertEqual(view["history"][1]["wait"],
-                         {"kind": "insight_decided", "target": self.proposal["id"]})
+                         {"kind": "object_resolved", "subject": {"type": "insight", "id": self.proposal["id"]}})
 
     def test_wait_liveness_accepts_insight_title_length_edges(self):
         item_ids = []
@@ -606,7 +606,7 @@ class WorkItemTests(Fixture):
         blocked = self.change("blocked", expected_rev=5, actor="reviewer",
                               wait={"kind": "insight_decided", "insight": self.proposal["id"]})
         self.assertEqual(blocked["holder"], "worker")
-        self.assertEqual(blocked["wait"], {"kind": "insight_decided", "target": self.proposal["id"]})
+        self.assertEqual(blocked["wait"], {"kind": "object_resolved", "subject": {"type": "insight", "id": self.proposal["id"]}})
         self.assertEqual(self.store.get(self.item_id), blocked)
 
     def test_code_change_wait_keeps_original_baseline(self):

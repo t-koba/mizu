@@ -203,20 +203,25 @@ no work-item status and registers no wait automatically. Existing Insight
 and separate; Insight answers cannot close record questions, and record-bound
 answers do not satisfy Insight-revision wait liveness.
 
-A holder may explicitly register a work-item-only wait:
+A holder may explicitly register an `object_resolved` work-item wait on a record:
 
 ```json
-{"kind":"record_closed","subject":{"type":"record","kind":"role.question","id":"role/worker/role.question/question1","digest":"<exact 64-hex record digest>"}}
+{"kind":"object_resolved","subject":{"type":"record","kind":"role.question","id":"role/worker/role.question/question1","digest":"<exact 64-hex record digest>"}}
 ```
 
 Registration requires the exact current immutable question under a declared
 `operator_question` kind, its authenticated writer equal to the current item
 holder (who makes the CAS transition), and an enabled `operator_records.answer`
-route. Historical wait reads validate the normalized subject without requiring
+route. Historical `record_closed` wait bytes remain valid and unchanged; new registrations
+use `object_resolved`. Historical wait reads validate the normalized subject without requiring
 that publishing still be enabled. Closure uses the same canonical SharedRecords
 and disposable operator catalog authority as listing, through a distinct lazy
 read-only lookup cached once per work-item projection. It does not use or change
-the existing Insight `answer_lookup` route. `[limits].operator_record_catalog_scan_entries`
+the existing Insight `answer_lookup` route. Under project
+`work_item_wait_resolution = "reopen"`, the host may reopen only the waiting
+item for its holder with proof pinning one exact permanent authenticated answer.
+Later answers or disabled publishing do not invalidate that immutable proof;
+answer acknowledgements and the target question are unchanged. `[limits].operator_record_catalog_scan_entries`
 (default 2048 positive TOML integer) bounds catalog directory entries, not answers.
 Exhaustion, corrupt or unavailable evidence is `unknown`; a complete catalog with
 no exact authenticated answer is `pending`. At least one exact answer to the
@@ -224,9 +229,11 @@ question writer makes liveness `due`, even if publishing is later disabled or
 multiple distinct answers exist. Blocked age is diagnostic only; pending
 and unknown waits remain blocked regardless of elapsed time.
 
-This is read-only replanning evidence: the item remains blocked until its holder
-explicitly transitions it under CAS. No additional wake, wait receipt, assignment,
-status mutation, raw answer-body projection or acknowledgement is introduced.
+Liveness reads are read-only replanning evidence. The item stays blocked until
+its holder explicitly transitions it under CAS or configured host reconciliation
+records a proof-bound reopening for that holder. Neither path changes the
+question or answer; no new acknowledgement, assignment or raw answer-body
+projection is introduced.
 Answer delivery and explicit acknowledgement remain on their existing path.
 No existing questions or other sources are migrated by this route.
 

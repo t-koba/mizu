@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .errors import Denied, LimitExceeded
+from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .fs import DIGEST, canonical, digest
 from .snapshot import SnapshotNotDescendant
 
@@ -21,6 +21,9 @@ def observe(store, item, *, receipt_cache=None):
     it uncached under the publication lock.
     """
     wait = store._stored_wait(item['wait'])
+    if wait['kind'] in ('object_resolved', 'insight_decided', 'record_closed'):
+        from .object_waits import observe as observe_object
+        return observe_object(store, wait, item)
     if wait['kind'] == 'code_change':
         snapshot = store.snapshots.get()
         if snapshot['code_digest'] == wait['digest']:
@@ -84,6 +87,12 @@ def validate(store, previous, record):
         raise Denied('Invalid wait resolution time')
     wait = store._stored_wait(wait)
     evidence = value['evidence']
+    if wait['kind'] in ('object_resolved', 'insight_decided', 'record_closed'):
+        from .object_waits import validate as validate_object
+        if value['kind'] != 'due':
+            raise Denied('Invalid object resolution outcome')
+        validate_object(store, wait, previous['holder'], evidence)
+        return
     publication = wait['kind'] == 'publication_ci'
     fields = {'snapshot_id', 'code_digest'} | ({'publication_id', 'receipt_digest'} if publication else set())
     if (not isinstance(evidence, dict) or set(evidence) != fields
@@ -143,11 +152,11 @@ def reconcile(project, role_name, *, limit, on_resolution=None):
         nonlocal resolved
         if (resolved == limit or item['status'] != 'blocked'
                 or item['holder'] != role_name or item['rev'] == MAX_REVISIONS
-                or (item.get('wait') or {}).get('kind') not in ('code_change', 'publication_ci')):
+                or (item.get('wait') or {}).get('kind') not in ('code_change', 'publication_ci', 'object_resolved', 'insight_decided', 'record_closed')):
             return item
         try:
             proof = observe(store, item, receipt_cache=receipt_cache)
-        except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError):
+        except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, RecursionError):
             # Missing/corrupt/ambiguous evidence confers no transition authority.
             return item
         if proof is None:
@@ -156,7 +165,7 @@ def reconcile(project, role_name, *, limit, on_resolution=None):
             opened = store.transition(
                 item['id'], expected_rev=item['rev'], status='open', actor=role_name,
                 reason='Automatically resolved recorded wait', _resolve_wait=True)
-        except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError):
+        except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, RecursionError):
             # CAS refusal or an uncertain write may follow a competing append;
             # use a fresh validated projection, never the scanned stale record.
             return store.get(item['id'])

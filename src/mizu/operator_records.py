@@ -376,6 +376,43 @@ def record_question_lookup(project):
     return closed
 
 
+def record_answer_evidence(project, subject, holder, proof=None):
+    """Select or replay one exact authenticated answer; never a rolling catalog on replay.
+
+    Registration already authenticated the immutable question and its writer.
+    Replay needs only the permanent answer route, independent of today's enablement
+    and role-kind declarations. No new records or acknowledgements are written.
+    """
+    from .fs import canonical, digest
+    shared = store(project)
+    if proof is None:
+        if _record_question(project, subject) != holder:
+            raise Denied('Answer resolution question writer mismatch')
+        with lock(project.root / 'locks' / 'operator-records.lock'):
+            indexed = catalog(shared, readonly=True,
+                              scan_limit=project.config.limits.operator_record_catalog_scan_entries)
+        candidates = [(envelope, computed) for envelope, computed in indexed.values()
+                      if envelope['kind'] == 'answer' and envelope['subject'] == subject]
+        if any(envelope['payload']['addressee'] != holder for envelope, _ in candidates):
+            raise Denied('Answer resolution route mismatch')
+        if not candidates:
+            return None
+        envelope, computed = min(candidates, key=lambda row: row[0]['id'])
+        return {'event': envelope['id'], 'digest': computed or digest(canonical(envelope)),
+                'rev': subject['digest'], 'state': 'answered'}
+    if proof['rev'] != subject['digest'] or proof['state'] != 'answered':
+        raise Denied('Answer resolution subject/state mismatch')
+    parts = proof['event'].split('/') if isinstance(proof['event'], str) else []
+    if len(parts) != 3 or parts[:2] != ['operator', project.name]:
+        raise Denied('Answer resolution event identity mismatch')
+    identifier(parts[2])
+    envelope, _ = shared.get(proof['event'], expected_digest=proof['digest'])
+    if (envelope['kind'] != 'answer' or envelope['subject'] != subject
+            or envelope['writer'] != WRITER or envelope['payload']['addressee'] != holder):
+        raise Denied('Answer resolution route mismatch')
+    return proof
+
+
 def answer_lookup(project):
     """Lazy, projection-local evidence only; no delivery, repair or decision.
 

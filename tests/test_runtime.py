@@ -278,7 +278,7 @@ class ContextTests(Fixture):
         self.assertIn("new transitions to blocked require a supported observable wait", description)
         self.assertIn("receipt-bound work-item-only CI wait", description)
         self.assertIn("work-item-only wait {kind:proposal_merged", description)
-        self.assertIn("work-item-only wait {kind:record_closed", description)
+        self.assertIn("work-item-only wait {kind:object_resolved", description)
         item_id = "wi_" + "a" * 32
         validate({"id": item_id, "expected_rev": 1, "status": "doing"}, schema)
         validate({"id": item_id, "expected_rev": 1, "status": "blocked",
@@ -288,8 +288,8 @@ class ContextTests(Fixture):
         work_wait = schema["properties"]["wait"]["properties"]
         insight_schema = DEFINITIONS["decide"][1]
         insight_wait = insight_schema["properties"]["wait"]["properties"]
-        self.assertEqual(work_wait["kind"]["enum"], insight_wait["kind"]["enum"] +
-                         ["ci", "publication_ci", "proposal_merged", "record_closed"])
+        self.assertEqual(work_wait["kind"]["enum"], ["deadline", "code_change", "dependency", "object_resolved",
+                          "ci", "publication_ci", "proposal_merged"])
         for field in insight_wait.keys() - {"kind"}:
             self.assertEqual(work_wait[field], insight_wait[field])
         self.assertEqual(work_wait.keys() - insight_wait.keys(),
@@ -297,7 +297,7 @@ class ContextTests(Fixture):
         proposal_wait = {"kind": "proposal_merged", "publication_id": "a" * 64,
                          "proposal_id": "forge:owner/repo#1"}
         validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": proposal_wait}, schema)
-        record_wait = {"kind": "record_closed", "subject": {
+        record_wait = {"kind": "object_resolved", "subject": {
             "type": "record", "kind": "role.question",
             "id": "role/worker/role.question/question1", "digest": "b" * 64}}
         validate({"id": item_id, "expected_rev": 3, "status": "blocked", "wait": record_wait}, schema)

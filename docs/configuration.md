@@ -211,6 +211,8 @@ requires `title` (1–200 nonblank characters) and `description`
 `wait` using the existing defer schema: `deadline` with timezone-aware `at`,
 `code_change` with no other fields, `insight_decided` with `insight`, or
 `dependency` with `recipient` and exact `requires: {insight, rev, action}`.
+New Insight task waits normalize to `object_resolved` with
+`subject: {type:"insight", id}`; historical task manifests retain their bytes.
 CI waits, null/malformed waits, unknown fields and per-task scopes are refused.
 There are 1–16 entries; an empty list is refused. A supplied list requires resolved intent `create`: explicit
 `none` conflicts, and if trusted-source policy is `none`, explicitly pass
@@ -449,7 +451,7 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `roles.<name>.context_sections` | Inline table `{include = [...], exclude = [...]}` of optional unit-prompt sections (default empty). Optional sections: `open_work_items`, `ready_work`, `work_order`, `check_jobs`, `insights`, `research`, `ci`, `acceptance`, `report`. Default: `open_work_items` is sent to insight producers (`submit_insight`), decision makers (`decide`), and roles holding a work-item capability (`work_items_read`, `work_items_create`, `work_items_transition`, `work_items_legacy_read`, `work_items_reconcile`, `work_order`); `ready_work` is sent only to roles holding a work-item capability; every other section keeps its own capability-gated content (empty without the capability). `include` restores a section, `exclude` removes its keys; keys that deliver instructions or obligations (decisions, work-item events, waits, obligations, operator records, snapshot pins, run, clock) are never optional. Unknown or fixed names, duplicates, and a name in both lists fail configuration load. Rows of an excluded section do not count as shown to a later resumed delta |
 | `work_items_doing` | Per-role active `doing` cap (integer 1–100; default 1). `roles.<name>.work_items_doing` overrides this default with the same bounds. Checked under the transition CAS lock when entering `doing` or transferring a `doing` hold to a different role, counting validated holder state across all items, not just a page. Blocked waits consume no slot; existing over-limit records remain readable and may leave `doing` or receive same-holder scope/delivery revisions |
 | `work_items_stale_seconds` | Uninterrupted `doing` age at which `doing_stale` becomes true (integer 1–31,536,000; default 86,400 / 24 hours). Review visibility only, not origin staleness, expiry, reassignment, authorization or scheduling |
-| `operator_record_catalog_scan_entries` | Directory-entry budget for work-item `record_closed` closure lookup only (positive TOML integer, maximum 9,223,372,036,854,775,807; default 2048). Counts canonical, legacy and disposable catalog directories, including unrelated/staging entries. Exhaustion (even at exact EOF), corruption or unavailability yields unknown liveness, never an open/closed claim. Existing Insight answer lookup and host listing bounds are unchanged. |
+| `operator_record_catalog_scan_entries` | Directory-entry budget for work-item record-subject `object_resolved` closure lookup only (positive TOML integer, maximum 9,223,372,036,854,775,807; default 2048). Counts canonical, legacy and disposable catalog directories, including unrelated/staging entries. Exhaustion (even at exact EOF), corruption or unavailability yields unknown liveness, never an open/closed claim. Existing Insight answer lookup and host listing bounds are unchanged. |
 | `work_items_prompt` | Maximum open work-item rows included in each full and delta prompt (1–100; default 20). Overflow and legacy-unseeded coverage are reported explicitly; the tool page limit is separately available through `work_items_read` |
 | `session_delta_details` | Prompt row details: `elide` (default) replaces work-item description/scope/reason previews and role-owned check-job command/error previews in both full and resumed prompts with exact `details_reference` requests (`mizu_work_items_read` by ID or `mizu_check_job` result by ID), only for roles already holding the corresponding read capability. `full` repeats all previews. Shared-check candidates retain details: `join` revalidates/subscribes and is not a guaranteed read. All IDs, titles/status/revisions, wait/liveness, result metadata and page/discovery counts, truncation and coverage remain explicit. Fingerprints still cover complete bounded rows except age counters; only validated same-session cursors mark unchanged rows with `details_unchanged`. New/changed rows and invalid/missing cursors never claim unchanged. These references use the existing bounded live reads (check result may acknowledge completion), not a frozen detail copy, and grant no new access. This display-only reduction changes neither captured work/order hashes nor dispatch, execution or liveness; it makes no cross-run or provider-cache reuse claim |
 | `idle_seconds`, `cooldown_seconds` | Daemon sleep between poll iterations and pause between work units. A writable role may override the cooldown with `roles.<name>.cooldown_seconds` (1–1,073,741,824; unset keeps the project value); read-only cadence stays on `idle_seconds` |
@@ -3028,8 +3030,20 @@ closed chains reuse existing source-witnessed projections rather than being
 replayed by a separate reconciliation pass. Candidate proof uses the existing
 bounded retained snapshot/receipt discovery; each append rechecks it under locks
 and CAS. There is no new index or cursor. Read tools, ready/open pages, status,
-and work-order review reads never perform these transitions. The first slice resolves only:
+and work-order review reads never perform these transitions. Supported resolutions are:
 
+- `object_resolved`: `{kind:"object_resolved", subject}` with one of
+  `{type:"insight", id}`, `{type:"record", kind, id, digest}`, or
+  `{type:"work_item", id}`. Insights follow the current revision and are due
+  only on `accept`/`modify`/`reject`; defer is pending and withdrawal impossible.
+  Records require an exact declared role-question from the holder and an
+  enabled operator answer route at registration; only an exact authenticated
+  answer is due. Work items require validated target history with status
+  `done`/`dropped`, including exhausted-chain retirement. Registration refuses
+  self-dependency, cycles and uncertain work-item traversal. Missing is
+  impossible only when established; unavailable/corrupt is unknown. New
+  insight/record registrations use this kind; historical `insight_decided` and
+  `record_closed` waits replay without rewriting.
 - `code_change`: a validated observed snapshot ID and code digest differ from
   the wait's stored code-digest baseline.
 - `publication_ci`: a retained, strict descendant of both the bound delivery
@@ -3040,7 +3054,8 @@ and work-order review reads never perform these transitions. The first slice res
 
 Missing, unknown, corrupt, ambiguous, or bounded-out proof leaves the wait
 pending. This does not request hosted CI, declare a CI result, finish work, or
-change other wait kinds. Non-superseded CI waits keep their exact receipt/result
+change the target object. Exact-result `dependency` waits, CI and proposal
+waits retain their separate routes. Non-superseded CI waits keep their exact receipt/result
 route. A stale CAS is not retried. Exhausted revision chains are not retired
 automatically. The manual policy does not rewrite earlier resolutions.
 
@@ -3053,7 +3068,15 @@ unheld. The immutable `wait_resolution` member records `wait_rev`, SHA-256
 `wait_digest` of the canonical prior wait (including any wait smoke references),
 `kind` (`due` or `superseded`), `resolved_at` (the event's UTC seconds timestamp),
 and `evidence` (exact `snapshot_id`/`code_digest`, plus `publication_id` and
-canonical `receipt_digest` for supersession). Item identity is the enclosing
+canonical `receipt_digest` for supersession; for object resolution, immutable
+`event`, canonical `digest`, exact target `rev` and resolving `state`). The
+prior wait digest binds the exact target identity. An Insight proof pins the
+immutable substantive decision event; a record proof pins the authenticated
+answer and uses the immutable question digest as its revision; a work-item
+proof pins the exact terminal history revision (or retirement projection).
+Replay does not consult the current target decision/status or answer catalog,
+so later revisions, additional answers and dropped-to-done corrections do not
+revoke an earlier valid resolution. Item identity is the enclosing
 revision chain. Replay validates the recorded proof, not today's moving
 receipt inventory; later ambiguity never rewrites the original observation.
 The field appears on that event and its current open projection, not subsequent
@@ -3061,8 +3084,8 @@ transitions. Resolution snapshots are durable storage roots while their history
 references them.
 
 The new field's exact maximum canonical growth is **521 bytes**, including its
-leading comma (three-digit prior revision, 64-byte hex identities/digests, and a
-25-byte UTC timestamp). Only work-item event reads carrying this field may use
+leading comma (the publication proof remains the largest shape; object proofs fit within
+the same allowance, including route-bounded answer IDs and a 25-byte UTC timestamp). Only work-item event reads carrying this field may use
 131,593 bytes instead of 131,072; the corresponding work-item projection
 allowance grows by the same 521 bytes. Ordinary events, seeds, other records,
 row/page budgets, and general caps are unchanged. On platforms supporting the

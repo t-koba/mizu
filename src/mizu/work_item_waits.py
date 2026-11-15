@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .errors import Denied, LimitExceeded
+from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .smoke_refs import validate_refs
 from .fs import DIGEST, canonical, digest, identifier, now
 
@@ -94,6 +94,9 @@ def _stored_wait(value) -> dict:
     if not isinstance(value, dict):
         raise Denied("Blocked work items require a structured wait")
     kind = value.get("kind")
+    if kind == "object_resolved":
+        from .object_waits import normalize
+        return normalize(value)
     if kind == "record_closed":
         return normalize_record_wait(value)
     if kind == "code_change":
@@ -195,6 +198,20 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                        event["outcome"]["outcome"])
             return {**result("terminal", "receipt_route_terminal"), "outcome": outcome,
                     "evidence": {"record_digest": computed or digest(canonical(envelope))}}
+        if kind == "object_resolved":
+            subject = wait["subject"]
+            if subject["type"] == "work_item":
+                from .object_waits import work_item_state
+                state, reason = work_item_state(store, subject)
+                return result(state, reason)
+            # Reuse the established read-only insight and authenticated answer
+            # routes, while retaining the registered kind in the projection.
+            legacy = ({"kind": "insight_decided", "target": subject["id"]}
+                      if subject["type"] == "insight" else
+                      {"kind": "record_closed", "subject": subject})
+            return {**_liveness(store, legacy, snapshot, item=item, writer_roles=writer_roles,
+                               operator_answer=operator_answer, record_question=record_question),
+                    "wait_kind": kind}
         if kind == "record_closed":
             if record_question is None:
                 factory = store.record_question_lookup
@@ -279,5 +296,5 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                 from .insights import satisfaction_evidence
                 due = satisfaction_evidence(wait, item, decision) is not None
         return result("due" if due else "pending", "condition_met" if due else "condition_pending")
-    except (Denied, OSError, ValueError, TypeError, AttributeError, KeyError, LimitExceeded):
+    except (Busy, ConfigError, Denied, OSError, ValueError, TypeError, AttributeError, KeyError, LimitExceeded, RecursionError):
         return result("unknown", "unreadable")

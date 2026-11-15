@@ -202,13 +202,14 @@ class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  effective_verification_projection=None, operator_answer_lookup=None,
-                 record_question_lookup=None, register_question_wait=None,
+                 record_question_lookup=None, register_question_wait=None, record_answer_evidence=None,
                  publication_evidence: PublicationEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.operator_answer_lookup = operator_answer_lookup
         self.record_question_lookup = record_question_lookup
         self.register_question_wait = register_question_wait
+        self.record_answer_evidence = record_answer_evidence
         self.vcs = vcs or {}
         self.publication_evidence = (publication_evidence if publication_evidence is not None
                                      else PublicationEvidence())
@@ -2544,11 +2545,26 @@ class WorkItems:
                                       if wait["kind"] == "proposal_merged" else normalize(self.root, raw_wait))
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
-                elif isinstance(wait, dict) and wait.get("kind") == "record_closed":
-                    registered = normalize_record_wait(wait)
-                    if self.register_question_wait is None or current["holder"] != actor:
-                        raise Denied("Record waits require the current work-item holder and declared route")
-                    self.register_question_wait(registered["subject"], current["holder"])
+                elif isinstance(wait, dict) and wait.get("kind") in ("object_resolved", "record_closed", "insight_decided"):
+                    from .object_waits import normalize, require_acyclic
+                    refs = validate_refs(wait.get("smoke_refs", []))
+                    raw = {k: v for k, v in wait.items() if k != "smoke_refs"}
+                    if raw["kind"] == "record_closed":
+                        legacy = normalize_record_wait(raw)
+                        raw = {"kind": "object_resolved", "subject": legacy["subject"]}
+                    elif raw["kind"] == "insight_decided":
+                        if set(raw) != {"kind", "insight"}:
+                            raise Denied("An insight wait requires only insight")
+                        raw = {"kind": "object_resolved", "subject": {"type": "insight", "id": raw["insight"]}}
+                    registered = normalize(raw)
+                    subject = registered["subject"]
+                    if subject["type"] == "record":
+                        if self.register_question_wait is None or current["holder"] != actor:
+                            raise Denied("Record waits require the current work-item holder and declared route")
+                        self.register_question_wait(subject, current["holder"])
+                    require_acyclic(self, item_id, subject)
+                    if "smoke_refs" in wait:
+                        registered["smoke_refs"] = refs
                 else:
                     registered = self.insights._normalize_wait(wait, "defer")
             verification = None

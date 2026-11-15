@@ -237,7 +237,7 @@ bounded local reads prove no live external source remains, and a held
 self-resolvable wait exists.
 Two held waits are self-resolvable, not external sources: `code_change` when
 the holder is the project's sole configured `workspace = "write"` role, and
-`insight_decided` on a current, substantively answered (`accept`, `modify` or
+`object_resolved` on an Insight (historically `insight_decided`) with a current, substantively answered (`accept`, `modify` or
 `reject`) `kind = "question"` authored by that holder. Exactly one enabled,
 authenticated operator `answer` to that same current question revision, routed
 back to its author, also annotates the held wait as self-resolvable and
@@ -421,7 +421,7 @@ produce JSON null, never a fabricated age. Age is display-only and does not
 prioritize admission.
 
 A blocked item with a satisfied `deadline`, `code_change`,
-`insight_decided`, or `dependency` wait re-enters `ready_work` for reassessment.
+`object_resolved` (historically `insight_decided`), or `dependency` wait re-enters `ready_work` for reassessment.
 Decision tasks may start blocked and unheld with one of these waits, atomically
 with their open or blocked siblings. No per-task transition or wait registration
 is needed. Once satisfied, an unheld blocked seed is claimable just like unheld
@@ -429,7 +429,7 @@ open work; a held blocked item is routed only to its holder. Dependency
 `recipient` keeps its existing condition semantics, not task assignment.
 Its prompt row includes the normalized `wait`, `wait_liveness` (`state`,
 `reason`, `wait_kind`), and `wait_satisfied: true` only for a due condition.
-Legacy blocks without a wait and confidently impossible `insight_decided`
+Legacy blocks without a wait and confidently impossible object
 targets (missing or currently withdrawn) also re-enter for writer replanning,
 with `wait_satisfied: false`. A superseded decision is pending: the stable
 target ID follows its current revision, not the obsolete decision. Unsafe or
@@ -475,13 +475,30 @@ live view; admission and prompt reads are not a frozen transaction.
 
 New transitions to `blocked` require a supported observable wait; historical
 no-wait events remain readable and replayable, without rewriting history. A
-work-item-only `record_closed` wait pins an exact role-question record and makes
-the item due only after a complete bounded catalog finds an authenticated answer
-to its writer. Registration requires the question writer to hold the item and
-the operator answer route to be enabled. Unknown or unsafe catalog evidence does
-not become due; the holder must explicitly transition under CAS. This wait adds
-no receipt, acknowledgement, wake or status mutation; see [SharedRecords question
-closure](shared-records.md#opt-in-role-questions-to-the-operator).
+work-item-only `object_resolved` wait supports one durable subject:
+
+- `{type:"insight", id}` follows the current revision: only `accept`, `modify`,
+  and `reject` are due. `defer` stays pending; withdrawal is impossible.
+- `{type:"record", kind, id, digest}` pins an exact declared role-question
+  record. Registration requires its authenticated writer to hold the item and
+  the operator answer route to be enabled. Only an exact authenticated answer
+  through that route is due; incomplete/unsafe catalog evidence is unknown.
+- `{type:"work_item", id}` is due only on validated target history with status
+  `done` or `dropped` (including explicit exhausted-chain retirement). Self
+  references and dependency cycles are refused before writing; missing or
+  uncertain traversal cannot authorize a new edge.
+
+Missing targets are impossible only when absence is established; corrupt or
+unavailable targets are unknown. New registrations use this one kind;
+historical `insight_decided` and `record_closed` bytes replay unchanged. Exact
+`dependency` revision/action waits and Insight deferrals keep their existing
+semantics. Read tools never reopen items. Under project
+`work_item_wait_resolution = "reopen"`, unit-opening reconciliation may reopen
+only the waiting item's holder with immutable proof binding the exact subject,
+revision and resolving state. It never mutates or completes the target. Manual
+policy leaves reopening to the holder's explicit CAS transition. See
+[resolution policy and proof](configuration.md#work-item-wait-resolution) and
+[SharedRecords question closure](shared-records.md#opt-in-role-questions-to-the-operator).
 CI/proposal notifications remain separate holder-routed wakes; validated terminal
 evidence also keeps the blocked item ready after notification acknowledgement.
 A run-level `wait` does not block unrelated ready ledger work: record a work
@@ -580,12 +597,12 @@ fails closed. There is no cursor: use the existing
 work-item read/explain APIs for the authoritative ledger and full history.
 Retries simply observe a new live view; no external facts or new CI facts are
 polled. Deadline, published-code and exact dependency-result conditions retain
-their existing meaning. Question/answer routing is outside this slice.
+their existing meaning. Object-question waits use the authenticated answer route described above.
 
 ### Externality of a blocker
 
 A structured wait observes recorded state; it does not prove that an outside
-actor caused the condition. In particular, `code_change`, `insight_decided`,
+actor caused the condition. In particular, `code_change`, `object_resolved` (historically `insight_decided`),
 and `dependency` do not attest who produced the code change or decision, and
 a dependency's `recipient` does not assign the task or restrict who may satisfy
 its condition. The task author should use `blocked` only when its condition is
