@@ -18,15 +18,18 @@ import time
 from collections import Counter, defaultdict
 
 from . import platform
+from .dispatch_evidence import MAX_ORDINAL
 from .errors import LimitExceeded, MizuError
-from .fs import loads_finite, safe_read
+from .fs import canonical, loads_finite, safe_read
 from .usage import cache_read_share, prompt_input_tokens
 
 SPARSE_BELOW = 5
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
+_ROLE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
 REASONS = ("invalid_record", "unknown_session", "invalid_interval",
            "unfinished", "unknown_model", "unknown_denominator")
-PAIR_REASONS = ("unsequenced", "overlap", "ineligible", "different_model_or_engine", "file_boundary")
+PAIR_REASONS = ("unsequenced", "ordinal_gap", "duplicate_ordinal", "overlap", "ineligible",
+                "different_model_or_engine", "file_boundary")
 
 
 def _unique_object(pairs):
@@ -53,15 +56,23 @@ def _text(value):
 
 
 def _attempt(raw, file_index):
-    row = dict(file=file_index, sequence=None, group=None, engine=None,
+    row = dict(file=file_index, sequence=None, role=None, group=None, engine=None, ordinal=None, legacy=True,
                start=None, end=None, share=None, reason="invalid_record")
     if not isinstance(raw, dict):
         return row
-    row.update(start=_timestamp(raw.get("started_at")), end=_timestamp(raw.get("ended_at")))
+    row.update(start=_timestamp(raw.get("started_at")), end=_timestamp(raw.get("ended_at")),
+               legacy="dispatch_ordinal" not in raw)
+    ordinal = raw.get("dispatch_ordinal")
+    if type(ordinal) is int and 1 <= ordinal <= MAX_ORDINAL:
+        row["ordinal"] = ordinal
+    role = raw.get("role")
+    if isinstance(role, str) and _ROLE.fullmatch(role):
+        row["role"] = role
     session = raw.get("session")
     if isinstance(session, dict):
         key, generation = session.get("key"), session.get("generation")
-        if isinstance(key, str) and _KEY.fullmatch(key) and type(generation) is int and generation >= 0:
+        if (isinstance(key, str) and _KEY.fullmatch(key) and type(generation) is int
+                and 0 <= generation <= 2**31):
             row["sequence"] = (key, generation)
     models = raw.get("models")
     if (raw.get("models_unknown") is False and raw.get("models_truncated") is False
@@ -84,6 +95,36 @@ def _attempt(raw, file_index):
         "unknown_denominator" if row["share"] is None else None)
     return row
 
+
+
+def _sequence_state(project, sequence, rows):
+    """Require the source-owned counter/witness before trusting ordinals."""
+    roles = {row["role"] for row in rows}
+    if len(roles) != 1:
+        return False
+    role = next(iter(roles))
+    key, generation = sequence
+    if role is None or role not in project.config.roles:
+        return False
+    prefix = f"sessions/{role}/{key}"
+    try:
+        witness = safe_read(project.root, f"{prefix}/dispatch-order.lock", 2)
+        if witness != b"00":
+            return False
+        raw = safe_read(project.root, f"{prefix}/dispatch-order.json", 256)
+        state = loads_finite(raw, object_pairs_hook=_unique_object)
+        if (not isinstance(state, dict) or set(state) != {"generation", "ordinal"}
+                or type(state["generation"]) is not int
+                or not 0 <= state["generation"] <= 2**31
+                or type(state["ordinal"]) is not int
+                or not 1 <= state["ordinal"] <= MAX_ORDINAL
+                or canonical(state) != raw
+                or state["generation"] < generation):
+            return False
+        return (state["generation"] > generation
+                or state["ordinal"] >= max(row["ordinal"] for row in rows))
+    except (OSError, MizuError, ValueError, TypeError, RecursionError):
+        return False
 
 def _distribution(values):
     """Nearest-rank observed quantiles, including singleton bins; no smoothing."""
@@ -195,8 +236,9 @@ def summarize(project):
             coverage["oversized_files" if isinstance(exc, LimitExceeded) else "unavailable_files"] += 1
         except (ValueError, TypeError, RecursionError):
             coverage["malformed_files"] += 1
-    # No incomplete file may supply an adjacency claim. No cross-file pairs:
-    # missing files or retained tails could otherwise hide intervening calls.
+    # Incomplete files cannot supply adjacency claims. Modern cross-file pairs
+    # need consecutive ordinals and healthy source-owned sequence state; legacy
+    # rows remain same-file only.
     sequences, groups = defaultdict(list), defaultdict(list)
     excluded = Counter({reason: 0 for reason in REASONS})
     for row in rows:
@@ -210,7 +252,7 @@ def summarize(project):
     pair_excluded = Counter({reason: 0 for reason in PAIR_REASONS})
     pair_candidates = unpaired = 0
     unknown_sessions = any(r["sequence"] is None for r in rows)
-    for sequence in sequences.values():
+    for sequence_key, sequence in sequences.items():
         if expired():
             break
         pair_candidates += len(sequence) // 2
@@ -219,10 +261,23 @@ def summarize(project):
                 or any(r["start"] is None or r["end"] is None or r["end"] <= r["start"] for r in sequence)):
             pair_excluded["unsequenced"] += len(sequence) // 2
             continue
-        sequence.sort(key=lambda r: r["start"])
+        sequenced = all(r["ordinal"] is not None for r in sequence)
+        if not sequenced and not all(r["legacy"] for r in sequence):
+            pair_excluded["unsequenced"] += len(sequence) // 2
+            continue
+        if sequenced and len({r["ordinal"] for r in sequence}) != len(sequence):
+            pair_excluded["duplicate_ordinal"] += len(sequence) // 2
+            continue
+        if sequenced and not _sequence_state(project, sequence_key, sequence):
+            pair_excluded["unsequenced"] += len(sequence) // 2
+            continue
+        # Timestamps only establish interval safety, never modern dispatch
+        # order. Keep endpoint identities through the separate interval sort.
+        sequence.sort(key=lambda r: r["ordinal"] if sequenced else r["start"])
+        chronological = sorted(range(len(sequence)), key=lambda i: sequence[i]["start"])
         overlapping = set()
-        furthest = 0
-        for i in range(1, len(sequence)):
+        furthest = chronological[0]
+        for i in chronological[1:]:
             if sequence[i]["start"] < sequence[furthest]["end"]:
                 overlapping.update((furthest, i))
             if sequence[i]["end"] > sequence[furthest]["end"]:
@@ -230,8 +285,9 @@ def summarize(project):
         for i in range(0, len(sequence) - 1, 2):
             a, b = sequence[i:i + 2]
             reason = ("unsequenced" if a["file"] in unsafe_files or b["file"] in unsafe_files else
-                      "overlap" if i in overlapping or i + 1 in overlapping else
-                      "file_boundary" if a["file"] != b["file"] else
+                      "ordinal_gap" if sequenced and b["ordinal"] != a["ordinal"] + 1 else
+                      "overlap" if i in overlapping or i + 1 in overlapping or b["start"] < a["end"] else
+                      "file_boundary" if not sequenced and a["file"] != b["file"] else
                       "ineligible" if a["reason"] or b["reason"] else
                       "different_model_or_engine" if (a["group"], a["engine"]) != (b["group"], b["engine"]) else None)
             if reason:
@@ -270,7 +326,7 @@ def summarize(project):
                        "median_shares": _distribution([_distribution([r["share"] for r in rs if not r["reason"]])["quantiles"]["p50"]
                                                        for rs in groups.values() if any(not r["reason"] for r in rs)]),
                        "median_changes": _distribution([_distribution(cs)["quantiles"]["p50"] for cs in group_changes.values()])},
-            "pairing": "Within each session-generation, sort all observed attempts by start; disjoint consecutive pairs (1,2), (3,4). Never skip invalid attempts. Invalid intervals block the sequence; an unknown session blocks all pairs. Dropped/truncated files cannot supply pairs. Reject either endpoint overlapping any interval in its sequence, ineligible endpoints, or different exact provider/model/engine. Never pair across files.",
+            "pairing": "Per session-generation, disjoint consecutive pairs. Order by dispatch ordinal; require unique, contiguous endpoint ordinals, including across files. All-legacy sequences retain start-time order and same-file pairs only. Mixed/unknown ordinals or invalid intervals block the sequence; unknown sessions block all pairs. Never skip invalid attempts. Dropped/truncated files cannot supply pairs. Reject overlapping or time-reversed endpoints, ineligible endpoints, or different exact provider/model/engine.",
             "note": "Observed counts only; empty, missing and bounded history is unknown, never zero history. Nearest-rank quantiles; sparse means fewer than 5 observations. Bins are left-closed, right-open except 1. Groups use exact session key, generation, provider and model; only distributions across groups leave this view. No causal inference or scheduler authorization."}
     if expired():
         coverage["status"] = "incomplete_unknown"

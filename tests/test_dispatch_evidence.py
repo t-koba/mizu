@@ -1,14 +1,18 @@
 """Local fake-driver measurements; not provider cache-residency tests."""
 import dataclasses
+import os
+import subprocess
+import sys
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import ROOT, Fixture, ScriptDriver
 from mizu import dispatch_evidence as evidence
 from mizu.config import DispatchEvidence, MIN_DISPATCH_EVIDENCE_BYTES, Usage
-from mizu.engine_config import effective, session_record, session_generation
+from mizu.engine_config import effective, reset_role_sessions, rotate_session, session_record, session_generation
 from mizu.errors import DeadlineWrapUp, ModelFailure
 from mizu.fs import read_json, write_json
 from mizu.runtime import Engine
+from mizu.scheduler_evidence import summarize
 from mizu.usage import MAX_ATTEMPT_USAGE_KEY_CHARS, attempt_usage, normalize
 
 
@@ -115,6 +119,175 @@ class DispatchEvidenceTests(Fixture):
         self.assertEqual(continuation["key"], session["key"])
         self.assertEqual(continuation["prompt_mode"], "continuation")
         self.assertIsNone(continuation["rotation"])
+
+    def test_ordinals_follow_selected_session_across_runs_and_failed_calls(self):
+        contexts = [self.context() for _ in range(3)]
+        settings = effective(self.config, contexts[0].role, contexts[0].role.profile)
+        error = ModelFailure("test", code="synthetic")
+        class Driver:
+            def execute(self, context, prompt):
+                session_record(context, context.role.profile, settings)
+                # Repeated observation of the same selection is idempotent.
+                session_record(context, context.role.profile, settings)
+                context.handle("_model_usage", {"sequence": 1,
+                    "usage": {"input": 100, "cacheRead": 25, "cacheWrite": 0},
+                    "model": {"provider": "observed", "model": "m"}})
+                if context is contexts[1]:
+                    raise error
+                return "original return"
+        for index, ctx in enumerate(contexts):
+            path, _ = session_record(ctx, ctx.role.profile, settings)  # peek
+            if index == 0:
+                self.assertFalse((path.parent / "dispatch-order.json").exists())
+            evidence.capture_projection(ctx, ctx.role.profile, "full", path.parent.name, None, path.parent)
+            with patch.object(evidence, "now", side_effect=[
+                    f"2026-09-01T00:00:0{index * 2}+00:00",
+                    f"2026-09-01T00:00:0{index * 2 + 1}+00:00"]):
+                if index == 1:
+                    with self.assertRaises(ModelFailure) as caught:
+                        evidence.execute(ctx, Driver(), "work")
+                    self.assertIs(caught.exception, error)
+                else:
+                    self.assertEqual(evidence.execute(ctx, Driver(), "work"), "original return")
+        self.assertEqual([self.records(c)[0]["dispatch_ordinal"] for c in contexts], [1, 2, 3])
+        self.assertEqual(summarize(self.project)["pairs"]["valid"], 1)
+        # Lost/evicted evidence leaves the consumed ordinal visible as a gap.
+        (contexts[1].run_dir / "dispatch-attempts.json").unlink()
+        view = summarize(self.project)
+        self.assertEqual(view["pairs"]["valid"], 0)
+        self.assertEqual(view["pairs"]["excluded"]["ordinal_gap"], 1)
+        # A reservation with no run record (crash after selection) also consumes
+        # its ordinal rather than reclaiming it on the next call.
+        self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 4)
+        self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 5)
+
+    def test_counter_generation_rotation_reuses_only_current_state(self):
+        ctx = self.context()
+        settings = effective(self.config, ctx.role, ctx.role.profile)
+        path, _ = session_record(ctx, ctx.role.profile, settings)
+        self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 1)
+        self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 2)
+        for generation in range(1, 4):
+            rotate_session(path, ctx.run_dir, "test")
+            self.assertEqual(evidence._dispatch_ordinal(path.parent, generation), 1)
+            self.assertEqual(read_json(path.parent / "dispatch-order.json"),
+                             {"generation": generation, "ordinal": 1})
+        self.assertEqual(sorted(p.name for p in path.parent.glob("dispatch-order*")),
+                         ["dispatch-order.json", "dispatch-order.lock"])
+        reset_role_sessions(self.config, self.project, ctx.role.name)
+        self.assertFalse(path.parent.exists())
+        path, _ = session_record(ctx, ctx.role.profile, settings)
+        self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 1)
+
+    def test_counter_contention_is_nonblocking_and_cannot_bridge_lost_evidence(self):
+        ctx = self.context()
+        directory = ctx.run_dir
+        self.assertEqual(evidence._dispatch_ordinal(directory, 0), 1)
+        prefix = "import os, sys; sys.path.insert(0, sys.argv[2]); "
+        child = subprocess.Popen([sys.executable, "-c", prefix +
+            "from mizu import platform; "
+            "fd=os.open(sys.argv[1], os.O_RDWR); platform.lock_fd(fd, blocking=False); "
+            "print('locked', flush=True); sys.stdin.readline(); platform.unlock_fd(fd)",
+            str(directory / "dispatch-order.lock"), str(ROOT / "src")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            import threading
+            ready = []
+            reader = threading.Thread(target=lambda: ready.append(child.stdout.readline()), daemon=True)
+            reader.start()
+            reader.join(timeout=5)
+            self.assertEqual(ready, ["locked\n"])
+            contender = subprocess.run([sys.executable, "-c", prefix +
+                "from pathlib import Path; from mizu.dispatch_evidence import _dispatch_ordinal; "
+                "print(_dispatch_ordinal(Path(sys.argv[1]), 0))",
+                str(directory), str(ROOT / "src")], capture_output=True, text=True, timeout=5)
+            self.assertEqual((contender.returncode, contender.stdout), (0, "None\n"))
+        finally:
+            try:
+                child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.communicate(timeout=5)
+        self.assertEqual(child.returncode, 0)
+        self.assertIsNone(evidence._dispatch_ordinal(directory, 0))
+        self.assertEqual((directory / "dispatch-order.lock").stat().st_size, 2)
+        self.assertEqual((directory / "dispatch-order.lock").read_bytes(), b"0!")
+
+    def test_counter_failures_leave_dispatch_unchanged_and_order_unknown(self):
+        for failure in ("unsupported", "corrupt", "missing", "write"):
+            with self.subTest(failure=failure):
+                ctx = self.context()
+                settings = effective(self.config, ctx.role, ctx.role.profile)
+                path, _ = session_record(ctx, ctx.role.profile, settings)
+                # Separate session directories keep each failure independent.
+                directory = ctx.run_dir / "counter"
+                directory.mkdir()
+                self.assertEqual(evidence._dispatch_ordinal(directory, 0), 1)
+                target = directory / "dispatch-order.json"
+                if failure == "corrupt":
+                    target.write_text('{"generation":0,"ordinal":true}')
+                elif failure == "missing":
+                    target.unlink()
+                if failure == "unsupported":
+                    guard = patch.object(evidence.platform, "lock_fd", side_effect=OSError("unsupported"))
+                elif failure == "write":
+                    guard = patch.object(evidence, "write_json", side_effect=OSError("write"))
+                else:
+                    guard = patch.object(evidence.platform, "lock_fd", wraps=evidence.platform.lock_fd)
+                with guard:
+                    self.assertIsNone(evidence._dispatch_ordinal(directory, 0))
+                self.assertIsNone(evidence._dispatch_ordinal(directory, 0))
+                # The physical call still returns and records a null ordinal
+                # when the portable lock is unavailable.
+                evidence.capture_projection(ctx, ctx.role.profile, "full", path.parent.name, None, path.parent)
+                class Driver:
+                    def execute(self, context, prompt):
+                        session_record(context, context.role.profile, settings)
+                        return "unchanged"
+                with patch.object(evidence.platform, "lock_fd", side_effect=OSError("unsupported")):
+                    self.assertEqual(evidence.execute(ctx, Driver(), "work"), "unchanged")
+                self.assertIsNone(self.records(ctx)[0]["dispatch_ordinal"])
+
+    def test_invalid_generation_state_poisoned_and_not_repaired(self):
+        ctx = self.context()
+        settings = effective(self.config, ctx.role, ctx.role.profile)
+        path, _ = session_record(ctx, ctx.role.profile, settings)
+        self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 1)
+        (path.parent / "generation.json").write_text(
+            '{"generation":0,"generation":1}')
+        self.assertIsNone(evidence._dispatch_ordinal(path.parent, 0))
+        self.assertEqual((path.parent / "dispatch-order.lock").read_bytes(), b"0!")
+        self.assertIsNone(evidence._dispatch_ordinal(path.parent, 0))
+
+    def test_unsafe_counter_files_are_never_followed_or_repaired(self):
+        for kind in ("symlink", "hardlink", "fifo", "oversized", "duplicate", "exhausted"):
+            with self.subTest(kind=kind):
+                directory = self.context().run_dir
+                self.assertEqual(evidence._dispatch_ordinal(directory, 0), 1)
+                target = directory / "dispatch-order.json"
+                target.unlink()
+                outside = directory / "untouched"
+                outside.write_bytes(b"private")
+                if kind == "symlink":
+                    try:
+                        target.symlink_to(outside)
+                    except (OSError, NotImplementedError):
+                        continue
+                elif kind == "hardlink":
+                    os.link(outside, target)
+                elif kind == "fifo":
+                    if not hasattr(os, "mkfifo"):
+                        continue
+                    os.mkfifo(target)
+                elif kind == "oversized":
+                    target.write_bytes(b" " * 257)
+                elif kind == "duplicate":
+                    target.write_text('{"generation":0,"ordinal":1,"ordinal":2}')
+                else:
+                    write_json(target, {"generation": 0, "ordinal": evidence.MAX_ORDINAL})
+                self.assertIsNone(evidence._dispatch_ordinal(directory, 0))
+                self.assertEqual(outside.read_bytes(), b"private")
+                self.assertIsNone(evidence._dispatch_ordinal(directory, 0))
 
     def test_generation_and_profile_mismatches_do_not_borrow_projection(self):
         for mismatch in ("profile", "generation"):

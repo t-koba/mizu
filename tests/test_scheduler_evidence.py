@@ -4,6 +4,7 @@ import dataclasses
 import io
 import json
 import os
+import shutil
 from unittest.mock import patch
 
 from support import Fixture
@@ -35,6 +36,15 @@ class SchedulerEvidenceTests(Fixture):
         target = directory / "dispatch-attempts.json"
         write_json(target, {"schema": 1, "attempts": rows, "dropped_attempts": dropped})
         return target
+
+    def sequence_state(self, *, key="a" * 64, generation=1, ordinal=1,
+                       role="worker", witness=b"00"):
+        directory = self.project.root / "sessions" / role / key
+        mkdir(directory)
+        (directory / "dispatch-order.lock").write_bytes(witness)
+        write_json(directory / "dispatch-order.json",
+                   {"generation": generation, "ordinal": ordinal})
+        return directory
 
     def view(self):
         return evidence.summarize(self.project)
@@ -213,6 +223,78 @@ class SchedulerEvidenceTests(Fixture):
         view = self.view()
         self.assertEqual(view["pairs"]["excluded"]["overlap"], 1)
         self.assertEqual(view["pairs"]["valid"], 0)
+
+    def test_ordinal_continuity_crosses_files_without_timestamp_ordering(self):
+        self.sequence_state(ordinal=8)
+        self.write([attempt(1, role="worker", dispatch_ordinal=8)], name="second")
+        self.write([attempt(0, role="worker", dispatch_ordinal=7)], name="first")
+        view = self.view()
+        self.assertEqual(view["pairs"]["valid"], 1)
+        self.assertEqual(view["pairs"]["idle_gap_seconds"]["quantiles"]["p50"], 1)
+        # Swapping ordinals must not be repaired by sorting wall timestamps.
+        self.write([attempt(1, role="worker", dispatch_ordinal=7)], name="second")
+        self.write([attempt(0, role="worker", dispatch_ordinal=8)], name="first")
+        self.assertEqual(self.view()["pairs"]["valid"], 0)
+        self.assertEqual(self.view()["pairs"]["excluded"]["overlap"], 1)
+
+    def test_ordinal_gaps_duplicates_unknowns_and_legacy_fail_closed(self):
+        cases = [((1, 3), "ordinal_gap"), ((1, 1), "duplicate_ordinal"),
+                 ((1, 2, 2, 3), "duplicate_ordinal")]
+        cases.extend(((1, invalid), "unsequenced") for invalid in (None, True, 0, -1, "2", 2**63))
+        for ordinals, reason in cases:
+            with self.subTest(ordinals=ordinals):
+                valid = [o for o in ordinals if type(o) is int and 1 <= o < 2**63]
+                self.sequence_state(ordinal=max(valid, default=1))
+                self.write([attempt(i, role="worker", dispatch_ordinal=o)
+                            for i, o in enumerate(ordinals)])
+                view = self.view()
+                self.assertEqual(view["pairs"]["valid"], 0)
+                self.assertEqual(view["pairs"]["excluded"][reason], len(ordinals) // 2)
+        self.write([attempt(0, dispatch_ordinal=1), attempt(1)])
+        self.assertEqual(self.view()["pairs"]["excluded"]["unsequenced"], 1)
+        # Old records remain timestamp-ordered and never cross file boundaries.
+        self.write([attempt(1), attempt(0)])
+        self.assertEqual(self.view()["pairs"]["valid"], 1)
+        self.write([attempt(0)])
+        self.write([attempt(1)], name="another")
+        self.assertEqual(self.view()["pairs"]["excluded"]["file_boundary"], 1)
+
+    def test_numbered_pairs_retain_endpoint_and_file_safety(self):
+        self.sequence_state(ordinal=3)
+        first = attempt(0, role="worker", dispatch_ordinal=1)
+        second = attempt(1, role="worker", dispatch_ordinal=2)
+        for change in (dict(status="started"), dict(usage={"status": "unknown"}),
+                       dict(models_unknown=True), dict(ended_at=None),
+                       dict(started_at=first["started_at"]),
+                       dict(session={"key": None, "generation": None})):
+            with self.subTest(change=change):
+                self.write([first], name="first")
+                self.write([{**second, **change}], name="second")
+                self.assertEqual(self.view()["pairs"]["valid"], 0)
+        self.write([second], name="second", dropped=1)
+        self.assertEqual(self.view()["pairs"]["excluded"]["unsequenced"], 1)
+        self.write([second, attempt(2, role="worker", dispatch_ordinal=3)], name="second")
+        self.project.config = dataclasses.replace(self.config,
+            dispatch_evidence=DispatchEvidence(max_attempts=1))
+        self.assertEqual(self.view()["pairs"]["excluded"]["unsequenced"], 1)
+
+    def test_poisoned_or_missing_sequence_state_blocks_pairs_after_run_loss(self):
+        self.write([attempt(0, role="worker", dispatch_ordinal=1)], name="first")
+        missing = self.write([attempt(1, role="worker", dispatch_ordinal=None)], name="lost")
+        self.write([attempt(2, role="worker", dispatch_ordinal=2)], name="last")
+        self.sequence_state(ordinal=2, witness=b"0!")
+        missing.unlink()
+        view = self.view()
+        self.assertEqual(view["pairs"]["valid"], 0)
+        self.assertEqual(view["pairs"]["excluded"]["unsequenced"], 1)
+        self.assertEqual(view["pairs"]["excluded"]["ordinal_gap"], 0)
+
+        # An explicit session reset removes the witness; old ordinals are then
+        # unknown rather than trusted using a same-key recreated directory.
+        shutil.rmtree(self.project.root / "sessions")
+        view = self.view()
+        self.assertEqual(view["pairs"]["valid"], 0)
+        self.assertEqual(view["pairs"]["excluded"]["unsequenced"], 1)
 
     def test_missing_corrupt_dropped_and_empty_coverage_are_unknown(self):
         mkdir(self.project.root / "runs")
