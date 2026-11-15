@@ -105,8 +105,11 @@ class SessionRowDetailsTests(Fixture):
     def setUp(self):
         super().setUp()
         roles = dict(self.config.roles)
+        # This suite isolates prompt-row/session detail behavior. Keep the
+        # open row visible without exercising the separate writer-parking
+        # contract; that contract has dedicated lifecycle tests.
         roles['worker'] = dataclasses.replace(
-            roles['worker'], capabilities=tuple(dict.fromkeys(
+            roles['worker'], workspace='read', capabilities=tuple(dict.fromkeys(
                 (*roles['worker'].capabilities, 'check_job', 'work_items_read'))))
         self.config = dataclasses.replace(
             self.config, roles=roles,
