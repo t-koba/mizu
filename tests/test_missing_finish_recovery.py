@@ -37,6 +37,17 @@ def seed_open_work(project):
     return decision["work_item"]["id"]
 
 
+def block_open_work(context, _prompt, _profile):
+    """Give the fixture's ready work a real observable wait before parking."""
+    page = context.handle("work_items_read", {"limit": 100})
+    for item in page["items"]:
+        if item["status"] == "open":
+            context.handle("work_items_transition", {
+                "id": item["id"], "expected_rev": item["rev"], "status": "blocked",
+                "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"},
+            })
+
+
 def save_worker_session(fixture):
     ctx = fixture.context("worker")
     settings = effective(fixture.config, ctx.role, ctx.role.profile)
@@ -66,7 +77,7 @@ class MissingFinishRecoveryTests(Fixture):
         self.assertEqual(health(self.project)["consecutive_failures"], 2)
         self.assertFalse(self.project.control()["paused"])
         # Next admitted unit rotates to a fresh conversation before dispatch.
-        capture = ScriptDriver()
+        capture = ScriptDriver(callback=block_open_work)
         result = Engine(self.config, driver=capture).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         run_dir = self.project.root / "runs" / result["run"]
@@ -82,16 +93,19 @@ class MissingFinishRecoveryTests(Fixture):
         # A sealed unit resets the streak.
         self.assertEqual(streak(self.project), 0)
         self.assertEqual(health(self.project)["consecutive_failures"], 0)
+        self.assertEqual(self.project.work_items.page_ready(limit=10)["items"], [])
 
     def test_success_resets_streak(self):
         seed_open_work(self.project)
         with self.assertRaises(MissingFinish):
             Engine(self.config, driver=NoFinishDriver()).run(self.project, "worker")
         self.assertEqual(streak(self.project), 1)
-        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        result = Engine(self.config, driver=ScriptDriver(callback=block_open_work)).run(
+            self.project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(streak(self.project), 0)
         self.assertEqual(health(self.project)["consecutive_failures"], 0)
+        self.assertEqual(self.project.work_items.page_ready(limit=10)["items"], [])
 
     def test_non_missing_failure_resets_streak(self):
         seed_open_work(self.project)
@@ -161,7 +175,8 @@ class MissingFinishRecoveryTests(Fixture):
             with self.assertRaises(MissingFinish):
                 Engine(self.config, driver=NoFinishDriver()).run(self.project, "worker")
         self.assertEqual(streak(self.project), 2)
-        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        result = Engine(self.config, driver=ScriptDriver(callback=block_open_work)).run(
+            self.project, "worker")
         self.assertEqual(result["status"], "completed")
         run_dir = self.project.root / "runs" / result["run"]
         rotation = read_json(run_dir / "rotation.json")
@@ -169,6 +184,7 @@ class MissingFinishRecoveryTests(Fixture):
         self.assertIn("missing-finish units 2 >=2", rotation["reason"])
         self.assertEqual(session_generation(path.parent), 1)
         self.assertFalse(path.exists())
+        self.assertEqual(self.project.work_items.page_ready(limit=10)["items"], [])
 
     def test_fully_blocked_queue_never_rotates(self):
         item_id = seed_open_work(self.project)
