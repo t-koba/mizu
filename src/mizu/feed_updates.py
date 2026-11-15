@@ -1,4 +1,4 @@
-"""Role-scoped feed discovery; only complete, returnable observations replace state.
+"""Role-scoped feed discovery; resumable delivery from complete observations.
 
 Workers observe one feed behind the existing killable network boundary. The
 parent holds one project cursor lock only through cleanup, cursor reads, response
@@ -13,8 +13,9 @@ from .errors import Denied, MizuError
 from .fs import ATOMIC_WRITE_TEMP_PREFIX, DIGEST, canonical, digest, loads_finite, lock, mkdir, safe_read, safe_write
 
 # Existing per-feed configuration permits at most 1000 entries. State keeps
-# only their SHA-256 identities plus a fixed version/scope envelope, never XML.
-_STATE_BYTES = 1000 * 67 + 1024
+# at most 1000 completed and 1000 partially delivered SHA-256 identities,
+# plus a fixed version/scope envelope, never XML.
+_STATE_BYTES = 2 * 1000 * 67 + 1024
 
 
 def _previous(root, name, role, feed):
@@ -22,7 +23,7 @@ def _previous(root, name, role, feed):
     try:
         path.lstat()
     except FileNotFoundError:
-        return set()
+        return set(), set()
     raw = safe_read(root, name, _STATE_BYTES)
     state = loads_finite(raw)
     if not isinstance(state, dict) or raw != canonical(state):
@@ -30,14 +31,22 @@ def _previous(root, name, role, feed):
     checksum = state.pop("checksum", None)
     if checksum != digest(canonical(state)):
         raise Denied("Invalid feed cursor checksum")
-    if (set(state) != {"version", "role", "feed", "identities"}
-            or type(state["version"]) is not int or state["version"] != 1
-            or state["role"] != role or state["feed"] != feed
-            or not isinstance(state["identities"], list) or len(state["identities"]) > 1000
-            or any(not isinstance(key, str) or not DIGEST.fullmatch(key) for key in state["identities"])
-            or len(set(state["identities"])) != len(state["identities"])):
+    version = state.get("version")
+    fields = {"version", "role", "feed", "identities"}
+    if (type(version) is not int or version not in (1, 2)
+            or set(state) != (fields if version == 1 else fields | {"delivered"})
+            or state["role"] != role or state["feed"] != feed):
         raise Denied("Invalid feed cursor")
-    return set(state["identities"])
+    sets = []
+    for keys in (state["identities"], state.get("delivered", [])):
+        if (not isinstance(keys, list) or len(keys) > 1000
+                or any(not isinstance(key, str) or not DIGEST.fullmatch(key) for key in keys)
+                or len(set(keys)) != len(keys)):
+            raise Denied("Invalid feed cursor")
+        sets.append(set(keys))
+    if sets[0] & sets[1]:
+        raise Denied("Invalid feed cursor")
+    return sets[0], sets[1]
 
 
 def _directory(path):
@@ -100,6 +109,18 @@ def _metadata_size(feed):
                           "errors": ["ambiguous_identity", "duplicate_identity", "missing_identity"]}))
 
 
+def _fit_row(row, room):
+    """Preserve identity/evidence; explicitly empty optional text if necessary."""
+    compact = {**row, "truncated_fields": []}
+    for field in ("summary", "title", "url"):
+        if compact[field]:
+            compact[field] = ""
+            compact["truncated_fields"].append(field)
+            if len(canonical(compact)) <= room:
+                return compact
+    return None
+
+
 def _read_feed(context, role, root, name, status, room):
     """Consume one worker result before starting the next worker.
 
@@ -118,7 +139,7 @@ def _read_feed(context, role, root, name, status, room):
         mkdir(root)
         _directory(root)
         try:
-            previous = _previous(root, name, role, name[:-5])
+            previous, delivered = _previous(root, name, role, name[:-5])
         except (MizuError, OSError, ValueError, TypeError):
             status["errors"] = ["corrupt_state"]
             return room
@@ -136,29 +157,42 @@ def _read_feed(context, role, root, name, status, room):
         status["overflow"] = observation["overflow"]
         status["errors"] = observation["errors"]
         identities = {row["identity"] for row in observation["entries"]}
+        # Only a complete source can prune or extend partial-delivery progress.
+        # Keep the last completed identity set intact until every new ID fits.
+        delivered &= identities - previous
+        seen = previous | delivered
         for row in observation["entries"]:
-            if row["identity"] not in previous:
-                cost = len(canonical(row)) + (1 if status["entries"] else 0)
-                if not status["truncated"] and cost <= room:
-                    status["entries"].append(row)
-                    room -= cost
-                else:
-                    status["truncated"] = True
+            if row["identity"] in seen:
+                continue
+            separator = 1 if status["entries"] else 0
+            # Do not clip a later row just to fill leftover room. On a repeat
+            # it becomes the first undelivered row and can use the full budget.
+            fitted = row
+            if len(canonical(row)) + separator > room:
+                fitted = _fit_row(row, room) if not status["entries"] else None
+            if fitted is None:
+                status["truncated"] = True
+                break
+            status["entries"].append(fitted)
+            room -= len(canonical(fitted)) + separator
         status["complete"] = observation["complete"] and not status["truncated"]
-        if not status["complete"]:
+        if not observation["complete"]:
             return room
+        delivered.update(row["identity"] for row in status["entries"])
         if context.tools_cancelled():
             status["complete"] = False
             status["errors"] = ["cancelled"]
             return room
         try:
-            state = {"version": 1, "role": role, "feed": name[:-5], "identities": sorted(identities)}
+            state = {"version": 2, "role": role, "feed": name[:-5],
+                     "identities": sorted(identities if status["complete"] else previous),
+                     "delivered": [] if status["complete"] else sorted(delivered)}
             safe_write(root, name, canonical({**state, "checksum": digest(canonical(state))}))
         except (MizuError, OSError, ValueError):
             status["complete"] = False
             status["errors"] = ["state_write_failed"]
         else:
-            status["cursor_advanced"] = True
+            status["cursor_advanced"] = status["complete"]
     return room
 
 

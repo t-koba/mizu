@@ -121,10 +121,20 @@ class FeedUpdatesTests(Fixture):
         self.read()
         path = self.state_path()
         valid = path.read_bytes()
-        for content in (b"{", b"x" * (feed_updates._STATE_BYTES + 1),
-                        canonical({**read_json(path), "identities": ["bad"]}),
-                        canonical({**read_json(path), "identities": ["f" * 64]}),
-                        valid.replace(b'"version":1', b'"version":0,"version":1')):
+        state = read_json(path)
+        state.pop("checksum")
+        corrupt = [b"{", b"x" * (feed_updates._STATE_BYTES + 1), valid + b"\n",
+                   canonical({**read_json(path), "identities": ["f" * 64]}),
+                   valid.replace(b'"version":2', b'"version":0,"version":2')]
+        for field in ("identities", "delivered"):
+            for keys in (["bad"], ["f" * 64] * 2, ["f" * 64] * 1001, "f" * 64):
+                broken = {**state, field: keys}
+                corrupt.append(canonical({**broken, "checksum": digest(canonical(broken))}))
+        for changes in ({"delivered": state["identities"]}, {"role": "reviewer"},
+                        {"feed": "f" * 64}, {"version": True}, {"version": 3}):
+            broken = {**state, **changes}
+            corrupt.append(canonical({**broken, "checksum": digest(canonical(broken))}))
+        for content in corrupt:
             path.write_bytes(content)
             result = self.read()["feeds"][0]
             self.assertEqual(result["errors"], ["corrupt_state"])
@@ -160,30 +170,127 @@ class FeedUpdatesTests(Fixture):
         self.assertFalse(status["cursor_advanced"])
         self.assertEqual(len(self.read()["feeds"][0]["entries"]), 1)
 
-    def test_response_truncation_and_cancellation_do_not_consume_entries(self):
+    def test_repeated_bounded_reads_resume_before_promoting_completed_cursor(self):
+        self.read()
+        previous = read_json(self.state_path())["identities"]
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
                                                                                 tool_response_bytes=4096))
         self.xml[FEED] = rss(*(item(str(n), "t" * 300, "s" * 1500) for n in range(3)))
-        for _ in range(2):
+        emitted = set()
+        for n in range(3):
             result = self.read()
             self.assertLessEqual(len(canonical(result)), 4096)
-            self.assertTrue(result["truncated"])
-            self.assertFalse(result["complete"])
-            self.assertFalse(self.state_path().exists())
+            status = result["feeds"][0]
+            self.assertEqual(len(status["entries"]), 1)
+            row = status["entries"][0]
+            self.assertNotIn("truncated_fields", row)
+            self.assertNotIn(row["identity"], emitted)
+            emitted.add(row["identity"])
+            final = n == 2
+            self.assertEqual(result["truncated"], not final)
+            self.assertEqual(result["complete"], final)
+            self.assertEqual(status["cursor_advanced"], final)
+            state = read_json(self.state_path())
+            self.assertEqual(set(state["identities"]), emitted if final else set(previous))
+            self.assertEqual(set(state["delivered"]), set() if final else emitted)
+        self.assertEqual(self.read()["feeds"][0]["entries"], [])
+
+    def test_v1_migrates_without_consuming_unreturned_identities(self):
+        self.read()
+        state = read_json(self.state_path())
+        legacy = {key: state[key] for key in ("role", "feed", "identities")}
+        legacy["version"] = 1
+        self.state_path().write_bytes(canonical({**legacy, "checksum": digest(canonical(legacy))}))
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
-                                                                                tool_response_bytes=32768))
+                                                                                tool_response_bytes=4096))
+        self.xml[FEED] = rss(*(item(str(n), "t" * 300, "s" * 1500) for n in range(3)))
+        result = self.read()["feeds"][0]
+        migrated = read_json(self.state_path())
+        self.assertFalse(result["cursor_advanced"])
+        self.assertEqual(migrated["version"], 2)
+        self.assertEqual(migrated["identities"], legacy["identities"])
+        self.assertEqual(migrated["delivered"], [result["entries"][0]["identity"]])
+        self.assertFalse(self.read()["complete"])
+        self.assertTrue(self.read()["complete"])
+
+    def test_incomplete_sources_preserve_partial_state_and_complete_sources_prune_it(self):
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
+                                                                                tool_response_bytes=4096))
+        original = rss(*(item(str(n), "t" * 300, "s" * 1500) for n in range(3)))
+        self.xml[FEED] = original
+        emitted = self.read()["feeds"][0]["entries"][0]["identity"]
+        before = self.state_path().read_bytes()
+        for xml in (rss(item("bad"), item("bad")), rss("<item/>"),
+                    rss(item("bad").replace("</guid>", "</guid><guid>other</guid>")),
+                    rss(*(item(str(n)) for n in range(4)))):
+            self.xml[FEED] = xml
+            status = self.read()["feeds"][0]
+            self.assertFalse(status["complete"])
+            self.assertFalse(status["cursor_advanced"])
+            self.assertEqual(self.state_path().read_bytes(), before)
+        self.seed_cache("<rss><channel>")
+        malformed = self.context("searcher").dispatch("feed_updates", {})["feeds"][0]
+        self.assertEqual(malformed["errors"], ["observation_failed"])
+        self.assertFalse(malformed["cursor_advanced"])
+        self.assertEqual(self.state_path().read_bytes(), before)
+        # A different complete source releases vanished partial IDs. They are
+        # new again if they reappear, just like IDs in the completed set.
+        self.xml[FEED] = rss(item("replacement"))
+        self.assertTrue(self.read()["complete"])
+        self.assertEqual(read_json(self.state_path())["delivered"], [])
+        self.xml[FEED] = original
+        self.assertEqual(self.read()["feeds"][0]["entries"][0]["identity"], emitted)
+
+    def test_partial_progress_survives_cancellation_and_state_write_failure(self):
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
+                                                                                tool_response_bytes=4096))
+        self.xml[FEED] = rss(*(item(str(n), "t" * 300, "s" * 1500) for n in range(3)))
+        first = self.read()["feeds"][0]["entries"][0]["identity"]
+        before = self.state_path().read_bytes()
         ctx = self.context("searcher")
         with patch.object(ctx, "_bounded_web_operation", side_effect=self.observe), \
                 patch.object(ctx, "tools_cancelled", return_value=True):
-            status = ctx._op_feed_updates({})["feeds"][0]
-        self.assertEqual(status["errors"], ["cancelled"])
-        self.assertFalse(self.state_path().exists())
-        self.assertEqual(len(self.read()["feeds"][0]["entries"]), 3)
-        self.xml[FEED] = rss(item("long", "t" * 500, "s" * 3000))
-        result = self.read()
+            cancelled = ctx._op_feed_updates({})["feeds"][0]
+        self.assertEqual(cancelled["errors"], ["cancelled"])
+        self.assertFalse(cancelled["cursor_advanced"])
+        self.assertEqual(self.state_path().read_bytes(), before)
+        with patch("mizu.feed_updates.safe_write", side_effect=OSError("disk full")):
+            failed = self.read()["feeds"][0]
+        self.assertEqual(failed["errors"], ["state_write_failed"])
+        self.assertFalse(failed["cursor_advanced"])
+        self.assertEqual(self.state_path().read_bytes(), before)
+        retry = self.read()["feeds"][0]
+        self.assertEqual(cancelled["entries"], retry["entries"])
+        self.assertEqual(failed["entries"], retry["entries"])
+        self.assertNotEqual(retry["entries"][0]["identity"], first)
+        self.assertTrue(self.read()["complete"])
+
+    def test_oversized_row_compacts_explicitly_and_replays_full_same_run_source(self):
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
+                                                                                tool_response_bytes=4096))
+        xml = rss(item("long", "😀" * 5000, "s" * 6000).replace(
+            "https://example.org/long", "https://example.org/" + "u" * 3900))
+        self.seed_cache(xml)
+        ctx = self.context("searcher")
+        result = ctx.dispatch("feed_updates", {})
+        self.assertLessEqual(len(canonical(result)), 4096)
         self.assertTrue(result["complete"])
-        self.assertEqual(result["feeds"][0]["entries"][0]["title"], "t" * 500)
-        self.assertEqual(result["feeds"][0]["entries"][0]["summary"], "s" * 3000)
+        row = result["feeds"][0]["entries"][0]
+        self.assertEqual(row["truncated_fields"], ["summary", "title", "url"])
+        self.assertEqual([row[field] for field in row["truncated_fields"]], ["", "", ""])
+        self.assertEqual(read_json(self.state_path())["identities"], [row["identity"]])
+        source, offset = "", 0
+        with patch.object(ctx, "_bounded_web_operation") as observe:
+            while True:
+                page = ctx.dispatch("fetch", {"receipt_id": row["source_receipt"], "offset": offset, "limit": 512})
+                self.assertLessEqual(len(canonical(page)), 4096)
+                source += page["text"]
+                offset = page["next_offset"]
+                if offset is None:
+                    break
+            observe.assert_not_called()
+        self.assertEqual(source, xml)
+        self.assertEqual(ctx.dispatch("feed_updates", {})["feeds"][0]["entries"], [])
 
     def test_release_unconfigured_feed_state_and_atomic_leftovers(self):
         self.read()
@@ -199,6 +306,9 @@ class FeedUpdatesTests(Fixture):
         self.assertEqual(len(self.read()["feeds"][0]["entries"]), 1)
 
     def test_concurrent_reads_serialize_cursor_consumption(self):
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
+                                                                                tool_response_bytes=4096))
+        self.xml[FEED] = rss(*(item(str(n), "t" * 300, "s" * 1500) for n in range(3)))
         first, second, release = Event(), Event(), Event()
         def operation(entered, *args):
             entered.set()
@@ -216,8 +326,15 @@ class FeedUpdatesTests(Fixture):
             finally:
                 release.set()
             results = [a.result(10), b.result(10)]
-        self.assertEqual(sorted(len(r["feeds"][0]["entries"]) for r in results), [0, 1])
-        self.assertTrue(all(r["complete"] for r in results))
+        rows = [r["feeds"][0]["entries"] for r in results]
+        self.assertEqual([len(entries) for entries in rows], [1, 1])
+        identities = {entries[0]["identity"] for entries in rows}
+        self.assertEqual(len(identities), 2)
+        self.assertTrue(all(not r["feeds"][0]["cursor_advanced"] for r in results))
+        self.assertEqual(set(read_json(self.state_path())["delivered"]), identities)
+        final = self.read()["feeds"][0]
+        self.assertTrue(final["cursor_advanced"])
+        self.assertNotIn(final["entries"][0]["identity"], identities)
 
     def test_release_removed_role_state_preserves_current_role_and_project(self):
         self.read()
@@ -389,12 +506,13 @@ class FeedUpdatesTests(Fixture):
         self.assertFalse(result["feeds"][1]["complete"])
         self.assertTrue(result["feeds"][1]["truncated"])
         self.assertTrue(self.state_path().exists())
-        self.assertFalse(self.state_path(feed=OTHER).exists())
+        self.assertEqual(read_json(self.state_path(feed=OTHER))["identities"], [])
+        self.assertEqual(len(read_json(self.state_path(feed=OTHER))["delivered"]), 1)
         self.assertLessEqual(len(canonical(result)), 4096)
 
     def test_many_large_workers_are_released_before_next_observation(self):
         # Weak references guard lifecycle, not a platform-dependent RSS estimate:
-        # neither the worker envelope nor an omitted 1.9 MB row may survive into
+        # neither the worker envelope nor an original 1.9 MB row may survive into
         # the next network call. Only bounded returned rows/statuses can survive.
         class Tracked(dict):
             pass
@@ -418,13 +536,13 @@ class FeedUpdatesTests(Fixture):
         self.assertEqual(observed, feeds)
         self.assertTrue(all(ref() is None for ref in previous))
         self.assertLessEqual(len(canonical(result)), self.config.limits.tool_response_bytes)
-        self.assertTrue(result["truncated"])
+        self.assertTrue(result["complete"])
         for status in result["feeds"]:
-            small = status["feed"] in (feeds[0], feeds[-1])
-            self.assertEqual(status["cursor_advanced"], small)
-            self.assertEqual(status["complete"], small)
-            self.assertEqual(len(status["entries"]), int(small))
-            self.assertEqual(self.state_path(feed=status["feed"]).exists(), small)
+            self.assertTrue(status["cursor_advanced"])
+            self.assertEqual(len(status["entries"]), 1)
+            if status["feed"] not in (feeds[0], feeds[-1]):
+                self.assertEqual(status["entries"][0]["truncated_fields"], ["title"])
+                self.assertEqual(status["entries"][0]["title"], "")
 
     def test_reserved_metadata_handles_late_failures_at_response_bounds(self):
         feeds = [f"https://example.org/feed/{n}" for n in range(12)]
@@ -469,6 +587,19 @@ class FeedUpdatesTests(Fixture):
         self.assertTrue(self.read()["complete"])
         self.assertLessEqual(self.state_path().stat().st_size, feed_updates._STATE_BYTES)
         self.assertEqual(self.read()["feeds"][0]["entries"], [])
+
+    def test_maximum_complete_and_partial_identity_sets_fit_and_reload(self):
+        self.read()
+        state = read_json(self.state_path())
+        state.pop("checksum")
+        keys = [digest(str(n).encode()) for n in range(2000)]
+        state.update(identities=keys[:1000], delivered=keys[1000:])
+        raw = canonical({**state, "checksum": digest(canonical(state))})
+        self.assertLessEqual(len(raw), feed_updates._STATE_BYTES)
+        self.state_path().write_bytes(raw)
+        self.assertEqual(feed_updates._previous(self.state_path().parent, self.state_path().name,
+                                                "searcher", digest(FEED.encode())),
+                         (set(keys[:1000]), set(keys[1000:])))
 
     def test_real_worker_output_overflow_does_not_consume_cursor(self):
         self.config = dataclasses.replace(self.config, web={**self.config.web, "search_feed_item_limit": 1000,

@@ -2275,11 +2275,18 @@ failed observations may also carry a bounded `detail` excerpt
 (up to 512 characters, further clipped or omitted to fit the response byte bound,
 external-untrusted). Each entry has a 64-hex `identity`
 (or null when missing), `title`, `url`, `summary` and `source_receipt`.
-Title/summary are not silently clipped: the existing source, worker-output and
-tool-response byte bounds apply. A URL is an absolute HTTPS alternate link
-(at most 4,096 characters), or empty if none is usable. `source_receipt`
-references the existing run-scoped fetch receipt and can be used with
-`mizu_fetch` to read the source. Entries, URLs and diagnostics remain
+A URL is an absolute HTTPS alternate link (at most 4,096 characters), or empty
+if none is usable. Text is returned unchanged when it fits. To let even an
+individually oversized first undelivered row make progress, the parent can
+empty optional fields in order (`summary`, `title`, then `url`) until it fits.
+Such a row includes `truncated_fields`, a list of exactly the fields emptied;
+there is no silent clipping. Identity and `source_receipt` are always preserved.
+A later row that does not fit is deferred rather than clipped to fill leftover
+space. The existing source and worker-output byte bounds still apply.
+`source_receipt` references the existing **same-run** fetch receipt: use
+`mizu_fetch({"receipt_id": "<source_receipt>", "offset": 0, "limit": 8192})`
+and its continuation offsets to read the full retained feed source, including
+text omitted from compact entries. Entries, URLs and diagnostics remain
 external-untrusted, never instructions.
 
 An entry's identity is the SHA-256 of the canonical tuple of configured feed
@@ -2296,15 +2303,26 @@ timeouts, receipts and cancellation. Each feed observation runs in a killable
 worker with the existing 2 MiB combined output ceiling; a worker failure or
 oversized output is a per-feed `observation_failed`, never an empty success.
 
-The first complete read returns the current bounded entries once. Later reads
-return identities absent from the **latest complete observation**, not an
-all-time ledger: an identity that disappears and later returns is new again.
+Reads return identities absent from the **latest fully completed observation**,
+not an all-time ledger: an identity that disappears and later returns is new
+again. If a complete source observation has more new entries than fit in the
+response, repeat the same empty request. Each successful read saves the IDs it
+returned separately from the completed cursor, so repeats resume with the next
+undelivered IDs at the same byte limit. The completed identity set is promoted
+only after all current new IDs have been returned; then partial-delivery IDs
+are cleared. Partial IDs are intersected with each new complete source's IDs,
+so disappeared entries do not accumulate or suppress a later reappearance.
+Repeats observe the current feed, not a frozen snapshot across calls.
+
 Cursor state lives under `<project>/feed-updates/<role-digest>/`, one atomic,
-checksummed versioned file per configured feed, containing only that feed's
-latest bounded identity set and scope metadata. Reads are bounded to 68,024
-bytes (1,000 SHA-256 identities plus envelope), refuse links and validate the
-canonical record/checksum. Network observations run one feed at a time without
-holding cursor locks; only one worker result plus bounded response/status data
+checksummed versioned file per configured feed. Version 2 contains scope
+metadata, at most 1,000 completed identities and at most 1,000 partial-delivery
+identities, never feed content. Reads are bounded to 135,024 bytes (two bounded
+SHA-256 sets plus envelope), refuse links and validate canonical encoding,
+checksum, scope, digest format, uniqueness and disjoint sets. Existing version 1
+completed cursors are accepted with empty partial progress and migrate on the
+next successful state write. Network observations run one feed at a time
+without holding cursor locks; only one worker result plus bounded response/status data
 is retained. A project-level lock serializes cleanup and each feed's comparison
 against the latest cursor, response sizing and state replacement (not the whole
 multi-feed read); different projects/roles do not consume each other's entries. Concurrent observations can finish out of order;
@@ -2318,25 +2336,33 @@ the same gate; no caller uses them. The single `<project>/feed-updates.lock`
 inode is never unlinked during use; project deletion removes the remaining state.
 
 `complete` means identity coverage and successful cursor persistence, not full
-article content or freshness beyond the fetch cache policy. `overflow`,
-identity errors, `corrupt_state`, fetch/parse errors, cancellation and
-`state_write_failed` never advance the affected feed; healthy feeds can still
-advance. Before observing feeds the parent reserves status metadata and failure
-space against `limits.tool_response_bytes`. If that metadata cannot fit, the
-result retains every configured feed's status in order, with top-level
-`truncated` true and `complete` false; no feed is observed and no cursor advances.
-Standard `mizu_result_read` continuation pages expose the full retained result
-without repeating the read. To observe entries, increase `tool_response_bytes`
-or reduce the configured feeds; repeating the empty request with unchanged
-configuration returns the same metadata-only result. Otherwise the final
-canonical response fits the bound without generic result paging. Each observed
-feed returns a bounded entry prefix, setting that feed's `truncated`/incomplete flags
-when entries are omitted. A later feed or write failure cannot evict previously
-returned entries or invalidate an earlier cursor commit. Retry with the same
-empty request; incomplete prefixes may repeat until a complete observation fits. Corrupt state is preserved for
-operator recovery, never silently reset. Cursor replacement is not a
-transaction with model delivery: a process loss after a successful write may
-lose the response, as with other tool-side state writes.
+article content or freshness beyond the fetch cache policy. A compact row with
+`truncated_fields` can complete identity coverage; `truncated` instead means
+rows were deferred (or metadata could not fit). `cursor_advanced` is true only
+when the fully completed identity set is persisted, never for partial progress.
+
+**Incomplete-source rule:** `overflow`, identity errors, fetch/parse errors and
+worker-output failures never save delivery progress or advance the completed
+cursor, even if some entries were returned. Cancellation, `corrupt_state` and
+`state_write_failed` likewise do not advance either set. Such entries can repeat;
+a complete source observation and successful persistence are required for
+resumable delivery. Corrupt state is preserved for operator recovery, never
+silently reset. Healthy feeds can still advance independently.
+
+Before observing feeds the parent reserves status metadata and failure space
+against `limits.tool_response_bytes`. If metadata alone cannot fit, the result
+retains every configured feed's status in order, with top-level `truncated` true
+and `complete` false; no feed is observed and no cursor advances. Standard
+`mizu_result_read` continuation pages expose this retained metadata without
+repeating the read. That metadata-only case requires changing the byte budget
+or configured feed list to observe entries; unchanged empty requests cannot
+make progress. Otherwise the canonical response fits the configured bound
+without generic result paging. Each observed feed returns a bounded prefix of
+undelivered entries, setting `truncated`/incomplete when rows are deferred.
+A later feed or write failure cannot evict earlier returned entries or
+invalidate an earlier cursor commit. State writes are not a transaction with
+model delivery: process loss after a successful write may lose the response,
+as with other tool-side state writes.
 
 ### Immutable Web continuation and experiment input
 
