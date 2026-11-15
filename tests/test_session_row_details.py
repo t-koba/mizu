@@ -105,16 +105,17 @@ class SessionRowDetailsTests(Fixture):
     def setUp(self):
         super().setUp()
         roles = dict(self.config.roles)
-        # This suite isolates prompt-row/session detail behavior. Keep the
-        # open row visible without exercising the separate writer-parking
-        # contract; that contract has dedicated lifecycle tests.
+        self.assertEqual(roles['worker'].workspace, 'write')
+        # The fake writer records a report and makes a progress-backed
+        # continuation so this suite exercises, rather than bypasses, parking.
         roles['worker'] = dataclasses.replace(
-            roles['worker'], workspace='read', capabilities=tuple(dict.fromkeys(
-                (*roles['worker'].capabilities, 'check_job', 'work_items_read'))))
+            roles['worker'], capabilities=tuple(dict.fromkeys(
+                (*roles['worker'].capabilities, 'check_job', 'work_items_read', 'report'))))
         self.config = dataclasses.replace(
             self.config, roles=roles,
             sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project = Project(self.config, 'sample')
+        self.observation_count = 0
         self.item = self.project.work_items.create(
             idempotency_key='row', title='Review scope', actor='worker',
             description='Complete description ' * 80)['record']['work_item']
@@ -127,10 +128,23 @@ class SessionRowDetailsTests(Fixture):
     def run_observed(self, *, settled=True, observe=True):
         prompts = []
         def callback(ctx, prompt, profile):
-            prompts.append(json.loads(prompt))
+            data = json.loads(prompt)
+            prompts.append(data)
             if observe:
                 profile = profile or ctx.role.profile
                 session_record(ctx, profile, effective(ctx.config, ctx.role, profile))
+            self.observation_count += 1
+            observation = self.observation_count
+            ctx.handle('report', {
+                'title': 'Session row detail observation',
+                'body': (f"Observed {len(data.get('open_work_items', {}).get('items', []))} open work rows "
+                         f"and {len(data.get('check_jobs', []))} check rows in observation {observation}.")})
+            next_step = f'Verify row detail continuity on observation {observation}'
+            ctx.handle('finish', {
+                'outcome': 'continue',
+                'summary': 'Recorded the current prompt-row observation.',
+                'next_step': next_step,
+                'state': f'Now: Review prompt row details.\nNext: {next_step}'})
         class Driver(ScriptDriver):
             def execute(driver, *args, **kwargs):
                 return {**super().execute(*args, **kwargs), 'settled': settled}
