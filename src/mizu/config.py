@@ -544,6 +544,9 @@ class Limits:
     #: decided (non-deferred) proposals. 0 disables time-based reaping;
     #: this clock never expires runs, snapshots or permanent audit records.
     retention_days: int = 31
+    #: Per-project cadence for automatic decided-insight archiving at runtime
+    #: ingestion boundaries; 0 disables automatic passes, not explicit ingest.
+    automatic_insight_archive_interval_seconds: int = 3600
     #: Completed, unreferenced run components; 0 retains indefinitely (0–3650).
     run_retention_days: int = 31
     #: Physical-run retention scan budget, independent of usage reports (1–100000).
@@ -656,7 +659,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "insight_cursor_ttl_seconds": (60, 604800),
                  "run_retention_scan_runs": (1, MAX_STORAGE_RUN_ENTRIES),
                  "host_record_reference_scan_entries": (1, TOML_INTEGER_MAX),
-                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
+                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_insight_archive_interval_seconds": (0, 2678400), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
                  "smoke_retention_projects": (1, TOML_INTEGER_MAX),
                  "smoke_retention_pairs": (1, TOML_INTEGER_MAX),
                  "smoke_retention_refs": (1, TOML_INTEGER_MAX),

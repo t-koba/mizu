@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from support import Fixture
 from mizu import insight_archive
-from mizu.errors import Denied
+from mizu.errors import ConfigError, Denied
+from mizu.config import load
 from mizu.fs import read_json, write_json
 from mizu.project import Project
 from mizu.storage import audit, backup, reclaim, restore
@@ -323,6 +324,83 @@ os._exit(0)
         self.assertEqual(self.project.insights.submit(insight_id=item["id"], **args), item)
         self.assertEqual(self.project.insights.revise(item["id"], **args, expected_rev=1), item)
         self.assertFalse((self.project.root / "inbox" / f"{item['id']}.json").exists())
+
+    def test_automatic_archive_interval_policy_default_and_bounds(self):
+        key = "automatic_insight_archive_interval_seconds = 3600"
+        original = self.file.read_text()
+        self.assertIn(key, original)
+        self.assertEqual(load(self.file).limits.automatic_insight_archive_interval_seconds, 3600)
+        for value in ("0", "2678400"):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(key, key.replace("3600", value)))
+                self.assertEqual(load(self.file).limits.automatic_insight_archive_interval_seconds,
+                                 int(value))
+        for value in ("-1", "2678401", "true", '"3600"', "3600.0"):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace(key, key.replace("3600", value)))
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+        self.file.write_text(original)
+
+    def test_automatic_archive_cadence_throttles_retry_but_manual_ingest_is_immediate(self):
+        item = self.proposal("e" * 32)
+        target = self.project.root / "inbox" / f"{item['id']}.json"
+        original_unlink = Path.unlink
+        original_store = insight_archive.store
+        stores = []
+
+        def unlink(path, *args, **kwargs):
+            if path == target:
+                raise OSError("controlled inbox unlink failure")
+            return original_unlink(path, *args, **kwargs)
+
+        def store(*args, **kwargs):
+            stores.append(1)
+            return original_store(*args, **kwargs)
+
+        with patch.object(Path, "unlink", unlink), patch.object(insight_archive, "store", store):
+            with patch("mizu.insights.time.time", return_value=self.epoch):
+                for _ in range(5):
+                    self.project.insights.ingest_editor(
+                        keep_days=31, archive_interval_seconds=3600)
+            self.assertEqual(len(stores), 1)
+            self.assertTrue(target.exists())
+            self.assertEqual(len(self.rows()), 1)
+
+            # An explicit/manual ingest bypasses the daemon cadence.
+            with patch("mizu.insights.time.time", return_value=self.epoch):
+                self.project.insights.ingest_editor(keep_days=31)
+            self.assertEqual(len(stores), 2)
+            self.assertTrue(target.exists())
+
+            # A later automatic pass retries only when the persisted interval is due.
+            self.project.insights._automatic_archive_last_monotonic = None
+            self.project.insights._automatic_archive_last_interval = None
+            with patch("mizu.insights.time.time", return_value=self.epoch + 3600):
+                self.project.insights.ingest_editor(
+                    keep_days=31, archive_interval_seconds=3600)
+            self.assertEqual(len(stores), 3)
+            self.assertTrue(target.exists())
+            self.assertEqual(len(self.rows()), 1)
+
+    def test_zero_automatic_archive_interval_preserves_manual_gc_and_editor_ingestion(self):
+        item = self.proposal("f" * 32)
+        target = self.project.root / "inbox" / f"{item['id']}.json"
+        write_json(self.project.root / "spool/editor" / ("1" * 32 + ".json"),
+                   {"title": "Fresh", "body": "Still ingested", "base_snapshot": None})
+        with patch("mizu.insights.time.time", return_value=self.epoch):
+            results = [self.project.insights.ingest_editor(
+                keep_days=31, archive_interval_seconds=0) for _ in range(3)]
+        self.assertEqual(results[0]["accepted"], 1)
+        self.assertEqual(results[1]["accepted"], 0)
+        self.assertEqual(self.project.insights.read("1" * 32)["title"], "Fresh")
+        self.assertTrue(target.exists())
+        self.assertFalse((self.project.root / insight_archive.NAME).exists())
+        with patch("mizu.insights.time.time", return_value=self.epoch):
+            result = self.project.insights.ingest_editor(keep_days=31)
+        self.assertEqual(result["reaped"], 1)
+        self.assertFalse(target.exists())
+        self.assertEqual(len(self.rows()), 1)
 
     def test_archived_decision_retry_preserves_original_event(self):
         # Do not fake-age this record: keyed retry validates the exact original

@@ -222,6 +222,7 @@ snapshot_files = 20000
 history_index = 128              # Published IDs in the active history window; merge ancestry uses the same bound.
 prompt_snapshots = 6             # Recent anchored summaries offered to each work unit.
 retention_days = 31              # Operator-selected retention window (days) for budget day-files and decided proposals. 0 disables time-based reaping; this clock never expires runs, snapshots or permanent audit records.
+automatic_insight_archive_interval_seconds = 3600 # Per-project cadence for automatic decided-insight archiving (0 disables automatic passes; `mizu insight ingest` remains immediate; 0–2678400).
 run_retention_days = 31        # Expire only complete, unreferenced run components (0 keeps indefinitely; 0–3650).
 run_retention_scan_runs = 5000  # Physical runs per retention scan (1–100000); independent of usage reports; incomplete scans refuse all deletion.
 host_record_reference_scan_entries = 5000 # Host partition and legacy-root entries per snapshot scan; budget exhaustion refuses reclamation.

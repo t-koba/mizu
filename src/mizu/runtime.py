@@ -3067,7 +3067,9 @@ class Engine:
             intent = (continuations.ready(project.snapshots, role_name)
                       if role.workspace == "write" else None)
             lock_diagnostics.phase("editor-ingestion")
-            project.insights.ingest_editor(keep_days=project.config.limits.retention_days)
+            project.insights.ingest_editor(
+                keep_days=project.config.limits.retention_days,
+                archive_interval_seconds=project.config.limits.automatic_insight_archive_interval_seconds)
             # Only timer-generated invocations opt in. Unknown evidence is not
             # emptiness: preserve ordinary execution on any failed strict read.
             # Operator wakes and saved continuations keep their existing path.
@@ -5277,7 +5279,9 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         probe = service_due(config, name, stop)
                         if probe is not None:
                             print(json.dumps(probe, ensure_ascii=False), flush=True)
-                        project.insights.ingest_editor(keep_days=config.limits.retention_days)
+                        project.insights.ingest_editor(
+                            keep_days=config.limits.retention_days,
+                            archive_interval_seconds=config.limits.automatic_insight_archive_interval_seconds)
                         if vcs_poll_enabled(config):
                             interval = vcs_poll_interval(config)
                             for event in poll_project_vcs(config, project, upstream_state,

@@ -79,6 +79,8 @@ from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, lock, 
                  read_json, safe_read, safe_read_managed, write_json, mkdir, DIGEST)
 
 MAX_DECISION_EVENT_BYTES = 1024 * 1024
+AUTOMATIC_INSIGHT_ARCHIVE_INTERVAL_MAX = 2678400
+_AUTOMATIC_INSIGHT_ARCHIVE_STATE_BYTES = 4096
 #: Bound for one per-token decision receipt file (1 KiB). Receipts are small
 #: fixed-shape records; the bound keeps the acknowledgement check bounded.
 DECISION_RECEIPT_BYTES = 1024
@@ -433,6 +435,19 @@ def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str | None:
 MAX_EVIDENCE_ENTRIES = 16
 MAX_EVIDENCE_CHARS = 8192
 
+def _automatic_insight_archive_due(path: Path, instant: int, interval: int) -> bool:
+    """True when the persistent per-project archive pass is due."""
+    missing: object = object()
+    record = read_json(path, missing, max_bytes=_AUTOMATIC_INSIGHT_ARCHIVE_STATE_BYTES)
+    if record is missing:
+        return True
+    if (not isinstance(record, dict) or set(record) != {"checked_at"}
+            or type(record.get("checked_at")) is not int
+            or not 0 <= record["checked_at"] <= instant):
+        raise Denied("Invalid automatic insight archive cadence record")
+    return instant - record["checked_at"] >= interval
+
+
 class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
@@ -444,6 +459,8 @@ class Insights:
                  decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES,
                  history_entries: int = 1000):
         self.root, self.maximum = root, maximum
+        self._automatic_archive_last_monotonic = None
+        self._automatic_archive_last_interval = None
         #: Current-state index shared with the work items of the same project.
         self.ledger = Ledger(root)
         self.ledger.attach(INSIGHTS, InsightSource(self))
@@ -2546,7 +2563,60 @@ replacement insight without implying rejected substance.
                     continue
         return removed
 
-    def ingest_editor(self, *, keep_days: int | None = None) -> dict:
+    def _automatic_archive(self, *, keep_days: int | None, interval_seconds: int) -> int:
+        """Run the daemon archive pass at most once per project interval.
+
+        A bounded per-project marker coordinates daemon processes; a local
+        monotonic cache avoids rereading it on every idle poll. The marker is
+        written before the nonblocking pass so persistent per-record failures
+        cannot turn each poll into another SQLite write. Failed inbox copies
+        remain live for the next cadence or an explicit ingest command.
+        """
+        if (type(interval_seconds) is not int
+                or not 0 <= interval_seconds <= AUTOMATIC_INSIGHT_ARCHIVE_INTERVAL_MAX
+                or interval_seconds == 0):
+            return 0
+        effective_keep = self.retention_days if keep_days is None else keep_days
+        if effective_keep <= 0:
+            return 0
+        monotonic = time.monotonic()
+        if (self._automatic_archive_last_interval == interval_seconds
+                and self._automatic_archive_last_monotonic is not None
+                and monotonic - self._automatic_archive_last_monotonic < interval_seconds):
+            return 0
+        state = self.root / "maintenance" / "automatic-insight-archive.json"
+        instant = int(time.time())
+
+        def record_check() -> None:
+            self._automatic_archive_last_monotonic = monotonic
+            self._automatic_archive_last_interval = interval_seconds
+
+        try:
+            if not _automatic_insight_archive_due(state, instant, interval_seconds):
+                record_check()
+                return 0
+            with lock(self.root / "locks" / "automatic-insight-archive.lock", blocking=False):
+                if not _automatic_insight_archive_due(state, instant, interval_seconds):
+                    record_check()
+                    return 0
+                write_json(state, {"checked_at": instant})
+                record_check()
+                return self.gc_decided(keep_days=keep_days, blocking=False)
+        except Busy:
+            record_check()
+            return 0
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, RecursionError):
+            record_check()
+            return 0
+
+    def ingest_editor(self, *, keep_days: int | None = None,
+                      archive_interval_seconds: int | None = None) -> dict:
+        """Ingest Editor submissions and optionally archive decided proposals.
+
+        Omitted ``archive_interval_seconds`` is the explicit/manual immediate
+        pass. Automatic runtime callers supply the configured per-project
+        cadence; editor submissions still process on every invocation.
+        """
         accepted = rejected = 0
         with lock(self.root / "locks" / "editor-ingest.lock"):
             spool = self.root / "spool" / "editor"
@@ -2577,12 +2647,15 @@ replacement insight without implying rejected substance.
                                {"name": path.name, "error": str(exc), "created_at": now()})
                     rejected += 1
             # Archiving is maintenance, not a prerequisite for durable editor
-            # ingestion or run admission. Keep the reference-safe lock order,
-            # but defer this sweep instead of waiting up to the global lock
-            # timeout; the daemon retries it on its next ingestion pass. Actual
-            # editor submissions still require the blocking record lock above.
-            try:
-                reaped = self.gc_decided(keep_days=keep_days, blocking=False)
-            except Busy:
-                reaped = 0
+            # ingestion or run admission. Manual ingestion runs it immediately;
+            # automatic callers use the bounded project cadence. Actual editor
+            # submissions still require the blocking record lock above.
+            if archive_interval_seconds is None:
+                try:
+                    reaped = self.gc_decided(keep_days=keep_days, blocking=False)
+                except Busy:
+                    reaped = 0
+            else:
+                reaped = self._automatic_archive(
+                    keep_days=keep_days, interval_seconds=archive_interval_seconds)
         return {"accepted": accepted, "rejected": rejected, "reaped": reaped}
