@@ -406,6 +406,9 @@ class OperatorRecordTests(Fixture):
             self.project.set_control(**change)
             self.assertFalse(should_run(self.project, snap, role_name='worker'))
             self.project.set_control(armed=True, paused=False, draining=False)
+        # Clearing drain advances an independent wake; isolate the corruption
+        # probe from that higher-priority reason to run.
+        snap['wake_generation'] = self.project.control()['wake_generation']
         with self.assertRaises(Denied):
             records.due(self.project, 'missing-role')
         context = self.context('worker')
