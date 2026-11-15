@@ -650,6 +650,7 @@ def read_manifest(stream, metadata_bytes: int, snapshot_id: str,
         'file_names': [name for name, _ in ordered],
         'file_shas': [entry['sha256'] for _, entry in ordered],
     }
-    if 'progress' in record:
-        audit['progress'] = record['progress']
+    for field in ('progress', 'next_step'):
+        if field in record:
+            audit[field] = record[field]
     return audit, goal_digest

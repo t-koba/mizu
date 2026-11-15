@@ -574,7 +574,9 @@ class WriterParkingTests(Fixture):
 
     def finish(self, ctx, outcome="wait", **extra):
         return ctx.handle("finish", {"outcome": outcome, "summary": "Disposition check",
-                                    "state": "Now: observed.\nNext: Inspect the remaining work", **extra})
+                                    "state": "Now: observed.\nNext: Inspect the remaining work",
+                                    **({"next_step": "Inspect the remaining work"} if outcome == "continue" else {}),
+                                    **extra})
 
     def assert_unsealed(self, ctx):
         self.assertIsNone(ctx.finished)

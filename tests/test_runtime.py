@@ -8,7 +8,7 @@ from support import Fixture, ScriptDriver
 from mizu.budget import Budget
 from mizu.config import load
 from mizu.errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, ProtocolError
-from mizu.fs import digest, lock, mkdir, read_json
+from mizu.fs import canonical, digest, lock, mkdir, read_json
 from support import history_write_json as write_json
 from mizu.project import Project, initialize
 from mizu.smoke_refs import shared_lock
@@ -20,6 +20,35 @@ class SnapshotTests(Fixture):
         snap = self.project.snapshots.get()
         (self.project.workspace / "app.py").write_text("VALUE = 3\n")
         self.assertEqual(self.project.snapshots.read(snap, "app.py"), b"VALUE = 2\n")
+
+    def test_typed_next_step_snapshot_validation_and_legacy_reads(self):
+        store = self.project.snapshots
+        captured = store.capture_files(self.project.workspace)
+        def create(**extra):
+            return store.create(captured, goal=self.project.goal, state="Next: Legacy prose",
+                                run=None, outcome="continue", summary="Captured", **extra)
+        legacy = create()
+        self.assertNotIn("next_step", store.get(legacy["id"]))
+        typed = create(next_step="Inspect the result")
+        self.assertEqual(store.get(typed["id"])["next_step"], "Inspect the result")
+        def audit(snapshot):
+            return store.audit_manifest(snapshot["id"], metadata_bytes=32768, maximum=1048576)
+        self.assertNotIn("next_step", audit(legacy))
+        self.assertEqual(audit(typed)["next_step"], "Inspect the result")
+        with self.assertRaises(Denied):
+            create(next_step="none")
+        # A correct content hash does not excuse an invalid typed field, including
+        # in the retention-only streaming reader.
+        for step in (None, 42, "none", "two\nlines"):
+            with self.subTest(step=step):
+                forged = {k: v for k, v in typed.items() if k != "id"}
+                forged["next_step"] = step
+                forged["id"] = digest(canonical(forged))
+                write_json(store.root / "snapshots" / (forged["id"] + ".json"), forged)
+                with self.assertRaises(Denied):
+                    store.get(forged["id"])
+                with self.assertRaises(Denied):
+                    audit(forged)
 
     def test_excludes_secrets_and_symlinks(self):
         (self.project.workspace / ".env").write_text("SECRET=private")
@@ -548,21 +577,20 @@ class ContextTests(Fixture):
         events = self.project.insights.decision_events("worker", ("reject",))
         self.assertEqual(len(events), 1)
         snapshots = {p.name: p.read_bytes() for p in (self.project.root / "snapshots").iterdir()}
-        for state in (None, "", "Now: Continue work", "Now: Work done. Next: Check result",
-                      "Next: Check result\nNext: Report result", "Next:", "Next: ",
-                      "Next: none", "Next: Nothing.", "Next: n/a", "Next:Check result",
-                      " Next: Check result", "Next: Check result "):
-            with self.subTest(state=state):
+        for step in (None, "", "none", "Nothing.", "n/a", " padded", "padded ",
+                     "two\nlines", "tab\there", "x" * 4097, 42):
+            with self.subTest(next_step=step):
                 ctx = self.context()
                 ctx.decision_events = events
                 args = {"outcome": "continue", "summary": "Work completed",
+                        "state": "Now: Work done.\nNext: Valid prose is not a typed step",
                         "ack_events": [events[0]["ack_token"]]}
-                if state is not None:
-                    args["state"] = state
+                if step is not None:
+                    args["next_step"] = step
                 with patch("mizu.runtime.operator_records.validate") as validate, \
                         patch("mizu.runtime.structured_wait_events.received") as received, \
                         patch.object(ctx, "close_exec") as close_exec:
-                    with self.assertRaisesRegex(Denied, "exactly one standalone Next: <step>"):
+                    with self.assertRaisesRegex(Denied, "next_step"):
                         ctx.handle("finish", args)
                     validate.assert_not_called()
                     received.assert_not_called()
@@ -573,7 +601,7 @@ class ContextTests(Fixture):
                 self.assertEqual({p.name: p.read_bytes() for p in
                                   (self.project.root / "snapshots").iterdir()}, snapshots)
                 # A refusal leaves the same unit open for correction, not sealed.
-                args["state"] = "Now: Work completed\nNext: Check the focused test result"
+                args["next_step"] = "Check the focused test result"
                 self.assertTrue(ctx.handle("finish", args)["sealed"])
 
     def test_next_diagnostic_leaves_other_roles_and_outcomes_unchanged(self):
@@ -990,7 +1018,8 @@ class PromptProjectionTests(Fixture):
 
     def test_finish_refuses_unknown_next_profile(self):
         from mizu.errors import Denied
-        finish = {"outcome": "continue", "summary": "s", "state": "Next: Check the result",
+        finish = {"outcome": "continue", "summary": "s", "state": "Check pending",
+                  "next_step": "Check the result",
                   "next_reason": "why", "next_profile": "no-such-profile"}
         with self.assertRaisesRegex(Denied, "no configured profile"):
             self.context("worker").handle("finish", dict(finish))
@@ -1135,7 +1164,12 @@ class PromptProjectionTests(Fixture):
         config = dataclasses.replace(self.config, limits=dataclasses.replace(
             self.config.limits, work_items_prompt=2))
         before = self.project.snapshots.get()["id"]
-        result = Engine(config, driver=ScriptDriver()).run(self.project, "worker")
+        def finish_with_handoff(context, *_):
+            (context.workspace / "prompt-projection-handoff.txt").write_text(context.run_dir.name)
+            context.handle("finish", {"outcome": "continue", "summary": "Projection recorded",
+                                       "state": context.snapshot["state"],
+                                       "next_step": "Reassess the accepted items"})
+        result = Engine(config, driver=ScriptDriver(finish_with_handoff)).run(self.project, "worker")
         projection = read_json(self.project.root / "runs" / result["run"] / "prompt_projection.json")
         self.assertEqual(projection["run"], result["run"])
         self.assertEqual(projection["profile"], config.roles["worker"].profile)
@@ -1550,7 +1584,7 @@ class WrapUpTests(Fixture):
             seen.append(tuple(sorted(ctx.role.capabilities)))
             seen.append(tuple(ctx.role.engine_tools))
             ctx.handle("finish", {"outcome": "continue", "summary": "resumed and sealed",
-                                  "state": "Now: wrapped.\nNext: resume.\nTasks: none\nBlocking: none"})
+                                  "next_step": 'resume.', "state": "Now: wrapped.\nNext: resume.\nTasks: none\nBlocking: none"})
         result = Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["finish"]["outcome"], "bounded")
@@ -1575,7 +1609,7 @@ class WrapUpTests(Fixture):
                 ctx.bound_hit = "tools"
                 raise LimitExceeded("Per-run tool limit exceeded")
             ctx.handle("finish", {"outcome": "continue", "summary": "s",
-                                  "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                  "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
         Engine(self.config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(len(prompts), 2)
         self.assertIn("For the rest of this work unit only: per-run tools bound reached", prompts[1])

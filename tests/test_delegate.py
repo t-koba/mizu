@@ -90,14 +90,14 @@ class DelegateTests(Fixture):
             if ctx.role.name == "worker":
                 ctx.handle("delegate", {"role": "helper", "task": "Check delegated grants"})
                 ctx.handle("finish", {"outcome": "continue", "summary": "Root sealed",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 return
             seen["capabilities"] = ctx.role.capabilities
             seen["tools"] = ctx.driver_capabilities
             with self.assertRaises(Denied):
                 ctx.handle("check_job", {"action": "start", "script": "true"})
             ctx.handle("finish", {"outcome": "continue", "summary": "Child sealed",
-                                  "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                  "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -155,7 +155,7 @@ class DelegateTests(Fixture):
                 child_spend["tools"] = ctx.tool_count
                 ctx.handle("finish", {"outcome": "continue",
                                       "summary": "child said: " + response["answer"],
-                                      "state": "Now: delegated.\nNext: verify.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'verify.', "state": "Now: delegated.\nNext: verify.\nTasks: none\nBlocking: none"})
             else:
                 parent = child_spend["parent"]
                 self.assertIs(ctx._spend, parent._spend)
@@ -167,7 +167,7 @@ class DelegateTests(Fixture):
                 child_spend["child_tools"] = ctx.tool_count
                 self.assertEqual(parent.tool_count, ctx.tool_count)
                 ctx.handle("finish", {"outcome": "continue", "summary": "child saw marker",
-                                      "state": "Now: done.\nNext: Report the child result.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'Report the child result.', "state": "Now: done.\nNext: Report the child result.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -210,7 +210,7 @@ class DelegateTests(Fixture):
                 if ctx.wrap_up_attempted:
                     seen["root_requests"] = ctx.wrap_up_requests
                     ctx.handle("finish", {"outcome": "continue", "summary": "parent seals",
-                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                          "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                     return
                 seen["response"] = ctx.handle("delegate", {"role": "helper", "task": "spend"})
                 seen["bound"] = ctx.bound_hit
@@ -219,14 +219,14 @@ class DelegateTests(Fixture):
                 ctx.handle("_budget", {"sequence": 2})
                 seen["root_requests"] = ctx.wrap_up_requests
                 ctx.handle("finish", {"outcome": "continue", "summary": "parent seals",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 # ScriptDriver's request reaches the normal cap; these two
                 # admitted requests use the delegated-child share.
                 ctx.handle("_budget", {"sequence": 2})
                 seen["child_bound"] = ctx.bound_hit
                 ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -253,7 +253,7 @@ class DelegateTests(Fixture):
                 if ctx.wrap_up_attempted:
                     seen["root_requests_after_seal_request"] = ctx.wrap_up_requests
                     ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
-                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                          "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                     return
                 responses = [ctx.handle("delegate", {"role": "helper", "task": str(i)})
                              for i in range(3)]
@@ -270,7 +270,7 @@ class DelegateTests(Fixture):
                 ctx.handle("_budget", {"sequence": 2})
                 seen["root_requests_after_seal_request"] = ctx.wrap_up_requests
                 ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 if ctx.execution_attempt == 0:
                     seen["children"] += 1
@@ -279,7 +279,7 @@ class DelegateTests(Fixture):
                     # reduced-grant attempt spends the child's shared reserve.
                     ctx.handle("_budget", {"sequence": 2})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child bounded",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -317,7 +317,7 @@ class DelegateTests(Fixture):
                 seen["bound"] = ctx.bound_hit
                 seen["child_tools"] = ctx.delegated_wrap_up_tools
                 ctx.handle("finish", {"outcome": "continue", "summary": "root seals",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 seen["root_tools"] = ctx.wrap_up_tools
             else:
                 if not ctx.wrap_up_attempted:
@@ -334,7 +334,7 @@ class DelegateTests(Fixture):
                 for _ in range(config.limits.delegate_wrap_up_tools - (0 if exhaust else 1)):
                     ctx.handle("research", {"state": "{}", "expected_generation": 0})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child seals",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -357,7 +357,7 @@ class DelegateTests(Fixture):
             if ctx.role.name != "worker":
                 ctx.handle("_budget", {"sequence": 2})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child sealed",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 return
             if ctx.execution_attempt == 1:
                 ctx.handle("delegate", {"role": "helper", "task": "use child allowance"})
@@ -366,7 +366,7 @@ class DelegateTests(Fixture):
                 raise LimitExceeded("exercise ordinary root fallback")
             seen["notice"] = prompt
             ctx.handle("finish", {"outcome": "continue", "summary": "root sealed",
-                                  "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                  "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -418,12 +418,12 @@ class DelegateTests(Fixture):
             if ctx.role.name == "worker":
                 response = ctx.handle("delegate", {"role": "helper", "task": "t"})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child said: " + response["answer"],
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 with self.assertRaises(Denied):
                     ctx.handle("delegate", {"role": "helper", "task": "nested"})
                 ctx.handle("finish", {"outcome": "continue", "summary": "nested refused",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -439,14 +439,14 @@ class DelegateTests(Fixture):
                 response = ctx.handle("delegate", {"role": "helper", "task": "List the workspace"})
                 seen["answer"] = response["answer"]
                 ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 # The child is an invocation of its own role: it holds that
                 # role's exclusion while it runs, so a sibling cleanup
                 # cannot remove the containers it is using.
                 seen["held"] = held(exclusion)
                 ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -474,14 +474,14 @@ class DelegateTests(Fixture):
                     seen["response"] = response
                 try:
                     ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
-                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                          "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 except Denied as exc:
                     # The drain bound reached the caller too: the seal waits
                     # for the reduced-grant wrap-up the engine would drive.
                     seen["seal_refused"] = str(exc)
             else:
                 ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         # The child stops at its safe boundary and says so, so the draining
@@ -506,13 +506,13 @@ class DelegateTests(Fixture):
                     seen["response"] = response
                 try:
                     ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
-                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                          "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 except Denied as exc:
                     seen["seal_refused"] = str(exc)
             else:
                 seen["child_ran"] = True
                 ctx.handle("finish", {"outcome": "continue", "summary": "child ran",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=_AdmitDriver(callback)).run(self.project, "worker")
         # The same rule holds on the path the Claude and Codex adapters use:
@@ -536,7 +536,7 @@ class DelegateTests(Fixture):
                     seen["response"] = response
                 try:
                     ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
-                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                          "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 except Denied as exc:
                     seen["seal_refused"] = str(exc)
             else:
@@ -570,7 +570,7 @@ class DelegateTests(Fixture):
                     seen["response"] = response
                 try:
                     ctx.handle("finish", {"outcome": "continue", "summary": "child stopped",
-                                          "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                          "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
                 except Denied as exc:
                     seen["seal_refused"] = str(exc)
             else:
@@ -594,7 +594,7 @@ class DelegateTests(Fixture):
             if ctx.role.name == "worker":
                 response = ctx.handle("delegate", {"role": "helper", "task": "t"})
                 ctx.handle("finish", {"outcome": "continue", "summary": "child error: " + response["error"],
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 raise RuntimeError("synthetic child failure")
 
@@ -618,7 +618,7 @@ class DelegateTests(Fixture):
                     if ctx.role.name == "helper":
                         raise error
                     seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
-                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed\nNext: Report the child result"})
+                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "next_step": 'Report the child result', "state": "Caller sealed\nNext: Report the child result"})
                 result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(seen["status"], "bounded" if bound else "interrupted")
@@ -654,7 +654,7 @@ class DelegateTests(Fixture):
         refusal = InfraExceeded("parent daily budget")
         def callback(ctx, *_):
             if ctx.role.name == "helper":
-                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed", "state": "Child sealed\nNext: Report the child result"})
+                ctx.handle("finish", {"outcome": "continue", "summary": "child sealed", "next_step": 'Report the child result', "state": "Child sealed\nNext: Report the child result"})
                 return
             ctx.handle("delegate", {"role": "helper", "task": "probe"})
             with patch("mizu.runtime.Budget.take", side_effect=refusal):
@@ -674,7 +674,7 @@ class DelegateTests(Fixture):
         def callback(ctx, *_):
             if ctx.role.name == "helper":
                 ctx.handle("finish", {"outcome": "continue", "summary": "child sealed",
-                                      "state": "Child sealed\nNext: Report the child result"})
+                                      "next_step": 'Report the child result', "state": "Child sealed\nNext: Report the child result"})
                 engine.stop.set()
                 return
             seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
@@ -697,11 +697,11 @@ class DelegateTests(Fixture):
                 def callback(ctx, *_):
                     if ctx.role.name == "helper":
                         ctx.bound_hit = "tools"
-                        ctx.handle("finish", {"outcome": "continue", "summary": "child bounded", "state": "Child bounded\nNext: Report the child result"})
+                        ctx.handle("finish", {"outcome": "continue", "summary": "child bounded", "next_step": 'Report the child result', "state": "Child bounded\nNext: Report the child result"})
                         return
                     with patch("mizu.runtime.write_json", side_effect=failing_write):
                         seen.update(ctx.handle("delegate", {"role": "helper", "task": "probe"}))
-                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "state": "Caller sealed\nNext: Report the child result"})
+                    ctx.handle("finish", {"outcome": "continue", "summary": "caller sealed", "next_step": 'Report the child result', "state": "Caller sealed\nNext: Report the child result"})
                 result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(seen["status"], "interrupted")
@@ -724,10 +724,10 @@ class DelegateTests(Fixture):
             if ctx.role.name == "worker":
                 response = ctx.handle("delegate", {"role": "helper", "task": "t"})
                 ctx.handle("finish", {"outcome": "continue", "summary": "via " + response["profile"],
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 ctx.handle("finish", {"outcome": "continue", "summary": "selected child",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")
@@ -776,14 +776,14 @@ class DelegateTests(Fixture):
                 capture = self.project.snapshots.get(response["snapshot"])
                 self.assertEqual(capture.get("state"), ctx.snapshot.get("state"))
                 ctx.handle("finish", {"outcome": "continue", "summary": "via " + response["profile"],
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
             else:
                 # The child executes on the capture even though routing saw current.
                 seen["child_snapshot"] = ctx.snapshot["id"]
                 seen["child_profile"] = ctx.role.profile
                 self.assertEqual(ctx.role.profile, "alternate")
                 ctx.handle("finish", {"outcome": "continue", "summary": "selected child",
-                                      "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
+                                      "next_step": 'y.', "state": "Now: x.\nNext: y.\nTasks: none\nBlocking: none"})
 
         result = Engine(config, driver=ScriptDriver(callback)).run(self.project, "worker")
         self.assertEqual(result["status"], "completed")

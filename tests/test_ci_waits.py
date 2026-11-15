@@ -175,7 +175,7 @@ class CiWaitTests(CiWaitFixture):
             self.assertIsNone(ctx.finished)
             (ctx.workspace / "progress.py").write_text("VALUE = 1\n")
             ctx.handle("finish", {"outcome": "continue", "summary": "CI reassessed",
-                                  "state": "Now: CI terminal.\nNext: Repair the exact failed check"})
+                                  "next_step": 'Repair the exact failed check', "state": "Now: CI terminal.\nNext: Repair the exact failed check"})
         engine.driver = ScriptDriver(handoff)
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         projected = json.loads(engine.driver.calls[-1][1])["ready_work"]["items"][0]

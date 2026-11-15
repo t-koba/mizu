@@ -322,7 +322,7 @@ vector database or an automatically complete history search. Usage day buckets
 and the usage window edge use the configured `timezone` day boundary so
 `mizu usage` groups agree with `mizu budget` for the same day.
 
-`continue` starts another meaningful unit. `bounded` is a `continue` that hit a per-run spend bound or entered finite-wall wrap-up before sealing: it saved what it could under the wrap-up allowance and runs again without counting toward `max_failures`. A host-sealed bounded yield may retain role-eligible ready work; it is not a writer-selected parking request. The items remain available for a later independent admission, but unchanged readiness alone does not bypass the no-progress self-admission policy. Writer-selected `wait`, `blocked`, and `continue` still require a complete empty ready inventory unless they hand off through a validated progress-backed `Next`. A whole-unit wall exhausted or deadline wrap-up ended without a seal instead
+`continue` starts another meaningful unit. `bounded` is a `continue` that hit a per-run spend bound or entered finite-wall wrap-up before sealing: it saved what it could under the wrap-up allowance and runs again without counting toward `max_failures`. A host-sealed bounded yield may retain role-eligible ready work; it is not a writer-selected parking request. The items remain available for a later independent admission, but unchanged readiness alone does not bypass the no-progress self-admission policy. Writer-selected `wait`, `blocked`, and `continue` still require a complete empty ready inventory unless they hand off through a validated progress-backed `next_step`. A whole-unit wall exhausted or deadline wrap-up ended without a seal instead
 records a bounded run result, without creating or publishing a snapshot or
 counting toward `max_failures`. Unrelated pre-seal faults still fail even if the
 wall also expires.
@@ -362,7 +362,7 @@ missing-finish continuation may still use the full work grant when no tool was
 called; otherwise it remains finish-only. Operators may allow 0–100
 consecutive no-progress continuations for read-only on-change roles; writers do
 not self-admit from that allowance or elapsed no-progress backoff. Writer
-continuations require a validated progress-backed Next or an independent wake.
+continuations require a validated progress-backed `next_step` or an independent wake.
 For read-only roles, `no_progress_backoff_seconds = 0` disables the timer wake;
 a positive value permits a parked on-change cursor to wake after that delay
 measured from its recorded progress timestamp. Writers inherit
@@ -764,7 +764,8 @@ admit a run for role-eligible ready work, as described in
 workspace. The
 work-item ledger is the single record of accepted and planned work, including
 blocked conditions; the finish outcome and structured wake source record why a
-unit stopped, while `Now`/`Next` are short working notes, not a second backlog.
+unit stopped, while prose `state` is a short working note and typed `next_step` proposes an
+immediate handoff, not a second backlog.
 
 Required arguments are `idempotency_key` (1–128 characters) and `title` (1–200).
 Optional `origin` is exactly `{"insight_id": <id>, "rev": <positive int>}` or

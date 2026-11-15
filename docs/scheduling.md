@@ -181,21 +181,23 @@ writer handoff for `continue`/`bounded` units. A writer's configured fallback
 applies only to a `wait` with no role-eligible ready work and a current
 self-resolvable wait after bounded local evidence proves no live external
 source. It never admits ready work on a timer. Mere progress still requires a
-new actionable `Next:` with a selected work signal for immediate writer handoff.
+new actionable `next_step` with a selected work signal for immediate writer handoff.
 
-### Writer Next handoff
+### Writer next-step handoff
 
-A writer declares its next actionable step in the existing durable finish
-`state`, as exactly one line `Next: <step>`. The state is limited to 32,000
-characters; the step must be 1–4,096 printable characters with no surrounding
-whitespace. Empty, duplicate, malformed and `none`/`nothing`/`n/a` declarations
-are absent. This is an explicit writer declaration, not natural-language
+A writer declares its next actionable step in the optional typed finish field
+`next_step`, independently of the short prose `state`. The step must be 1–4,096
+printable characters with no surrounding whitespace; empty values and
+`none`/`nothing`/`n/a` placeholders (case-insensitive, ignoring trailing periods)
+are invalid. This is an explicit writer declaration, not natural-language
 classification: use `wait` with the exact check or a deadline when the next
 step is not actionable yet. A writer `finish` with `outcome=continue` and no
-parseable declaration is refused before sealing or acknowledgement side effects.
-Correct `state` to include exactly one standalone `Next: <step>` line and retry
-`finish` in the same unit. This diagnostic does not apply to other outcomes or
-non-writer roles, and a corrected line alone does not grant admission.
+valid `next_step` is refused before sealing or acknowledgement side effects.
+Correct `next_step` and retry `finish` in the same unit. Other outcomes and
+read-only roles need not supply it; any supplied field must be valid. The field
+alone does not grant admission. It is retained in immutable finish/run and
+snapshot records; legacy snapshots without it remain readable, but their prose
+is never parsed for a step.
 
 Readiness requires `continue` or `bounded`, a validated role-matching progress
 record, and at least one selected work signal (`tool`, `code`, `decision`, or
@@ -203,13 +205,13 @@ record, and at least one selected work signal (`tool`, `code`, `decision`, or
 (including check-job `list`, `logs`, and queued/running `result`) do not
 count as tool work. Terminal result retrieval still qualifies as work; exact
 check-result wake/acknowledgement and verification import are unchanged. The
-declaration must differ from the exact published parent's Next. Legacy, missing
-or corrupt evidence, or an unavailable parent, fails closed. This reads at most
+declaration must differ from the exact published parent's typed `next_step`. Missing
+or corrupt progress evidence, or an unavailable parent, fails closed. This reads at most
 one parent, adds no store or task lifecycle, and
 never changes WorkItems eligibility or any wait/event routing.
 
 Before a writable writer parks with `wait`, `blocked`, or a `continue`/`bounded`
-finish without a validated immediate Next handoff, the host requires a complete,
+finish without a validated immediate next-step handoff, the host requires a complete,
 empty role-scoped ready inventory. It reads `page_ready` under its 100-row
 API maximum before sealing or applying acknowledgements; inventories larger
 than that bound fail closed.
@@ -219,7 +221,7 @@ gaps and retry in the same unit. Every ready item needs a durable disposition:
 finish it with the existing completion evidence, block it on a supported named
 observable wait, or drop it with a reason. Holding it as `doing` is not a
 disposition. Unheld open work and this role's held work count; other holders'
-work does not block the role. A progress-backed new Next may instead hand off
+work does not block the role. A progress-backed new `next_step` may instead hand off
 immediately under the existing validation rules.
 
 Ready-work presence alone never authorizes a timed re-admission, for either
@@ -269,11 +271,11 @@ live scheduler verdict.
 
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the
-same Next, even after work, does not renew it. When this is the dispatch cause,
+same `next_step`, even after work, does not renew it. When this is the dispatch cause,
 admission is `next_task`, and both full and resumed/delta unit openings carry
 the exact step as the first `task` field. Persistent session identity, stable
 system context and cache remain unchanged. Independent events keep precedence;
-`--event` probes still require their existing subscribed event, not Next alone.
+`--event` probes still require their existing subscribed event, not `next_step` alone.
 
 Progress records and their allowance/backoff disposition remain bounded
 evidence. Read-only roles use that policy for on-change dispatch as described
@@ -330,12 +332,12 @@ substantive decision, a terminal event, a due wait, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
 inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
 operator records and changed role-eligible ready work bypass it independently
-of workspace mode. A writer Next handoff, a writer self-resolvable-wait
+of workspace mode. A writer next-step handoff, a writer self-resolvable-wait
 fallback with no current role-eligible ready work, or a read-only role-specific
 progress continuation can also bypass the unchanged-code gate. Read-only roles
 never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
-changes, Next handoffs and progress-only continuation; writer probes retain their existing
+changes, next-step handoffs and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either
 workspace mode. The recorded
 `admission` label is `operator_record` / `decision` / `work_item` / `wait` /

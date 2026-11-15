@@ -509,6 +509,7 @@ def _published_snapshot(context: Context) -> dict:
     proof, diagnostic = acceptance.effective_projection(context.project, context.snapshot)
     return {**{k: context.snapshot[k] for k in (
         "id", "code_digest", "created_at", "state", "summary", "verification")},
+        **({"next_step": context.snapshot["next_step"]} if "next_step" in context.snapshot else {}),
         "effective_verification": proof, "effective_verification_diagnostic": diagnostic}
 
 

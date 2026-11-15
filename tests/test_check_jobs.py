@@ -358,7 +358,7 @@ class JobTests(Fixture):
         def act(ctx, *_):
             ctx._op_check_job({'action': 'result', 'id': job['id']})
             ctx.bound_hit = 'requests'
-            ctx._op_finish({'outcome': 'continue', 'summary': 'Bound reached', 'state': 'Unfinished work\nNext: Inspect the test result'})
+            ctx._op_finish({'outcome': 'continue', 'summary': 'Bound reached', "next_step": 'Inspect the test result', 'state': 'Unfinished work\nNext: Inspect the test result'})
         Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
         self.assertFalse(check_jobs.read(self.project, job['id'])['acknowledged'])
 
@@ -2993,7 +2993,7 @@ class TerminalResultWakeTests(Fixture):
         from mizu.runtime import Engine, should_run
         def finish(ctx, *_):
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'No change',
-                                  'state': 'Now: No change\nNext: Inspect the check result'})
+                                  "next_step": 'Inspect the check result', 'state': 'Now: No change\nNext: Inspect the check result'})
         driver = ScriptDriver(finish)
         engine = Engine(self.config, driver=driver)
         # Consume initial goal/operator inputs, then publish a no-progress finish.
@@ -3023,7 +3023,7 @@ class TerminalResultWakeTests(Fixture):
                     self.assertFalse(ctx.progress_tool)
                     self.assertFalse(getattr(ctx, "check_results_read", set()))
                     ctx.handle('finish', {'outcome': 'continue', 'summary': 'Still pending',
-                        'state': 'Now: observed only.\nNext: Inspect pending result for ' + status})
+                        "next_step": 'Inspect pending result for ' + status, 'state': 'Now: observed only.\nNext: Inspect pending result for ' + status})
                 engine = Engine(self.config, driver=ScriptDriver(poll))
                 self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
                 snapshot = self.project.snapshots.get()

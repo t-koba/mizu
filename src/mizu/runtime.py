@@ -63,7 +63,7 @@ from .readiness_witness import settled as witness_settled, witness as state_witn
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
                        WRITER_HANDOFF_PROGRESS_SIGNALS,
                        missing_finish_recovery_due, missing_finish_streak,
-                       no_progress_recovery_due, progress_disposition, progress_timestamp,
+                       no_progress_recovery_due, progress_disposition, progress_timestamp, validate_next_step,
                        validate_progress)
 from .run_health import (_capture_cause, _clear_missing_finish_streak,
                          _record_health_failure, _record_missing_finish_only)
@@ -1977,7 +1977,7 @@ class Context:
         """Refuse an undisposed or unprovable ready set before sealing or acking.
 
         A host-imposed bounded seal is an automatic yield and may retain ready
-        work. A validated new Next handoff is also not parking. Other parking
+        work. A validated new next_step handoff is also not parking. Other parking
         finishes require a complete empty role-scoped inventory under the page
         API maximum. Unknown waits and overflow are evidence gaps, never
         dispositions.
@@ -1987,7 +1987,7 @@ class Context:
         if finished["outcome"] not in ("wait", "blocked", "continue", "bounded"):
             return
         if (finished["outcome"] in ("continue", "bounded")
-                and _declared_next(finished.get("state")) is not None):
+                and finished.get("next_step") is not None):
             captured = self.project.snapshots.capture_files(self.workspace, persist=False)
             candidate = {**finished, "parent": self.snapshot["id"],
                          "progress": self._finish_progress(captured, finished)}
@@ -1995,7 +1995,7 @@ class Context:
                 return
         message = ("Writer parking requires a complete empty role-scoped ready inventory. "
                    "Finish each ready item, block it on a supported named observable wait, "
-                   "drop it with a reason, or make an immediate progress-backed new Next handoff. "
+                   "drop it with a reason, or make an immediate progress-backed new next_step handoff. "
                    "A held doing item is still ready. ")
         try:
             page = self.project.work_items.page_ready(
@@ -2021,10 +2021,9 @@ class Context:
     def _op_finish(self, args: dict) -> dict:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
-        if (self.role.workspace == "write" and args["outcome"] == "continue"
-                and _declared_next(args.get("state")) is None):
-            raise Denied("Writer continue requires exactly one standalone Next: <step> line in state; "
-                         "correct state and retry finish with an actionable step")
+        if ("next_step" in args
+                or (self.role.workspace == "write" and args["outcome"] == "continue")):
+            validate_next_step(args.get("next_step"))
         tokens = args.get("ack_events", [])
         decisions = {event["ack_token"]: event for event in self.decision_events}
         terminal = {event["ack_token"]: event for event in self.work_item_events}
@@ -3719,6 +3718,7 @@ class Engine:
                         wake_at=time.time() + finished["wait_seconds"] if finished["outcome"] == "wait" else None,
                         inbox_seen=context.inbox_seen,
                         wake_generation=context.wake_generation, progress=progress,
+                        next_step=finished.get("next_step"),
                         parent=context.snapshot["id"])
                     if context.safe_point_yield_requested:
                         safe_point.target(project.snapshots, run_id, snapshot["id"])
@@ -4388,35 +4388,21 @@ def _operator_woke(control, cursor, *, observer=False) -> bool:
     return generation != seen
 
 
-def _declared_next(state) -> str | None:
-    """A single-line declaration, not a semantic task classifier; invalid is absent."""
-    if not isinstance(state, str) or len(state) > 32000:
-        return None
-    steps = [line for line in state.splitlines() if line.startswith("Next:")]
-    if len(steps) != 1 or not steps[0].startswith("Next: "):
-        return None
-    step = steps[0][6:]
-    if (not step or len(step) > 4096 or step != step.strip() or not step.isprintable()
-            or step.casefold().rstrip(".") in ("none", "nothing", "n/a")):
-        return None
-    return step
-
-
 def _writer_next_task(project, snapshot, role_name) -> str | None:
     """Resolve one durable writer handoff from the exact published parent pair.
 
     Only continue/bounded work with progress selected by the current role policy
     may declare readiness. Changed policy and malformed evidence fail closed.
-    Repeating the previous Next is not a new declaration; publishing the
+    Repeating the previous typed step is not a new declaration; publishing the
     successor consumes this handoff. Reads at most one parent and never changes
     WorkItems or wait authority.
     """
     if snapshot.get("outcome") not in ("continue", "bounded"):
         return None
-    step = _declared_next(snapshot.get("state"))
     progress = snapshot.get("progress")
     try:
-        if not step or not isinstance(progress, dict):
+        step = validate_next_step(snapshot.get("next_step"))
+        if not isinstance(progress, dict):
             return None
         selected, signals = progress.get("selected"), progress.get("signals")
         if (not isinstance(selected, list) or not isinstance(signals, dict)
@@ -4429,7 +4415,7 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
         if not parent_id:
             return None
         parent = project.snapshots.get(parent_id)
-        return step if step != _declared_next(parent.get("state")) else None
+        return step if step != parent.get("next_step") else None
     except (Denied, OSError, ValueError):
         return None
 
@@ -4571,7 +4557,7 @@ def _writer_progress_fallback(record, config, role, ready_work_present, current_
                               *, project=None) -> bool:
     """Back off only for a proven self-resolvable wait with no ready work.
 
-    Ready-set changes and progress-backed Next handoffs use their event paths;
+    Ready-set changes and progress-backed next-step handoffs use their event paths;
     historical conversion markers remain readable but authorize no timer.
     """
     if (role.workspace != "write" or record.get("outcome") != "wait"

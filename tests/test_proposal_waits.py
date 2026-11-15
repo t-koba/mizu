@@ -291,9 +291,13 @@ class ProposalWaitTests(Fixture):
         with self.assertRaises(Denied):
             ctx.handle("finish", {"outcome": "wait", "summary": "bad ack", "ack_events": ["f" * 64]})
         proposal_waits.validate_selection(ctx, tokens)
-        ctx.handle("finish", {"outcome": "wait", "summary": "merge observed", "state": "Merge observed; holder decides next", "ack_events": tokens})
-        proposal_waits.complete(ctx, {"outcome": "wait", "ack_events": tokens})
-        proposal_waits.complete(ctx, {"outcome": "wait", "ack_events": tokens})
+        (ctx.workspace / "proposal-handoff.txt").write_text("Reassess the merged proposal")
+        finish = {"outcome": "continue", "summary": "Merge observed",
+                  "state": "Merge observed; holder decides next",
+                  "next_step": "Reassess the merged proposal", "ack_events": tokens}
+        ctx.handle("finish", finish)
+        proposal_waits.complete(ctx, finish)
+        proposal_waits.complete(ctx, finish)
         self.assertEqual(proposal_waits.pending(self.store, "worker"), [])
         self.assertEqual(without_blocked_age(self.store.page_ready(role_name="worker")),
                          without_blocked_age(ready))

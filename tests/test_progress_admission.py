@@ -9,9 +9,9 @@ from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff
 from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, read_json, write_json
-from mizu.runtime import (Engine, _declared_next, _is_observational_operation, _operator_woke,
+from mizu.runtime import (Engine, _is_observational_operation, _operator_woke,
                           _progress_obligations_digest, _progress_record, _writer_next_task, should_run)
-from mizu.snapshot import PROGRESS_SIGNALS, no_progress_recovery_due, progress_disposition, validate_progress
+from mizu.snapshot import PROGRESS_SIGNALS, no_progress_recovery_due, progress_disposition, validate_next_step, validate_progress
 
 
 class ProgressConfigTests(Fixture):
@@ -38,7 +38,7 @@ class ProgressConfigTests(Fixture):
             candidate = raw
             if setting == "progress_signals":
                 candidate = candidate.replace(
-                    'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.',
+                    'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
                     f"progress_signals = {invalid}")
             if setting == "no_progress_continuations":
                 candidate = candidate.replace("no_progress_continuations = 0", f"no_progress_continuations = {invalid}")
@@ -67,12 +67,12 @@ class ProgressConfigTests(Fixture):
                           limits.no_progress_recovery_after), (100, 86400, 86400, 100))
 
         empty = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
             "progress_signals = []")
         self.file.write_text(empty)
         self.assertEqual(load(self.file).limits.progress_signals, ())
         state_opt_in = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new Next. Empty disables qualification.',
+            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
             'progress_signals = ["state"]')
         self.file.write_text(state_opt_in)
         self.assertEqual(load(self.file).limits.progress_signals, ("state",))
@@ -129,7 +129,7 @@ class ProgressAdmissionTests(Fixture):
                 callback(ctx, base)
             if ctx.finished is None:
                 args = {"outcome": "continue", "summary": "Finished this unit",
-                        "state": base["state"]}
+                        "next_step": 'Continue the progress experiment', "state": base["state"]}
                 if ack_decisions:
                     args["ack_events"] = delivered_ack_tokens(prompt)
                 ctx.handle("finish", args)
@@ -137,16 +137,17 @@ class ProgressAdmissionTests(Fixture):
         return self.project.snapshots.get()
 
     def test_next_declaration_is_bounded_unambiguous_and_requires_work(self):
-        self.assertEqual(_declared_next('Now: worked.\nNext: Add the test.'), 'Add the test.')
-        for state in (None, '', 'Next: none', 'Next: ', 'Next:  padded', 'Next: padded ',
-                      'Next: first\nNext: second', 'Next:\nNext: valid', 'Next: tab\there',
-                      'Next: ' + 'x' * 4097, 'x' * 32001):
-            with self.subTest(state=str(state)[:30]):
-                self.assertIsNone(_declared_next(state))
+        self.assertEqual(validate_next_step('Add the test.'), 'Add the test.')
+        self.assertEqual(validate_next_step('x' * 4096), 'x' * 4096)
+        for step in (None, 1, '', 'none', 'Nothing.', 'N/A...', ' padded', 'padded ',
+                     'first\nsecond', 'tab\there', 'x' * 4097):
+            with self.subTest(step=str(step)[:30]):
+                with self.assertRaises(Denied):
+                    validate_next_step(step)
         def work(ctx, _):
             (ctx.workspace / 'app.py').write_text('VALUE = 42\n')
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'Worked',
-                                  'state': 'Now: worked.\nNext: Add the test.'})
+                                  "next_step": 'Add the test.', 'state': 'Now: worked.\nNext: Add the test.'})
         snapshot = self._recorded_run(work)
         self.assertEqual(_writer_next_task(self.project, snapshot, 'worker'), 'Add the test.')
         self.assertIsNone(_writer_next_task(self.project, snapshot, 'reviewer'))
@@ -154,6 +155,26 @@ class ProgressAdmissionTests(Fixture):
             self.assertIsNone(_writer_next_task(self.project, {**snapshot, 'outcome': outcome}, 'worker'))
         missing_parent = {**snapshot, 'parent': '0' * 64}
         self.assertIsNone(_writer_next_task(self.project, missing_parent, 'worker'))
+
+    def test_typed_step_is_not_inferred_or_compared_from_prose(self):
+        def work(ctx, _):
+            (ctx.workspace / 'app.py').write_text('VALUE = 42\n')
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'Worked',
+                                  'state': 'No prose declaration', 'next_step': 'Add the test.'})
+        snapshot = self._recorded_run(work)
+        legacy = {k: v for k, v in snapshot.items() if k != 'next_step'}
+        legacy['state'] = 'Next: Add the test.'
+        self.assertIsNone(_writer_next_task(self.project, legacy, 'worker'))
+        candidate = {**snapshot, 'parent': snapshot['id'], 'state': 'Different prose'}
+        self.assertIsNone(_writer_next_task(self.project, candidate, 'worker'))
+        candidate.update(next_step='Run the test.', state=snapshot['state'])
+        self.assertEqual(_writer_next_task(self.project, candidate, 'worker'), 'Run the test.')
+        legacy_parent = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=self.project.goal, state='Next: Add the test.', run=None,
+            outcome='continue', summary='Legacy snapshot')
+        candidate.update(parent=legacy_parent['id'], next_step='Add the test.')
+        self.assertEqual(_writer_next_task(self.project, candidate, 'worker'), 'Add the test.')
 
     def test_next_handoff_uses_effective_configured_progress_signals(self):
         base = self._baseline()
@@ -165,7 +186,7 @@ class ProgressAdmissionTests(Fixture):
             signals = {**empty_signals, signal: True}
             return {
                 "outcome": "continue",
-                "state": state,
+                "state": state, "next_step": "Add the test.",
                 "parent": parent,
                 "progress": self._record(
                     role="worker", selected=list(selected),
@@ -210,7 +231,7 @@ class ProgressAdmissionTests(Fixture):
 
         def declare_only(ctx, _):
             ctx.handle("finish", {"outcome": "continue", "summary": "Declared a step without progress",
-                                   "state": state})
+                                   "next_step": "Add the test.", "state": state})
 
         snapshot = self._recorded_run(declare_only, base=base)
         self.assertTrue(snapshot["progress"]["signals"]["state"])
@@ -259,20 +280,20 @@ class ProgressAdmissionTests(Fixture):
             with self.assertRaises(Denied):
                 ctx.handle("files", {"unexpected": True})
             ctx.handle("finish", {"outcome": "continue", "summary": "Tool refused",
-                                   "state": base["state"]})
+                                   "next_step": 'Continue the progress experiment', "state": base["state"]})
         failed = self._recorded_run(failed_tool)
         self.assertFalse(failed["progress"]["signals"]["tool"])
 
         def change_code(ctx, base):
             (ctx.workspace / "app.py").write_text("VALUE = 17\n")
             ctx.handle("finish", {"outcome": "continue", "summary": "Code changed",
-                                   "state": base["state"]})
+                                   "next_step": 'Continue the progress experiment', "state": base["state"]})
         code = self._recorded_run(change_code)
         self.assertTrue(code["progress"]["signals"]["code"])
 
         def finish_with_state(ctx, base, value):
             ctx.handle("finish", {"outcome": "continue", "summary": "State was reworded",
-                                   "state": value})
+                                   "next_step": 'Continue the progress experiment', "state": value})
         state = self._recorded_run(
             lambda ctx, base: finish_with_state(ctx, base, "Now: a distinct recorded state.\nNext: Continue the progress experiment"))
         self.assertTrue(state["progress"]["signals"]["state"])
@@ -299,7 +320,7 @@ class ProgressAdmissionTests(Fixture):
             record = ctx.handle("submit_insight", {"title": "A tested action", "body": "Observed detail."})
             ctx.handle("decide", {"id": record["id"], "action": "accept", "reason": "Evidence supports it.", "rev": 1})
             ctx.handle("finish", {"outcome": "continue", "summary": "Decision recorded",
-                                   "state": "Now: accepted work.\nNext: Implement the accepted finding"})
+                                   "next_step": 'Implement the accepted finding', "state": "Now: accepted work.\nNext: Implement the accepted finding"})
         action = self._recorded_run(actions, custom_config=config)
         self.assertTrue(action["progress"]["signals"]["tool"])
         self.assertTrue(action["progress"]["signals"]["decision"])
@@ -318,7 +339,7 @@ class ProgressAdmissionTests(Fixture):
         self.project.set_control(wake_generation="operator-woke")
         def finish(ctx, snapshot):
             ctx.handle("finish", {"outcome": "continue", "summary": "Wake handled",
-                                   "state": snapshot["state"]})
+                                   "next_step": 'Continue the progress experiment', "state": snapshot["state"]})
         result = self._recorded_run(finish, base=base)
         self.assertTrue(result["progress"]["signals"]["input"])
         self.assertEqual(result["progress"]["no_progress_count"], 0)
@@ -456,7 +477,7 @@ class ProgressAdmissionTests(Fixture):
                 def finish(ctx, prompt, profile):
                     calls.append(True)
                     ctx.handle("finish", {"outcome": "continue", "summary": "Wake consumed",
-                                          "state": ctx.snapshot["state"]})
+                                          "next_step": 'Continue the progress experiment', "state": ctx.snapshot["state"]})
                 engine = Engine(config, driver=ScriptDriver(finish))
                 # Explicit file-trigger dispatch still requires a due event.
                 self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
@@ -468,7 +489,7 @@ class ProgressAdmissionTests(Fixture):
                 if kind != "goal":
                     self.assertTrue(snapshot["progress"]["signals"]["input"])
                     self.assertEqual(snapshot["progress"]["no_progress_count"], 0)
-                    # Delivered input is consumed; without a new Next it cannot loop.
+                    # Delivered input is consumed; without a new next_step it cannot loop.
                 self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
                 self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
 
@@ -534,7 +555,7 @@ class ProgressAdmissionTests(Fixture):
         def finish(ctx, prompt, profile):
             calls.append(True)
             ctx.handle("finish", {"outcome": "continue", "summary": "Backoff elapsed",
-                                   "state": ctx.snapshot["state"]})
+                                   "next_step": 'Continue the progress experiment', "state": ctx.snapshot["state"]})
         result = Engine(config, driver=ScriptDriver(finish)).run(self.project, "worker")
         self.assertEqual(calls, [])
         self.assertEqual(result["skipped"], "unchanged")
@@ -726,7 +747,7 @@ class PerRoleProgressSignalsTests(Fixture):
                 callback(ctx, base)
             if ctx.finished is None:
                 ctx.handle("finish", {"outcome": "continue", "summary": "Finished this unit",
-                                      "state": base["state"]})
+                                      "next_step": 'Continue the progress experiment', "state": base["state"]})
         Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
         return self.project.snapshots.get()
 

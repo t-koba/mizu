@@ -39,7 +39,8 @@ def finish(bridge, *, resumed=False):
         if scenario == 'recover-continue':
             state += '\nNext: Resume the synthetic task'
         forward(bridge, 'finish', {'outcome': scenario.removeprefix('recover-'),
-                                 'summary': 'Recovered existing workspace', 'state': state})
+                                 'summary': 'Recovered existing workspace', 'state': state,
+                                 **({'next_step': 'Resume the synthetic task'} if scenario == 'recover-continue' else {})})
         return
     if scenario.startswith('seal-'):
         if len(bridge['tools']) != 1:
@@ -66,7 +67,9 @@ def finish(bridge, *, resumed=False):
                     raise AssertionError('Failed finish was retried successfully')
             return
         outcome = scenario.removeprefix('seal-')
-        forward(bridge, 'finish', {'outcome': outcome, 'summary': 'Synthetic checkpoint seal', 'state': 'Retain state\nNext: Resume the synthetic task'})
+        forward(bridge, 'finish', {'outcome': outcome, 'summary': 'Synthetic checkpoint seal',
+                                 'state': 'Retain state\nNext: Resume the synthetic task',
+                                 **({'next_step': 'Resume the synthetic task'} if outcome == 'continue' else {})})
         forward(bridge, '_model_usage', {'sequence': 1, 'usage': {'outputTokens': 5}})
         for operation, args in (('finish', {'outcome': 'continue', 'summary': 'must not overwrite'}),
                                 ('files', {}), ('_budget', {'sequence': 2}), ('_hello', {}),

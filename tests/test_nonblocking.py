@@ -17,7 +17,7 @@ class ParkAndContinueTests(Fixture):
             ctx.handle("finish", {
                 "outcome": "continue",
                 "summary": "Parked A; progressed B.",
-                "state": ('Q1 (parked): backend choice for A. Tried both adapters; need operator pick; resume A on answer.\nNext: finish B.'),
+                "next_step": 'finish B.', "state": ('Q1 (parked): backend choice for A. Tried both adapters; need operator pick; resume A on answer.\nNext: finish B.'),
             })
         Engine(self.config, driver=ScriptDriver(park_and_progress)).run(self.project, "worker")
         parked = self.project.snapshots.get()

@@ -50,6 +50,16 @@ _PROGRESS_TIMESTAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
 
 
+def validate_next_step(value) -> str:
+    """Validate the typed writer handoff; legacy prose is never an input."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= 4096
+            or value != value.strip() or not value.isprintable()
+            or value.casefold().rstrip(".") in ("none", "nothing", "n/a")):
+        raise Denied("next_step requires 1–4096 printable characters without surrounding "
+                     "whitespace or a placeholder; correct next_step and retry finish")
+    return value
+
+
 def validate_wait_resolution_high_water(value: dict) -> dict:
     """Validate the bounded resolution-only prefix receipt (not a ready cursor)."""
     if (not isinstance(value, dict) or set(value) != {"signature", "token"}
@@ -574,7 +584,7 @@ class Snapshots:
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
                wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "",
-               progress: dict | None = None,
+               progress: dict | None = None, next_step: str | None = None,
                parent: str | None | object = _CURRENT_PARENT) -> dict:
         """Persist an immutable capture; publication is a separate CAS operation.
 
@@ -601,6 +611,8 @@ class Snapshots:
                   "parent": parent}
         if progress is not None:
             record["progress"] = progress
+        if next_step is not None:
+            record["next_step"] = validate_next_step(next_step)
         record["id"] = digest(canonical(record))
         write_json(self.root / "snapshots" / f"{record['id']}.json", record, exclusive=True)
         return record
@@ -901,6 +913,8 @@ class Snapshots:
         if "parent" in record and record["parent"] is not None and (
                 not isinstance(record["parent"], str) or not DIGEST.fullmatch(record["parent"])):
             raise Denied("Invalid parent snapshot ID")
+        if "next_step" in record:
+            validate_next_step(record["next_step"])
         if "progress" in record:
             validate_progress(record["progress"])
         names = record.get("file_names")
@@ -922,6 +936,8 @@ class Snapshots:
             raise Denied("Invalid parent snapshot ID")
         if not isinstance(record.get("files"), dict):
             raise Denied("Invalid snapshot files")
+        if "next_step" in record:
+            validate_next_step(record["next_step"])
         if "progress" in record:
             validate_progress(record["progress"])
         if digest(canonical(record["files"])) != record.get("code_digest"):

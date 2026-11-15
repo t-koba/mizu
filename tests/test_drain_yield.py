@@ -21,7 +21,7 @@ from mizu.pi_durable import PiDurableDriver, interpret_result
 from mizu.pi_durable_store import load_run, open_store
 from mizu.runtime import Engine, WRAP_UP_REQUESTS, WRAP_UP_TOOLS
 
-FINISH = {"outcome": "continue", "summary": "Saved work for drain", "state": "Next: resume."}
+FINISH = {"outcome": "continue", "summary": "Saved work for drain", "next_step": 'resume.', "state": "Next: resume."}
 
 
 class DrainYieldTests(Fixture):

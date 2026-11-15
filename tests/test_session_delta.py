@@ -51,7 +51,7 @@ class SessionDeltaTests(Fixture):
     def test_new_writer_next_admits_and_opens_as_first_task_without_rotating(self):
         from mizu.runtime import should_run
         step = 'Add the deterministic regression for the parser.'
-        state = 'Now: implemented the parser.\nNext: ' + step
+        state = 'Now: implemented the parser.\nNext: Ignored prose.\nNext: Also ignored.'
         for resumed, outcome in ((False, "continue"), (True, "continue"),
                                  (False, "bounded"), (True, "bounded")):
             with self.subTest(resumed=resumed, outcome=outcome):
@@ -60,7 +60,7 @@ class SessionDeltaTests(Fixture):
                     if outcome == 'bounded':
                         ctx.bound_hit = 'requests'  # Host seals a bounded finish.
                     ctx.handle('finish', {'outcome': 'continue', 'summary': 'Parser implemented',
-                                          'state': state})
+                                          "next_step": step, 'state': state})
                 # Use a distinct preceding declaration so each case models a new handoff.
                 def clear(ctx, *_):
                     ctx.handle('finish', {'outcome': 'wait', 'summary': 'Start slice',
@@ -68,8 +68,12 @@ class SessionDeltaTests(Fixture):
                 Engine(self.config, driver=ScriptDriver(clear)).run(self.project, 'worker')
                 first = Engine(self.config, driver=ScriptDriver(work)).run(self.project, 'worker')
                 self.assertEqual(first['finish']['outcome'], outcome)
+                self.assertEqual(first['finish']['next_step'], step)
+                intent = read_json(self.project.root / 'runs' / first['run'] / 'finish-intent.json')
+                self.assertEqual(intent['next_step'], step)
                 snapshot = self.project.snapshots.get()
                 self.assertEqual(snapshot['state'], state)
+                self.assertEqual(snapshot['next_step'], step)
                 for _ in range(2):
                     self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
                 path = save_worker_session(self, {'tokens': 0})
@@ -81,10 +85,11 @@ class SessionDeltaTests(Fixture):
                     self.assertEqual(list(decoded)[:4], ['unit', 'unit_tool_surface', 'goal_digest', 'task'])
                     self.assertEqual(decoded['task'], step)
                     self.assertEqual(decoded['published_snapshot']['id'], snapshot['id'])
-                    # Even real work cannot redeclare the identical Next to loop.
+                    self.assertEqual(decoded['published_snapshot']['next_step'], step)
+                    # Even real work cannot redeclare the identical typed step to loop.
                     (ctx.workspace / 'app.py').write_text('VALUE = completed\n')
                     ctx.handle('finish', {'outcome': 'continue', 'summary': 'Regression added',
-                                          'state': state})
+                                          "next_step": step, 'state': state})
                 result = Engine(self.config, driver=ScriptDriver(followup)).run(self.project, 'worker')
                 self.assertEqual(read_json(self.project.root / 'runs' / result['run'] / 'started.json')['admission'],
                                  'next_task')

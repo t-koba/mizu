@@ -221,7 +221,7 @@ slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
 `model_catalog.py` includes its observation-store schema version at magnitude 1;
-`operator_records.py` inventories positive insight-subject revisions and question-list bounds at magnitude 1;
+`operator_records.py` inventories positive insight-subject revisions, question-list bounds and exact answer-route IDs at magnitude 1;
 `operator_record_index.py` records single-link scratch and exact body-marker/schema shapes at
 magnitude 1.
 This is not a global numeric comparison linter.
@@ -2129,6 +2129,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('operator_records.py', 'questions', 1, 1): (
         '1', 'format',
         'operator question listing / per-invocation directory scan limit must be a positive integer'),
+    ('operator_records.py', 'record_answer_evidence', 1, 0): (
+        '3', 'format',
+        'operator answer proof / exact SharedRecord IDs have three path components'),
     ('work_order.py', '_validate_items', 0, 0): (
         '1', 'format',
         'work order / a plan requires at least one actionable item ID'),
@@ -2344,12 +2347,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('runtime.py', '_producer_limit', 2, 0): (
         '1073741824', 'configured policy',
         'producer holds / open_work_items and producer_inputs_per_source use the configured range'),
-    ('runtime.py', '_declared_next', 1, 0): (
-        '32000', 'format',
-        'writer handoff / state text follows the public finish schema length'),
-    ('runtime.py', '_declared_next', 1, 1): (
+    ('snapshot.py', 'validate_next_step', 0, 0): (
+        '1', 'format',
+        'typed writer handoff / next_step is a nonempty finish field'),
+    ('snapshot.py', 'validate_next_step', 2, 0): (
         '4096', 'format',
-        'writer handoff / actionable Next step follows the documented declaration format bound'),
+        'typed writer handoff / next_step follows the documented declaration bound'),
     ('admission.py', '_valid_resource', 1, 0): (
         '3', 'format',
         'admission resource key / project, locks directory and lock filename are exactly three path components'),

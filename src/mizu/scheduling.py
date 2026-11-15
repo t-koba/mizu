@@ -45,7 +45,7 @@ class DaemonFacts:
     routed_events_due: bool | None = None
     ci_due: bool | None = None
     wait_expired: bool | None = None
-    # Runtime resolves writer Next readiness or the observer progress policy.
+    # Runtime resolves writer next-step readiness or the observer progress policy.
     # Unscoped diagnostic callers retain the legacy permissive behavior.
     progress_admits: bool | None = None
 

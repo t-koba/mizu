@@ -60,6 +60,16 @@ class WaitResolutionTests(Fixture):
     def reconcile(self, *, role='worker', limit=20):
         resolution.reconcile(self.project, role, limit=limit)
 
+    def progress_handoff(self):
+        """A valid immediate handoff lets delivery tests retain ready work."""
+        def finish(context, *_):
+            marker = context.workspace / 'test-handoff.txt'
+            marker.write_text(context.run_dir.name)
+            context.handle('finish', {'outcome': 'continue', 'summary': 'Delivered wait evidence',
+                                      'state': context.snapshot['state'],
+                                      'next_step': f"Reassess ready work from {context.snapshot['id'][:8]}"})
+        return ScriptDriver(finish)
+
     def test_reconcile_requires_a_positive_page_limit(self):
         with self.assertRaises(Denied):
             self.reconcile(limit=0)
@@ -270,7 +280,7 @@ class WaitResolutionTests(Fixture):
         self.assertFalse(self.store.page_ready(role_name='reviewer')['_wait_resolution_pending'])
         # Fresh project and engine discard every in-process reconciliation hint.
         self.project = Project(self.config, 'sample')
-        engine = Engine(self.config, driver=ScriptDriver())
+        engine = Engine(self.config, driver=self.progress_handoff())
         self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
         delivered = self.project.snapshots.get()
         self.assertEqual(delivered['progress']['ready_work_signature'], page['signature'])
@@ -294,7 +304,7 @@ class WaitResolutionTests(Fixture):
         second = self.store.transition(second['id'], expected_rev=second['rev'], status='blocked',
             actor='worker', wait={'kind': 'code_change'})
         self.snapshot('second wait becomes due')
-        engine = Engine(self.config, driver=ScriptDriver())
+        engine = Engine(self.config, driver=self.progress_handoff())
         self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
         self.assertTrue(engine.driver.calls)
         self.assertEqual(self.store.get(second['id'])['wait_resolution']['wait_rev'], second['rev'])
@@ -313,7 +323,7 @@ class WaitResolutionTests(Fixture):
         second = self.block('page-overflow-second')
         self.snapshot('both waits are due')
 
-        driver = ScriptDriver()
+        driver = self.progress_handoff()
         result = Engine(self.config, driver=driver).run(
             self.project, 'worker', event_trigger=True)
         self.assertEqual(result['status'], 'completed')
@@ -356,7 +366,7 @@ class WaitResolutionTests(Fixture):
         observed_idle = False
 
         for _ in range(len(items) + 1):
-            driver = ScriptDriver()
+            driver = self.progress_handoff()
             result = Engine(self.config, driver=driver).run(
                 self.project, 'worker', event_trigger=True)
             if result.get('skipped') == 'no-event':
@@ -536,7 +546,7 @@ class WaitResolutionTests(Fixture):
         self.baseline = self.project.snapshots.get()
         first = self.block('prune-first')
         self.snapshot('first wait is due')
-        first_driver = ScriptDriver()
+        first_driver = self.progress_handoff()
         self.assertEqual(Engine(self.config, driver=first_driver).run(
             self.project, 'worker', event_trigger=True)['status'], 'completed')
         first_token = f"{first['id']}:{first['rev']}"
@@ -548,7 +558,7 @@ class WaitResolutionTests(Fixture):
                               status='doing', actor='worker')
         second = self.block('prune-second')
         self.snapshot('second wait is due')
-        second_driver = ScriptDriver()
+        second_driver = self.progress_handoff()
         self.assertEqual(Engine(self.config, driver=second_driver).run(
             self.project, 'worker', event_trigger=True)['status'], 'completed')
         progress = self.project.snapshots.get()['progress']['wait_resolution_tokens']

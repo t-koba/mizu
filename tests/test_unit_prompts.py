@@ -62,17 +62,24 @@ class UnitPromptSeamTests(Fixture):
         for name, text in surfaces.items():
             with self.subTest(surface=name):
                 for phrase in ("outcome=continue", "host-sealed bounded outcome",
-                               "exactly one standalone `Next: <actionable step>` line in state",
-                               "new proposed follow-up", "Next alone does not admit",
-                               "parent snapshot", "validated progress record",
+                               "supply `next_step`",
+                               "new proposed follow-up", "next_step alone does not admit",
+                               "parent snapshot", "role-matching validated progress record",
                                "at least one selected true",
                                "`tool`, `code`, `decision`, or `insight` signal",
-                               "A state-only Next does not admit and may leave the writer parked",
-                               "do not rely on Next as a wake signal",
+                               "The field alone does not admit and may leave the writer parked",
+                               "do not rely on next_step as a wake signal",
                                "outcome=wait for external results",
                                "work not yet actionable",
                                "An admitted continuation opens with that step as its task"):
                     self.assertIn(phrase, text)
+        schema = finish["inputSchema"]
+        self.assertEqual(schema["properties"]["next_step"],
+                         {"type": "string", "minLength": 1, "maxLength": 4096})
+        self.assertNotIn("next_step", schema["required"])
+        for text in surfaces.values():
+            self.assertNotIn("Next: <", text)
+            self.assertIn("differ from the typed parent step", text)
         # bounded is a host-sealed outcome, not a new finish-tool argument.
         self.assertEqual(finish["inputSchema"]["properties"]["outcome"]["enum"],
                          ["continue", "wait", "blocked", "done"])

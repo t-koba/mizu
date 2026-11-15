@@ -12,22 +12,24 @@ from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS
 # Shared by full/delta unit openings and the finish-tool description.
 WRITER_CONTINUATION_CONTRACT = (
     "To propose an immediate writer continuation, finish with outcome=continue (or a "
-    "host-sealed bounded outcome) and include exactly one standalone "
-    "`Next: <actionable step>` line in state, naming a new proposed follow-up. "
+    "host-sealed bounded outcome) and supply `next_step`, naming a new proposed follow-up. "
+    "The typed step must be 1–4096 printable characters, without surrounding whitespace "
+    "or a none/nothing/n/a placeholder, and differ from the typed parent step. "
+    "Legacy prose state never supplies a typed step. "
     "A malformed writer continue is refused before sealing or acknowledgements; "
-    "correct state to that form and retry finish. "
-    "Next alone does not admit: the host requires a parent snapshot and a "
-    "validated progress record with at least one selected true `tool`, `code`, "
-    "`decision`, or `insight` signal. A state-only Next does not admit and may "
-    "leave the writer parked; do not rely on Next as a wake signal. Use "
+    "correct next_step and retry finish. "
+    "next_step alone does not admit: the host requires a parent snapshot and a "
+    "role-matching validated progress record with at least one selected true `tool`, `code`, "
+    "`decision`, or `insight` signal. The field alone does not admit and may "
+    "leave the writer parked; do not rely on next_step as a wake signal. Use "
     "outcome=wait for external results or work not yet actionable. An admitted "
     "continuation opens with that step as its task. Before a writable writer parks "
-    "(wait, blocked, or continue/bounded without a validated immediate Next), "
+    "(wait, blocked, or continue/bounded without a validated immediate next_step), "
     "finish requires a complete empty role-scoped ready inventory. Finish each "
     "ready item, block it on a supported named observable wait, or drop it with "
     "a reason; held doing work is still ready. Unknown or truncated evidence "
     "refuses finish before sealing or acknowledgements. Ready work alone never "
-    "creates a timed re-admission; use an immediate progress-backed Next or the "
+    "creates a timed re-admission; use an immediate progress-backed next_step or the "
     "existing independent event/deadline paths.")
 
 
@@ -333,6 +335,7 @@ DEFINITIONS = {
                     "release_checks": array(text(64), 32),
                     "ack_events": array(text(64), 512),
                     "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS},
+                    "next_step": {**text(4096), "minLength": 1},
                     "next_profile": text(63), "next_reason": text(256)},
                    ("outcome", "summary"))),
 }

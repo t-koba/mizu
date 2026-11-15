@@ -11,7 +11,7 @@ from mizu.fs import lock, read_json
 from mizu.runtime import Engine, slot
 
 
-FINISH = {"outcome": "continue", "summary": "child result", "state": "Next: review."}
+FINISH = {"outcome": "continue", "summary": "child result", "next_step": 'review.', "state": "Next: review."}
 
 
 class ChildSlotTests(Fixture):

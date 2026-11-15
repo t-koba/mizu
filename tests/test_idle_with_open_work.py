@@ -77,7 +77,8 @@ class IdleWithOpenWorkTests(Fixture):
             if with_progress:
                 (ctx.workspace / "progress.py").write_text("VALUE = 1\n")
             ctx.handle("finish", {"outcome": outcome, "summary": "Writer finished",
-                                  "state": state})
+                                  "state": state,
+                                  **({"next_step": "Inspect ready work"} if outcome == "continue" else {})})
         Engine(self.config, driver=ScriptDriver(finish)).run(self.project, "worker")
         return self.project.snapshots.get()
 

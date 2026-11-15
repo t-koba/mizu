@@ -476,7 +476,7 @@ class ReadySetChangeTests(Fixture):
             self.item('arrived-during-run')
             (ctx.workspace / 'progress.py').write_text('VALUE = 1\n')
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'New work arrived',
-                                  'state': 'Now: changed code.\nNext: Handle newly arrived work'})
+                                  "next_step": 'Handle newly arrived work', 'state': 'Now: changed code.\nNext: Handle newly arrived work'})
         engine = self.engine(arrive_and_handoff)
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
@@ -587,7 +587,7 @@ class ReadySetChangeTests(Fixture):
         self.delivered_ready_base()
         def finish(ctx, *_):
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'No selected progress',
-                                  'state': 'Observed only\nNext: Reassess eligible work'})
+                                  "next_step": 'Reassess eligible work', 'state': 'Observed only\nNext: Reassess eligible work'})
         engine = self.engine(finish)
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
@@ -610,7 +610,7 @@ class ReadySetChangeTests(Fixture):
         def finish(ctx, *_):
             (ctx.workspace / 'progress.py').write_text('VALUE = 1\n')
             ctx.handle('finish', {'outcome': 'continue', 'summary': 'Made progress',
-                                  'state': base['state'].replace(
+                                  "next_step": 'Inspect the test result', 'state': base['state'].replace(
                                       'Reassess the task', 'Run the focused test')})
         Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
