@@ -10,7 +10,7 @@ from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
 from mizu.errors import Busy, Denied
-from mizu.fs import held, lock, read_json
+from mizu.fs import held, lock, read_json, write_json as write_indexed_json
 from support import forget_ledger, history_write_json as write_json
 from mizu.process import Result
 from mizu.sandbox import cleanup
@@ -499,8 +499,8 @@ class JobTests(Fixture):
         self.lifecycle_record(2, shared_job=source.name, **stale)
         waited = self.lifecycle_record(3, **stale)
         with self.project.insights.ledger.write('check_jobs', ['retired-role.wait.json']):
-            write_json(check_jobs.root(self.project) / 'retired-role.wait.json',
-                       {'id': waited.name, 'wait_until': 1})  # Expiry does not release the record.
+            write_indexed_json(check_jobs.root(self.project) / 'retired-role.wait.json',
+                               {'id': waited.name, 'wait_until': 1})  # Expiry does not release the record.
         protected = [source, waited,
                      self.lifecycle_record(4, acknowledged=False, **stale),
                      self.lifecycle_record(5, status='queued', **stale),
@@ -514,16 +514,15 @@ class JobTests(Fixture):
         path = self.lifecycle_record(1, code_digest='c' * 64)
         wait = check_jobs.root(self.project) / 'worker.wait.json'
         with self.project.insights.ledger.write('check_jobs', [wait.name]):
-            write_json(wait, {'id': 'not an ID'})
+            write_indexed_json(wait, {'id': 'not an ID'})
         self.release_stale(); self.assertTrue(path.exists())
         with self.project.insights.ledger.write('check_jobs', [wait.name]):
             wait.unlink()
         corrupt = self.lifecycle_record(2, acknowledged='invalid')
         self.release_stale(); self.assertTrue(path.exists())
         shutil.rmtree(corrupt)
-        # Rebuild only the derived domain under its lock. Deleting the SQLite
-        # database to invalidate it is not portable on Windows if the OS still
-        # has a transient handle open.
+        # Rebuild only this derived domain after out-of-band fixture removal;
+        # keep unrelated ledger domains and the database file intact.
         with lock(self.project.root / 'locks/check-jobs.lock'):
             self.project.insights.ledger.rebuild('check_jobs')
         target = self.root / 'outside'; target.write_text('untouched')
