@@ -1860,6 +1860,9 @@ RANGE_ARGUMENTS = {
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         '1025', 'safety',
         'check jobs / identity search is one candidate beyond MAX_CHECK_RETAINED'),
+    ('ci_requests.py', 'CiRequests.prior_spend_possible', 0, 0): (
+        '1', 'format',
+        'CI request attempts / attempt identities start at one; inspect only prior attempts'),
     ('decision_delivery.py', 'pending', 1, 0): (
         '-1', 'mechanism', 'decision delivery / reverse-range sentinel'),
     ('decision_delivery.py', 'pending', 2, 0): (
