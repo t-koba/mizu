@@ -521,7 +521,11 @@ class JobTests(Fixture):
         corrupt = self.lifecycle_record(2, acknowledged='invalid')
         self.release_stale(); self.assertTrue(path.exists())
         shutil.rmtree(corrupt)
-        forget_ledger(self.project.root)
+        # Rebuild only the derived domain under its lock. Deleting the SQLite
+        # database to invalidate it is not portable on Windows if the OS still
+        # has a transient handle open.
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            self.project.insights.ledger.rebuild('check_jobs')
         target = self.root / 'outside'; target.write_text('untouched')
         link = path / 'linked'
         try:
