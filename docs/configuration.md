@@ -2043,6 +2043,7 @@ models are recorded. Model usage excludes unreported auxiliary billing.
 | `verify` | Execute operator-owned command strings and bind proof to code digest |
 | `check_job` | Submit and inspect asynchronous frozen-input sandbox checks: `verify`, an ordinary `experiment` and a read-only `exec` return a job instead of blocking, and the role continues independent work, finishing with `outcome=wait, wait_for_check=<id>` when nothing else remains. A result is imported only while the source digest, the configured commands and the environment still match, so a source change cannot inherit a passing result. Writable execution stays synchronous. A request may carry an optional `purpose` (1-64 printable characters, no path separators): a later request with the same purpose from the same role replaces that role's earlier unfinished job for that purpose, which leaves the queue and keeps its evidence; a purpose never retires another role's job. See [check jobs](check-jobs.md) |
 | `fetch`, `search` | Allowlisted retrieval / trusted discovery adapter |
+| `feed_updates` | Query-free RSS/Atom discovery with a current identity set per project role and configured feed; ungranted by default |
 | `probe` | One policy-bounded HTTPS request to `probe_hosts` with an allowlisted method and bounded headers/body; observes status, headers and bounded body with a receipt (no redirects, no credentials) |
 | `insights` | Read proposals |
 | `work_items_read` | Read an open-item page (optional cursor up to 128 characters; limit 1–100, default 25; rows at most 8192 canonical bytes) or one exact seeded item by ID in any status, including terminal states, with current origin staleness and paged immutable history (`after_rev` exclusive 0–256, default 0; limit 1–100, default 25; chain at most 256 revisions; ordinary records at most 131,072 bytes, with resolution-bearing transition events at most 131,593 bytes). Either response is capped at 1 MiB and is a fresh live view, not a frozen snapshot; unsafe or malformed store data fails closed. This read grant does not imply transition authority |
@@ -2213,7 +2214,7 @@ structured results; seal rejects later calls regardless of exposure.
 
 ## Web
 
-Configures outbound retrieval for `fetch` and `search`:
+Configures outbound retrieval for `fetch`, `search` and `feed_updates`:
 
 | Key | Default | Description |
 |---|---|---|
@@ -2221,7 +2222,7 @@ Configures outbound retrieval for `fetch` and `search`:
 | `probe_hosts` | `[]` | HTTPS hostname allowlist for `probe` observation with the same exact/leading-dot/`*` entries; empty disables `probe` (method/header/body rules still apply) |
 | `probe_methods` | `[]` | Allowlisted `probe` methods (uppercase tokens, e.g. `GET`, `POST`); empty disables `probe` |
 | `feeds` | `[]` | Allowed RSS/Atom feed URLs for discovery |
-| `search_feed_item_limit` | `200` | RSS/Atom candidates retained per feed (1–1000); a lower value can reduce one feed's contribution relative to the other configured sources. The existing global 1,000-candidate search/page ceiling and overflow signaling remain separate; this does not affect `search_command` results |
+| `search_feed_item_limit` | `200` | RSS/Atom candidates retained per feed (1–1000), also the observation bound for `feed_updates`; a lower value can reduce one feed's contribution relative to the other configured sources. The existing global 1,000-candidate search/page ceiling and overflow signaling remain separate; this does not affect `search_command` results |
 | `search_command` | `[]` | Trusted argv command receiving/returning bounded JSON; request contains `query` and `budget_seconds` (seconds, the configured whole-command upper bound; see [extensions](extensions.md#search-adapter)) |
 | `diagnostic_bytes` | `2048` | Maximum stderr tail shown on a configured program's nonzero exit (0–8192; `0` disables). The excerpt is labelled `external-untrusted` and is model-visible; it may contain host paths or other private adapter output |
 | `destination_command` | `[]` | Trusted argv owning the destination decision per request (`url`, `host`, `role`, `capability` fetch/probe, redirect `hop`, `method`); stdin bounded JSON, stdout must be `{"allow": bool}`. Unset keeps the `hosts`/`probe_hosts` lists; when set the decider decides authoritatively per hop and anything but explicit `true` denies (fail closed). While set, `fetch` bypasses the response cache so every hop is decided live; `probe` never caches. HTTPS-only, port 443, DNS pinning, bounds and receipts stay in mechanism |
@@ -2256,6 +2257,86 @@ URL fragments are stripped client-side and never sent. Redirects re-validate hos
 Transport floor (fixed mechanism, not policy): every `fetch`/`probe`/feed retrieval is HTTPS-only on port 443 with no URL credentials and DNS pinning, even when `destination_command` decides the destination or `hosts` widens to `*`. Which hosts, feeds, adapters, deciders, intranet reach, timeouts, cache windows and byte caps apply is operator policy above; how bytes move (encrypted TLS, standard port, no creds in URLs, pinned DNS, bounded receipts) stays in mechanism so cleartext or non-standard-port retrieval cannot be enabled by configuration. Credentials in URLs stay refused.
 
 `probe` reuses `[web] timeout_seconds`/`max_bytes`/`intranet` with its own `probe_hosts`/`probe_methods` allowlists. It sends one request (caller headers at most 16, names 128, values 4096; credential/framing headers refused) with a bounded body (at most `max_bytes`, 32 KiB tool-input cap), follows no redirects (3xx returns as observation), never caches, and records a `sources/<id>/receipt.json` receipt (`status`, bounded headers, `sha256`, `trust: external-untrusted`). Non-2xx statuses return as observation, never as failure.
+
+### Query-free feed updates
+
+Grant `feed_updates` explicitly in a role's capabilities to expose
+`mizu_feed_updates({})`. It reads distinct configured `[web].feeds` URLs in order
+without a query or search adapter; `mizu_search` keeps its existing query,
+ranking, candidate bounds and replay behavior. There is no scheduler, notice,
+implicit grant or automatic retry. An empty feed list returns a complete empty
+read and releases that role's old feed cursors.
+
+The response is `{feeds, scope: "configured-feeds-only", trust:
+"external-untrusted", complete, truncated}`. Each feed has `feed`, `entries`,
+`errors` (error codes), `overflow`, `complete`, `truncated` and
+`cursor_advanced` (`overflow` is null when no observation was obtained);
+failed observations may also carry a bounded `detail` excerpt
+(up to 512 characters, further clipped or omitted to fit the response byte bound,
+external-untrusted). Each entry has a 64-hex `identity`
+(or null when missing), `title`, `url`, `summary` and `source_receipt`.
+Title/summary are not silently clipped: the existing source, worker-output and
+tool-response byte bounds apply. A URL is an absolute HTTPS alternate link
+(at most 4,096 characters), or empty if none is usable. `source_receipt`
+references the existing run-scoped fetch receipt and can be used with
+`mizu_fetch` to read the source. Entries, URLs and diagnostics remain
+external-untrusted, never instructions.
+
+An entry's identity is the SHA-256 of the canonical tuple of configured feed
+URL, identity kind and value: RSS `guid` or Atom `id` is preferred; a usable
+HTTPS link is the fallback. Identity values are stripped of surrounding
+whitespace. Titles, timestamps, order and link changes with a stable GUID/ID
+do not create updates. Multiple identity elements, ambiguous fallback links,
+missing identities and duplicates make that feed incomplete. Every item/entry
+counts toward `search_feed_item_limit`, not just entries with usable links;
+any additional entry sets `overflow`. Malformed/non-feed XML and XML document
+type/entity declarations are refused. Retrieval uses the existing HTTPS fetch
+path, allowlists/destination decider, DNS pinning, cache freshness, byte limits,
+timeouts, receipts and cancellation. Each feed observation runs in a killable
+worker with the existing 2 MiB combined output ceiling; a worker failure or
+oversized output is a per-feed `observation_failed`, never an empty success.
+
+The first complete read returns the current bounded entries once. Later reads
+return identities absent from the **latest complete observation**, not an
+all-time ledger: an identity that disappears and later returns is new again.
+Cursor state lives under `<project>/feed-updates/<role-digest>/`, one atomic,
+checksummed versioned file per configured feed, containing only that feed's
+latest bounded identity set and scope metadata. Reads are bounded to 68,024
+bytes (1,000 SHA-256 identities plus envelope), refuse links and validate the
+canonical record/checksum. Network observations run one feed at a time without
+holding cursor locks; only one worker result plus bounded response/status data
+is retained. A project-level lock serializes cleanup and each feed's comparison
+against the latest cursor, response sizing and state replacement (not the whole
+multi-feed read); different projects/roles do not consume each other's entries. Concurrent observations can finish out of order;
+an older observation replacing a newer set can cause repeats, not consume unseen
+entries. The writer removes state for roles no longer in `config.roles`, feeds
+no longer configured for the calling role, and that role's uncommitted
+atomic-write leftovers on the next read. Cleanup is confined to this project's
+feed tree and refuses unexpected paths, linked or non-regular cleanup files,
+and non-directory role paths. Obsolete per-role lock files are retired under
+the same gate; no caller uses them. The single `<project>/feed-updates.lock`
+inode is never unlinked during use; project deletion removes the remaining state.
+
+`complete` means identity coverage and successful cursor persistence, not full
+article content or freshness beyond the fetch cache policy. `overflow`,
+identity errors, `corrupt_state`, fetch/parse errors, cancellation and
+`state_write_failed` never advance the affected feed; healthy feeds can still
+advance. Before observing feeds the parent reserves status metadata and failure
+space against `limits.tool_response_bytes`. If that metadata cannot fit, the
+result retains every configured feed's status in order, with top-level
+`truncated` true and `complete` false; no feed is observed and no cursor advances.
+Standard `mizu_result_read` continuation pages expose the full retained result
+without repeating the read. To observe entries, increase `tool_response_bytes`
+or reduce the configured feeds; repeating the empty request with unchanged
+configuration returns the same metadata-only result. Otherwise the final
+canonical response fits the bound without generic result paging. Each observed
+feed returns a bounded entry prefix, setting that feed's `truncated`/incomplete flags
+when entries are omitted. A later feed or write failure cannot evict previously
+returned entries or invalidate an earlier cursor commit. Retry with the same
+empty request; incomplete prefixes may repeat until a complete observation fits. Corrupt state is preserved for
+operator recovery, never silently reset. Cursor replacement is not a
+transaction with model delivery: a process loss after a successful write may
+lose the response, as with other tool-side state writes.
 
 ### Immutable Web continuation and experiment input
 

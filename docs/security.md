@@ -223,7 +223,7 @@ Outbound traffic is separated by purpose instead of banned uniformly:
   dropped capabilities, `no-new-privileges` and user mapping stay fixed.
   Dependencies arrive via operator-reviewed images, never via in-sandbox
   downloads unless the operator enables the network and accepts the risk.
-- Retrieval (`fetch`/`search`/`probe`): explicit HTTPS egress to operator-allowlisted
+- Retrieval (`fetch`/`search`/`feed_updates`/`probe`): explicit HTTPS egress to operator-allowlisted
   hosts, every response kept as a content receipt. Where to allow is policy
   (`[web]`, with `probe` destinations/methods in `probe_hosts`/`probe_methods`);
   the receipts, bounds and untrusted labels are

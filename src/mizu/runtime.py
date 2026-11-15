@@ -76,7 +76,7 @@ from . import materialize as _materialize
 from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
-from . import web_operations
+from . import feed_updates, web_operations
 from . import sandbox_operations
 from . import reviews
 from . import role_state_ops
@@ -1294,6 +1294,9 @@ class Context:
     def _op_probe(self, args: dict) -> dict:
         return web_operations.probe(self, args)
 
+    def _op_feed_updates(self, args: dict) -> dict:
+        return feed_updates.read(self)
+
     def _op_search(self, args: dict) -> dict:
         return web_operations.search(self, args)
 
@@ -2145,7 +2148,7 @@ class Context:
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
-        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
+        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "feed_updates": _op_feed_updates, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
         "work_items_reconcile": _op_work_items_reconcile,

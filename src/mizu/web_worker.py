@@ -21,7 +21,7 @@ def _output_limit(operation: str, max_bytes: int) -> int:
     """Finite combined stdout/stderr ceiling, including serialized receipts."""
     floor = 2 * 1024 * 1024
     if operation not in ("fetch", "probe"):
-        # Search keeps its existing finite aggregate cap, not a body envelope.
+        # Search and feed observations use a finite aggregate cap, not a body envelope.
         return floor
     metadata_reserve = 64 * 1024
     if operation == "probe":
@@ -63,8 +63,12 @@ def main():
             result = web.fetch(data["value"])
         elif data["operation"] == "probe":
             result = web.probe(data["value"])
-        else:
+        elif data["operation"] == "feed_updates":
+            result = web.feed_entries(data["value"])
+        elif data["operation"] == "search":
             result = web.search(data["value"])
+        else:
+            raise Denied("Unknown web operation")
         sys.stdout.buffer.write(canonical(result))
         return 0
     except Exception as exc:

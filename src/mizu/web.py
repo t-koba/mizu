@@ -234,6 +234,12 @@ class PinnedHTTPS(http.client.HTTPSConnection):
         raise last_error or OSError("No address could be reached")
 
 
+def _feed_root(source: str):
+    if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
+        raise Denied("XML document type and entity declarations are refused")
+    return ET.fromstring(source)
+
+
 class Web:
     def __init__(self, settings: dict, cache: Path, receipts: Path, role: str = ""):
         self.settings, self.cache, self.receipts, self.role = settings, cache, receipts, role
@@ -513,6 +519,66 @@ class Web:
         finally:
             connection.close()
 
+    def feed_entries(self, feed: str) -> dict:
+        """Observe one configured feed, without a query or cursor mutation.
+
+        Identities are digests of (configured feed, identity kind, value), not
+        timestamps or mutable titles. Every item counts toward the existing
+        per-feed bound, including entries with missing/ambiguous identities.
+        """
+        if feed not in self.settings["feeds"]:
+            raise Denied("Feed is not configured")
+        receipt = self.fetch(feed)
+        root = _feed_root(receipt["text"])
+        local = lambda node: node.tag.rsplit("}", 1)[-1]
+        if (local(root) not in ("rss", "RDF", "feed")
+                or (local(root) == "rss" and not any(local(child) == "channel" for child in root))):
+            raise Denied("Not an RSS or Atom feed")
+        entries, seen, errors = [], set(), set()
+        overflow = False
+        for item in root.iter():
+            if local(item) not in ("item", "entry"):
+                continue
+            if len(entries) >= self.settings["search_feed_item_limit"]:
+                overflow = True
+                break
+            children = list(item)
+            def value(name):
+                node = next((child for child in children if local(child) == name), None)
+                return "" if node is None else "".join(node.itertext())
+            links = []
+            for child in children:
+                if local(child) != "link" or child.get("rel", "alternate") != "alternate":
+                    continue
+                link = child.get("href", child.text or "").strip()
+                try:
+                    _parse_url(link)
+                except (Denied, ValueError):
+                    continue
+                links.append(link)
+            kind = "id" if local(item) == "entry" else "guid"
+            identifiers = ["".join(child.itertext()).strip() for child in children if local(child) == kind]
+            identity = identifiers[0] if len(identifiers) == 1 else ""
+            if len(identifiers) > 1:
+                errors.add("ambiguous_identity")
+            if not identity:
+                if len(set(links)) > 1:
+                    errors.add("ambiguous_identity")
+                kind, identity = "link", links[0] if links else ""
+            entry_id = digest(canonical([feed, kind, identity])) if identity else None
+            if entry_id is None:
+                errors.add("missing_identity")
+            elif entry_id in seen:
+                errors.add("duplicate_identity")
+            seen.add(entry_id)
+            title = value("title")
+            summary = value("description") or value("summary")
+            entries.append({"identity": entry_id, "title": title, "url": links[0] if links else "",
+                            "summary": summary,
+                            "source_receipt": receipt["id"]})
+        return {"entries": entries, "overflow": overflow, "errors": sorted(errors),
+                "complete": not overflow and not errors}
+
     def _search_feeds(self, query: str) -> tuple[list, list, int, int, bool]:
         """Keyword overlap over every configured feed; best-effort per feed.
 
@@ -533,10 +599,7 @@ class Web:
             kept = 0
             try:
                 receipt = self.fetch(feed)
-                source = receipt["text"]
-                if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
-                    raise Denied("XML document type and entity declarations are refused")
-                root = ET.fromstring(source)
+                root = _feed_root(receipt["text"])
                 for item in root.iter():
                     if item.tag.rsplit("}", 1)[-1] not in ("item", "entry"):
                         continue
