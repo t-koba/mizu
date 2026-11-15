@@ -56,8 +56,8 @@ class DispatchPreflightTests(Fixture):
         self.config.roles['worker'] = dataclasses.replace(
             self.config.roles['worker'], daemon=False, interval_seconds=0,
             calendar='', decision_events=(), work_item_events=())
-        self.project.work_items.create(idempotency_key='explicit',
-            title='Work exists', actor='worker')
+        # The scripted writer parks immediately; keep this fixture free of
+        # ready work so it tests check-result authority, not parking policy.
         engine = Engine(self.config, driver=ScriptDriver())
         self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
         # A completed result remains discoverable, but only an exact explicit
