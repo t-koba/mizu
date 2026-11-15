@@ -20,7 +20,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from . import acceptance, check_jobs, prompt_sections
+from . import acceptance, check_jobs, prompt_sections, reviews
 from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
 from .protocol import WRITER_CONTINUATION_CONTRACT, tool_definitions
@@ -547,6 +547,7 @@ def prompt_for(context: Context) -> str:
                                             for s in context.project.snapshots.history(
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
+                       **reviews.prompt(context),
                        "pending_insights": pending,
                        "open_insights": opening["open_backlog"],
                        "open_work_items": open_work_items,
@@ -657,6 +658,7 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
+                       **reviews.prompt(context),
                        **checks,
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)

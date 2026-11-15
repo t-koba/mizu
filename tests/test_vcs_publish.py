@@ -8,7 +8,7 @@ from unittest.mock import patch
 import unittest
 import uuid
 
-from support import Fixture, set_project_target
+from support import Fixture, ScriptDriver, set_project_target
 from mizu import vcs
 from mizu.errors import ConfigError, Denied
 from mizu.fs import canonical, digest, lock, mkdir, write_json
@@ -16,7 +16,7 @@ from mizu.project import git_env
 from mizu.publication import Publication, source_commit
 from mizu.distribution import public_source_identity
 from mizu.process import Result
-from mizu.runtime import Context, check_consult_role
+from mizu.runtime import Context, Engine, check_consult_role
 
 
 def adapter_settings(code, timeout=5, maximum=524288):
@@ -54,6 +54,8 @@ class PublishFixture(Fixture):
     def setUp(self):
         super().setUp()
         self.source_commit = init_publish_git(self)
+        self.config = dataclasses.replace(self.config, publication=dataclasses.replace(
+            self.config.publication, reviewer_role="reviewer"))
 
 
 def with_caps(fixture, name, extra):
@@ -64,7 +66,29 @@ def with_caps(fixture, name, extra):
     return config, new_role
 
 
-def make_context(fixture, config, role, workspace=None):
+def review_for_publication(fixture, config):
+    """Real host-sealed fake-engine review; no approval bypass in publish tests."""
+    snap = fixture.project.snapshots.get()
+    captured = fixture.project.snapshots.capture_files(fixture.project.workspace)
+    if captured["code_digest"] != snap["code_digest"]:
+        snap = fixture.project.snapshots.create(captured, goal=snap["goal"], state=snap["state"],
+            run=None, outcome="wait", summary="Publication candidate", parent=snap["id"])
+        fixture.project.snapshots.publish(snap)
+    roles = dict(config.roles)
+    roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=False)
+    review_config = dataclasses.replace(config, roles=roles, publication=dataclasses.replace(
+        config.publication, reviewer_role="reviewer"))
+    def review(ctx, *_):
+        ctx.handle("finish", {"outcome": "wait", "summary": "Fixture independent review",
+                              "review_verdict": "approve"})
+    result = Engine(review_config, driver=ScriptDriver(review)).run(fixture.project, "reviewer")
+    fixture.assertEqual(result.get("status"), "completed", result)
+    return review_config
+
+
+def make_context(fixture, config, role, workspace=None, *, review=True):
+    if review and "vcs_publish" in role.capabilities:
+        config = review_for_publication(fixture, config)
     run = fixture.project.root / "runs" / uuid.uuid4().hex
     mkdir(run)
     snap = fixture.project.snapshots.get()
@@ -1092,7 +1116,7 @@ class LineageTargetConfiguredTests(PublishFixture):
         from concurrent.futures import ThreadPoolExecutor
 
         second = initialize(self.config, "other", self.root / "source", self.goal,
-                            ["worker"], ["python3 -m unittest"])
+                            ["worker", "reviewer"], ["python3 -m unittest"])
         second.set_control(armed=True, paused=False, wake_generation="test-wake")
         first = self.project
         config, role = with_caps(self, "worker", ["vcs_publish", "vcs_read"])

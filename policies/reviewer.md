@@ -7,7 +7,13 @@ weakened tests (execution-only without value assertions) and avoidable complexit
 noise. Where useful, reproduce a suspected defect in the isolated experiment
 workspace; do not edit shared source. Submit reproducible findings as Insights,
 including exact snapshot, paths, evidence and uncertainty. No finding is a valid
-outcome. Finish with wait; do not alter source or acceptance definitions.
+outcome. When the host-supplied `review_authority.authorized` is true
+(operator configuration `publication.reviewer_role`), finish with `review_verdict = "approve"` only when
+this exact input snapshot is acceptable, or `"changes_requested"` for material
+required corrections. The host supplies the snapshot and reviewer identity;
+never encode approval in summary prose or shared records. Keep findings in
+Insights separately. Without authorization, omit the verdict. Finish with wait;
+do not alter source or acceptance definitions.
 
 ## Reconsideration on rejection
 

@@ -2464,7 +2464,49 @@ bad adapter cannot busy-loop.
 
 ## VCS publish (M2 step 1: `vcs_read`/`vcs_publish` behind `GO <branch>` approval)
 
-Same `[vcs]` adapter, with no publish-specific configuration keys.
+Same `[vcs]` adapter. `[publication].reviewer_role` explicitly authorizes the
+independent read-only role whose typed verdicts can approve publication. The
+default `""` authorizes nobody: `vcs_publish` fails closed even with human GO.
+A configured name must exist, have `workspace = "read"` and `finish`, and lack
+`delegate`; writable roles cannot approve their own work. For example:
+
+```toml
+[publication]
+reviewer_role = "reviewer"
+```
+
+The unit prompt exposes host-supplied `review_authority = {authorized, reviewed_snapshot}`
+(including full and delta prompts). The reviewer supplies only `finish.review_verdict = "approve"` or
+`"changes_requested"`. The host supplies `reviewed_snapshot`, `role` and `run`
+from trusted unit context; these are not finish arguments. Findings remain
+separate Insights and summary/state text never grants approval. Missing,
+legacy prose, malformed or unauthorized verdicts never approve. Invalid finish
+arguments are denied before sealing and can be corrected in the same unit.
+Bounded runs cannot approve. Consultations/delegations return advice only and
+cannot issue typed publication verdicts, even when asked to use the reviewer role.
+
+A successful top-level typed review creates one **unpublished immutable review snapshot**
+with `review = {verdict, reviewed_snapshot, role, run}` and parent equal to the
+input snapshot, plus create-only `runs/<run>/review.json` containing
+`{snapshot: <review snapshot>, review: <same fact>}`. The snapshot preserves the
+reader's wake/lifecycle metadata. Its normal observed cursor selects the latest
+completed receipt; a later missing verdict
+or changes request never falls back to older approval. Review receipt and input
+snapshots and the run receipt remain retained while that cursor references them;
+replacing it releases those retention roots. Interrupted finalization does not
+advance the cursor. Reads are constant-count, receipt/cursor JSON is bounded to
+4096 UTF-8 bytes with no-follow reads, and malformed/missing evidence denies.
+No automatic retry or external call is made by the review gate.
+
+`vcs_publish` requires both the independent typed approval of its exact
+unit-opening snapshot **and** the unchanged captured code digest, in addition
+to the existing recorded human `GO <branch>`. Another snapshot with identical
+code does not inherit approval. Publish the candidate as a local snapshot,
+let the configured reviewer assess it, then publish externally from a later
+writer unit without changing the tree. Worker-authored Insights/shared records
+are never review evidence. The run-local publication observation includes the
+exact review receipt consumed; this gate does not replace human approval,
+verification, projection checks or immutable publication dispatch safeguards.
 `vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact`
 and the local `publications` listing of recorded publication receipts, which contacts
 no adapter and answers from the project's own durable evidence; the listing accepts

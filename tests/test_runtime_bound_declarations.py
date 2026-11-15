@@ -496,6 +496,9 @@ DECLARATIONS = {
     'ci_requests.py': {
         'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded evidence-record read'),
     },
+    'reviews.py': {
+        'RECORD_BYTES': ('4096', 'safety', 'typed review / bounded cursor and immutable run receipt reads'),
+    },
     'publication.py': {
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
@@ -1205,6 +1208,7 @@ CONFIGURED = {
     },
     'PublicationPolicy': {
         'source_commit_timeout_seconds': ('5', 'configured policy', 'publication / local Git HEAD command wall-time budget'),
+        'reviewer_role': ("''", 'configured policy', 'publication / explicitly authorized reviewer role (empty denies all)'),
     },
     'PublicationEvidence': {
         'name_processing_limit': ('10000', 'configured policy', 'publication / name-processing budget after os.listdir materializes all names'),

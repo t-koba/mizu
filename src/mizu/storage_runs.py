@@ -270,6 +270,15 @@ def plan(project, *, settlement_pins=None, scan=None):
                 if clock - _stamp(started["started_at"]) > days * 86400:
                     eligible.add(run)
 
+        # A current typed review owns its immutable run receipt. Replacing the
+        # observer cursor releases it; historical snapshot.run is still audit
+        # metadata rather than a general run-retention root.
+        from .reviews import check as check_review
+        for path in scan.children(root / "observed"):
+            cursor = scan.record(path)
+            if "review" in cursor:
+                pin(check_review(cursor["review"])["run"])
+
         for run in settlement_pins:
             pin(run)
 

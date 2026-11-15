@@ -1,0 +1,115 @@
+"""Typed review receipts, bound only by the host to a reader's input snapshot.
+
+The observed cursor selects the latest completed review snapshot in O(1).
+Neither prose, insights nor role-authored shared records are approval evidence.
+"""
+from __future__ import annotations
+
+import re
+import time
+
+from .errors import Denied, LimitExceeded
+from .fs import DIGEST, ID, loads_finite, safe_read, write_json
+
+RUN = re.compile(r"[0-9a-f]{32}\Z")
+VERDICTS = frozenset({"approve", "changes_requested"})
+#: Safety envelope for the small immutable receipt and existing observed cursor.
+RECORD_BYTES = 4096
+
+
+def authorized(config, role) -> bool:
+    return (bool(config.publication.reviewer_role)
+            and role.name == config.publication.reviewer_role
+            and role.workspace == "read" and "finish" in role.capabilities
+            and "delegate" not in role.capabilities)
+
+
+def check(review) -> dict:
+    if (not isinstance(review, dict)
+            or set(review) != {"verdict", "reviewed_snapshot", "role", "run"}
+            or not isinstance(review.get("verdict"), str)
+            or review["verdict"] not in VERDICTS
+            or not isinstance(review.get("reviewed_snapshot"), str)
+            or not DIGEST.fullmatch(review["reviewed_snapshot"])
+            or not isinstance(review.get("run"), str) or not RUN.fullmatch(review["run"])
+            or not isinstance(review.get("role"), str) or not ID.fullmatch(review["role"])):
+        raise Denied("Invalid typed review receipt")
+    return review
+
+
+def context_authorized(context) -> bool:
+    return authorized(context.config, context.role) and not getattr(context, "ephemeral", False)
+
+
+def prompt(context) -> dict:
+    allowed = context_authorized(context)
+    return {"review_authority": {"authorized": allowed,
+                                 "reviewed_snapshot": context.snapshot["id"] if allowed else None}}
+
+
+def finish(context, verdict):
+    if not context_authorized(context):
+        raise Denied("Review verdict requires the configured independent reviewer")
+    return check({"verdict": verdict, "reviewed_snapshot": context.snapshot["id"],
+                  "role": context.role.name, "run": context.run_dir.name})
+
+
+def record(context, finished):
+    """Create one immutable review snapshot and its create-only run receipt.
+
+    Read-only runs normally update only their observed cursor. A review needs
+    an immutable snapshot to bind the typed verdict, so this creates that single
+    snapshot while retaining the ordinary reader wake/lifecycle metadata. The
+    observed cursor commits it only after finalization succeeds.
+    """
+    review = finished.get("review")
+    if review is None or finished["outcome"] == "bounded":
+        return None
+    check(review)
+    source = context.snapshot
+    captured = {key: source[key] for key in ("files", "code_digest", "skipped", "bytes")}
+    receipt = context.project.snapshots.create(
+        captured, goal=context.goal, state=finished.get("state", ""),
+        run=context.run_dir.name, outcome=finished["outcome"], summary=finished["summary"],
+        wake_at=(time.time() + finished["wait_seconds"]
+                 if finished["outcome"] == "wait" else None),
+        inbox_seen=context.inbox_seen, wake_generation=context.wake_generation,
+        next_step=finished.get("next_step"), parent=source["id"], review=review)
+    write_json(context.run_dir / "review.json",
+               {"snapshot": receipt["id"], "review": review}, exclusive=True)
+    return receipt
+
+
+def require_approval(context, code_digest):
+    """Consume only the latest host-sealed exact-snapshot typed fact.
+
+    Missing, unsafe, malformed, unauthorized or mismatched evidence denies;
+    no scan/retry/fallback to older approvals. Human GO remains independently
+    required by the caller. Reads are bounded; model arguments select neither
+    identity nor reviewed snapshot.
+    """
+    try:
+        name = context.config.publication.reviewer_role
+        role = context.config.roles.get(name)
+        if role is None or not authorized(context.config, role):
+            raise Denied("No authorized reviewer")
+        cursor = loads_finite(safe_read(
+            context.project.root, f"observed/{name}.json", RECORD_BYTES))
+        receipt = context.project.snapshots.get(cursor.get("snapshot"))
+        review = check(receipt.get("review"))
+        source = context.snapshot
+        if (cursor.get("review") != review
+                or review["role"] != name or review["verdict"] != "approve"
+                or review["reviewed_snapshot"] != source["id"]
+                or receipt.get("parent") != source["id"]
+                or receipt.get("run") != review["run"]
+                or receipt["code_digest"] != code_digest
+                or source["code_digest"] != code_digest):
+            raise Denied("Review does not approve this exact snapshot")
+        saved = loads_finite(safe_read(
+            context.project.root, f"runs/{review['run']}/review.json", RECORD_BYTES))
+        if saved != {"snapshot": receipt["id"], "review": review}:
+            raise Denied("Review run binding differs")
+        return saved
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded) as exc:
+        raise Denied("Publication requires an authorized typed approval for the exact snapshot") from exc

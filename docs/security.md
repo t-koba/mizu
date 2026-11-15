@@ -172,6 +172,17 @@ test passes by construction once captured: test edits, hard-coded outputs, or
 defense deletion to satisfy a corrupted test are the same failure class, so keep
 acceptance tests operator-owned or review the test diff before `done`; acceptance needs value assertions on fixed inputs, not mere execution -- test-file presence alone is not verification strength). When acceptance checks persisted effects, assert exact row/object counts and deny unknown persisted fields — prefer an independent readback over checker-echoed values, since value-only checks still pass on extra-record/extra-field effects.
 
+Publication through `vcs_publish` additionally requires an independent typed
+`approve` finish verdict for the exact input snapshot, authorized by
+`publication.reviewer_role` (unset means nobody is authorized), plus the existing
+operator-channel human GO for the branch and code digest. The host binds reviewer,
+run and reviewed snapshot; writable roles and ephemeral children cannot issue
+publication verdicts. Review findings, summary prose and worker-authored shared
+records never grant approval. Immutable review/run receipts and exact snapshot
+and captured-code checks prevent rebinding to a different candidate. This proves
+review identity and binding, not the semantic correctness of a model's review;
+see the [review contract](configuration.md#vcs-publish-m2-step-1-vcs_readvcs_publish-behind-go-branch-approval).
+
 ### Inference-engine confinement
 
 All engines expose only the capability-filtered `mizu_*` tools; model-driven

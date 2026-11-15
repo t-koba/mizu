@@ -70,6 +70,9 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # evidence. Integer seconds 1..9223372036854775807 (TOML representation ceiling,
 # not a runtime-performance guarantee); defaults shown.
 # [publication]
+# Independent read-only reviewer allowed to seal typed finish verdicts.
+# Empty (default) authorizes nobody and blocks vcs_publish, even with human GO.
+# reviewer_role = ""
 # source_commit_timeout_seconds = 5
 
 # Local `mizu init` git-tree import command bounds. Integer seconds

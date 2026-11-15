@@ -1222,13 +1222,15 @@ def ci_request_evidence_policy(raw: dict) -> CiRequestEvidence:
 @dataclasses.dataclass(frozen=True)
 class PublicationPolicy:
     source_commit_timeout_seconds: int = 5
+    reviewer_role: str = ""
 
 
 def publication_policy(raw: dict) -> PublicationPolicy:
-    keys(raw, {"source_commit_timeout_seconds"}, "publication")
+    keys(raw, {"source_commit_timeout_seconds", "reviewer_role"}, "publication")
     return PublicationPolicy(source_commit_timeout_seconds=number(
         raw.get("source_commit_timeout_seconds", PublicationPolicy.source_commit_timeout_seconds),
-        "publication.source_commit_timeout_seconds", 1, TOML_INTEGER_MAX))
+        "publication.source_commit_timeout_seconds", 1, TOML_INTEGER_MAX),
+        reviewer_role=string(raw.get("reviewer_role", ""), "publication.reviewer_role"))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2006,6 +2008,12 @@ def load(file: Path) -> Config:
     number(web["diagnostic_bytes"], "web.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     number(web["search_feed_item_limit"], "web.search_feed_item_limit", 1, 1000)
     web["intranet"] = boolean(web["intranet"], "web.intranet")
+    review_policy = publication_policy(data.get("publication", {}))
+    if review_policy.reviewer_role:
+        reviewer = roles.get(review_policy.reviewer_role)
+        if (reviewer is None or reviewer.workspace != "read"
+                or "finish" not in reviewer.capabilities or "delegate" in reviewer.capabilities):
+            raise ConfigError("publication.reviewer_role must name an independent read-only role with finish and without delegate")
     vcs = data.get("vcs", {})
     keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
                "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
@@ -2103,7 +2111,7 @@ def load(file: Path) -> Config:
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),
-                  publication=publication_policy(data.get("publication", {})),
+                  publication=review_policy,
                   project_import=project_import_policy(data.get("project_import", {})),
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})),

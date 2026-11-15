@@ -78,6 +78,7 @@ from .publication import Publication, source_commit
 from .web import Web
 from . import web_operations
 from . import sandbox_operations
+from . import reviews
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
@@ -1566,6 +1567,7 @@ class Context:
         except ValueError as exc:
             raise Denied(f"Publication requires a projectable snapshot: {exc}") from exc
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
+        review_approval = reviews.require_approval(self, code_digest)
         try:
             source = source_commit(
                 self.workspace, timeout=self.config.publication.source_commit_timeout_seconds,
@@ -1607,7 +1609,7 @@ class Context:
                             "trust": "external-untrusted"}
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
-        record = {**receipt, "published": True,
+        record = {**receipt, "published": True, "review": review_approval,
                   "receipt": publication.path("receipt").relative_to(self.project.root).as_posix(),
                   "trust": "external-untrusted", "result": data}
         return observe(record)
@@ -2024,6 +2026,7 @@ class Context:
         if ("next_step" in args
                 or (self.role.workspace == "write" and args["outcome"] == "continue")):
             validate_next_step(args.get("next_step"))
+        review = reviews.finish(self, args["review_verdict"]) if "review_verdict" in args else None
         tokens = args.get("ack_events", [])
         decisions = {event["ack_token"]: event for event in self.decision_events}
         terminal = {event["ack_token"]: event for event in self.work_item_events}
@@ -2121,8 +2124,12 @@ class Context:
                 args["wait_liveness"] = _writer_wait_liveness(
                     self.project, self.role, releases=releases)
         self.close_exec()
-        finished = {**args, "wait_seconds": wait, "recorded_at": now(),
+        # State is optional for readers; persist its protocol default so run
+        # lifecycle records and immutable review snapshots agree.
+        finished = {"state": "", **args, "wait_seconds": wait, "recorded_at": now(),
                     **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
+        if review is not None and finished["outcome"] != "bounded":
+            finished["review"] = review
         write_json(self.run_dir / "finish-intent.json", finished)
         self.finished = finished
         return {"sealed": True}
@@ -3725,6 +3732,9 @@ class Engine:
                     if (context.safe_point_yield_requested and finished["outcome"] == "continue"):
                         continuations.prepare(project.snapshots, role=role_name, source_run=run_id,
                                               snapshot=snapshot["id"])
+                review_snapshot = reviews.record(context, finished)
+                if review_snapshot is not None:
+                    snapshot = review_snapshot
                 if decision:
                     from .selection import State
                     State(self.config).result(decision, run=run_id, attempt=selection_attempt)
@@ -3790,6 +3800,8 @@ class Engine:
                                                set(getattr(context, "check_results_read", set())) | released)
                 if not finished.get("wait_for_check"):
                     observed = {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]}
+                    if review_snapshot is not None:
+                        observed["review"] = finished["review"]
                     if role.workspace != "write":
                         state_digest = digest(finished.get("state", "").encode())
                         signals = {
@@ -3864,11 +3876,11 @@ class Engine:
                 write_json(project.root / "health" / f"{role_name}.json",
                            {"consecutive_failures": 0, "consecutive_missing_finish": 0,
                             "last_run": run_id, "updated_at": now()})
+                delivery_settlement.finalized(context)
                 # Do not consume a read-only observation until finalization
                 # succeeds: an interrupted finish must remain runnable.
                 if role.workspace != "write" and not finished.get("wait_for_check"):
                     write_json(project.root / "observed" / f"{role_name}.json", observed)
-                delivery_settlement.finalized(context)
                 return result
             except BaseException as exc:
                 if continuation is not None and context is None:

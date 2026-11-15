@@ -584,7 +584,7 @@ class Snapshots:
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
                wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "",
-               progress: dict | None = None, next_step: str | None = None,
+               progress: dict | None = None, next_step: str | None = None, review: dict | None = None,
                parent: str | None | object = _CURRENT_PARENT) -> dict:
         """Persist an immutable capture; publication is a separate CAS operation.
 
@@ -611,6 +611,9 @@ class Snapshots:
                   "parent": parent}
         if progress is not None:
             record["progress"] = progress
+        if review is not None:
+            from .reviews import check
+            record["review"] = check(review)
         if next_step is not None:
             record["next_step"] = validate_next_step(next_step)
         record["id"] = digest(canonical(record))

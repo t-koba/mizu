@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from support import Fixture
 import test_vcs_dispose as dispose
-from test_vcs_publish import init_publish_git
+from test_vcs_publish import init_publish_git, review_for_publication
 from mizu.publication import Publication
 from mizu import fs, vcs
 from mizu.errors import Denied
@@ -30,6 +30,7 @@ class MutationIntentTests(Fixture):
         config = dataclasses.replace(config, vcs=settings)
         if capability == "vcs_publish":
             source = init_publish_git(self)
+            config = review_for_publication(self, config)
             args = {"op": op, "branch": "mizu/" + op}
         elif op == "retire":
             args = {"branch": "mizu/x-1", "expected_sha": dispose.SHA_A}
