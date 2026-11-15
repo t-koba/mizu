@@ -1976,10 +1976,14 @@ class Context:
     def _check_writer_parking(self, finished):
         """Refuse an undisposed or unprovable ready set before sealing or acking.
 
-        A validated new Next handoff is not parking. All other parking finishes
-        require a complete empty role-scoped inventory under the page API maximum.
-        Unknown waits and overflow are evidence gaps, never dispositions.
+        A host-imposed bounded seal is an automatic yield and may retain ready
+        work. A validated new Next handoff is also not parking. Other parking
+        finishes require a complete empty role-scoped inventory under the page
+        API maximum. Unknown waits and overflow are evidence gaps, never
+        dispositions.
         """
+        if finished["outcome"] == "bounded" and self.bound_hit is not None:
+            return
         if finished["outcome"] not in ("wait", "blocked", "continue", "bounded"):
             return
         if (finished["outcome"] in ("continue", "bounded")

@@ -322,7 +322,7 @@ vector database or an automatically complete history search. Usage day buckets
 and the usage window edge use the configured `timezone` day boundary so
 `mizu usage` groups agree with `mizu budget` for the same day.
 
-`continue` starts another meaningful unit. `bounded` is a `continue` that hit a per-run spend bound or entered finite-wall wrap-up before sealing: it saved what it could under the wrap-up allowance and runs again without counting toward `max_failures`. A whole-unit wall exhausted or deadline wrap-up ended without a seal instead
+`continue` starts another meaningful unit. `bounded` is a `continue` that hit a per-run spend bound or entered finite-wall wrap-up before sealing: it saved what it could under the wrap-up allowance and runs again without counting toward `max_failures`. A host-sealed bounded yield may retain role-eligible ready work; it is not a writer-selected parking request. The items remain available for a later independent admission, but unchanged readiness alone does not bypass the no-progress self-admission policy. Writer-selected `wait`, `blocked`, and `continue` still require a complete empty ready inventory unless they hand off through a validated progress-backed `Next`. A whole-unit wall exhausted or deadline wrap-up ended without a seal instead
 records a bounded run result, without creating or publishing a snapshot or
 counting toward `max_failures`. Unrelated pre-seal faults still fail even if the
 wall also expires.

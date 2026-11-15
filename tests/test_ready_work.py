@@ -61,29 +61,34 @@ class ReadyWorkTests(Fixture):
             self.project.work_items.transition(item["id"], expected_rev=rev,
                                                status="dropped", actor="worker", reason="Test candidate settled")
 
-    def test_drain_bounded_blocked_finish_resumes_ready_work_after_drain_clears(self):
+    def test_drain_bounded_finish_preserves_ready_work_for_next_independent_wake(self):
         item = self.item("drain-bound")
         def bounded_finish(ctx, *_):
-            (ctx.workspace / 'bounded.py').write_text('VALUE = 1\n')
             self.project.set_control(draining=True)
             ctx.bound_hit = "drain"
             ctx.wrap_up_attempted = True
             ctx.handle("finish", {"outcome": "blocked", "summary": "Tools were restricted",
-                                   "state": "Now: bounded wrap-up.\nNext: Resume with the full grant."})
+                                   "state": "Now: yielding at the drain bound with ready work untouched."})
         result = Engine(self.config, driver=ScriptDriver(bounded_finish)).run(self.project, "worker")
         snapshot = self.project.snapshots.get()
         self.assertEqual(result["finish"]["outcome"], "bounded")
         self.assertEqual(result["finish"]["bound"], "drain")
         self.assertEqual(snapshot["outcome"], "bounded")
+        self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
         due_time = time.time() + role_no_progress_backoff_seconds(
             self.config, self.config.roles["worker"]) + 1
         self.assertFalse(should_run(self.project, snapshot, current_time=due_time,
                                    role_name="worker"))
         self.project.set_control(draining=False)
-        self.assertTrue(should_run(self.project, snapshot, current_time=due_time,
-                                   role_name="worker"))
+        # An unchanged ready item is not a no-progress self-admission signal;
+        # the durable yield leaves it available for a later independent wake.
+        self.assertFalse(should_run(self.project, snapshot, current_time=due_time,
+                                    role_name="worker"))
         self.assertFalse(should_run(self.project, {**snapshot, "outcome": "blocked"},
                                     current_time=due_time, role_name="worker"))
+        self.project.set_control(wake_generation="bounded-resume")
+        self.assertTrue(should_run(self.project, snapshot, current_time=due_time,
+                                   role_name="worker"))
         self.assertEqual(self.project.work_items.page_ready(limit=1)["items"][0]["id"], item["id"])
 
     def test_blocked_rows_cannot_hide_ready_work_or_wake_on_their_own(self):

@@ -580,19 +580,19 @@ class WriterParkingTests(Fixture):
         self.assertIsNone(ctx.finished)
         self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
 
-    def test_all_parking_outcomes_refuse_open_and_held_doing(self):
+    def test_writer_selected_parking_outcomes_refuse_open_and_held_doing(self):
         item = self.ready("ready")
         ctx = self.context()
         for status in ("open", "doing"):
             if status == "doing":
                 item = self.project.work_items.transition(
                     item["id"], expected_rev=item["rev"], actor="worker", status=status)
-            for outcome in ("wait", "blocked", "continue", "bounded"):
+            for outcome in ("wait", "blocked", "continue"):
                 with self.subTest(status=status, outcome=outcome):
-                    ctx.bound_hit = "drain" if outcome == "bounded" else None
-                    ctx.wrap_up_attempted = outcome == "bounded"
+                    ctx.bound_hit = None
+                    ctx.wrap_up_attempted = False
                     with self.assertRaisesRegex(Denied, "held doing item is still ready"):
-                        self.finish(ctx, "wait" if outcome == "bounded" else outcome)
+                        self.finish(ctx, outcome)
                     self.assert_unsealed(ctx)
         self.assertEqual(self.project.work_items.get(item["id"]), item)
 
