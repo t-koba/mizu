@@ -2830,7 +2830,10 @@ class Engine:
         """
         snapshot = project.snapshots.get()
         cursor = _role_cursor(project, role_name)
-        code_unchanged = role.on_change and _on_change_observed(cursor, snapshot)
+        reviewer_role = getattr(self.config.publication, "reviewer_role", "")
+        exact_snapshot_review = bool(reviewer_role and role_name == reviewer_role)
+        code_unchanged = role.on_change and _on_change_observed(
+            cursor, snapshot, exact_snapshot=exact_snapshot_review)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
         record_state = operator_records.pending(project, role)
@@ -3799,8 +3802,10 @@ class Engine:
                         check_jobs.acknowledge(project, role_name,
                                                set(getattr(context, "check_results_read", set())) | released)
                 if not finished.get("wait_for_check"):
-                    observed = {"snapshot": snapshot["id"], "code_digest": snapshot["code_digest"]}
+                    source = context.snapshot if review_snapshot is not None else snapshot
+                    observed = {"snapshot": source["id"], "code_digest": source["code_digest"]}
                     if review_snapshot is not None:
+                        observed["review_receipt"] = review_snapshot["id"]
                         observed["review"] = finished["review"]
                     if role.workspace != "write":
                         state_digest = digest(finished.get("state", "").encode())
@@ -4605,25 +4610,28 @@ def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
                                 current_time) != "parked_no_progress"
 
 
-def _on_change_observed(cursor: dict, snapshot: dict) -> bool:
-    """True when an ``on_change`` role already observed this code.
+def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False) -> bool:
+    """True when an ``on_change`` role already observed its relevant source.
 
-    Schema: observed cursor plus the published snapshot. Bounds: string
-    comparison only. Trust: local operator state plus content digests, never
-    model input. Failure: never raises; unreadable cursors read as unseen.
+    The configured publication reviewer is bound to the exact input snapshot,
+    so its cursor is compared by snapshot ID even when code is unchanged.
+    Other roles retain code-digest deduplication. Bounds: string comparison
+    only. Trust: local operator state plus content digests, never model input.
+    Failure: never raises; unreadable cursors read as unseen.
 
-    State-only republications keep the same ``code_digest`` under a new
-    snapshot id, so they do not schedule ``on_change`` roles. A wake caused
-    by an insight that needs no action still publishes (writer judgment),
-    but that publication carries the same digest and observers keep
-    skipping, so one no-op wake cannot retrigger the loop. Legacy cursors
-    without ``code_digest`` fall back to snapshot-id equality once, then
-    upgrade on the next completed run.
+    State-only republications do not schedule ordinary ``on_change`` roles,
+    preventing no-op wake loops. Exact-snapshot reviewers are the exception:
+    each new input snapshot requires its own review receipt. Review cursors
+    name the reviewed source, not the separately stored receipt snapshot.
+    Legacy cursors without ``code_digest`` fall back to snapshot-id equality.
     """
     try:
-        current = snapshot.get("code_digest")
         if not isinstance(cursor, dict):
             return False
+        if exact_snapshot:
+            current_id = snapshot.get("id")
+            return isinstance(current_id, str) and bool(current_id) and cursor.get("snapshot") == current_id
+        current = snapshot.get("code_digest")
         if not isinstance(current, str) or not current:
             return cursor.get("snapshot") == snapshot.get("id")
         seen = cursor.get("code_digest")

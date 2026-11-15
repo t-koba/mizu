@@ -55,15 +55,86 @@ class ReviewVerdictTests(PublishFixture):
         self.assertEqual(result["finish"]["review"], expected)
         self.assertEqual(receipt["review"], expected)
         self.assertEqual(receipt["parent"], source["id"])
+        observed = read_json(self.project.root / "observed" / "reviewer.json")
+        self.assertEqual(observed["snapshot"], source["id"])
+        self.assertEqual(observed["review_receipt"], receipt["id"])
+        self.assertEqual(observed["review"], expected)
         self.assertIn("wake_at", receipt)  # review metadata must not replace lifecycle fields
         self.assertEqual(self.project.snapshots.get()["id"], source["id"])
         saved = self.project.root / "runs" / result["run"] / "review.json"
         self.assertEqual(read_json(saved), {"snapshot": receipt["id"], "review": expected})
         with self.assertRaisesRegex(Denied, "Immutable object conflict"):
             write_json(saved, {}, exclusive=True)
+        # Existing cursors used `snapshot` for the receipt; the gate still
+        # validates that exact source while new writes keep the fields apart.
+        legacy = dict(observed)
+        legacy["snapshot"] = receipt["id"]
+        del legacy["review_receipt"]
+        write_json(self.project.root / "observed" / "reviewer.json", legacy)
         publication = self.publish()
         self.assertTrue(publication["published"])
         self.assertEqual(publication["review"], read_json(saved))
+
+    def test_exact_snapshot_reviewer_wakes_for_same_code_successor_only(self):
+        roles = dict(self.config.roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=True)
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project.config = self.config
+
+        self.review()
+        source = self.project.snapshots.get()
+        cursor = read_json(self.project.root / "observed" / "reviewer.json")
+        self.assertEqual(cursor["snapshot"], source["id"])
+        self.assertEqual(cursor["review_receipt"], self.project.snapshots.get(
+            cursor["review_receipt"])["id"])
+        # An exact review of the current input does not retrigger itself.
+        same = Engine(self.config, driver=ScriptDriver()).run(
+            self.project, "reviewer", scheduled_invocation=True)
+        self.assertEqual(same.get("skipped"), "unchanged", same)
+
+        successor = self.project.snapshots.create(
+            {key: source[key] for key in ("files", "code_digest", "skipped", "bytes")},
+            goal=source["goal"], state="New state, unchanged code", run=None,
+            outcome="wait", summary="New exact snapshot", parent=source["id"])
+        self.project.snapshots.publish(successor)
+        result = Engine(self.config, driver=ScriptDriver()).run(
+            self.project, "reviewer", scheduled_invocation=True)
+        self.assertEqual(result.get("status"), "completed", result)
+        self.assertEqual(read_json(
+            self.project.root / "observed" / "reviewer.json")["snapshot"], successor["id"])
+        self.assertEqual(Engine(self.config, driver=ScriptDriver()).run(
+            self.project, "reviewer", scheduled_invocation=True).get("skipped"), "unchanged")
+
+    def test_review_diff_spans_multiple_publications_from_last_reviewed_source(self):
+        self.review()
+        source = self.project.snapshots.get()
+        cursor_path = self.project.root / "observed" / "reviewer.json"
+        cursor = read_json(cursor_path)
+        self.assertEqual(cursor["snapshot"], source["id"])
+        for value in (5, 7):
+            (self.project.workspace / "app.py").write_text(f"VALUE = {value}\n")
+            previous = self.project.snapshots.get()
+            captured = self.project.snapshots.capture_files(self.project.workspace)
+            successor = self.project.snapshots.create(
+                captured, goal=previous["goal"], state=f"Writer state {value}", run=None,
+                outcome="wait", summary=f"Writer snapshot {value}", parent=previous["id"])
+            self.project.snapshots.publish(successor)
+
+        current = self.context("reviewer").handle("diff", {})
+        self.assertEqual(current["base_snapshot"], source["id"])
+        self.assertIn("-VALUE = 2", current["diff"])
+        self.assertIn("+VALUE = 7", current["diff"])
+
+        # Read old cursors where the snapshot field named the receipt itself;
+        # validate that receipt and recover its exact reviewed input as base.
+        legacy = dict(cursor)
+        legacy["snapshot"] = legacy["review_receipt"]
+        del legacy["review_receipt"]
+        write_json(cursor_path, legacy)
+        migrated = self.context("reviewer").handle("diff", {})
+        self.assertEqual(migrated["base_snapshot"], source["id"])
+        self.assertIn("-VALUE = 2", migrated["diff"])
+        self.assertIn("+VALUE = 7", migrated["diff"])
 
     def test_missing_legacy_and_changes_requested_never_approve(self):
         self.denied()

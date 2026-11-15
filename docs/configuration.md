@@ -1158,10 +1158,13 @@ detected bound without declaring it:
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
 | **CI request** | `vcs_request` requires the role capability and `[vcs] request_grant` | always | A request targets a completed publication receipt, never a branch head, and returned runs must bind to that commit. An explicit same-attempt request reconciles an unresolved dispatch through a non-dispatch adapter query; only durable `not_dispatched` permits a new attempt. Time never settles uncertainty. Read-only status/listing never settle it, and there is no automatic retry. The run's own record names each attempt, day, outcome and covered items, so CI activity is visible per unit |
 
-`on_change` is orthogonal to scheduling: it skips execution when the published
-`code_digest` is unchanged, so state-only republications do not reschedule it.
-An unacknowledged decision event routed to the role (`decision_events` in
-`own` mode, or any-source matches with `decision_sources = "any"` delivering
+`on_change` is orthogonal to scheduling. Ordinary roles skip execution when the
+published `code_digest` is unchanged, so state-only republications do not
+reschedule them. The configured `publication.reviewer_role` is the exact-snapshot
+exception: it compares snapshot IDs because each published input needs its own
+typed approval, even when code is unchanged. An unacknowledged decision event
+routed to the role (`decision_events` in `own` mode, or any-source matches with
+`decision_sources = "any"` delivering
 once and admitting even deferrals), a terminal work-item event routed by
 `work_item_sources`, a due structured wait, a red on the configured CI wake set
 for a role with `ci_wake`, or a changed ready-work set (including exact terminal
@@ -2489,11 +2492,15 @@ A successful top-level typed review creates one **unpublished immutable review s
 with `review = {verdict, reviewed_snapshot, role, run}` and parent equal to the
 input snapshot, plus create-only `runs/<run>/review.json` containing
 `{snapshot: <review snapshot>, review: <same fact>}`. The snapshot preserves the
-reader's wake/lifecycle metadata. Its normal observed cursor selects the latest
-completed receipt; a later missing verdict
-or changes request never falls back to older approval. Review receipt and input
-snapshots and the run receipt remain retained while that cursor references them;
-replacing it releases those retention roots. Interrupted finalization does not
+reader's wake/lifecycle metadata. The observed cursor stores the reviewed input
+in `snapshot` and the immutable receipt ID in `review_receipt`, keeping scheduler
+and diff ancestry on the input while retaining the typed verdict separately. A
+later missing verdict or changes request never falls back to older approval.
+Legacy cursors that stored the receipt in `snapshot` remain verifiable and
+recover the reviewed input as the diff base; the next typed review writes the
+separate fields. Review receipt and input snapshots and the run receipt remain
+retained while that cursor references them; replacing it releases those roots.
+Interrupted finalization does not
 advance the cursor. Reads are constant-count, receipt/cursor JSON is bounded to
 4096 UTF-8 bytes with no-follow reads, and malformed/missing evidence denies.
 No automatic retry or external call is made by the review gate.

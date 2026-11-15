@@ -146,10 +146,13 @@ Day-files keep a shared aggregate plus a per-project map, so `daily_requests` ca
 and `shared_daily_requests` (0 disables) caps the shared total. Budget reports show both scopes,
 so one project's usage no longer stops another under a smaller limit.
 
-## ADR-023 — Digest-gated on_change observers
-`on_change` compares `code_digest`, not snapshot id, so state-only
-republications do not reschedule observers. A no-action wake publishes the
-same digest and observers keep skipping instead of looping model calls.
+## ADR-023 — Change-gated observers
+Ordinary `on_change` observers compare `code_digest`, so state-only
+republications do not reschedule them and a no-action wake cannot loop model
+calls. The configured publication reviewer is the exact-snapshot exception:
+its observed cursor tracks the reviewed input separately from the immutable
+receipt and compares snapshot IDs, because approval cannot transfer to a
+same-code successor.
 
 ## ADR-024 — Bounded run-evidence retention for bulky engine logs
 Operator-set `[limits]` day counts gzip raw run event logs at N days and drop them at M days

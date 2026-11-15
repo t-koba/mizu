@@ -1037,7 +1037,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                 skipped_references.add(history_path)
             elif history_path not in skipped_references:
                 live_ids |= set(active_history)
-    # A typed-review cursor owns the review snapshot and its exact input.
+    # A typed-review cursor owns its receipt snapshot and exact input.
     for path in reference_children(root / "observed"):
         cursor, skipped = _audit_ref_dict(root, path)
         if skipped:
@@ -1047,6 +1047,8 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                 from .reviews import check as check_review
                 live_ids.add(check_review(cursor["review"])["reviewed_snapshot"])
                 reference_field(path, cursor, "snapshot", live_ids, required=True)
+                if "review_receipt" in cursor:
+                    reference_field(path, cursor, "review_receipt", live_ids, required=True)
             except Denied:
                 skipped_references.add(path)
     history_ids |= live_ids

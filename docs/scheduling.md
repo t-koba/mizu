@@ -13,10 +13,14 @@ At most one of `daemon`, `interval_seconds`, `calendar` may be set per role
 (`decision_events`, `work_item_events` with their `*_sources` routes) are
 independent triggers: they may accompany a schedule or run event-only on
 platforms with file triggers; they do not count as a second schedule mode.
-`on_change` skips unchanged code on ordinary scheduled/explicit runs.
-For an unscheduled role, it also selects published-code event wake: service
-rendering watches the persisted snapshot pointer and invokes `mizu run --event`;
-the role runs only while its observed code digest is stale. Pending eligible
+`on_change` normally skips same-code snapshots on ordinary scheduled/explicit
+runs. For the configured `publication.reviewer_role`, it compares exact snapshot
+IDs instead: typed approval never transfers to a same-code successor, so the
+reviewer must assess each new input snapshot, including state-only republications,
+on its configured schedule. Other roles retain code-digest deduplication. For
+an unscheduled role, `on_change` also selects the published-change event wake;
+for an unscheduled configured reviewer, that wake compares the exact snapshot
+ID rather than only its code digest. Pending eligible
 operator records are a separate role-addressed event source, not the project
 operator wake-generation cursor.
 

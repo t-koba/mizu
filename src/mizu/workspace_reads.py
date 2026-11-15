@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import reviews as _reviews
 from . import vcs as _vcs
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (DIGEST, READ_PAGE_CHARS, digest, page, read_json, relative_parts, safe_read)
@@ -51,6 +52,20 @@ def observed_diff_base(context: Context, *, max_bytes: int) -> str | None:
             or not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest)):
         return None
     try:
+        if "review" in cursor or "review_receipt" in cursor:
+            review = _reviews.check(cursor.get("review"))
+            receipt_id = (cursor.get("review_receipt") if "review_receipt" in cursor
+                          else snapshot_id)
+            if not isinstance(receipt_id, str) or not DIGEST.fullmatch(receipt_id):
+                return None
+            receipt = context.project.snapshots.get(receipt_id)
+            source_id = review["reviewed_snapshot"]
+            if (receipt.get("id") != receipt_id or receipt.get("review") != review
+                    or receipt.get("parent") != source_id or receipt.get("run") != review["run"]
+                    or receipt.get("code_digest") != code_digest
+                    or ("review_receipt" in cursor and snapshot_id != source_id)):
+                return None
+            snapshot_id = source_id
         record = context.project.snapshots.get(snapshot_id)
     except (OSError, ValueError, Busy, Denied, LimitExceeded):
         return None

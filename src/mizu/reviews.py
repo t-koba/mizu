@@ -1,7 +1,8 @@
 """Typed review receipts, bound only by the host to a reader's input snapshot.
 
-The observed cursor selects the latest completed review snapshot in O(1).
-Neither prose, insights nor role-authored shared records are approval evidence.
+The observed cursor keeps the reviewed input snapshot separate from its
+immutable review-receipt snapshot. Neither prose, insights nor role-authored
+shared records are approval evidence.
 """
 from __future__ import annotations
 
@@ -95,10 +96,14 @@ def require_approval(context, code_digest):
             raise Denied("No authorized reviewer")
         cursor = loads_finite(safe_read(
             context.project.root, f"observed/{name}.json", RECORD_BYTES))
-        receipt = context.project.snapshots.get(cursor.get("snapshot"))
+        has_receipt_cursor = "review_receipt" in cursor
+        receipt_id = cursor.get("review_receipt") if has_receipt_cursor else cursor.get("snapshot")
+        receipt = context.project.snapshots.get(receipt_id)
         review = check(receipt.get("review"))
         source = context.snapshot
         if (cursor.get("review") != review
+                or cursor.get("snapshot") != (source["id"] if has_receipt_cursor else receipt.get("id"))
+                or cursor.get("code_digest") != source["code_digest"]
                 or review["role"] != name or review["verdict"] != "approve"
                 or review["reviewed_snapshot"] != source["id"]
                 or receipt.get("parent") != source["id"]
