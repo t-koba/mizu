@@ -236,7 +236,23 @@ pending acceptance evidence and explicitly protected IDs remain ineligible.
 Unreferenced acknowledged records are selected before referenced ones; a
 shared-job source becomes eligible only after every subscription that references
 it is already a victim in the same preflight, so a source is not removed while a
-surviving subscription still references it. The fixed `MAX_CHECK_RETAINED`
+surviving subscription still references it. This is a local cache-eviction
+boundary, not proof that no historical citation survives. `sandbox.check_reuse`
+offers a completed passing job only while its pinned source, execution,
+dependency and cache inputs still match; reuse is an optimization and an
+acknowledged job can later be evicted at the configured count target. The
+reference graph here covers `shared_job` subscriptions, not arbitrary text in
+persistent sessions or run records. Sessions are retained audit logs and are
+backed up, while oversized tool replies can remain under `runs/<run>/tool-results`
+until run retention; neither is indexed by check-job eviction. Conversely,
+`check-jobs/` is excluded from backups, so restore can leave a historical session
+citation without its job record. Acknowledgement means delivery/handling for
+the current job projection; it does not establish that all historical
+references have disappeared. The current product therefore cannot prove global
+reference absence or promise that an old check ID will resolve after eviction or
+restore. If that archival lookup becomes a requirement, add bounded structured
+references and source-owned release events for every retained transcript before
+claiming reference-based cleanup. The fixed `MAX_CHECK_RETAINED`
 ceiling of 1024 preserves the defensive envelope for linear metadata scans and
 request-identity search; it is not an intrinsic format limit. Frozen source obeys
 the existing snapshot size/file/exclusion bounds. Private source/build trees are
