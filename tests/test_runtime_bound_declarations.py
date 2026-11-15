@@ -1918,6 +1918,9 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('ci_acceptance.py', 'policy', 0, 0): (
         'len(commands)', 'mechanism',
         'CI acceptance / exact coverage check iterates each bounded command index'),
+    ('ci_requests.py', 'CiRequests.prior_spend_possible', 1, 0): (
+        'attempt', 'configured policy',
+        'CI requests / prior-attempt scan is limited by the validated record_limit'),
     ('ci_polling.py', 'poll_ci', 0, 0): (
         'max_branches', 'configured policy',
         'CI polling / rotating branch batch bounded by vcs.poll_max_branches'),
