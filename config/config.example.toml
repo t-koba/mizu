@@ -146,9 +146,6 @@ retention = "permanent"
 
 [limits]
 selection_max_interval_seconds = 31536000 # Selector timer ceiling (1..TOML signed-64-bit max); computed timestamps must still fit year 9999.
-# Provisional project cap on open/doing/blocked work; 0 disables.
-# Existing over-limit items are preserved; only new seeds are refused.
-open_work_items = 100
 # Provisional per-source cap on unresolved live producer inputs; 0 disables.
 # Existing over-limit inputs are preserved; only the next admission is held.
 producer_inputs_per_source = 20
@@ -498,8 +495,6 @@ daemon = true
 
 [roles.searcher]
 profile = "alternate"
-# Opt in to an open-work producer hold (default false; per-source holds remain independent).
-# held_at_capacity = true
 policy = ["policies/shared.md", "policies/searcher.md"]
 workspace = "read"
 # Add "withdraw_decided" here only to allow retracting proposals with a current accept/modify disposition.

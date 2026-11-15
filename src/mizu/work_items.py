@@ -31,7 +31,7 @@ from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, 
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      PublicationEvidence)
-from .errors import Denied, LimitExceeded, OpenWorkItemsFull
+from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
                  safe_read, sync_dir, text_preview, write_json)
 from .insights import _decision_key, _validate_keyed_substantive_event
@@ -248,20 +248,6 @@ class WorkItems:
                 "doing_age_seconds": None if elapsed is None else max(0, elapsed) // 1_000_000,
                 "doing_stale": elapsed is not None and elapsed >= self.stale_seconds * 1_000_000}
 
-    def require_open_capacity(self, requested_delta: int) -> None:
-        """Check a whole new-seed transaction while holding insights.lock.
-
-        Zero-seed decisions and a disabled cap do not read the index.
-        Existing over-limit work stays unchanged.
-        """
-        limit = self.insights.open_work_items
-        if not requested_delta or not limit:
-            return
-        current_count = self.count_open()
-        if current_count + requested_delta > limit:
-            raise OpenWorkItemsFull(current_count=current_count, limit=limit,
-                                    requested_delta=requested_delta)
-
     def _count_open(self, *, locked: bool) -> int:
         with self._ledger.read("items", locked=locked) as db:
             return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('open', 'doing', 'blocked')")[0][0]
@@ -347,9 +333,7 @@ class WorkItems:
         numeric revision history, direct/legacy record, unknown entry, or
         unsafe/ambiguous temporary still fails closed. This does not commit:
         direct callers commit create.json; decisions embed the seed in their
-        atomic event. The committing caller checks capacity for the entire
-        transaction; this preflight does not reserve slots. Existing commits
-        must use validate_seed_replay instead.
+        atomic event. Existing commits must use validate_seed_replay instead.
         """
         if smoke_refs is not None:
             validate_refs(smoke_refs)
@@ -478,7 +462,6 @@ class WorkItems:
                       "work_item": seed}
             if seed.get("smoke_refs") != smoke_refs and origin is not None and "insight_id" in origin:
                 record["requested_smoke_refs"] = smoke_refs
-            self.require_open_capacity(1)
             directory.mkdir(parents=True, exist_ok=True)
             with self.committing([item_id]):
                 write_json(directory / "create.json", record, exclusive=True)
@@ -708,7 +691,6 @@ class WorkItems:
                 return {"record": existing, "created": False}
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Legacy reconciliation exceeds byte bound")
-            self.require_open_capacity(1 if outcome == "open" else 0)
             with self.committing([f"wi_{event_id}"]):
                 write_json(self.root / "work-items" / f"wi_{event_id}" / "legacy.json",
                            record, exclusive=True)

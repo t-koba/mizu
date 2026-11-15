@@ -1,4 +1,4 @@
-"""Producer admission: per-source and open-work congestion holds.
+"""Producer admission: per-source congestion holds.
 
 Only configured non-writer project roles holding ``submit_insight`` are gated, before any
 model or run-slot use. Undecided and deferred live revisions count; resolved
@@ -54,29 +54,6 @@ class ProducerConfigTests(Fixture):
     def test_default_wires_through_project(self):
         self.assertEqual(self.config.limits.producer_inputs_per_source, 20)
         self.assertEqual(self.project.insights.producer_inputs_per_source, 20)
-        self.assertFalse(self.config.roles["reviewer"].held_at_capacity)
-
-    def test_role_open_work_hold_is_explicit_opt_in(self):
-        text = self.file.read_text().replace(
-            "[roles.searcher]\n", "[roles.searcher]\nheld_at_capacity = true\n", 1)
-        self.file.write_text(text)
-        config = load(self.file)
-        self.assertTrue(config.roles["searcher"].held_at_capacity)
-        self.assertFalse(config.roles["reviewer"].held_at_capacity)
-
-    def test_role_open_work_hold_rejects_invalid_or_unknown_values(self):
-        original = self.file.read_text()
-        for value in ("1", '"true"', "0.5", '"yes"'):
-            with self.subTest(value=value):
-                self.file.write_text(original.replace(
-                    "[roles.searcher]\n", f"[roles.searcher]\nheld_at_capacity = {value}\n", 1))
-                with self.assertRaises(ConfigError):
-                    load(self.file)
-        self.file.write_text(original.replace(
-            "[roles.searcher]\n",
-            "[roles.searcher]\nheld_at_capacity_typo = true\n", 1))
-        with self.assertRaises(ConfigError):
-            load(self.file)
 
     def test_missing_key_keeps_default(self):
         text = self.file.read_text()
@@ -87,7 +64,6 @@ class ProducerConfigTests(Fixture):
 
     def test_explicit_values_and_zero_disables(self):
         text = self.file.read_text()
-        self.assertIn("open_work_items = 100", text)
         self.assertIn("producer_inputs_per_source = 20", text)
         current = 20
         for value in (0, 1, 20, 1073741824):
@@ -268,51 +244,25 @@ class ProducerCountsTests(Fixture):
 
 
 class ProducerEvaluatorTests(unittest.TestCase):
-    def test_non_producer_never_held(self):
-        self.assertFalse(evaluate_producer(ProducerFacts(
-            is_producer=False, per_source_limit=1, open_work_limit=1,
-            source_pending=10, open_count=10, load_ok=True)).held)
-
-    def test_disabled_limits_never_hold(self):
-        self.assertFalse(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=0, open_work_limit=0,
-            source_pending=10, open_count=10, load_ok=True)).held)
-
-    def test_each_cause_and_release(self):
-        self.assertEqual(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=2, open_work_limit=100,
-            source_pending=2, open_count=0, load_ok=True)).reasons,
-            ("per_source_full",))
-        self.assertFalse(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=100, open_work_limit=1,
-            source_pending=0, open_count=1, load_ok=True)).held)
-        self.assertEqual(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=100, open_work_limit=1,
-            source_pending=0, open_count=1, load_ok=True,
-            held_at_capacity=True)).reasons,
-            ("open_work_full",))
-        self.assertEqual(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=2, open_work_limit=1,
-            source_pending=2, open_count=1, load_ok=True,
-            held_at_capacity=True)).reasons,
-            ("per_source_full", "open_work_full"))
-        self.assertFalse(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=2, open_work_limit=1,
-            source_pending=1, open_count=0, load_ok=True)).held)
-        self.assertEqual(evaluate_producer(ProducerFacts(
-            is_producer=True, per_source_limit=2, open_work_limit=1,
-            source_pending=0, open_count=0, load_ok=False)).reasons,
-            ("load_unavailable",))
+    def test_per_source_hold_and_release(self):
+        for producer, limit, pending, ok, reasons in (
+                (False, 1, 10, True, ()), (True, 0, 10, True, ()),
+                (True, 2, 2, True, ("per_source_full",)),
+                (True, 2, 1, True, ()), (True, 2, 0, False, ("load_unavailable",))):
+            with self.subTest(producer=producer, limit=limit, pending=pending, ok=ok):
+                decision = evaluate_producer(ProducerFacts(
+                    is_producer=producer, per_source_limit=limit,
+                    source_pending=pending, load_ok=ok))
+                self.assertEqual(decision.reasons, reasons)
+                self.assertEqual(decision.held, bool(reasons))
 
 
 class ProducerHoldTests(Fixture):
     def setUp(self):
         super().setUp()
         self.project.insights.producer_inputs_per_source = 2
-        self.project.insights.open_work_items = 100
 
     def test_per_source_hold_and_release(self):
-        self.assertFalse(self.config.roles["searcher"].held_at_capacity)
         first = _submit(self, "searcher", "One")
         _submit(self, "searcher", "Two")
         held = producer_hold(self.project, "searcher")
@@ -332,40 +282,9 @@ class ProducerHoldTests(Fixture):
         self.assertNotIn("skip", result)
         self.assertIn("run", result)
 
-    def test_open_work_hold_and_release(self):
-        self.config.roles["searcher"] = dataclasses.replace(
-            self.config.roles["searcher"], held_at_capacity=True)
-        self.project.insights.open_work_items = 1
-        item = self.project.work_items.create(
-            idempotency_key="one", title="One", actor="worker")["record"]["work_item"]
-        held = producer_hold(self.project, "searcher")
-        self.assertIsNotNone(held)
-        self.assertIn("open_work_full", held["reasons"])
-        self.assertFalse(should_run(
-            self.project, self.project.snapshots.get(), role_name="searcher"))
-        before = _runs(self.project)
-        result = Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "searcher")
-        self.assertEqual(result["skip"]["skipped"], "producer-held")
-        self.assertIn("open_work_full", result["skip"]["reasons"])
-        self.assertEqual(_runs(self.project), before)
-        self.project.work_items.transition(
-            item["id"], expected_rev=1, status="doing", actor="worker")
-        self.project.work_items.transition(
-            item["id"], expected_rev=2, status="dropped", actor="worker",
-            reason="Merged")
-        self.assertIsNone(producer_hold(self.project, "searcher"))
-        self.assertTrue(should_run(
-            self.project, self.project.snapshots.get(), role_name="searcher"))
-        result = Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "searcher")
-        self.assertNotIn("skip", result)
-
-    def test_default_reviewer_is_not_held_by_open_work_capacity(self):
-        self.project.insights.open_work_items = 1
+    def test_work_backlog_does_not_hold_producer(self):
         self.project.work_items.create(
             idempotency_key="one", title="One", actor="worker")
-        self.assertFalse(self.config.roles["reviewer"].held_at_capacity)
         self.assertIsNone(producer_hold(self.project, "reviewer"))
         self.assertEqual(self.project.status()["backpressure"]["held"], [])
         before = _runs(self.project)
@@ -374,9 +293,8 @@ class ProducerHoldTests(Fixture):
         self.assertNotEqual(result.get("skip", {}).get("skipped"), "producer-held")
         self.assertNotEqual(_runs(self.project), before)
 
-    def test_zero_disables_both_causes(self):
+    def test_zero_disables_per_source_hold(self):
         self.project.insights.producer_inputs_per_source = 0
-        self.project.insights.open_work_items = 0
         _submit(self, "searcher", "One")
         _submit(self, "searcher", "Two")
         self.project.work_items.create(
@@ -387,13 +305,10 @@ class ProducerHoldTests(Fixture):
         self.assertNotIn("skip", result)
 
     def test_non_producer_never_held(self):
-        self.config.roles["searcher"] = dataclasses.replace(
-            self.config.roles["searcher"], held_at_capacity=True)
         _submit(self, "searcher", "One")
         _submit(self, "searcher", "Two")
         self.project.work_items.create(
             idempotency_key="one", title="One", actor="worker")
-        self.project.insights.open_work_items = 1
         self.assertIsNotNone(producer_hold(self.project, "searcher"))
         self.assertIsNone(producer_hold(self.project, "reporter"))
         result = Engine(self.config, driver=ScriptDriver()).run(
@@ -407,7 +322,6 @@ class ProducerHoldTests(Fixture):
 
     def test_writer_is_not_held_even_with_submit_capability(self):
         self.project.insights.producer_inputs_per_source = 1
-        self.project.insights.open_work_items = 1
         _submit(self, "worker", "Writer question")
         self.project.work_items.create(
             idempotency_key="writer-full", title="Existing", actor="worker")
@@ -429,12 +343,9 @@ class ProducerHoldTests(Fixture):
             result = Engine(self.config, driver=ScriptDriver()).run(
                 self.project, "searcher")
             self.assertEqual(result["skip"]["reason"], "load_unavailable")
-        self.config.roles["searcher"] = dataclasses.replace(
-            self.config.roles["searcher"], held_at_capacity=True)
         with patch.object(self.project.work_items, "count_open_readonly",
                           side_effect=OSError("injected")):
-            held = producer_hold(self.project, "searcher")
-            self.assertEqual(held["reason"], "load_unavailable")
+            self.assertIsNone(producer_hold(self.project, "searcher"))
 
     def test_malformed_live_record_holds_fail_closed(self):
         first = _submit(self, "searcher", "One")
@@ -459,12 +370,9 @@ class ProducerHoldTests(Fixture):
         self.assertIsNone(producer_hold(self.project, "searcher"))
 
     def test_disabled_bound_ignores_unrelated_unavailable_store(self):
-        self.config.roles["searcher"] = dataclasses.replace(
-            self.config.roles["searcher"], held_at_capacity=True)
         _submit(self, "searcher", "One")
-        # The opted-in open-work bound does not depend on inbox readability.
+        # A disabled per-source bound does not depend on inbox readability.
         self.project.insights.producer_inputs_per_source = 0
-        self.project.insights.open_work_items = 100
         with patch.object(self.project.insights, "unresolved_counts",
                           side_effect=OSError("injected")):
             self.assertIsNone(producer_hold(self.project, "searcher"))
@@ -474,9 +382,8 @@ class ProducerHoldTests(Fixture):
             counts = {row["source"]: row["pending"] for row in view["producer_inputs"]}
             self.assertIsNone(counts.get("searcher"))
             self.assertEqual(view["open_work_count"], 0)
-        # Open-work disabled: open-ledger failures must not hold when only per-source matters.
+        # Work-ledger failures are visibility errors, not producer holds.
         self.project.insights.producer_inputs_per_source = 100
-        self.project.insights.open_work_items = 0
         with patch.object(self.project.work_items, "count_open_readonly",
                           side_effect=OSError("injected")), \
                 patch.object(self.project.work_items, "_page_open_impl",
@@ -487,9 +394,8 @@ class ProducerHoldTests(Fixture):
             self.assertEqual(view["held"], [])
             self.assertIsNone(view["open_work_count"])
             self.assertEqual({row["source"]: row["pending"] for row in view["producer_inputs"]}["searcher"], 1)
-        # Both disabled: status attempts both stores, admission never holds.
+        # With the per-source bound disabled, status still attempts both stores.
         self.project.insights.producer_inputs_per_source = 0
-        self.project.insights.open_work_items = 0
         with patch.object(self.project.insights, "unresolved_counts",
                           side_effect=OSError("injected")):
             with patch.object(self.project.work_items, "count_open_readonly",
@@ -503,31 +409,11 @@ class ProducerHoldTests(Fixture):
         _submit(self, "searcher", "One")
         for bad in (-1, 1073741825, True, "20", 0.5, None):
             self.project.insights.producer_inputs_per_source = bad
-            self.project.insights.open_work_items = 100
             held = producer_hold(self.project, "searcher")
             self.assertIsNotNone(held, msg=f"per-source {bad!r} must hold")
             self.assertEqual(held["reason"], "load_unavailable")
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"], msg=f"per-source {bad!r} status must be unavailable")
-        self.project.insights.producer_inputs_per_source = 100
-        self.config.roles["searcher"] = dataclasses.replace(
-            self.config.roles["searcher"], held_at_capacity=True)
-        for bad in (-1, 1073741825, False, "100", 1.5, None):
-            self.project.insights.open_work_items = bad
-            held = producer_hold(self.project, "searcher")
-            self.assertIsNotNone(held, msg=f"open {bad!r} must hold")
-            self.assertEqual(held["reason"], "load_unavailable")
-            view = self.project.status()["backpressure"]
-            self.assertFalse(view["load_ok"], msg=f"open {bad!r} status must be unavailable")
-
-    def test_invalid_role_policy_fails_closed(self):
-        self.config.roles["searcher"] = dataclasses.replace(
-            self.config.roles["searcher"], held_at_capacity=1)
-        held = producer_hold(self.project, "searcher")
-        self.assertEqual(held["reason"], "load_unavailable")
-        view = self.project.status()["backpressure"]
-        rows = {row["source"]: row for row in view["held"]}
-        self.assertEqual(rows["searcher"]["reasons"], ["load_unavailable"])
 
     def test_daemon_admission_veto_and_release(self):
         first = _submit(self, "searcher", "One")
@@ -574,17 +460,12 @@ class ProducerEventPreservationTests(Fixture):
 
 class ProducerStatusTests(Fixture):
     def test_backpressure_reports_limits_counts_holds(self):
-        for name in ("searcher", "reviewer"):
-            self.config.roles[name] = dataclasses.replace(
-                self.config.roles[name], held_at_capacity=True)
         self.project.insights.producer_inputs_per_source = 2
-        self.project.insights.open_work_items = 1
         _submit(self, "searcher", "One")
         _submit(self, "searcher", "Two")
         status = self.project.status()
         view = status["backpressure"]
-        self.assertEqual(view["limits"], {"producer_inputs_per_source": 2,
-                                          "open_work_items": 1})
+        self.assertEqual(view["limits"], {"producer_inputs_per_source": 2})
         self.assertEqual(view["open_work_count"], 0)
         counts = {row["source"]: row["pending"] for row in view["producer_inputs"]}
         self.assertEqual(counts.get("searcher"), 2)
@@ -601,20 +482,17 @@ class ProducerStatusTests(Fixture):
         view = self.project.status()["backpressure"]
         self.assertEqual(view["open_work_count"], 1)
         held = {row["source"]: row["reasons"] for row in view["held"]}
-        self.assertIn("open_work_full", held.get("searcher"))
-        self.assertIn("open_work_full", held.get("reviewer"))
+        self.assertEqual(held, {"searcher": ["per_source_full"]})
         self.assertEqual({row["source"]: row["thresholds"] for row in view["held"]},
-                         {"searcher": {"producer_inputs_per_source": 2, "open_work_items": 1},
-                          "reviewer": {"open_work_items": 1}})
+                         {"searcher": {"producer_inputs_per_source": 2}})
 
     def test_disabled_bounds_still_report_current_counts(self):
         _submit(self, "searcher", "One")
         _submit(self, "not-configured", "Not a project producer")
         self.project.work_items.create(idempotency_key="one", title="One", actor="worker")
-        for per_source, open_work in ((0, 100), (20, 0), (0, 0)):
-            with self.subTest(per_source=per_source, open_work=open_work):
+        for per_source in (0, 20):
+            with self.subTest(per_source=per_source):
                 self.project.insights.producer_inputs_per_source = per_source
-                self.project.insights.open_work_items = open_work
                 view = self.project.status()["backpressure"]
                 self.assertTrue(view["load_ok"])
                 self.assertEqual(view["open_work_count"], 1)
@@ -624,13 +502,9 @@ class ProducerStatusTests(Fixture):
                 self.assertNotIn("not-configured", counts)
                 self.assertEqual(view["held"], [])
 
-    def test_unreadable_disabled_metric_does_not_mask_enabled_full_metric(self):
+    def test_unreadable_work_metric_does_not_mask_per_source_hold(self):
         _submit(self, "searcher", "One")
         self.project.insights.producer_inputs_per_source = 1
-        self.project.insights.open_work_items = 0
-        for name in ("searcher", "reviewer"):
-            self.config.roles[name] = dataclasses.replace(
-                self.config.roles[name], held_at_capacity=True)
         with patch.object(self.project.work_items, "_page_open_impl", side_effect=OSError("injected")):
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"])
@@ -639,28 +513,17 @@ class ProducerStatusTests(Fixture):
                                              "reasons": ["per_source_full"],
                                              "thresholds": {"producer_inputs_per_source": 1}}])
         self.project.insights.producer_inputs_per_source = 0
-        self.project.insights.open_work_items = 1
-        for name in ("searcher", "reviewer"):
-            self.config.roles[name] = dataclasses.replace(
-                self.config.roles[name], held_at_capacity=True)
         self.project.work_items.create(idempotency_key="one", title="One", actor="worker")
         with patch.object(self.project.insights, "unresolved_counts", side_effect=OSError("injected")):
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"])
             self.assertEqual(view["open_work_count"], 1)
-            self.assertTrue(view["held"])
-            self.assertTrue(all(row["reasons"] == ["open_work_full"] and row["pending"] is None
-                                and row["thresholds"] == {"open_work_items": 1}
-                                for row in view["held"]))
+            self.assertEqual(view["held"], [])
 
     def test_status_stays_usable_when_load_unreadable(self):
-        for name in ("searcher", "reviewer"):
-            self.config.roles[name] = dataclasses.replace(
-                self.config.roles[name], held_at_capacity=True)
         with patch.object(self.project.work_items, "_page_open_impl",
                           side_effect=OSError("injected")):
             view = self.project.status()["backpressure"]
             self.assertFalse(view["load_ok"])
             self.assertIsNone(view["open_work_count"])
-            self.assertTrue(all(row["reasons"] == ["load_unavailable"]
-                                for row in view["held"]))
+            self.assertEqual(view["held"], [])

@@ -438,8 +438,6 @@ class Limits:
     #: Host I/O policy; the 256 MiB default preserves the previous refusal bound.
     probe_executable_bytes: int = DEFAULT_PROBE_EXECUTABLE_BYTES
     lock_diagnostics: bool = False
-    # Provisional project-wide bound on newly seeded nonterminal work; 0 disables.
-    open_work_items: int = 100
     # Provisional per-source bound on unresolved live producer inputs; 0 disables.
     # Congestion thresholds, not measured optima; see docs/configuration.md.
     producer_inputs_per_source: int = 20
@@ -640,7 +638,6 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "lock_retry_interval_ms": (1, MAX_WAIT_SECONDS * 1000),
                  "pipe_poll_interval_ms": (1, 500),
                  "probe_executable_bytes": (1, TOML_INTEGER_MAX),
-                 "open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
                  "prior_role_report_preview_bytes": (0, MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES),
@@ -820,10 +817,6 @@ class Role:
     check_result_wake: bool = True
     #: Direct exec shell state is confined to one role unit; never acceptance.
     persistent_exec: bool = False
-    #: Explicit opt-in to holding this non-writer producer when project
-    #: open/doing/blocked work reaches the configured cap. Per-source limits
-    #: are independent and remain effective when this is false.
-    held_at_capacity: bool = False
     #: Per-role per-run spend overrides. None keeps the project `[limits]`
     #: value as default; a set value must lie in the same range as the
     #: project bound. Storage,
@@ -1734,7 +1727,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
                     "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "held_at_capacity", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1863,8 +1856,6 @@ def load(file: Path) -> Config:
         ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
         check_result_wake = boolean(role.get("check_result_wake", True),
                                     f"roles.{name}.check_result_wake")
-        held_at_capacity = boolean(role.get("held_at_capacity", False),
-                                   f"roles.{name}.held_at_capacity")
         persistent_exec = boolean(role.get("persistent_exec", False), f"roles.{name}.persistent_exec")
         if persistent_exec and "exec" not in caps:
             raise ConfigError(f"roles.{name}.persistent_exec requires the exec capability")
@@ -1952,7 +1943,7 @@ def load(file: Path) -> Config:
                            decision_events=events, work_item_events=work_events, decision_sources=raw_sources,
                            work_item_sources=work_sources, ci_wake=ci_wake,
                            check_result_wake=check_result_wake,
-                           held_at_capacity=held_at_capacity, persistent_exec=persistent_exec,
+                           persistent_exec=persistent_exec,
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds,

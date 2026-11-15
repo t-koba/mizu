@@ -382,27 +382,13 @@ required). Operator tooling that concatenates configs
 
 ## Limits
 
-`open_work_items = 100` is a provisional congestion bound, not a measured
-optimum; tune it to project capacity or set it to 0 to disable. It is independent
-of prompt pagination or producer admission: the work-item cap always refuses
-new seeds at capacity, while a role is held before execution only when its
-`held_at_capacity` policy is enabled (see below). The authoritative
-count is replayed from WorkItems seeds and current revision chains under the
-project insights record lock; there is no separate quota ledger. Multi-task
-manifests check their entire new-seed delta or commit nothing. Reducing the
-configured cap never deletes, drops, or changes existing items.
-
-A capacity refusal raises typed `OpenWorkItemsFull` (a `Denied`, not a run/spend
-limit), with `current_count`, `limit`, and `requested_delta` attributes and an
-`evidence` object containing those fields and `type`. Tool error text names the
-type and all three values. It commits neither a decision nor a seed and leaves
-the input unchanged. The writer must defer, reject, or accept with
-`work_item_intent="none"` and merge into existing work instead of creating more.
-Exact committed replays succeed even when full; conflicting retries still fail.
-Other storage/validation failures remain fail-closed. No automatic retry or
-background reservation is made; retry a refused request after capacity returns
-(or after an operator changes configuration). Tool calls retain their normal
-request/tool accounting. Terminal transitions remain available at capacity.
+Work-item creation has no project-wide backlog cap. Direct creation,
+accept/modify decisions (including multi-task manifests), and legacy
+reconciliation remain atomic and idempotent regardless of the existing number
+of open, doing, or blocked items. Request, manifest, storage, and page bounds
+still apply; invalid or corrupt state fails closed. The writer chooses what
+to accept, merge, defer, or reject using the current bounded work-load view.
+Per-role `work_items_doing` limits constrain active execution, not accepted work.
 
 `producer_inputs_per_source = 20` is a provisional congestion threshold, not a
 measured optimum; tune it to project capacity or set it to 0 to disable. It
@@ -411,12 +397,9 @@ holds only configured non-writer project roles that carry the
 defer, or reject input at capacity), before any model or run-slot use, when the
 role-name source's current unresolved live input count (undecided plus deferred revisions;
 resolved revisions and archive-only history excluded) reaches the per-source
-limit. This per-source bound remains independent of the role's open-work
-policy. A non-writer producer is also held when the authoritative
-open/doing/blocked count reaches `open_work_items` only if that role sets
-`roles.<name>.held_at_capacity = true`; the boolean defaults to false. The
-work-item cap still refuses new seeds regardless of this setting. Operator,
-vcs, and editor input channels are never role names, so they are never held.
+limit. Open/doing/blocked work is visibility, not an admission threshold.
+Operator, vcs, and editor input channels are never role names, so they are
+never held.
 The check applies to direct, scheduled, event-triggered, and daemon admission,
 and runs before any event or cursor is acknowledged; a held attempt claims no
 run directory, slot, or lock, consumes no event, and leaves every pending input
@@ -451,10 +434,8 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `run_seconds` | Whole-unit monotonic wall deadline, default `1200`, integer 1–1,073,741,824 seconds. `roles.<name>.run_seconds` inherits when unset; integer 0 disables only that role's whole-unit wall, and positive integers up to the same maximum override it. Resolved once per Context, never renewed by selector fallback |
 | `model_request_seconds` | Positive finite logical-request deadline, default `1200`, integer 1–1,073,741,824 seconds; no role override. Host-enforced independently of the whole-unit wall. Pi/pi-durable: each admitted `model_request`; Claude: enclosing query; Codex: enclosing turn, not every opaque provider HTTP subcall |
 | `command_seconds` | Deadline for each individual container command (unchanged by role wall overrides) |
-| `open_work_items` | Per-project cap on newly seeded nonterminal work (open/doing/blocked); integer 0–1,073,741,824, provisional default 100; 0 disables. Existing over-limit items are preserved. Done/dropped do not count. Checked atomically with direct creation, accept/modify single or multi-task decisions, and legacy reconciliation to open. Exact committed retries and zero-seed decisions remain allowed |
-| `producer_inputs_per_source` | Per-source cap on unresolved live producer inputs per configured `submit_insight` role (undecided plus deferred; resolved and archive-only history excluded); integer 0–1,073,741,824, provisional default 20; 0 disables. Existing over-limit inputs are preserved; only the next direct, scheduled, event-triggered, or daemon admission for that role is held. This limit is independent of the open-work hold policy. Held attempts consume no events; resume happens only through existing schedules or subscriptions |
-| `roles.<name>.held_at_capacity` | Explicit boolean opt-in (default `false`) for a non-writable role with `submit_insight`: also hold its next admission when open/doing/blocked WorkItems reach `open_work_items`. Does not affect per-source holds or the work-item seed cap; invalid/non-boolean values fail configuration load |
-| `roles.<name>.context_sections` | Inline table `{include = [...], exclude = [...]}` of optional unit-prompt sections (default empty). Optional sections: `open_work_items`, `ready_work`, `work_order`, `check_jobs`, `insights`, `research`, `ci`, `acceptance`, `report`. Default: `open_work_items` and `ready_work` are sent only to roles holding a work-item capability (`work_items_read`, `work_items_create`, `work_items_transition`, `work_items_legacy_read`, `work_items_reconcile`, `work_order`); every other section keeps its own capability-gated content (empty without the capability). `include` restores a section, `exclude` removes its keys; keys that deliver instructions or obligations (decisions, work-item events, waits, obligations, operator records, snapshot pins, run, clock) are never optional. Unknown or fixed names, duplicates, and a name in both lists fail configuration load. Rows of an excluded section do not count as shown to a later resumed delta |
+| `producer_inputs_per_source` | Per-source cap on unresolved live producer inputs per configured `submit_insight` role (undecided plus deferred; resolved and archive-only history excluded); integer 0–1,073,741,824, provisional default 20; 0 disables. Existing over-limit inputs are preserved; only the next direct, scheduled, event-triggered, or daemon admission for that role is held. Held attempts consume no events; resume happens only through existing schedules or subscriptions |
+| `roles.<name>.context_sections` | Inline table `{include = [...], exclude = [...]}` of optional unit-prompt sections (default empty). Optional sections: `open_work_items`, `ready_work`, `work_order`, `check_jobs`, `insights`, `research`, `ci`, `acceptance`, `report`. Default: `open_work_items` is sent to insight producers (`submit_insight`), decision makers (`decide`), and roles holding a work-item capability (`work_items_read`, `work_items_create`, `work_items_transition`, `work_items_legacy_read`, `work_items_reconcile`, `work_order`); `ready_work` is sent only to roles holding a work-item capability; every other section keeps its own capability-gated content (empty without the capability). `include` restores a section, `exclude` removes its keys; keys that deliver instructions or obligations (decisions, work-item events, waits, obligations, operator records, snapshot pins, run, clock) are never optional. Unknown or fixed names, duplicates, and a name in both lists fail configuration load. Rows of an excluded section do not count as shown to a later resumed delta |
 | `work_items_doing` | Per-role active `doing` cap (integer 1–100; default 1). `roles.<name>.work_items_doing` overrides this default with the same bounds. Checked under the transition CAS lock when entering `doing` or transferring a `doing` hold to a different role, counting validated holder state across all items, not just a page. Blocked waits consume no slot; existing over-limit records remain readable and may leave `doing` or receive same-holder scope/delivery revisions |
 | `work_items_stale_seconds` | Uninterrupted `doing` age at which `doing_stale` becomes true (integer 1–31,536,000; default 86,400 / 24 hours). Review visibility only, not origin staleness, expiry, reassignment, authorization or scheduling |
 | `operator_record_catalog_scan_entries` | Directory-entry budget for work-item `record_closed` closure lookup only (positive TOML integer, maximum 9,223,372,036,854,775,807; default 2048). Counts canonical, legacy and disposable catalog directories, including unrelated/staging entries. Exhaustion (even at exact EOF), corruption or unavailability yields unknown liveness, never an open/closed claim. Existing Insight answer lookup and host listing bounds are unchanged. |
@@ -616,7 +597,7 @@ failure behavior. A valid finish seal remains separate from adapter settlement
 and all final integrity/verification/publication checks still apply.
 
 
-All limits are positive integers except `lock_timeout_seconds`, `open_work_items`, `decision_receipt_diagnostics`, `queue_observations`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `writer_no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `readiness_recheck_seconds`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
+All limits are positive integers except `lock_timeout_seconds`, `decision_receipt_diagnostics`, `queue_observations`, `producer_inputs_per_source`, `delegate_wrap_up_requests`, `delegate_wrap_up_tools`, `daily_requests`, `shared_daily_requests`, `max_failures`, `busy_retry_seconds`, `admission_wait_seconds`, `no_progress_continuations`, `no_progress_backoff_seconds`, `writer_no_progress_backoff_seconds`, `missing_finish_followups`, `safe_point_yield_quantum`, `readiness_recheck_seconds`, `free_disk_mb`, `retention_days`, `run_retention_days`, `snapshot_retention_days`, `automatic_prune_interval_seconds`, `automatic_smoke_retention_interval_seconds`, `event_log_compress_days`, `event_log_retention_days`, `session_max_tokens`, `session_max_age_seconds`, and adapter `diagnostic_bytes`, which may be zero. `missing_finish_counts_as_failure`, `drain_yield`, and `lock_diagnostics` are booleans. `session_max_cost_usd` is a number (integer or float) which may be zero.
 
 ### Operator-invoked run retention
 
@@ -1875,7 +1856,7 @@ A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`
 256 characters), `on_change`,
 `decision_events` (at most 8 unique lowercase decision actions, never
 `withdraw`), `work_item_events` (unique `done`/`dropped` values, default `[]`) plus `ci_wake` (whether a red on the configured CI wake set wakes
-this role: default true for writable roles, false otherwise), `held_at_capacity` (whether this non-writable `submit_insight` role opts into an open-work producer hold; default false, independent of per-source holds), and `decision_sources` (`own` default routing only this role's findings,
+this role: default true for writable roles, false otherwise), and `decision_sources` (`own` default routing only this role's findings,
 `any` routing matching actions from any source so a resolver runs on each new
 deferral) and `work_item_sources` (terminal routing by origin submitter;
 `own`/`any`, default/migration rules in

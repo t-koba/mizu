@@ -882,9 +882,11 @@ closed. This projection does not yet gate internal transitions.
 
 `page_open(cursor=None, limit=25)` is the bounded page reader used by the
 explicitly granted `work_items_read` operation and by the project-wide
-`open_work_items` prompt projection. Every full and delta prompt includes the
-same bounded rows regardless of role grants, capped by `limits.work_items_prompt`
-(default 20, range 1–100); the runtime calls the fail-closed reader directly,
+`open_work_items` prompt projection. Full and delta prompts use the same
+bounded page, capped by `limits.work_items_prompt` (default 20, range 1–100).
+Insight producers, decision makers, and work-item roles receive it by default;
+`roles.<name>.context_sections` can include or exclude it. The runtime calls
+the fail-closed reader directly,
 so store errors are not converted into empty inventory. The explicitly granted
 read-only tool defaults to 25 rows and accepts an optional opaque cursor (at
 most 128 characters) and limit (1–100). Local recorded content may be
@@ -1531,7 +1533,7 @@ command blindly, run `git reset --hard`, or manufacture a successful observation
 
 The runtime prompt carries only protocol framing (goal, anchored snapshot
 references, capability-gated pending insights and acceptance commands, the
-bounded `open_work_items` page for roles holding a work-item capability (`roles.<name>.context_sections` restores or removes optional sections), then trailing volatile `run`,
+bounded `open_work_items` page for insight producers, decision makers, and roles holding a work-item capability (`roles.<name>.context_sections` restores or removes optional sections), then trailing volatile `run`,
 `now`, and `timezone` fields so repeated stable content forms a longer cacheable
 prefix); sealing
 is directed by the `finish` tool contract. Each run

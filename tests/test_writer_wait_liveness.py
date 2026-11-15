@@ -669,9 +669,8 @@ class WriterParkingTests(Fixture):
         # prompt display setting; a real 101-row ready set is incomplete.
         from mizu.work_items import MAX_OPEN_PAGE_ROWS
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, work_items_prompt=1, open_work_items=MAX_OPEN_PAGE_ROWS + 1))
+            self.config.limits, work_items_prompt=1))
         self.project.config = self.config
-        self.project.insights.open_work_items = MAX_OPEN_PAGE_ROWS + 1
         for index in range(MAX_OPEN_PAGE_ROWS + 1):
             self.ready(f"overflow-{index}")
         with self.assertRaisesRegex(Denied, "evidence unavailable or incomplete"):

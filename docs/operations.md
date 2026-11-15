@@ -1148,44 +1148,33 @@ the qpx ledger from this repository, or patch an installed runtime. The template
 authorizes no deployment and does not assert that this recovery has been run.
 
 
-## Open-work capacity
+## Work-load visibility
 
-`[limits].open_work_items` caps new nonterminal WorkItems per project (provisional
-default **100**, **0 disables**). Open, doing, and blocked items count; done and
-dropped do not. Lowering the cap below the current backlog preserves all items
-and their lifecycle operations, but refuses new seeds until enough work closes.
-The cap is independent of prompt page size and FIFO order; producer admission can also hold explicitly opted-in roles at this cap (see Producer admission below).
-
-On `OpenWorkItemsFull`, inspect the reported `current_count`, `limit`, and
-`requested_delta`; the refused decision/create/reconcile committed no new work.
-Use the paginated `work_items_read` view to review existing work. Defer or reject
-the input, or accept with `work_item_intent="none"` and merge its scope into an
-existing item through the usual CAS transition. Multi-task decisions are
-all-or-nothing: do not assume any subset committed. An exact retry of an already
-committed request is safe even at capacity. Completing or dropping items releases
-capacity immediately for subsequent transactions; no separate quota reset is
-needed.
+There is no project-wide cap on accepted work. Review the bounded
+`open_work_items` page in full and delta prompts: insight producers, decision
+makers, and work-item roles receive its current `total`, `overflow_count`,
+truncation/cursor metadata, and at most `[limits].work_items_prompt` rows by
+default. `roles.<name>.context_sections` can include or exclude this section.
+Use paginated `work_items_read` when granted to inspect further work. The
+writer decides which work to accept, merge, defer, or reject; active `doing`
+slots remain limited separately. Direct create, seeded decisions, and legacy
+reconciliation remain all-or-nothing with exact retry semantics. Validation,
+manifest byte/task bounds, and corrupt-state refusals still apply.
 
 ## Producer admission
 
 `[limits].producer_inputs_per_source` holds congested producers (provisional
-default **20**, **0 disables**). Both numbers are congestion thresholds chosen
-from current project evidence, not measured optima: the default per-source
-bound 20 matches the highest observed per-source count among the current 53
-unresolved live proposals, and the open-work default 100 stays above the
-current 56 seeded open/doing/blocked items. Tune either to project capacity.
+default **20**, **0 disables**). This is a provisional congestion threshold,
+not a measured optimum; tune it to project capacity.
 
 Only configured non-writer project roles that hold `submit_insight` are gated;
 the writer remains free to resolve, merge, defer, or reject input at capacity.
 The gate runs before any model or run-slot use, when their role-name source's current unresolved live
 input count (undecided plus deferred; resolved and archive-only history
-excluded) reaches the per-source limit or the authoritative open/doing/blocked
-count reaches `open_work_items` only for a role with the explicit
-`roles.<name>.held_at_capacity = true` opt-in (default false). The per-source
-threshold remains independent; disabling the open-work hold does not disable
-it, and the work-item seed cap still applies to all roles. `mizu status`
+excluded) reaches the per-source limit. The open-work count is visibility,
+not a producer gate. `mizu status`
 reports each held role in `backpressure.held` with its reason and a `thresholds`
-map containing the exact configured bound(s). Operator, vcs, and
+map containing the exact configured bound. Operator, vcs, and
 editor input channels are never role names, so they are never held. The check applies to direct,
 scheduled, event-triggered, and daemon admission, and runs before any event or
 cursor is acknowledged; a held attempt (`skipped: producer-held`) claims no
@@ -1202,17 +1191,18 @@ stores (decision history receipts, work-item events, waits, CI wake state)
 instead of a duplicate queue or an implicit schedule. The next ordinary
 schedule tick, interval/calendar firing, event trigger with pending input, or
 daemon readiness re-evaluation admits the producer once its counts drop below
-the limits (after inputs are decided or open work closes) or after an operator
+the per-source limit (after inputs are decided) or after an operator
 raises or disables a limit. No separate wake is added and none is needed.
 
-`mizu status` reports the congestion view under `backpressure`: both
-configured limits, the current open-work count, per-producer unresolved input
-counts, held producers, and hold reasons (`per_source_full`, `open_work_full`,
+`mizu status` reports the congestion view under `backpressure`: the
+configured per-source limit, the current open-work count, per-producer
+unresolved input counts, held producers, and hold reasons (`per_source_full`,
 `load_unavailable`). Counts come only from the current project's Insights live
 inbox and WorkItems ledger; no private or ignored state is read. Status
-attempts both current counts even when their bound is 0. An unreadable metric
-is reported as `null` with `load_ok: false`; it holds a producer only when
-that metric's bound is enabled (invalid limits also hold fail-closed).
+attempts both current counts even when the per-source bound is 0. An unreadable
+metric is reported as `null` with `load_ok: false`; it holds a producer only
+when the enabled per-source metric is unavailable (invalid limits also hold
+fail-closed).
 Admission counting rejects unsafe, unreadable, oversized or malformed live
 rows and decisions, including ID/filename mismatches and invalid revisions
 or decision actions; tolerant prompt/list projections are unchanged.

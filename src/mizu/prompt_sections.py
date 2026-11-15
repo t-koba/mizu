@@ -34,7 +34,8 @@ class Section:
 
 
 SECTIONS: dict[str, Section] = {
-    "open_work_items": Section(("open_work_items",), WORK_CAPABILITIES, False),
+    "open_work_items": Section(("open_work_items",),
+                               WORK_CAPABILITIES | {"submit_insight", "decide"}, False),
     "ready_work": Section(("ready_work",), WORK_CAPABILITIES, False),
     "work_order": Section(("work_order",), frozenset({"work_order"}), True),
     "check_jobs": Section(("check_jobs", "check_continuation", "shared_checks", "check_discovery"),

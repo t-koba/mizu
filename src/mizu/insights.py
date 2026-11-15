@@ -436,7 +436,7 @@ MAX_EVIDENCE_CHARS = 8192
 class Insights:
     def __init__(self, root: Path, maximum: int = PREVIEW_BYTES, retention_days: int = 31, *,
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
-                 cursor_ttl_seconds: int = 86400, open_work_items: int = 100,
+                 cursor_ttl_seconds: int = 86400,
                  producer_inputs_per_source: int = 20,
                  decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS,
                  decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS,
@@ -447,7 +447,6 @@ class Insights:
         self.ledger = Ledger(root)
         self.ledger.attach(INSIGHTS, InsightSource(self))
         self.retention_days = retention_days
-        self.open_work_items = open_work_items
         self.producer_inputs_per_source = producer_inputs_per_source
         self.cursor_ttl_seconds = cursor_ttl_seconds
         if (type(decision_projection_records) is not int
@@ -1274,7 +1273,6 @@ replacement insight without implying rejected substance.
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
             seeds = record.get("work_items", [record["work_item"]] if "work_item" in record else [])
-            store.require_open_capacity(len(seeds))
             if work_items is not None:
                 _validate_keyed_substantive_event(record, insight_id, rev, key, current["title"])
             store.prepare_decision_write(need_wait=(registered is not None))

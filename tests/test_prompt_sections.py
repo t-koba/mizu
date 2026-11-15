@@ -15,7 +15,7 @@ WORK = ("work_items_read", "work_items_create", "work_items_transition",
 class PromptSectionTests(Fixture):
     def judge(self, **extra):
         ctx = self.context("reviewer")
-        caps = tuple(c for c in ctx.role.capabilities if c not in WORK) + ("check_job",)
+        caps = tuple(c for c in ctx.role.capabilities if c not in WORK + ("submit_insight", "decide")) + ("check_job",)
         ctx.role = dataclasses.replace(ctx.role, capabilities=caps, **extra)
         return ctx
 
@@ -32,6 +32,25 @@ class PromptSectionTests(Fixture):
         with_inventory = self.context("reviewer")
         full = len(prompt_for(with_inventory))
         self.assertLess(len(prompt_for(ctx)), full)
+
+    def test_producers_deciders_and_writer_receive_bounded_work_load(self):
+        from mizu.config import load
+        self.file.write_text(self.file.read_text().replace("work_items_prompt = 20", "work_items_prompt = 1"))
+        self.config = load(self.file)
+        self.project.config = self.config
+        for index in range(2):
+            self.project.work_items.create(idempotency_key=str(index), title="Existing", actor="worker")
+        for capability in ("submit_insight", "decide"):
+            ctx = self.judge()
+            ctx.role = dataclasses.replace(ctx.role, capabilities=(capability,))
+            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+                payload = json.loads(builder(ctx, *args))
+                page = payload["open_work_items"]
+                self.assertEqual((len(page["items"]), page["total"], page["overflow_count"]), (1, 2, 1))
+                self.assertNotIn("ready_work", payload)
+        for role in ("worker", "searcher"):
+            page = json.loads(prompt_for(self.context(role)))["open_work_items"]
+            self.assertEqual((len(page["items"]), page["total"]), (1, 2))
 
     def test_every_key_belongs_to_one_section_or_is_fixed(self):
         seen = [k for s in prompt_sections.SECTIONS.values() for k in s.keys]
