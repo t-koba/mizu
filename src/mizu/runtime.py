@@ -5101,7 +5101,7 @@ def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=Tru
         current = _wall(target.get(key))
         if current is None or seen > current:
             target[key] = seen
-    if isinstance(shared.get("ci_wait_cursor"), str):
+    if isinstance(shared.get("ci_wait_cursor"), (str, list)):
         state["ci_wait_cursor"] = shared["ci_wait_cursor"]
     if "proposal_cursor" in shared:
         stored_cursor = shared.get("proposal_cursor")

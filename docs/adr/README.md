@@ -139,7 +139,7 @@ Daemon upstream and CI polling require `vcs.poll_enabled` plus a command, at the
 cadence. One project polls once per tick under a lock with shared poll state; over-long branch
 lists and timeouts become poll events rather than daemon failures. Cadence and caps are policy:
 `poll_interval_seconds` 300, `poll_status_timeout_seconds` 15, `poll_fetch_timeout_seconds` 30,
-`poll_max_branches` 4 (see `[vcs]` in `docs/configuration.md`); worst case ~90 s per tick at defaults.
+`poll_max_branches` 4 plus `poll_max_ci_wait_targets` 16 for distinct receipt-resolved branch/SHA pairs (see `[vcs]` in `docs/configuration.md`). Calls are bounded but the serial worst case can exceed the 300 s default cadence.
 
 ## ADR-022 — Per-project request budget with an optional shared total
 Day-files keep a shared aggregate plus a per-project map, so `daily_requests` caps each project
@@ -173,7 +173,7 @@ blocking lock deadlines were later moved to `[limits].lock_timeout_seconds` by A
 |---|---|---|---|
 | `SMOKE_REQUESTS/TOOLS/SECONDS` (`smoke.py`) | 4 / 5 / 120 s | Stays fixed | Paid spend cap with one benign-listing margin; opening it opens spend |
 | Infra-wait classes (`Busy`/`InfraExceeded` defer, `LimitExceeded` counts) | type-based | Stays fixed | Fault taxonomy prevents hiding real faults; operator controls brake via `max_failures` plus budget/disk thresholds |
-| `POLL_CALL/FETCH_TIMEOUT_CAP`, `MAX_CI_BRANCHES` (`runtime.py`) | 15 s / 30 s / 4 | Moves to policy | Per-tick liveness bound keeps the daemon responsive; now `[vcs] poll_status_timeout_seconds`, `poll_fetch_timeout_seconds`, `poll_max_branches` with the same defaults (worst case ~90 s at defaults) |
+| `POLL_CALL/FETCH_TIMEOUT_CAP`, `MAX_CI_BRANCHES`, `MAX_CI_WAIT_TARGETS` (`vcs_poll_policy.py`) | 15 s / 30 s / 4 / 16 | Moves to policy | Bounded per-call and per-tick work; `[vcs] poll_status_timeout_seconds`, `poll_fetch_timeout_seconds`, `poll_max_branches`, and `poll_max_ci_wait_targets`. Distinct branch/SHA wait reads are shared across waiters; the serial all-timeout case can exceed the 300 s cadence. |
 | `poll_interval_seconds`, `pending_insights`, `prompt_snapshots`, `history_index`, `retention_days`, event-log days | configured | Already policy | Existing `[limits]`/`[vcs]` knobs with documented defaults |
 | `PREVIEW_BYTES`, `READ_PAGE_CHARS`, `MAX_FRAME`, `SCRIPT_MAX`, insight/report/finish/consult/search sizes | 128 KiB / 8,192 chars / 1 MiB / 64 KiB / 60 KiB / 48 KiB / 12+32 KiB / 8 KiB+8 / 1k+4k | Stays fixed | Framing and memory safety: unbounded reads or messages risk OOM and protocol desync |
 | `MAX_WEB_WORKER_INPUT_BYTES` (`web_worker.py`) | 3 MiB | Stays fixed | Covers 2x canonical expansion of the 1 MiB TOML budget plus escaped valid probe input; parent and child reject overflow before parsing |

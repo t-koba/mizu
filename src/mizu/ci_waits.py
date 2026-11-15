@@ -1,6 +1,6 @@
 """Snapshot- or receipt-pinned work-item CI waits; host-only observation, never publication.
 
-At most poll_max_branches adapter calls per due tick, rotating by item/revision/candidate snapshot.
+At most poll_max_ci_wait_targets adapter calls per due tick, rotating by exact branch/SHA.
 Ledger scans stream with O(limit) retained rows. Evidence is create-only, bounded
 and no-follow; exact digest acknowledgements follow successful run completion.
 All decisions still belong to the holder: neither observation nor ack transitions
@@ -117,7 +117,7 @@ def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_d
 
 
 def _complete_status(wait, data):
-    """No partial/unknown observation can resolve a pre-publication wait."""
+    """No partial/unknown observation can resolve a CI wait."""
     return (isinstance(data, dict)
             and data.get("branch", wait["branch"]) == wait["branch"]
             and data.get("sha", wait["sha"]) == wait["sha"]
@@ -176,7 +176,10 @@ def _read(store, item):
 
 def terminal(wait, data):
     """Only the declared set, exactly once per name and exact revision."""
-    rows = parse_status_checks(data)
+    return _terminal_rows(wait, parse_status_checks(data))
+
+
+def _terminal_rows(wait, rows):
     selected = []
     for name in wait["checks"]:
         matches = [row for row in rows if row["check"] == name]
@@ -655,61 +658,80 @@ def _poll_error_code(exc):
     return "invalid"
 
 
+def _poll_candidates(store, descendants, errors, limit):
+    """Stream eligible receipt-resolved candidates, retaining no waiter list."""
+    for item in _items(store):
+        try:
+            if _evidence(store, item) is not None:
+                continue
+        except (Denied, LimitExceeded, OSError, ValueError) as exc:
+            # Never overwrite invalid immutable evidence or query it.
+            if len(errors) < limit:
+                errors.append(_poll_error_code(exc))
+            continue
+        for _, candidate in _candidates(store, item, descendants):
+            try:
+                wait = _candidate_wait(store, item["wait"], candidate)
+                if wait is not None:
+                    yield item, candidate, wait
+            except (Denied, LimitExceeded, OSError, ValueError) as exc:
+                if len(errors) < limit:
+                    errors.append(_poll_error_code(exc))
+
+
 def poll(config, project, state, *, now, interval, reader=None):
     from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
-                                  vcs_poll_max_branches, vcs_poll_status_timeout)
+                                  vcs_poll_max_ci_wait_targets, vcs_poll_status_timeout)
     from .vcs import read_via
     if not config.vcs.get("poll_enabled") or not config.vcs.get("command"):
         return None
     if not upstream_fetch_due(state.get("last_ci_wait_poll"), now, interval):
         return None
     state["last_ci_wait_poll"] = now
-    limit = vcs_poll_max_branches(config)
-    cursor = state.get("ci_wait_cursor", "")
-    if not isinstance(cursor, str):
-        cursor = ""
-    # Two bounded heaps implement a wrap-around window without storing the ledger.
-    after, before = [], []
+    limit = vcs_poll_max_ci_wait_targets(config)
+    cursor = state.get("ci_wait_cursor")
+    # Legacy item/revision/candidate strings have a different ordering. Restart
+    # their window safely; subsequent ticks use only exact target pairs.
+    cursor = (tuple(cursor) if isinstance(cursor, list) and len(cursor) == 2
+              and all(isinstance(part, str) for part in cursor) else ())
+    after, before = set(), set()
     errors = []
+    store = project.work_items
+    descendants = config.vcs.get("ci_wait_descendants", True)
     try:
-        for item in _items(project.work_items):
-            try:
-                if _evidence(project.work_items, item) is not None:
-                    continue
-            except (Denied, LimitExceeded, OSError, ValueError) as exc:
-                # Never overwrite invalid immutable evidence or spend adapter calls on it.
-                if len(errors) < limit:
-                    errors.append(_poll_error_code(exc))
-                continue
-            for sid, candidate in _candidates(project.work_items, item,
-                    config.vcs.get("ci_wait_descendants", True)):
-                token = f"{item['id']}:{item['rev']:020d}:{sid}"
-                bucket = after if token > cursor else before
-                # Negated numeric identity tuple gives a bounded max-heap.
-                key = (-int(item["id"][3:], 16), -item["rev"], -int(sid or "0", 16))
-                entry = (key, token, item, candidate)
-                if len(bucket) < limit:
-                    heapq.heappush(bucket, entry)
-                elif key > bucket[0][0]:
-                    heapq.heapreplace(bucket, entry)
-        targets = (sorted(after, reverse=True) + sorted(before, reverse=True))[:limit]
+        for _, _, wait in _poll_candidates(store, descendants, errors, limit):
+            target = (wait["branch"], wait["sha"])
+            bucket = after if target > cursor else before
+            bucket.add(target)
+            if len(bucket) > limit:
+                bucket.remove(max(bucket))
+        targets = (sorted(after) + sorted(before))[:limit]
+        # Advance the selected window even when reads fail or waiters change.
+        if targets:
+            state["ci_wait_cursor"] = list(targets[-1])
+        targets = set(targets)
+        # Lazily read while streaming so the triggering waiter's revision is
+        # captured before its adapter call and revalidated afterwards. Cache
+        # failures too: no selected pair is queried twice in this tick.
+        responses = {}
         observed = 0
-        for _, token, item, candidate in targets:
-            state["ci_wait_cursor"] = token  # advance even if the adapter fails
+        for item, candidate, wait in _poll_candidates(store, descendants, errors, limit):
+            target = (wait["branch"], wait["sha"])
+            if target not in targets:
+                continue
             try:
-                wait = _candidate_wait(project.work_items, item["wait"], candidate)
-                if wait is None:
+                if target not in responses:
+                    responses[target] = None
+                    params = {"branch": wait["branch"], "sha": wait["sha"]}
+                    data = (reader(config.vcs, "status", params) if reader else read_via(
+                        capped_vcs_settings(config.vcs, vcs_poll_status_timeout(config)),
+                        "status", params, preserve_status_rows=True))
+                    if _complete_status(params, data):
+                        responses[target] = parse_status_checks(data)
+                status_rows = responses[target]
+                if status_rows is None:
                     continue
-                # Preserve mismatched rows for fail-closed declared-set evaluation.
-                params = {"branch": wait["branch"], "sha": wait["sha"]}
-                data = (reader(config.vcs, "status", params) if reader else read_via(
-                    capped_vcs_settings(config.vcs, vcs_poll_status_timeout(config)),
-                    "status", params, preserve_status_rows=True))
-                if wait["kind"] == "publication_ci" and not _complete_status(wait, data):
-                    continue
-                if data.get("branch", wait["branch"]) != wait["branch"]:
-                    continue
-                rows = terminal(wait, data)
+                rows = _terminal_rows(wait, status_rows)
                 if rows is None:
                     continue
                 with lock(project.root / "locks" / "insights.lock"):

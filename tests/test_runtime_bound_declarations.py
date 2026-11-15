@@ -762,6 +762,7 @@ DECLARATIONS = {
     },
     'vcs_poll_policy.py': {
         'MAX_CI_BRANCHES': ('4', 'configured policy', 'VCS polling / fail-closed fallback for poll_max_branches'),
+        'MAX_CI_WAIT_TARGETS': ('16', 'configured policy', 'CI waits / fail-closed fallback for poll_max_ci_wait_targets'),
         'POLL_CALL_TIMEOUT_CAP': ('15', 'configured policy', 'VCS polling / fail-closed fallback for poll_status_timeout_seconds'),
         'POLL_FETCH_TIMEOUT_CAP': ('30', 'configured policy', 'VCS polling / fail-closed fallback for poll_fetch_timeout_seconds'),
         'DEFAULT_VCS_POLL_INTERVAL_SECONDS': (
@@ -1163,8 +1164,9 @@ CONFIGURED_SETTINGS = {
         'poll_interval_seconds': ('DEFAULT_VCS_POLL_INTERVAL_SECONDS', 'configured policy',
                                   'VCS polling / cadence default shared with the defensive policy helper'),
         'poll_max_branches': ('4', 'configured policy', 'VCS polling / branches considered per daemon tick'),
+        'poll_max_ci_wait_targets': ('16', 'configured policy', 'CI waits / unique exact branch/SHA targets per daemon tick'),
         'poll_fetch_timeout_seconds': ('30', 'configured policy', 'VCS polling / upstream fetch timeout default'),
-        'poll_status_timeout_seconds': ('15', 'configured policy', 'VCS polling / per-branch status timeout default'),
+        'poll_status_timeout_seconds': ('15', 'configured policy', 'VCS polling / per-status-call timeout default'),
         'ci_rewake_seconds': ('1800', 'configured policy',
                               'VCS CI wake / unchanged-red re-wake interval default'),
     },
@@ -2411,7 +2413,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_requests.py', '_validated_outcome', 0, 0): (
         '1', 'format',
         'Legacy CI timeout outcome / validate the stored positive duration without applying time policy'),
-    ('ci_waits.py', 'terminal', 1, 0): (
+    ('ci_waits.py', 'poll', 1, 0): (
+        '2', 'format', 'CI wait cursor / exact branch and SHA pair, not a legacy item token'),
+    ('ci_waits.py', '_terminal_rows', 1, 0): (
         '1', 'safety',
         'CI terminal observation / each declared check name must match exactly one result'),
     ('ci_waits.py', 'diagnose', 1, 0): (
@@ -4087,9 +4091,10 @@ def no_defaults(limit, /, count, *, size):
                     for key, value in zip(assignment.value.keys, assignment.value.values)
                     if isinstance(key, ast.Constant)}
         self.assertEqual(
-            {name: policy[name] for name in ('MAX_CI_BRANCHES', 'POLL_CALL_TIMEOUT_CAP',
+            {name: policy[name] for name in ('MAX_CI_BRANCHES', 'MAX_CI_WAIT_TARGETS', 'POLL_CALL_TIMEOUT_CAP',
                                               'POLL_FETCH_TIMEOUT_CAP')},
             {'MAX_CI_BRANCHES': defaults['poll_max_branches'],
+             'MAX_CI_WAIT_TARGETS': defaults['poll_max_ci_wait_targets'],
              'POLL_CALL_TIMEOUT_CAP': defaults['poll_status_timeout_seconds'],
              'POLL_FETCH_TIMEOUT_CAP': defaults['poll_fetch_timeout_seconds']})
         self.assertEqual(wake['DEFAULT_CI_REWAKE_SECONDS'], defaults['ci_rewake_seconds'])

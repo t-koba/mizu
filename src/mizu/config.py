@@ -2012,7 +2012,7 @@ def load(file: Path) -> Config:
     keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
                "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
                "poll_enabled", "poll_proposals_enabled", "ci_wait_descendants",
-               "poll_interval_seconds", "poll_max_branches",
+               "poll_interval_seconds", "poll_max_branches", "poll_max_ci_wait_targets",
                "ci_cache_max_branches", "ci_cache_max_checks_per_branch",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
                "retire_grant", "owned_prefixes", "protected_refs",
@@ -2022,7 +2022,7 @@ def load(file: Path) -> Config:
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
            "poll_enabled": False, "poll_proposals_enabled": False, "ci_wait_descendants": True,
-           "poll_interval_seconds": DEFAULT_VCS_POLL_INTERVAL_SECONDS, "poll_max_branches": 4,
+           "poll_interval_seconds": DEFAULT_VCS_POLL_INTERVAL_SECONDS, "poll_max_branches": 4, "poll_max_ci_wait_targets": 16,
            "ci_cache_max_branches": DEFAULT_CI_CACHE_MAX_BRANCHES,
            "ci_cache_max_checks_per_branch": DEFAULT_CI_CACHE_MAX_CHECKS_PER_BRANCH,
            "poll_fetch_timeout_seconds": 30,
@@ -2082,6 +2082,7 @@ def load(file: Path) -> Config:
     vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")
     number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
     number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)
+    number(vcs["poll_max_ci_wait_targets"], "vcs.poll_max_ci_wait_targets", 1, 64)
     number(vcs["poll_fetch_timeout_seconds"], "vcs.poll_fetch_timeout_seconds", 1, 300)
     number(vcs["poll_status_timeout_seconds"], "vcs.poll_status_timeout_seconds", 1, 300)
     mat = data.get("materialize", {})

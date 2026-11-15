@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import uuid
+import weakref
 from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver, without_blocked_age, forget_ledger
@@ -23,7 +24,7 @@ class CiWaitFixture(Fixture):
     def setUp(self):
         super().setUp()
         self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
-            "poll_enabled": True, "command": ["configured-adapter"], "poll_max_branches": 2})
+            "poll_enabled": True, "command": ["configured-adapter"], "poll_max_ci_wait_targets": 2})
         self.project = Project(self.config, "sample")
         self.store = self.project.work_items
         self.publication = Publication(self.project.root, "a" * 40, "c" * 64, "published", "push",
@@ -637,20 +638,84 @@ class CiWaitTests(CiWaitFixture):
             self.acknowledge_delivery(old_context, old)
         self.assertEqual(ci_waits.pending(self.store, "reviewer"), fresh)
 
+    def test_poll_streams_duplicate_waiters_without_retaining_a_waiter_list(self):
+        template = self.block()
+        live = weakref.WeakValueDictionary()
+        class TrackedItem(dict):
+            pass
+        def items(_store):
+            for i in range(1000):
+                item = TrackedItem(template)
+                live[i] = item
+                # Only the generator and current loop item may remain live,
+                # independently of how many duplicate waiters were scanned.
+                self.assertLessEqual(len(live), 3)
+                yield item
+        with patch.object(ci_waits, '_items', new=items), \
+                patch.object(ci_waits, '_evidence', new=lambda *_args: None):
+            result, reader = self.poll(rows=[])
+        reader.assert_called_once()
+        self.assertEqual((result['polled'], result['observed']), (1, 0))
+        self.assertEqual(len(live), 0)
+
+    def test_duplicate_pair_waiters_share_read_with_separate_declared_set_evidence(self):
+        first = self.block("unit", wait={**self.wait, "checks": ["unit"]})
+        second = self.block("lint", actor="reviewer", wait={**self.wait, "checks": ["lint"]})
+        pending = self.block("missing", wait={**self.wait, "checks": ["absent"]})
+        result, reader = self.poll(rows=self.rows()[:1] + self.rows("failure")[1:])
+        reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
+        self.assertEqual(result["polled"], 1)
+        self.assertEqual(result["observed"], 2)
+        for item, name, conclusion in ((first, "unit", "failure"), (second, "lint", "success")):
+            event = ci_waits._evidence(self.store, item)
+            self.assertEqual(event["work_item"], item["id"])
+            self.assertEqual(event["holder"], item["holder"])
+            self.assertEqual([row["check"] for row in event["checks"]], [name])
+            self.assertEqual(event["conclusion"], conclusion)
+            self.assertEqual(self.store.get(item["id"]), item)
+        self.assertIsNone(ci_waits.evidence(self.store, pending))
+        self.assertNotEqual(ci_waits._evidence(self.store, first)["evidence_digest"],
+                            ci_waits._evidence(self.store, second)["evidence_digest"])
+
+    def test_duplicate_pair_failed_oversized_and_partial_reads_never_fan_out_evidence(self):
+        items = [self.block(str(i)) for i in range(4)]
+        bad = [Denied("private error"), {"checks": self.rows() * 513},
+               *({"checks": self.rows(), **extra} for extra in (
+                   {"complete": False}, {"truncated": True}, {"scan_stopped": True},
+                   {"cursor": "more"}, {"sha": "e" * 40}, {"branch": "other"})),
+               {"checks": self.rows("cancelled")}, {"checks": self.rows("unknown")}]
+        for response in bad:
+            with self.subTest(response_type=type(response).__name__):
+                reader = Mock(side_effect=response) if isinstance(response, Exception) else Mock(return_value=response)
+                result, _ = self.poll(reader=reader)
+                reader.assert_called_once()
+                self.assertEqual(result["polled"], 1)
+                self.assertEqual(result["observed"], 0)
+                self.assertLessEqual(len(result["errors"]), self.config.vcs["poll_max_ci_wait_targets"])
+                self.assertEqual(self.state["ci_wait_cursor"], ["published", SHA])
+                self.assertTrue(all(ci_waits.evidence(self.store, item) is None for item in items))
+
     def test_bounded_rotation_throttle_errors_and_shared_state(self):
         for i in range(5):
-            self.block(str(i), wait={**self.wait, "checks": [str(i)]})
+            publication = Publication(self.project.root, f"{i:040x}", "c" * 64,
+                                      "published", "push", projection=public_source_identity({}))
+            intent, _ = publication.prepare("approval", "run")
+            publication.mark_dispatch()
+            publication.complete(intent, f"{i:040x}")
+            self.block(str(i), wait={"kind": "ci", "publication_id": publication.id,
+                                     "checks": [str(i)]})
+        # A legacy item-token cursor must restart, not strand any exact targets.
+        self.state["ci_wait_cursor"] = "wi_" + "f" * 64 + ":00000000000000000002:"
         seen = []
         def reader(settings, op, params):
-            # Capture item selection through its cursor, all responses unresolved.
-            seen.append(self.state["ci_wait_cursor"])
+            seen.append((params["branch"], params["sha"]))
             if len(seen) == 1:
                 raise Denied("unavailable")
             return {"checks": []}
         for _ in range(3):
             result, _ = self.poll(reader=reader)
             self.assertEqual(result["polled"], 2)
-        self.assertEqual(len(set(seen)), 5)
+        self.assertEqual(set(seen), {("published", f"{i:040x}") for i in range(5)})
         self.assertIsNone(ci_waits.poll(self.config, self.project, self.state,
                                        now=self.clock, interval=15, reader=reader))
         shared = {k: self.state[k] for k in ("last_ci_wait_poll", "ci_wait_cursor")}
@@ -688,7 +753,7 @@ class CiWaitTests(CiWaitFixture):
         reader.assert_called_once()
         shared = read_json(self.project.root / "vcs-poll.json")
         self.assertEqual(shared["last_ci_wait_poll"], 1000)
-        self.assertTrue(shared["ci_wait_cursor"].startswith("wi_"))
+        self.assertEqual(shared["ci_wait_cursor"], ["published", SHA])
 
     def test_default_reader_preserves_mismatched_duplicate_rows(self):
         self.block()
@@ -780,7 +845,8 @@ class CiWaitTests(CiWaitFixture):
         result, reader = self.poll()
         reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
         self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
-        self.assertEqual(result["errors"], ["denied"])
+        # Both streaming passes screen the corrupt immutable evidence.
+        self.assertEqual(result["errors"], ["denied", "denied"])
         self.assertNotIn(bad["id"], json.dumps(result))
         fresh_context = self.delivery_context()
         self.assertEqual([event["work_item"] for event in fresh_context.wait_events], [third["id"]])
@@ -815,7 +881,7 @@ class CiWaitTests(CiWaitFixture):
             result, reader = self.poll()
             reader.assert_called_once()
             self.assertEqual((result["ok"], result["polled"], result["observed"]), (False, 1, 1))
-            self.assertEqual(len(result["errors"]), self.config.vcs["poll_max_branches"])
+            self.assertEqual(len(result["errors"]), self.config.vcs["poll_max_ci_wait_targets"])
             context = self.delivery_context()
             self.assertEqual([event["work_item"] for event in context.wait_events], [good["id"]])
             self.acknowledge_delivery(context)
@@ -1129,7 +1195,7 @@ class PublicationCiWaitTests(CiWaitFixture):
         for _ in range(ticks):
             result, adapter = self.poll(reader=reader)
             self.assertLessEqual(adapter.call_count if isinstance(adapter, Mock) else 0,
-                                 self.config.vcs['poll_max_branches'])
+                                 self.config.vcs['poll_max_ci_wait_targets'])
             if result['observed']:
                 return result
         self.fail('No terminal candidate observed within bounded rotation')
@@ -1354,8 +1420,8 @@ class PublicationCiWaitTests(CiWaitFixture):
         newer = self.descendant('newer')
         self.publish_descendant(older)
         self.publish_descendant(newer, sha='e' * 40, source='e' * 40)
-        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'poll_max_branches': 1})
-        self.state['ci_wait_cursor'] = f"{item['id']}:{item['rev']:020d}:{int(newer['id'], 16) - 1:064x}"
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'poll_max_ci_wait_targets': 1})
+        self.state['ci_wait_cursor'] = ["published", SHA]
         seen = []
         def reader(settings, op, params):
             seen.append(params)
@@ -1382,7 +1448,7 @@ class PublicationCiWaitTests(CiWaitFixture):
             _, adapter = self.poll()
             adapter.assert_not_called()
         receipt = self.publish_descendant(healthy, source='1' * 40)
-        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'poll_max_branches': 4})
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, 'poll_max_ci_wait_targets': 4})
         bad = [{'checks': self.rows()[:1]}, {'checks': self.rows(sha='e' * 40)},
                {'checks': self.rows(), 'branch': 'other'}, {'checks': self.rows(), 'sha': 'e' * 40},
                {'checks': self.rows(), 'complete': False}, {'checks': self.rows(), 'cursor': 'more'}]
@@ -1428,31 +1494,63 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.assertEqual(ci_waits._read(self.store, item), original)
         self.assertEqual(original['publication_id'], receipt['publication_id'])
 
-    def test_rotation_caps_calls_and_covers_item_revision_candidate_targets_after_errors(self):
+    def test_unique_pair_rotation_covers_targets_despite_duplicate_items_and_candidates(self):
         self.receipt_for()
-        children = [self.descendant(str(i)) for i in range(3)]
-        for i, child in enumerate(children):
-            self.publish_descendant(child, source=str(i + 1) * 40, sha=str(i + 1) * 40)
-        items = [self.block(str(i)) for i in range(2)]
+        # Many items and descendant candidates resolve to the same exact pair.
+        # They must not consume the other targets' slots, even after read errors.
+        children = [self.descendant(str(i)) for i in range(6)]
+        shas = [SHA] * 4 + ['1' * 40, '2' * 40]
+        for i, (child, sha) in enumerate(zip(children, shas)):
+            self.publish_descendant(child, source=str(i + 1) * 40, sha=sha)
+        other_branch = self.receipt_for(branch='other', source='7' * 40)
+        self.block('other-branch', wait={'kind': 'ci', 'publication_id': other_branch['publication_id'],
+                                        'checks': ['unit', 'lint']})
+        items = [self.block(str(i)) for i in range(8)]
         seen = []
         def reader(settings, op, params):
-            seen.append(self.state['ci_wait_cursor'])
+            seen.append((params['branch'], params['sha']))
             if len(seen) == 1:
                 raise Denied(f"/tmp/private/path for {items[0]['id']}: arbitrary adapter note")
             return {'checks': []}
-        for _ in range(4):
+        for _ in range(3):
             before = len(seen)
             result, _ = self.poll(reader=reader)
             self.assertEqual(result['polled'], 2)
             self.assertEqual(len(seen) - before, 2)
+            self.assertEqual(len(set(seen[before:])), 2)
             if before == 0:
                 self.assertEqual(result['errors'], ['denied'])
                 rendered = json.dumps(result)
                 self.assertNotIn(items[0]['id'], rendered)
                 self.assertNotIn('/tmp/private/path', rendered)
                 self.assertNotIn('arbitrary adapter note', rendered)
-        self.assertEqual(len(set(seen)), 8)
-        self.assertEqual(set(seen), {f"{item['id']}:{item['rev']:020d}:{snap['id']}"
-                                    for item in items for snap in [self.snapshot, *children]})
+        self.assertEqual(set(seen[:4]), {('published', sha) for sha in set(shas)} | {('other', SHA)})
         self.assertEqual(set(self.state), {'last_ci_wait_poll', 'ci_wait_cursor'})
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
+
+    def test_duplicate_candidates_share_read_but_keep_exact_per_item_receipt_evidence(self):
+        first = self.descendant('first')
+        second = self.descendant('second')
+        receipts = [self.publish_descendant(first), self.publish_descendant(second, source='1' * 40)]
+        descendant_waiter = self.block('descendant')
+        # These exact waits share status with the descendant waiter but must
+        # retain their own independently selected publication receipts.
+        exact = [self.block(str(i), wait={**self.wait, 'snapshot_id': snapshot['id']})
+                 for i, snapshot in enumerate((first, second))]
+        items = [descendant_waiter, *exact]
+        result, reader = self.poll()
+        reader.assert_called_once_with(self.config.vcs, 'status', {'branch': 'published', 'sha': SHA})
+        self.assertEqual(result['polled'], 1)
+        self.assertEqual(result['observed'], len(items))
+        events = ci_waits.pending(self.store, 'worker')
+        self.assertEqual({event['work_item'] for event in events}, {item['id'] for item in items})
+        self.assertEqual(len({event['evidence_digest'] for event in events}), len(items))
+        event = ci_waits._evidence(self.store, descendant_waiter)
+        self.assertIn(event['observed_snapshot']['snapshot_id'], {first['id'], second['id']})
+        self.assertEqual(event['snapshot_relation'], 'strict_descendant')
+        for item, receipt in zip(exact, receipts):
+            event = ci_waits._evidence(self.store, item)
+            self.assertEqual(event['publication_id'], receipt['publication_id'])
+            self.assertEqual(event['snapshot_relation'], 'exact')
+        for item in items:
+            self.assertEqual(self.store.get(item['id']), item)

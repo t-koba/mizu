@@ -781,25 +781,34 @@ adapter, otherwise it fails closed. An active polling daemon is needed to
 observe new results; disabling polling later leaves existing waits unresolved
 until polling resumes (already retained evidence remains deliverable).
 
-On each due VCS polling tick, the host observes at most `poll_max_branches`
-work-item CI status targets, in addition to the existing branch/proposal polling
-budgets. It uses `poll_interval_seconds` and `poll_status_timeout_seconds`,
-rotating over logical `(item ID, blocked revision, candidate snapshot ID)` targets
-with one durable cursor in `vcs-poll.json`. Exact and retained descendant targets
-share this budget; there is no newest/nearest-only selection. Pending, unknown,
-ambiguous or failed targets advance the cursor too, so one unresolved publication
-cannot starve another. Selection streams the ledger with O(limit) retained rows
-and discovers candidates within the configured snapshot history, not an
-unbounded queue. Adapter status responses retain their existing 1024-row and
-byte limits. Every query names the receipt's **recorded branch and exact
-published SHA**; a moved branch never substitutes its new head.
+On each due VCS polling tick, the host selects at most
+`poll_max_ci_wait_targets` unique receipt-resolved **`(branch, SHA)` pairs**
+(default 16, range 1–64), separately from the actual branch-polling budget
+`poll_max_branches`. Exact and retained descendant candidates share this target
+budget; duplicate items or candidate snapshots on one pair consume only one
+slot. There is no newest/nearest-only selection. A rotating lexicographic window
+uses one durable pair cursor in `vcs-poll.json`; legacy item-token cursors restart
+safely. Failed reads and pending/unknown responses advance the window too.
+Missing or ambiguous receipts do not enter the window or query status.
+
+The host streams eligible waits/candidates to select the window, then streams
+again to query each selected pair at most once and fan out that response to
+all matching current waiters/candidates. Each item's exact declared check set,
+receipt, revision, holder and wait are revalidated independently before writing
+its own immutable evidence. Neither an adapter response nor fan-out releases or
+settles an item. The scans retain no waiter list: extra memory is bounded by
+the configured target count and parsed status-row limits, with candidate
+discovery bounded by snapshot history. Adapter status responses retain their
+existing 1024-row and byte limits. Polls use `poll_interval_seconds` and
+`poll_status_timeout_seconds`. Every query names the receipt's **recorded branch
+and exact published SHA**; a moved branch never substitutes its new head.
 
 Completion is over the declared set, not over whichever rows happen to be
 returned. Every declared name must occur exactly once at that SHA, in exactly
 `success` or `failure` state. Missing, pending, unknown, duplicate or mismatched
 named rows leave the wait unresolved. Unrelated checks impose no requirement.
 Once all declared checks are terminal, all-success concludes `success`;
-otherwise the conclusion is `failure`. Adapter failures do not resolve waits.
+otherwise the conclusion is `failure`. Adapter failures or incomplete status responses do not resolve waits.
 
 Before any wake, the host rechecks the current blocked revision and writes a
 create-only record under `evidence/ci-waits/<item>.<rev>.result.json` (128 KiB,

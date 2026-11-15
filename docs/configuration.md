@@ -2353,9 +2353,10 @@ refresh and the best-effort daemon periodic fetch.
 | `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new receipt-bound waits |
 | `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations and explicit exact-proposal merge waits; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
 | `poll_interval_seconds` | `300` | Daemon poll cadence in seconds (15–86,400) |
-| `poll_max_branches` | `4` | CI branches polled per daemon tick (1–64) |
+| `poll_max_branches` | `4` | Actual CI branches polled per daemon tick (1–64), separate from work-item CI waits |
+| `poll_max_ci_wait_targets` | `16` | Unique receipt-resolved `(branch, SHA)` work-item CI wait targets per due tick (1–64) |
 | `poll_fetch_timeout_seconds` | `30` | Daemon upstream-fetch adapter cap in seconds (1–300); each tick uses `min(timeout_seconds, this)` |
-| `poll_status_timeout_seconds` | `15` | Daemon per-branch CI status adapter cap in seconds (1–300); each tick uses `min(timeout_seconds, this)` |
+| `poll_status_timeout_seconds` | `15` | Daemon per-status-call adapter cap in seconds (1–300); each tick uses `min(timeout_seconds, this)` |
 | `ci_rewake_seconds` | `1800` | Unchanged-red re-wake interval in seconds (60–86,400); an unchanged red still re-wakes eventually so it can never park a writer forever |
 
 Adapter contract: stdin is one JSON object `{"op": ...}` bounded by
@@ -2425,13 +2426,27 @@ host-side work with no capability check (operator-scheduled, not model
 authority): each daemon iteration takes the per-project `vcs-poll.lock`
 (non-blocking) and shares `vcs-poll.json` timestamps, so one project polls
 once even with a daemon per role; a daemon that misses the lock skips the
-tick. Bounds keep one tick short: one fetch capped at
-`min(timeout_seconds, poll_fetch_timeout_seconds)`, CI at most
-`poll_max_branches` branches capped at
-`min(timeout_seconds, poll_status_timeout_seconds)` each (worst case ~90 s
-at defaults without proposal polling; one enabled proposal page adds at most
-one more status-timeout cap). Proposal polling uses that
-same status timeout cap and shared cadence, but is separately opted in with
+tick. Adapter calls are individually capped at
+`min(timeout_seconds, poll_fetch_timeout_seconds)` for fetches and
+`min(timeout_seconds, poll_status_timeout_seconds)` for status reads. CI polls
+at most `poll_max_branches` actual branches per tick. Work-item CI waits have a
+separate `poll_max_ci_wait_targets` budget (default 16, range 1–64) for unique
+receipt-resolved `(branch, SHA)` pairs, not items or candidate snapshots. A
+bounded rotating window queries each selected pair at most once per tick and
+fans the parsed response out to matching current waiters, keeping separate
+immutable per-item evidence and exact declared-check semantics. Failed reads
+advance the pair cursor too; legacy item-token cursors restart safely. Partial
+or ambiguous evidence never resolves a wait. No unbounded waiter list is
+retained; memory follows the target budget and parsed status-row limits.
+
+These serial calls have a finite per-tick bound, not a guarantee of finishing
+within the 300-second default cadence: at defaults, a slow tick can take about
+90 seconds for fetch plus branch polling and up to 240 seconds for CI-wait
+status targets; one enabled proposal page adds at most one more status-timeout
+cap. The per-project lock prevents overlapping polls; shared timestamps keep
+the usual cadence, though a tick that exceeds its interval makes the next
+attempt due on the following daemon iteration. Proposal polling uses
+the same status-timeout cap and cadence, but is separately opted in with
 `poll_proposals_enabled = true`; the global `poll_enabled` and configured
 adapter are also required. It fetches at most one normalized page (up to 256
 rows) per proposal tick, persists the opaque cursor in `vcs-poll.json`, and

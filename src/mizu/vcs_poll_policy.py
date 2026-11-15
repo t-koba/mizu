@@ -30,12 +30,13 @@ def upstream_fetch_due(last_fetch: float | None, now: float, interval: float) ->
 
 
 #: Fail-closed defaults for daemon polling bounds (operator policy in
-#: `[vcs]` carries the same values; see ``vcs_poll_*`` below). The branch
-#: cap keeps one tick short so a poll cannot block the loop for minutes
+#: `[vcs]` carries the same values; see ``vcs_poll_*`` below). Branch and
+#: exact wait-target budgets bound adapter calls per due tick
 #: even when every adapter call uses its full per-call timeout. The
 #: per-call caps bound daemon ticks via `min(timeout_seconds, cap)` so a
 #: large on-demand timeout cannot stall the loop.
 MAX_CI_BRANCHES = 4
+MAX_CI_WAIT_TARGETS = 16
 POLL_CALL_TIMEOUT_CAP = 15
 POLL_FETCH_TIMEOUT_CAP = 30
 #: Shared daemon polling cadence default used by config load and defensive policy reads.
@@ -60,6 +61,15 @@ def vcs_poll_max_branches(config) -> int:
     return _vcs_poll_number(settings, "poll_max_branches", MAX_CI_BRANCHES)
 
 
+def vcs_poll_max_ci_wait_targets(config) -> int:
+    """Exact branch/SHA wait targets per tick (default 16; configured 1–64)."""
+    try:
+        settings = config.vcs
+    except AttributeError:
+        return MAX_CI_WAIT_TARGETS
+    return _vcs_poll_number(settings, "poll_max_ci_wait_targets", MAX_CI_WAIT_TARGETS)
+
+
 def vcs_poll_fetch_timeout(config) -> int:
     """Daemon fetch cap from `vcs.poll_fetch_timeout_seconds` (default 30)."""
     try:
@@ -71,7 +81,7 @@ def vcs_poll_fetch_timeout(config) -> int:
 
 
 def vcs_poll_status_timeout(config) -> int:
-    """Daemon per-branch status cap from `vcs.poll_status_timeout_seconds` (default 15)."""
+    """Daemon per-status-call cap from `vcs.poll_status_timeout_seconds` (default 15)."""
     try:
         settings = config.vcs
     except AttributeError:

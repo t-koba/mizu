@@ -4,7 +4,9 @@ import unittest
 
 from support import Fixture
 from mizu import vcs
-from mizu.errors import Busy, Denied
+from mizu.config import load
+from mizu.errors import Busy, ConfigError, Denied
+from mizu.vcs_poll_policy import vcs_poll_max_ci_wait_targets
 from mizu.fs import lock
 from mizu.runtime import (MAX_CI_BRANCHES, capped_vcs_settings, poll_ci,
                           vcs_poll_enabled, vcs_poll_interval)
@@ -41,6 +43,25 @@ class PollBoundsTests(Fixture):
         self.assertEqual(event["event"], "ci_poll")
         self.assertFalse(event["ok"])
         self.assertIn("Too many", event["error"])
+
+    def test_ci_wait_target_budget_defaults_validation_and_independence(self):
+        self.assertEqual(self.config.vcs["poll_max_ci_wait_targets"], 16)
+        self.assertEqual(vcs_poll_max_ci_wait_targets(self.config), 16)
+        original = self.file.read_text()
+        for value in ('1', '16', '64', '0', '-1', '65', 'true', '1.5', '"2"'):
+            with self.subTest(value=value):
+                self.file.write_text(original.replace('poll_max_ci_wait_targets = 16', f'poll_max_ci_wait_targets = {value}'))
+                if value in ('1', '16', '64'):
+                    config = load(self.file)
+                    self.assertEqual(vcs_poll_max_ci_wait_targets(config), int(value))
+                    self.assertEqual(config.vcs["poll_max_branches"], 4)
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'vcs.poll_max_ci_wait_targets'):
+                        load(self.file)
+        for value in (None, 0, -1, 'bad'):
+            config = dataclasses.replace(self.config, vcs={"poll_max_ci_wait_targets": value})
+            self.assertEqual(vcs_poll_max_ci_wait_targets(config), 16)
+        self.assertEqual(vcs_poll_max_ci_wait_targets(object()), 16)
 
     def test_poll_bounds_follow_operator_config(self):
         self.assertEqual(self.config.vcs["poll_max_branches"], 4)
