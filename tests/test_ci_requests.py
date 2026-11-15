@@ -326,7 +326,107 @@ class CiRequestTests(Fixture):
                 invoke.assert_not_called()
                 if attempt == 2:
                     next_result = self.request(self.context(runs()), attempt=3)
-                    self.assertNotIn("possibly_duplicate_spend", next_result)
+                    self.assertTrue(next_result["possibly_duplicate_spend"])
+
+    def test_legacy_chain_retains_risk_until_exact_prior_no_spend_reconciliation(self):
+        # A legacy retry could follow timeout-unknown. The immediate predecessor
+        # permits a retry, but cannot establish that the whole chain spent no runs.
+        for resolution in ("not_dispatched", "runs"):
+            with self.subTest(resolution=resolution):
+                store, first_id, first = self.pending_marker()
+                self.legacy_unknown(store, first_id, first)
+                _, second_id, second = self.pending_marker(attempt=2, possibly_duplicate_spend=True)
+                no_spend = {key: value for key, value in second.items() if key != "dispatched_at"}
+                no_spend.update(outcome="not_dispatched", reason_code="provider_rejected",
+                                runs=[], requested_at="2026-10-21T00:00:00+00:00")
+                store.record_outcome(second_id, no_spend)
+                historical = {path: path.read_bytes() for path in store.root.iterdir()}
+
+                third_id = request_id(self.receipt["publication_id"], SHA, ["ci"], 3)
+                payload = {"outcome": "not_dispatched", "request_id": third_id,
+                           "attempt": 3, "reason_code": "provider_rejected"}
+                ctx = self.context(payload)
+                result = self.request(ctx, attempt=3)
+                self.assertTrue(result["possibly_duplicate_spend"])
+                self.assertTrue(store.dispatched(third_id)["possibly_duplicate_spend"])
+                self.assertTrue(store.outcome(third_id)["possibly_duplicate_spend"])
+                activity = ctx.ci_request_summary()["requests"][0]
+                self.assertEqual((activity["state"], activity["possibly_duplicate_spend"]),
+                                 ("not_dispatched", True))
+                evidence = list(ctx.run_dir.glob("vcs-request/*.json"))
+                self.assertEqual(len(evidence), 1)
+                self.assertTrue(read_json(evidence[0])["possibly_duplicate_spend"])
+                row = next(row for row in store.page()["items"] if row["request_id"] == third_id)
+                self.assertTrue(row["possibly_duplicate_spend"])
+                for path, raw in historical.items():
+                    self.assertEqual(path.read_bytes(), raw)
+
+                payload = {"request_id": first_id, "attempt": 1}
+                payload.update(runs() if resolution == "runs" else
+                               {"outcome": resolution, "reason_code": "provider_rejected"})
+                with patch("mizu.runtime._vcs.request_runs_via") as dispatch:
+                    self.request(self.context(payload))
+                dispatch.assert_not_called()
+                for path, raw in historical.items():
+                    self.assertEqual(path.read_bytes(), raw)
+                ctx = self.context(runs())
+                fourth = self.request(ctx, attempt=4)
+                fourth_id = fourth["request_id"]
+                evidence = list(ctx.run_dir.glob("vcs-request/*.json"))
+                self.assertEqual(len(evidence), 1)
+                for record in (fourth, store.dispatched(fourth_id), store.outcome(fourth_id),
+                               ctx.ci_request_summary()["requests"][0], read_json(evidence[0])):
+                    self.assertEqual(record.get("possibly_duplicate_spend", False), resolution == "runs")
+                # Later knowledge never rewrites the risk recorded at dispatch time.
+                self.assertTrue(store.outcome(third_id)["possibly_duplicate_spend"])
+                for path in store.root.iterdir():
+                    path.unlink()
+
+    def test_incomplete_unreadable_or_bounded_prior_history_never_clears_risk(self):
+        store, first_id, first = self.pending_marker()
+        _, second_id, second = self.pending_marker(attempt=2, possibly_duplicate_spend=True)
+        no_spend = {key: value for key, value in second.items() if key != "dispatched_at"}
+        no_spend.update(outcome="not_dispatched", reason_code="provider_rejected",
+                        runs=[], requested_at="2026-10-21T00:00:00+00:00")
+        store.record_outcome(second_id, no_spend)
+        first_no_spend = {**no_spend, "request_id": first_id, "attempt": 1}
+        first_no_spend.pop("possibly_duplicate_spend")
+        for problem in ("missing", "unreadable", "invalid", "bounded"):
+            with self.subTest(problem=problem):
+                path = store._path(first_id, "request")
+                if problem == "missing":
+                    store._path(first_id, "dispatch").unlink()
+                else:
+                    store._path(first_id, "dispatch").write_text(json.dumps(first))
+                    path.write_text("invalid json" if problem == "unreadable" else json.dumps(
+                        {**first_no_spend, **({"sha": OTHER_SHA} if problem == "invalid" else {})}))
+                ctx = self.context(runs())
+                if problem == "bounded":
+                    ctx.config = dataclasses.replace(ctx.config, ci_requests=dataclasses.replace(
+                        ctx.config.ci_requests, record_limit=1))
+                result = self.request(ctx, attempt=3)
+                self.assertTrue(result["possibly_duplicate_spend"])
+                self.assertTrue(ctx.ci_request_summary()["requests"][0]["possibly_duplicate_spend"])
+                store._path(result["request_id"], "dispatch").unlink()
+                store._path(result["request_id"], "request").unlink()
+
+    def test_risky_dispatch_failure_is_visible_in_activity_before_outcome(self):
+        store, first_id, first = self.pending_marker()
+        self.legacy_unknown(store, first_id, first)
+        # Also recover risk if an older writer already lost the predecessor's flag.
+        _, second_id, marker = self.pending_marker(attempt=2)
+        record = {key: value for key, value in marker.items() if key != "dispatched_at"}
+        record.update(outcome="not_dispatched", reason_code="provider_rejected",
+                      runs=[], requested_at="2026-10-21T00:00:00+00:00")
+        store.record_outcome(second_id, record)
+        ctx = self.context({"malformed": True})
+        with self.assertRaises(Denied):
+            self.request(ctx, attempt=3)
+        activity = ctx.ci_request_summary()["requests"][0]
+        self.assertEqual((activity["state"], activity["possibly_duplicate_spend"]),
+                         ("unresolved", True))
+        self.assertTrue(store.dispatched(activity["request_id"])["possibly_duplicate_spend"])
+        self.assertIsNone(store.outcome(activity["request_id"]))
 
     def test_adapter_request_and_no_dispatch_echo_bind_the_explicit_attempt(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"], 2)

@@ -36,8 +36,21 @@ sidecar with `dispatch_digest`, `legacy_outcome_digest` (SHA-256 of canonical
 marker and legacy outcome JSON respectively), and `outcome` (the validated new
 provider result record). Readers validate both digests and the effective outcome
 against the marker. Missing/invalid resolution stays unresolved; corrupt evidence
-fails closed. Existing `possibly_duplicate_spend` flags remain validated and
-visible; new dispatches do not create or propagate that legacy flag.
+fails closed.
+
+A new dispatch records `possibly_duplicate_spend: true` whenever any earlier
+exact attempt in the same publication/SHA/workflow chain is unresolved or has
+validated runs. Retry authorization still requires the immediate predecessor's
+validated `not_dispatched` outcome; the risk flag neither grants nor denies it.
+Only validated `not_dispatched` outcomes for **all** earlier attempts establish
+no prior spend and allow future dispatches to omit the flag. Thus exact later
+no-spend reconciliation can clear future risk, while reconciliation to runs
+retains it, regardless of the older flags. Missing, unreadable or invalid history
+retains risk, as does history exceeding `ci_requests.record_limit` (default
+1000 prior attempts). The check reads exact attempt identities, not a truncated
+daily listing or unrelated evidence. Markers, outcomes, invocation evidence and
+per-run activity summaries agree on the risk at dispatch time; reconciliation
+never rewrites historical flags.
 
 Read-only daily/cost views and status polling never settle markers or contact the
 reconciliation operation. Evidence is retained, without TTL or deletion. Daily

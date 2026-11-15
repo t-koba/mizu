@@ -708,7 +708,12 @@ an attempt or authorizes another dispatch; only durable `not_dispatched` permits
 an explicit next numbered attempt. Legacy timeout-unknown records stay immutable
 and unresolved until a digest-bound resolution sidecar supplies a validated
 provider answer (see [CI dispatch uncertainty](ci-acceptance.md#ci-dispatch-uncertainty-independent-of-acceptance)).
-Legacy `possibly_duplicate_spend` flags remain visible but are not newly created.
+`possibly_duplicate_spend` records risk at dispatch time: a new attempt sets it
+if any earlier exact attempt is unresolved or has validated runs. Only validated
+no-spend outcomes for every earlier attempt clear future risk; missing, unreadable
+or over-budget history retains it (`ci_requests.record_limit`, default 1000 prior
+attempts). Later reconciliation never rewrites historical flags. Retry permission
+remains tied solely to the immediate predecessor's validated `not_dispatched`.
 Read-only listings and status polling never settle markers, and no request is
 retried automatically. An unreadable or invalid outcome stays unresolved,
 never inferred from absent provider status. The listing is bounded (`total`, `truncated` and `scan_stopped`);

@@ -1676,6 +1676,10 @@ class Context:
             if previous is None or previous.get("outcome") != "not_dispatched":
                 raise Denied("A new CI attempt requires the preceding attempt's durable "
                              "no-dispatch outcome")
+        # Retry permission above is independent of spend in the rest of a
+        # legacy chain. Only a fully validated no-spend history clears risk.
+        possibly_duplicate_spend = requests.prior_spend_possible(
+            receipt["publication_id"], sha, workflows, attempt)
         # The covered items are checked before the provider is called, so a
         # coverage that cannot take the wait never spends a run.
         self._coverage_state(covered, identity, register=False)
@@ -1687,6 +1691,8 @@ class Context:
         marker = {"request_id": identity, "publication_id": receipt["publication_id"],
                   "sha": sha, "workflows": workflows, "dispatched_at": dispatched_at,
                   "attempt": attempt, "covered": covered_records}
+        if possibly_duplicate_spend:
+            marker["possibly_duplicate_spend"] = True
 
         def before_invoke():
             # The dispatch marker is the point of no return: from here the run
@@ -1694,7 +1700,8 @@ class Context:
             # request now, and no later failure can drop it.
             requests.mark_dispatch(identity, marker)
             self.record_ci_request(identity, dispatched_at[:10], workflows,
-                                   covered_ids, state="unresolved", attempt=attempt)
+                                   covered_ids, state="unresolved", attempt=attempt,
+                                   possibly_duplicate_spend=possibly_duplicate_spend)
 
         response = _vcs.request_runs_via(
             self.config.vcs, sha, workflows, request_id=identity, attempt=attempt,

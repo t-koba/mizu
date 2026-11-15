@@ -99,6 +99,28 @@ class CiRequests:
             raise Denied("Invalid CI request resolution outcome")
         return effective
 
+    def prior_spend_possible(self, publication_id: str, sha: str,
+                             workflows: list[str], attempt: int) -> bool:
+        """Conservative risk at dispatch time, not permission to retry.
+
+        Only validated no-spend outcomes for *every* earlier exact attempt
+        establish no prior spend. Ignore their historical risk flags: a later
+        exact reconciliation can now prove that the whole chain spent nothing.
+        Missing, unreadable or over-budget history cannot prove that. Read at
+        most policy.record_limit attempts, without scanning unrelated evidence.
+        """
+        if attempt - 1 > self.policy.record_limit:
+            return True
+        for prior in range(1, attempt):
+            identity = request_id(publication_id, sha, workflows, prior)
+            try:
+                outcome = self.outcome(identity)
+            except (Denied, LimitExceeded, OSError):
+                return True
+            if outcome is None or outcome.get("outcome") != "not_dispatched":
+                return True
+        return False
+
     def resolve(self, identity: str, record: dict) -> None:
         """Retain a provider answer without replacing legacy timeout evidence."""
         if self.outcome(identity) is not None:
@@ -147,7 +169,9 @@ class CiRequests:
         whether the request is ``resolved``, ``not_dispatched`` or
         ``unresolved``. Legacy timeout-unknown is unresolved until a validated
         resolution exists. Only no-spend permits a later explicit attempt.
-        Legacy ``possibly_duplicate_spend`` flags remain visible. An unreadable result
+        ``possibly_duplicate_spend`` records whether earlier exact attempts
+        may have spent runs when this attempt began; later reconciliation
+        never rewrites that historical flag. An unreadable result
         remains unresolved, not a reason to hide the request. The rows
         are chronological and the page holds at most ``limit`` requests.
         Bounds: at most 100 attempts per page; policy bounds post-listing
