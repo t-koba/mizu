@@ -74,15 +74,25 @@ def run_case(root, mode, point):
 def main():
     root, mode, point = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
     if point == 'batch':
-        # Recoverable-fault points over pre-made pristine case trees, one
-        # spawn per mode instead of one per point. Crash mode is never
-        # batched: each point needs its own process death. Cases run in
-        # numeric order on disjoint trees with fresh state per point.
-        if mode == 'crash':
-            raise SystemExit('batch supports only recoverable fault modes')
+        # One helper startup per mode over pristine per-point trees. POSIX
+        # crash cases fork sequentially so each fault still kills a process
+        # without modifying the parent's state or another case's tree.
+        if mode == 'crash' and os.name != 'posix':
+            raise SystemExit('crash batch requires POSIX fork')
         points = sorted(int(p.name) for p in root.iterdir()
                         if p.name.isdigit() and not p.is_symlink() and p.is_dir())
-        print(json.dumps([run_case(root/str(point), mode, point) for point in points]))
+        if mode == 'crash':
+            statuses = []
+            for point in points:
+                pid = os.fork()
+                if pid == 0:
+                    run_case(root/str(point), mode, point)
+                    os._exit(0)
+                _, status = os.waitpid(pid, 0)
+                statuses.append(os.waitstatus_to_exitcode(status))
+            print(json.dumps(statuses))
+        else:
+            print(json.dumps([run_case(root/str(point), mode, point) for point in points]))
         return
     print(json.dumps(run_case(root, mode, int(point))))
 

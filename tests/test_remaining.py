@@ -275,12 +275,24 @@ class RemainingTests(Fixture):
                 with self.subTest(mode=mode,boundary=events[point-1],point=point):
                     self.assertEqual(len(case),point)
                     check_recovered(batch/str(point))
+        batch=self.root/'crash';batch.mkdir()
+        for point in range(1,len(events)+1):shutil.copytree(base,batch/str(point))
+        if os.name == 'posix':
+            # One helper forks a fresh child per point; every crash still
+            # terminates via os._exit(86), with its own exit status checked.
+            result=subprocess.run([sys.executable,str(script),str(batch),'crash','batch'],env=env,capture_output=True,text=True,timeout=120)
+            self.assertEqual(result.returncode,0,result.stderr)
+            statuses=json.loads(result.stdout)
+            self.assertEqual(len(statuses),len(events))
         for point in range(1,len(events)+1):
-            # Crash points keep one process death per point.
             with self.subTest(mode='crash',boundary=events[point-1],point=point):
-                root=self.root/f'crash-{point}';shutil.copytree(base,root)
-                result=subprocess.run([sys.executable,str(script),str(root),'crash',str(point)],env=env,capture_output=True,text=True,timeout=5)
-                self.assertIn(result.returncode,(0,86))
+                root=batch/str(point)
+                if os.name == 'posix':
+                    status=statuses[point-1]
+                else:
+                    result=subprocess.run([sys.executable,str(script),str(root),'crash',str(point)],env=env,capture_output=True,text=True,timeout=5)
+                    status=result.returncode
+                self.assertIn(status,(0,86))
                 check_recovered(root)
 
     def test_special_file_after_finish_refuses_done(self):
