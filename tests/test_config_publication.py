@@ -8,7 +8,7 @@ from mizu.errors import ConfigError
 
 class PublicationConfigTests(Fixture):
     def test_default_and_range(self):
-        expected = {'source_commit_timeout_seconds': 5}
+        expected = {'source_commit_timeout_seconds': 5, 'reviewer_role': ''}
         self.assertEqual(dataclasses.asdict(self.config.publication), expected)
         self.assertEqual(dataclasses.asdict(PublicationPolicy()), expected)
         original = self.file.read_text()
