@@ -268,9 +268,10 @@ class AcceptanceTests(Fixture):
         value = check_jobs.raw_read(self.project, job['id'])
         value['acknowledged'] = True
         write_json(path / 'job.json', value)
-        # A lowered cap, without constructing 1024 full source trees.
-        with self.capped(2):
-            check_jobs._make_room(self.project)
+        check_jobs.acknowledge(self.project, 'worker', [job['id']])
+        self.assertTrue(path.exists())  # Passed cache candidate, not a delivery-owned job.
+        (ctx.workspace / 'app.py').write_text('VALUE = 99\n')
+        check_jobs.submit(ctx)
         self.assertFalse(path.exists())
 
     def test_marked_oversized_result_recovery_disposes_without_promoting_raw_proof(self):
@@ -295,8 +296,8 @@ class AcceptanceTests(Fixture):
         self.assert_size_refusal(job)
         self.project.set_control(paused=True)
         storage.backup(self.project, self.root / 'recovered-backup.tar.gz')
-        with self.capped():
-            check_jobs._make_room(self.project)
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            check_jobs._release_locked(self.project, [job['id']])
         self.assertFalse(path.exists())
 
     def test_recovery_size_disposition_does_not_mask_invalid_evidence(self):
@@ -663,9 +664,7 @@ class AcceptanceTests(Fixture):
         self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'cancelled')
         self.assertEqual(acceptance.audit(self.project.root), 0)
 
-    def test_eviction_waits_for_retention_then_ignores_cache_loss(self):
-        from pathlib import Path
-        from mizu.errors import Busy
+    def test_source_release_waits_for_receipt_and_preserves_immutable_proof(self):
         ctx = self.context()
         job = check_jobs.submit(ctx)
         with patch('mizu.acceptance._retain', side_effect=OSError('receipt not yet durable')):
@@ -675,14 +674,15 @@ class AcceptanceTests(Fixture):
         value = check_jobs.raw_read(self.project, job['id'])
         value['acknowledged'] = True
         write_json(path, value)
-        # Model the fixed cache cap without constructing 1024 source trees.
-        with self.capped():
-            with self.assertRaises(Busy):
-                check_jobs._make_room(self.project)
+        (ctx.workspace / 'app.py').write_text('VALUE = 99\n')
+        check_jobs.submit(ctx)
+        self.assertTrue(path.exists())
         receipt_id = acceptance.recover_job(self.project, job['id'])
-        with self.capped():
-            check_jobs._make_room(self.project)
+        receipts = self.project.root / 'evidence/acceptance'
+        before = {p.relative_to(receipts): p.read_bytes() for p in receipts.rglob('*.json')}
+        check_jobs.submit(ctx)
         self.assertFalse(path.exists())
+        self.assertEqual({p.relative_to(receipts): p.read_bytes() for p in receipts.rglob('*.json')}, before)
         self.assertIsNone(acceptance.recover_job(self.project, job['id']))
         self.assertEqual(acceptance.effective(self.project, ctx.snapshot)['receipt_id'], receipt_id)
 
@@ -902,9 +902,7 @@ class AcceptanceTests(Fixture):
             self.assertEqual((check_jobs.root(self.project) / job['id'] / name).read_bytes(), raw)
         self.assertEqual(acceptance.audit(self.project.root), 0)
 
-    def test_invalid_producer_keeps_pending_proof_eviction_pin(self):
-        from pathlib import Path
-        from mizu.errors import Busy
+    def test_invalid_producer_keeps_pending_proof_release_pin(self):
         ctx, job, path = self.pending_producer()
         value = check_jobs.raw_read(self.project, job['id'])
         value['acknowledged'] = True
@@ -913,9 +911,8 @@ class AcceptanceTests(Fixture):
         forget_ledger(self.project.root)
         pending = (path / 'job.json').read_bytes()
         self.run_job()
-        with self.capped():
-            with self.assertRaises(Busy):
-                check_jobs._make_room(self.project)
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            check_jobs._release_locked(self.project, [job['id']])
         self.assertEqual((path / 'job.json').read_bytes(), pending)
         self.assertTrue(path.exists())
 

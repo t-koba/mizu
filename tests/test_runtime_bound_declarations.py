@@ -277,6 +277,9 @@ DECLARATIONS = {
         'MAX_CACHE_DIAGNOSTIC_ENTRIES': (
             '2', 'safety',
             'acceptance / cap retained cache diagnostics to the input/output phase pair'),
+        'MAX_CHECK_REQUEST_SEQUENCE': (
+            '(1 << 63) - 1', 'format',
+            'acceptance / request sequence fits SQLite signed 64-bit integers'),
     },
     'classification.py': {
         'MAX_CLASSIFICATION_MODEL_LABEL_CHARS': (
@@ -812,6 +815,9 @@ DECLARATIONS = {
             '32', 'format', 'check jobs / public command-evidence identifier hex width'),
         'MAX_COMMAND_EVIDENCE_LIST_ROWS': (
             '32', 'safety', 'check jobs / bounded command-evidence listing rows'),
+        'LEGACY_CHECK_REQUEST_SEQUENCE_COUNT': (
+            '1025', 'safety',
+            'check jobs / one-time reconstruction of the previous deterministic 0-through-1024 sequence space'),
     },
     'delegation_gates.py': {
         'POLICY_MAX_BYTES': (
@@ -1229,13 +1235,6 @@ CONFIGURED = {
         'git_timeout_seconds': ('10', 'configured policy', 'workspace cache / per-command Git timeout'),
         'git_output_bytes': ('8388608', 'configured policy', 'workspace cache / index listing output budget'),
     },
-}
-
-
-# The Limits migration is field-scoped, not an inventory of every Limits field.
-CHECK_RETENTION = {
-    'check_retained': ('1024', 'configured policy', 'Limits / per-project retained check records including subscriptions'),
-    'MAX_CHECK_RETAINED': ('1024', 'safety', 'config / existing defensive linear metadata-scan and identity-search envelope'),
 }
 
 
@@ -1857,9 +1856,6 @@ TIMED_WAIT_ARGUMENTS = {
 RANGE_ARGUMENTS = {
     ('insight_index.py', 'audit', 0, 0): (
         '1', 'mechanism', 'insight audit / prior revisions start at the first'),
-    ('check_jobs.py', 'submit.request_slot', 0, 0): (
-        '1025', 'safety',
-        'check jobs / identity search is one candidate beyond MAX_CHECK_RETAINED'),
     ('ci_requests.py', 'CiRequests.prior_spend_possible', 0, 0): (
         '1', 'format',
         'CI request attempts / attempt identities start at one; inspect only prior attempts'),
@@ -1895,6 +1891,9 @@ RANGE_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 SYMBOLIC_RANGE_ARGUMENTS = {
+    ('check_jobs.py', 'submit.request_slot', 0, 0): (
+        'LEGACY_CHECK_REQUEST_SEQUENCE_COUNT', 'safety',
+        'check jobs / reconstruct the bounded legacy sequence space before indexed allocation'),
     ('insight_index.py', 'audit', 1, 0): (
         'row[3]', 'mechanism', 'insight audit / prior revisions below the live revision'),
     ('admission.py', 'check_slot_exclusions', 0, 0): (
@@ -3943,7 +3942,7 @@ def no_defaults(limit, /, count, *, size):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
         found = inventory(tree, symbolic_bounds=SYMBOLIC_BOUNDS.get('config.py'))
         declared = set(CONFIG_MODULE_BOUNDS)
-        for special in (CHECK_RETENTION, PRIOR_ROLE_REPORT_PREVIEW, HISTORY_TEMPORARIES,
+        for special in (PRIOR_ROLE_REPORT_PREVIEW, HISTORY_TEMPORARIES,
                         DECISION_PROJECTION, DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION,
                         SMOKE_RETENTION_SCAN):
             declared.update(name for name in special if name in found)
@@ -4184,16 +4183,6 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual([ast.unparse(value) for value in values], [
             'min(MAX_PROBE_EVENT_STREAM_BYTES, config.limits.event_stream_bytes)'])
         self.assertEqual(DECLARATIONS['probes.py']['MAX_PROBE_EVENT_STREAM_BYTES'][1], 'safety')
-
-    def test_check_retention_declarations(self):
-        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
-        limits = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Limits')
-        field = next(node for node in limits.body if isinstance(node, ast.AnnAssign)
-                     and node.target.id == 'check_retained')
-        self.assertEqual(ast.unparse(field.value), CHECK_RETENTION['check_retained'][0])
-        self.assertEqual(inventory(tree)['MAX_CHECK_RETAINED'], CHECK_RETENTION['MAX_CHECK_RETAINED'][0])
-        self.assertEqual([entry[1] for entry in CHECK_RETENTION.values()], ['configured policy', 'safety'])
-        self.assertTrue(all(entry[2].strip() for entry in CHECK_RETENTION.values()))
 
     def test_prior_role_report_preview_policy_and_protocol_ceiling(self):
         from mizu.config import MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES, _LIMIT_RANGES

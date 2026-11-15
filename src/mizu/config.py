@@ -68,9 +68,6 @@ MAX_CHECK_RECOVERY_INTERVAL_SECONDS = 86400
 #: reserve one index for the extra candidate that detects a truncated window.
 MAX_USAGE_POLICY_COUNT = min(TOML_INTEGER_MAX, sys.maxsize)
 MAX_USAGE_RUNS_SCANNED = MAX_USAGE_POLICY_COUNT - 1
-#: Defensive retained-check metadata/identity-search envelope. Policy may lower
-#: this existing ceiling; raising it needs evidence for the linear queue scans.
-MAX_CHECK_RETAINED = 1024
 #: Absolute recovery metadata ceiling; the active per-project work budget is
 #: configurable below this value. A synthetic 4,096-entry scan remained below
 #: 3.5 MiB of Python allocations on the measured host.
@@ -480,7 +477,6 @@ class Limits:
     parallel_checks: int = 2
     check_pending: int = 32
     #: Retained records including subscriptions; only safe acknowledged jobs evict.
-    check_retained: int = 1024
     #: UTF-8 bytes per prior-role continuation summary/state preview; 0 disables text.
     prior_role_report_preview_bytes: int = 4000
     #: Crash-leftover decision-history temporary scan budget; default 64.
@@ -647,7 +643,6 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "open_work_items": (0, 1073741824),
                  "producer_inputs_per_source": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
-                 "check_retained": (1, MAX_CHECK_RETAINED),
                  "prior_role_report_preview_bytes": (0, MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES),
                  "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
                  "decision_projection_records": (1, MAX_DECISION_PROJECTION_RECORDS),

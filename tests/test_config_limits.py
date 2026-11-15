@@ -8,7 +8,6 @@ import unittest
 
 from support import Fixture
 from mizu.config import (DEFAULT_INSIGHT_HISTORY_ENTRIES, DEFAULT_PROBE_EXECUTABLE_BYTES,
-                         MAX_CHECK_RETAINED,
                          MAX_DECISION_PROJECTION_RECORDS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
                          MAX_HISTORY_TEMPORARIES, MAX_INSIGHT_HISTORY_ENTRIES,
                          MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
@@ -351,32 +350,13 @@ class ProjectGoalBytesConfigTests(Fixture):
                         load(self.file)
 
 
-class CheckRetainedConfigTests(Fixture):
-    def test_default_and_strict_range(self):
-        self.assertEqual(MAX_CHECK_RETAINED, 1024)
-        self.assertEqual(Limits().check_retained, 1024)
-        original = re.sub(r'(?m)^check_retained = .*\n', '', self.file.read_text())
-        self.file.write_text(original)
-        self.assertEqual(load(self.file).limits.check_retained, 1024)
-        for value in ('1', '7', '1024', '0', '-1', '1025',
-                      'true', 'false', '1.5', '"1"', '[]', '{}'):
-            with self.subTest(value=value):
-                self.file.write_text(original.replace('\n[limits]\n', f'\n[limits]\ncheck_retained = {value}\n'))
-                if value in ('1', '7', '1024'):
-                    limits = load(self.file).limits
-                    self.assertEqual(limits.check_retained, int(value))
-                    self.assertEqual(limits.check_pending, 32)
-                else:
-                    with self.assertRaisesRegex(ConfigError, 'limits.check_retained'):
-                        load(self.file)
-
-    def test_include_can_lower_retained_target_independently(self):
-        original = re.sub(r'(?m)^check_retained = .*\n', '', self.file.read_text())
-        (self.file.parent / 'retention.toml').write_text('[limits]\ncheck_retained = 2\n')
-        self.file.write_text('include = ["retention.toml"]\n' + original)
-        limits = load(self.file).limits
-        self.assertEqual(limits.check_retained, 2)
-        self.assertEqual(limits.check_pending, 32)
+class CheckJobLifecycleConfigTests(Fixture):
+    def test_removed_retention_target_is_rejected(self):
+        self.assertFalse(hasattr(load(self.file).limits, 'check_retained'))
+        self.file.write_text(self.file.read_text().replace(
+            '\n[limits]\n', '\n[limits]\ncheck_retained = 2\n'))
+        with self.assertRaises(ConfigError):
+            load(self.file)
 
 
 class RunRetentionScanConfigTests(Fixture):

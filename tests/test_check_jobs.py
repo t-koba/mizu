@@ -377,111 +377,134 @@ class JobTests(Fixture):
         self.assertEqual(check_jobs.pending(self.project, 'worker'), [])
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
 
-    def retention_target(self, target):
-        self.config = dataclasses.replace(self.config,
-            limits=dataclasses.replace(self.config.limits, check_retained=target))
-        self.project.config = self.config
-
-    def retention_record(self, number, **fields):
+    def lifecycle_record(self, number, **fields):
+        from mizu.acceptance import write_job
         job_id = f'{number:064x}'
-        path = check_jobs.root(self.project) / job_id / 'job.json'
-        write_json(path, {'id': job_id, 'role': 'worker', 'status': 'completed',
-                          'acknowledged': True, **fields})
-        os.utime(path, (number, number))  # Distinct oldest-first order on every host.
-        return path
+        value = {'id': job_id, 'role': 'worker', 'kind': 'verify',
+                 'status': 'completed', 'passed': True, 'acknowledged': True,
+                 'code_digest': 'a' * 64, 'execution': check_jobs.execution_key(self.config),
+                 'environment': 'b' * 64, 'commands': ['one'], **fields}
+        write_job(self.project, job_id, value)
+        return check_jobs.root(self.project) / job_id
 
-    def test_retained_target_exact_cap_evicts_oldest_on_submission(self):
-        self.retention_target(2)
-        oldest = self.retention_record(1)
-        ctx, first = self.submit()
-        self.assertTrue(oldest.exists())  # No eviction below the target.
-        _, second = self.submit()
-        self.assertNotEqual(first['id'], second['id'])
-        self.assertFalse(oldest.exists())
-        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 2)
-        self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'queued')
-
-    def test_lowered_retained_target_converges_before_insertion(self):
-        paths = [self.retention_record(n) for n in range(1, 5)]
-        self.retention_target(2)
-        _, job = self.submit()
-        self.assertEqual([p.exists() for p in paths], [False, False, False, True])
-        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 2)
-        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
-
-    def test_retention_prunes_acknowledged_subscription_before_its_source(self):
-        self.retention_target(1)
-        source = self.retention_record(1)
-        subscription = self.retention_record(2, shared_job=source.parent.name)
-        with patch.object(check_jobs.shutil, 'rmtree', wraps=check_jobs.shutil.rmtree) as remove:
-            _, job = self.submit()
-        self.assertEqual([Path(call.args[0]).name for call in remove.call_args_list],
-                         [subscription.parent.name, source.parent.name])
-        self.assertFalse(source.exists())
-        self.assertFalse(subscription.exists())
-        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 1)
-        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
-
-    def test_retention_keeps_source_referenced_by_surviving_subscription(self):
-        source = self.retention_record(1)
-        subscription = self.retention_record(2, shared_job=source.parent.name,
-                                             acknowledged=False)
-        other = [self.retention_record(3), self.retention_record(4)]
-        self.retention_target(3)  # The two unrelated records satisfy the reduction.
-        _, job = self.submit()
-        self.assertTrue(source.exists())
-        self.assertTrue(subscription.exists())
-        self.assertTrue(all(not path.exists() for path in other))
-        self.assertEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 3)
-        self.assertEqual(check_jobs.read(self.project, job['id'])['status'], 'queued')
-
-    def test_lowered_retained_target_refuses_without_partial_eviction(self):
-        paths = [self.retention_record(1), self.retention_record(2),
-                 self.retention_record(3, acknowledged=False),
-                 self.retention_record(4, acknowledged=False)]
-        before = {p: p.read_bytes() for p in paths}
-        self.retention_target(2)  # Needs three victims; only two are eligible.
-        with self.assertRaisesRegex(Busy, 'Retained check evidence is full'):
-            self.submit()
-        self.assertEqual({p: p.read_bytes() for p in paths}, before)
-        self.assertEqual(set(check_jobs.root(self.project).glob('*/job.json')), set(paths))
-
-    def test_retention_preflight_preserves_ineligible_evidence_and_references(self):
-        oldest = self.retention_record(1)
-        protected = [self.retention_record(2, acknowledged=False),
-                     self.retention_record(3, status='queued'),
-                     self.retention_record(4, status='running'),
-                     self.retention_record(5, status='running', detached=True),
-                     self.retention_record(6, acceptance_scope={'bound': 'pending'}),
-                     self.retention_record(7)]
-        original = self.retention_record(8)
-        # Preserve an otherwise eligible source when unrelated evidence can
-        # satisfy the target; a subscription of a running job stays ineligible.
-        subscription = self.retention_record(9, shared_job=original.parent.name)
-        protected += [original, self.retention_record(10, shared_job=protected[2].parent.name)]
-        newest = self.retention_record(11, acceptance_scope={'bound': 'retained'},
-                                       acceptance_receipt_id='a' * 64)
-        before = {p: p.read_bytes() for p in protected}
-        self.retention_target(len(protected) + 1)  # Three victims, then room for one.
+    def release_stale(self, *, protect=frozenset(), current=None):
         with lock(self.project.root / 'locks/check-jobs.lock'):
-            check_jobs._make_room(self.project, protect={protected[5].parent.name})
-        self.assertFalse(any(p.exists() for p in (oldest, subscription, newest)))
-        self.assertEqual({p: p.read_bytes() for p in protected}, before)
+            check_jobs._release_stale(self.project, 'a' * 64,
+                                     check_jobs.execution_key(self.config), 'b' * 64,
+                                     current, protect=protect)
 
-    def test_retention_preserves_released_physical_job_until_runner_finishes(self):
-        from mizu.errors import Busy
-        ctx, job = self.submit()
-        path = check_jobs.root(self.project) / job['id'] / 'job.json'
-        record = read_json(path); record['status'] = 'running'; write_json(path, record)
-        check_jobs.cancel(ctx, job['id'])
-        check_jobs.acknowledge(self.project, 'worker', {job['id']})
-        with self.capped():
-            with self.assertRaises(Busy):
-                check_jobs._make_room(self.project)
+    def test_source_lifecycle_releases_only_changed_input_candidates(self):
+        kept = [self.lifecycle_record(1), self.lifecycle_record(2, commands=['other'])]
+        stale = [self.lifecycle_record(3, code_digest='c' * 64),
+                 self.lifecycle_record(4, environment='c' * 64),
+                 self.lifecycle_record(5, execution='c' * 64),
+                 self.lifecycle_record(6, cache_input='c' * 64)]
+        self.release_stale()
+        self.assertTrue(all(p.exists() for p in kept))
+        self.assertTrue(all(not p.exists() for p in stale))
+
+    def test_cache_identity_release_requires_bound_current_inputs(self):
+        self.config = dataclasses.replace(self.config, sandbox=dataclasses.replace(
+            self.config.sandbox, check_cache_paths=('build',)))
+        self.project.config = self.config
+        matching = self.lifecycle_record(1, cache_input='d' * 64)
+        changed = self.lifecycle_record(2, cache_input='e' * 64)
+        self.release_stale()  # Unknown cache inputs authorize no release.
+        self.assertTrue(matching.exists() and changed.exists())
+        self.release_stale(current='d' * 64)
+        self.assertTrue(matching.exists())
+        self.assertFalse(changed.exists())
+
+    def test_submission_releases_stale_source_but_keeps_other_commands(self):
+        ctx, first = self.submit(); self.run_job()
+        check_jobs.acknowledge(self.project, 'worker', [first['id']])
+        original = check_jobs.root(self.project) / first['id']
+        # Pin environment explicitly: ordinary fixtures have an unpinned image.
+        value = check_jobs.raw_read(self.project, first['id'])
+        value['environment'] = 'b' * 64
+        from mizu.acceptance import write_job
+        # Keep receipt binding valid by using an ordinary completed experiment.
+        value.pop('acceptance_scope', None); value.pop('acceptance_receipt_id', None)
+        value['kind'] = 'experiment'
+        write_job(self.project, first['id'], value)
+        self.project.verify = ('another command',)
+        with patch.object(check_jobs, 'environment', return_value='b' * 64):
+            self.submit()
+            self.assertTrue(original.exists())
+            (ctx.workspace / 'app.py').write_text('VALUE = 99\n')
+            self.submit()
+        self.assertFalse(original.exists())
+
+    def test_source_release_preserves_typed_references_and_unread_or_physical_jobs(self):
+        stale = {'code_digest': 'c' * 64}
+        source = self.lifecycle_record(1, **stale)
+        self.lifecycle_record(2, shared_job=source.name, **stale)
+        waited = self.lifecycle_record(3, **stale)
+        with self.project.insights.ledger.write('check_jobs', ['retired-role.wait.json']):
+            write_json(check_jobs.root(self.project) / 'retired-role.wait.json',
+                       {'id': waited.name, 'wait_until': 1})  # Expiry does not release the record.
+        protected = [source, waited,
+                     self.lifecycle_record(4, acknowledged=False, **stale),
+                     self.lifecycle_record(5, status='queued', **stale),
+                     self.lifecycle_record(6, status='running', detached=True, **stale),
+                     self.lifecycle_record(7, status='cleanup_failed', **stale),
+                     self.lifecycle_record(8, **stale)]
+        self.release_stale(protect={protected[-1].name})
+        self.assertTrue(all(p.exists() for p in protected))
+
+    def test_unknown_reference_or_unsafe_tree_prevents_release(self):
+        path = self.lifecycle_record(1, code_digest='c' * 64)
+        wait = check_jobs.root(self.project) / 'worker.wait.json'
+        with self.project.insights.ledger.write('check_jobs', [wait.name]):
+            write_json(wait, {'id': 'not an ID'})
+        self.release_stale(); self.assertTrue(path.exists())
+        with self.project.insights.ledger.write('check_jobs', [wait.name]):
+            wait.unlink()
+        corrupt = self.lifecycle_record(2, acknowledged='invalid')
+        self.release_stale(); self.assertTrue(path.exists())
+        shutil.rmtree(corrupt)
+        forget_ledger(self.project.root)
+        target = self.root / 'outside'; target.write_text('untouched')
+        link = path / 'linked'
+        try:
+            link.symlink_to(target)
+        except OSError:
+            self.skipTest('symlinks unavailable')
+        self.release_stale(); self.assertTrue(path.exists())
+        self.assertEqual(target.read_text(), 'untouched')
+        link.unlink()
+        os.link(target, link)
+        self.release_stale(); self.assertTrue(path.exists())
+
+    def test_terminal_nonreusable_ack_releases_only_unreferenced_records(self):
+        path = self.lifecycle_record(1, passed=False, acknowledged=False)
+        check_jobs.set_wait(self.project, 'worker', path.name)
+        check_jobs.acknowledge(self.project, 'worker', [path.name])
         self.assertTrue(path.exists())
-        record = read_json(path); record['status'] = 'cancelled'; write_json(path, record)
-        with self.capped():
-            check_jobs._make_room(self.project)
+        check_jobs.clear_wait(self.project, 'worker')
+        check_jobs.acknowledge(self.project, 'worker', [path.name])
+        self.assertFalse(path.exists())
+        source = self.lifecycle_record(2, passed=False, acknowledged=False)
+        sub = self.lifecycle_record(3, role='reviewer', status='queued',
+                                    shared_job=source.name, acknowledged=False)
+        check_jobs.acknowledge(self.project, 'worker', [source.name])
+        self.assertTrue(source.exists())
+        check_jobs.acknowledge(self.project, 'reviewer', [sub.name])
+        self.assertFalse(sub.exists())
+        check_jobs.acknowledge(self.project, 'worker', [source.name])
+        self.assertFalse(source.exists())
+
+    def test_release_keeps_live_owner_lock(self):
+        path = self.lifecycle_record(1, code_digest='c' * 64)
+        with lock(path / 'owner.lock'):
+            self.release_stale()
+            self.assertTrue(path.exists())
+        remove = shutil.rmtree
+        def closed_probe(directory):
+            self.assertFalse(held(path / 'owner.lock'))
+            return remove(directory)
+        with patch.object(check_jobs.shutil, 'rmtree', side_effect=closed_probe):
+            self.release_stale()
         self.assertFalse(path.exists())
 
     def test_finish_refuses_releasing_other_role_or_waited_check(self):
@@ -1592,6 +1615,75 @@ class CacheInputTests(Fixture):
         self.cache.mkdir(parents=True, exist_ok=True)
         (self.cache / 'object').write_text(content)
 
+    def measured_submission_steps(self, context):
+        from contextlib import contextmanager
+        from mizu import acceptance
+        original = acceptance._jobs
+        steps = []
+
+        @contextmanager
+        def measured(project, *, locked=False):
+            with original(project, locked=locked) as db:
+                count = [0]
+                db.set_progress_handler(lambda: count.__setitem__(0, count[0] + 1) or 0, 1)
+                try:
+                    yield db
+                finally:
+                    db.set_progress_handler(None, 0)
+                    steps.append(count[0])
+
+        with patch.object(acceptance, '_jobs', measured):
+            job = check_jobs.submit(context, fresh=True)
+        return sum(steps), job
+
+    def test_submission_lookup_work_does_not_grow_with_unrelated_retained_jobs(self):
+        self.seed()
+        baseline_context = self.context()
+        baseline, baseline_job = self.measured_submission_steps(baseline_context)
+        self.assertEqual(self.run_job()['status'], 'completed')
+        check_jobs.acknowledge(self.project, baseline_context.role.name, [baseline_job['id']])
+
+        # These successful custom results are retained for a different exact
+        # execution key and have no request-identity relation to verify.
+        for index in range(32):
+            context = self.context()
+            job = check_jobs.submit(context, script=f'echo retained-{index}')
+            self.assertEqual(self.run_job()['status'], 'completed')
+            check_jobs.acknowledge(self.project, context.role.name, [job['id']])
+        self.assertGreaterEqual(len(list(check_jobs.root(self.project).glob('*/job.json'))), 32)
+
+        measured, _job = self.measured_submission_steps(self.context())
+        # A table scan over retained job history crosses this allowance; indexed
+        # exact-request, current-pending and current-lifecycle probes remain flat.
+        self.assertLessEqual(measured, baseline + 128)
+
+    def test_legacy_request_sequence_reconstruction_is_bounded(self):
+        from mizu import acceptance
+        from mizu.fs import canonical, digest
+        self.seed()
+        context = self.context()
+        first = check_jobs.submit(context, fresh=True)
+        record = acceptance.read_job(self.project, first['id'])
+        cache_request = record['cache_request']
+        record.pop('request_sequence')
+        record.update(status='completed', passed=True, acknowledged=True)
+        acceptance.write_job(self.project, first['id'], record)
+        legacy_id = digest(canonical({'cache_request': cache_request, 'sequence': 1024}))
+        legacy = {**record, 'id': legacy_id}
+        acceptance.write_job(self.project, legacy_id, legacy)
+
+        next_job = check_jobs.submit(context, fresh=True)
+        self.assertEqual(next_job['id'], digest(canonical(
+            {'cache_request': cache_request, 'sequence': 1025})))
+        self.assertEqual(acceptance.read_job(self.project, next_job['id'])['request_sequence'], 1025)
+        current = acceptance.read_job(self.project, next_job['id'])
+        current.update(status='completed', passed=True, acknowledged=True)
+        acceptance.write_job(self.project, next_job['id'], current)
+        following = check_jobs.submit(context, fresh=True)
+        self.assertEqual(following['id'], digest(canonical(
+            {'cache_request': cache_request, 'sequence': 1026})))
+        self.assertEqual(acceptance.read_job(self.project, following['id'])['request_sequence'], 1026)
+
     def test_absent_empty_and_changed_bytes_are_distinct_inputs(self):
         environment = check_jobs.environment(self.project)
         absent = self.fingerprint()
@@ -2042,6 +2134,7 @@ class CacheInputTests(Fixture):
         raw = read_json(path)
         raw.pop('cache_input')
         raw.pop('cache_request')
+        raw.pop('request_sequence', None)
         write_json(path, raw)
         self.assertEqual(self.run_job()['status'], 'refused')
         self.assertFalse(FakeSandbox.calls)

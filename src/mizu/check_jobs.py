@@ -22,7 +22,7 @@ from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
-from .acceptance import raw_jobs, strict_jobs, write_job
+from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, write_job
 
 
 class _SharedCheckCaptureRefused(Exception):
@@ -86,6 +86,9 @@ MAX_CHECK_CAPTURE_ERROR_BYTES = 256
 MAX_COMMAND_EVIDENCE_ID_HEX_CHARS = 32
 #: Bound command-evidence IDs returned by one logs listing.
 MAX_COMMAND_EVIDENCE_LIST_ROWS = 32
+#: Request sequence is stored in SQLite's signed 64-bit integer domain.
+#: Legacy cache requests were allocated from sequences 0..1024 before indexing.
+LEGACY_CHECK_REQUEST_SEQUENCE_COUNT = 1025
 _COMMAND_EVIDENCE_ID = re.compile(
     rf'[a-f0-9]{{{MAX_COMMAND_EVIDENCE_ID_HEX_CHARS}}}\Z')
 #: Bound transient memory while hashing one frozen check input.
@@ -120,6 +123,33 @@ def raw_read(project, job_id):
     if not isinstance(value, dict) or value.get('id') != job_id:
         raise Denied('Check job unavailable')
     return value
+
+
+def _indexed_jobs(project, query, parameters=()):
+    from .acceptance import _jobs
+    with _jobs(project) as db:
+        rows = db.execute(query, parameters).fetchall()
+    result = []
+    for job_id, raw in rows:
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            raise Denied('Invalid indexed check job') from exc
+        if not isinstance(value, dict) or value.get('id') != job_id:
+            raise Denied('Invalid indexed check job')
+        result.append(value)
+    return result
+
+
+def _shared_candidate(project, key):
+    rows = _indexed_jobs(
+        project,
+        "SELECT id,job FROM check_jobs WHERE valid=1 AND shared_key=? AND shared_job IS NULL "
+        "AND detached=0 AND cancel_requested=0 AND "
+        "(status IN ('queued','running') OR (status='completed' AND passed=1)) "
+        "ORDER BY created_at,id LIMIT 1",
+        (key,))
+    return rows[0] if rows else None
 
 
 
@@ -572,7 +602,7 @@ def _delivered_summary(project, job_id, owner):
 
 
 def _subscribe(context, original, *, purpose=None, request=None, request_id=None,
-               request_fresh=None, request_bounds=None, request_reuse=None):
+               request_sequence=None, request_fresh=None, request_bounds=None, request_reuse=None):
     receiver = getattr(context, 'spend_role', None) if getattr(context, 'delegated_child', False) else None
     owner = receiver.name if receiver is not None else context.role.name
     if receiver is not None and 'check_job' not in receiver.capabilities:
@@ -583,7 +613,6 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
     path = root(context.project) / job_id / 'job.json'
     if path.exists():
         return _delivered_summary(context.project, job_id, owner)
-    _make_room(context.project, protect={original['id']})
     # A terminal reusable result is returned synchronously in this response;
     # recording a second unread completion would manufacture a later wake.
     # Queued/running subscriptions remain unread until the normal result path.
@@ -593,8 +622,10 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
            'producer_role': context.role.name, 'run': context.run_dir.name,
            'created_at': now(), 'acknowledged': already_delivered}
     job.pop('cache_request', None)
+    job.pop('request_sequence', None)
     if request is not None:
         job['cache_request'] = request
+        job['request_sequence'] = request_sequence
         # The subscription states the subscriber's own durable request
         # identity, never the original's execution-bound fields.
         job['fresh'] = request_fresh
@@ -613,49 +644,86 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
     return summary(read(context.project, job_id))
 
 
-def _make_room(project, *, protect=frozenset()):
-    records = sorted(raw_jobs(project, invalid=True).values(), key=lambda value: (root(project) / value['id'] / 'job.json').stat().st_mtime)
-    required = len(records) - project.config.limits.check_retained + 1
-    if required <= 0:
-        return
-    values = [(root(project) / value['id'] / 'job.json', value) for value in records]
-    references = {}
-    for _, value in values:
-        if value.get('shared_job'):
-            references.setdefault(value['shared_job'], set()).add(value.get('id'))
-    referenced = set(references)
-    eligible = []
-    for path, value in values:
-        # A detached subscription is cancelled immediately; its physical runner
-        # may still own the frozen inputs until it observes cancellation.
-        executing = not value.get('shared_job') and value.get('status') in ('queued', 'running')
-        pending_proof = value.get('acceptance_scope') is not None and not value.get('acceptance_receipt_id')
-        if (value.get('acknowledged') and not executing and not pending_proof
-                and value.get('id') not in protect
-                and read(project, value['id']).get('status') not in ('queued', 'running')):
-            eligible.append((path.parent, value['id']))
+def _release_locked(project, ids, *, protect=frozenset()):
+    """Release source-owned candidates under check-jobs.lock, never unknown state.
 
-    # Select unreferenced records first, preserving source evidence when other
-    # acknowledged records can satisfy the target. A source becomes eligible
-    # only after every subscription that references it is already a victim.
-    victims = []
-    victim_ids = set()
-    while len(victims) < required:
-        available = [entry for entry in eligible
-                     if entry[1] not in victim_ids
-                     and not (references.get(entry[1], set()) - victim_ids)]
-        if not available:
-            raise Busy('Retained check evidence is full; inspect and acknowledge results')
-        leaves = [entry for entry in available if entry[1] not in referenced]
-        victim = (leaves or available)[0]
-        victims.append(victim[0])
-        victim_ids.add(victim[1])
-    # Preflight the entire reduction under check-jobs.lock: an insufficient
-    # eligible set must not partially evict evidence after a target decrease.
-    # Selection order also removes subscriptions before their source records.
-    for victim in victims:
-        with project.insights.ledger.write('check_jobs', [victim.name]):
-            shutil.rmtree(victim)
+    The index selects candidates and reverse subscription edges. Only selected
+    trees are inspected; indexed wait IDs are edges, prose citations are not.
+    owner.lock is nonblocking (runners acquire it before check-jobs.lock).
+    """
+    from . import acceptance
+    from .check_job_index import TERMINAL
+    try:
+        with acceptance._jobs(project, locked=True) as db:
+            if db.execute('SELECT 1 FROM check_jobs WHERE valid=0 LIMIT 1').fetchone():
+                return  # An invalid record can conceal any reference.
+            if db.execute('SELECT 1 FROM check_waits WHERE job_id IS NULL LIMIT 1').fetchone():
+                return  # An unreadable wait can point to any job.
+    except (Denied, OSError, ValueError, RecursionError):
+        return
+    for job_id in ids:
+        if job_id in protect:
+            continue
+        try:
+            with acceptance._jobs(project, locked=True) as db:
+                wait = db.execute('SELECT 1 FROM check_waits WHERE job_id=? LIMIT 1', (job_id,)).fetchone()
+                row = db.execute('SELECT job FROM check_jobs WHERE id=? AND valid=1', (job_id,)).fetchone()
+                edge = db.execute('SELECT 1 FROM check_jobs WHERE shared_job=? LIMIT 1', (job_id,)).fetchone()
+            if wait or row is None or edge:
+                continue
+            job = acceptance.read_job(project, job_id)
+            if canonical(job).decode() != row[0]:
+                continue  # Out-of-band changes require index audit, not deletion.
+            acceptance._inspect_evidence(project, job)
+            if (job.get('acknowledged') is not True
+                    or not job.get('shared_job') and job.get('status') not in TERMINAL
+                    or job.get('status') == 'cleanup_failed'
+                    or job.get('acceptance_scope') is not None and not job.get('acceptance_receipt_id')):
+                continue
+            if job.get('shared_job'):
+                original = acceptance.read_job(project, job['shared_job'])
+                if (original.get('shared_job') or original.get('status') not in TERMINAL
+                        or original.get('status') == 'cleanup_failed'):
+                    continue
+            directory = root(project) / job_id
+            # Never follow links or remove unsafe/ambiguous trees, including
+            # links in frozen input/output and a linked owner lock.
+            pending = [directory]
+            while pending:
+                path = pending.pop()
+                acceptance._present(project.root, path.relative_to(project.root).as_posix())
+                info = path.lstat()
+                if stat.S_ISDIR(info.st_mode):
+                    pending.extend(path.iterdir())
+                elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise Denied('Unsafe check job tree')
+            with lock(directory / 'owner.lock', blocking=False):
+                pass
+            # Close the probe before removal (Windows cannot unlink an open
+            # CRT lock file). check-jobs.lock still excludes execution: a stale
+            # runner must re-read the terminal/missing job before starting.
+            with project.insights.ledger.write('check_jobs', [job_id]):
+                shutil.rmtree(directory)
+        except (Denied, Busy, OSError, ValueError, RecursionError):
+            continue  # Unknown ownership, evidence or reference state is a pin.
+
+
+def _release_stale(project, source, execution, env, current, *, protect=frozenset()):
+    """A bound submission ends only obsolete reusable candidates' cache lifetime."""
+    from .acceptance import _jobs
+    from .check_job_index import lifecycle_key
+    if env is None or project.config.sandbox.check_cache_paths and current is None:
+        return
+    keys = sorted(lifecycle_key({'code_digest': source, 'execution': execution,
+                                 'environment': env, 'cache_input': cache, 'kind': kind})
+                  for kind, cache in (('verify', current), ('experiment', None)))
+    with _jobs(project, locked=True) as db:
+        ids = [row[0] for row in db.execute(
+            'SELECT id FROM check_jobs WHERE lifecycle_key < ? '
+            'OR (lifecycle_key > ? AND lifecycle_key < ?) OR lifecycle_key > ?',
+            (keys[0], keys[0], keys[1], keys[1]))]
+    if ids:
+        _release_locked(project, ids, protect=protect)
 
 
 def submit(context, script=None, *, commands=None, kind="experiment", fresh=False, purpose=None, scratch_paths=None):
@@ -721,18 +789,39 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
     cache_request = digest(canonical(request_identity))
 
     def request_slot():
-        # Strictly validate every retained record: an unreadable or ambiguous
-        # store must not conceal an unresolved request.
+        # Query only this exact request and its active physical source. The old
+        # request-ID format had a bounded legacy sequence space; new records
+        # persist their sequence so future allocation is one indexed lookup.
         from . import acceptance
+        from .acceptance import _jobs
+        with _jobs(project, locked=True) as db:
+            if db.execute('SELECT 1 FROM check_jobs WHERE valid=0 LIMIT 1').fetchone():
+                raise Denied('Invalid acceptance producer entry')
+            active = db.execute(
+                "SELECT j.id, j.job, j.request_sequence FROM check_jobs j "
+                "LEFT JOIN check_jobs source ON source.id=j.shared_job AND source.valid=1 "
+                "WHERE j.valid=1 AND j.cache_request=? AND j.detached=0 AND j.cancel_requested=0 AND "
+                "((j.shared_job IS NULL AND j.status IN ('queued','running')) OR "
+                "(j.shared_job IS NOT NULL AND (source.status IN ('queued','running') OR source.id IS NULL))) "
+                "ORDER BY j.created_at,j.id LIMIT 2", (cache_request,)).fetchall()
+            latest = db.execute(
+                "SELECT request_sequence FROM check_jobs WHERE valid=1 AND cache_request=? "
+                "AND request_sequence IS NOT NULL ORDER BY request_sequence DESC LIMIT 1",
+                (cache_request,)).fetchone()
+            legacy_ids = ([] if latest else db.execute(
+                "SELECT id FROM check_jobs WHERE valid=1 AND cache_request=? "
+                "AND request_sequence IS NULL", (cache_request,)).fetchall())
+
         matches = []
-        for record in strict_jobs(project).values():
-            if record.get('cache_request') != cache_request:
-                continue
-            # Every decomposed request field is compared so a changed
-            # fresh, bounds, owner, source or configuration cannot coalesce
-            # with an unrelated demand. The request identity survives
-            # binding and start; only the execution binding is rebound.
-            if (record.get('role') != owner or record.get('producer_role') != context.role.name
+        for job_id, raw, sequence in active:
+            record = acceptance.read_job(project, job_id)
+            if not isinstance(raw, str) or record.get('id') != job_id:
+                raise Denied('Invalid check request record')
+            # Every decomposed request field is compared so a changed fresh,
+            # bounds, owner, source or configuration cannot coalesce with an
+            # unrelated demand. The request identity survives binding/start.
+            if (record.get('cache_request') != cache_request
+                    or record.get('role') != owner or record.get('producer_role') != context.role.name
                     or record.get('run') != context.run_dir.name
                     or record.get('code_digest') != capture['code_digest']
                     or record.get('execution') != request_identity['execution']
@@ -741,7 +830,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                     or record.get('environment_bounds') != env_bounds
                     or record.get('inputs_bound_required') != project.config.sandbox.check_reuse):
                 raise Denied('Invalid check request identity')
-            if record.get('detached') or acceptance._present(project.root, f"check-jobs/{record['id']}/cancel.json"):
+            if acceptance._present(project.root, f"check-jobs/{job_id}/cancel.json"):
                 continue
             if ('cache_input' not in record and 'cache_binding_pending' not in record
                     and not record.get('shared_job')):
@@ -750,8 +839,6 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 original = acceptance.read_job(project, record['shared_job'])
                 if original.get('shared_job'):
                     raise Denied('Invalid check subscription')
-                # A pending or unbound original is impossible as shared
-                # execution: refuse the corrupt subscription, never reuse it.
                 if original.get('cache_binding_pending'):
                     raise Denied('Invalid check subscription')
                 if (original.get('kind') == 'verify' and project.config.sandbox.check_cache_paths
@@ -765,19 +852,38 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
             if status not in ('queued', 'running', 'completed', 'refused', 'cancelled', 'interrupted', 'cleanup_failed'):
                 raise Denied('Invalid check request status')
             if status in ('queued', 'running'):
-                matches.append(record['id'])
+                matches.append((job_id, sequence))
         if len(matches) > 1:
             raise Denied('Ambiguous check request identity')
         if matches:
-            return matches[0], True
-        for index in range(1025):
-            key = digest(canonical({'cache_request': cache_request, 'sequence': index}))
-            if not acceptance._present(project.root, f'check-jobs/{key}'):
-                return key, False
-            if (not (root(project) / key).is_dir()
-                    or not acceptance._present(project.root, f'check-jobs/{key}/job.json')):
-                raise Denied('Incomplete check request record')
-        raise Busy('Retained check evidence is full; inspect and acknowledge results')
+            return matches[0][0], True, matches[0][1]
+
+        if latest:
+            sequence = latest[0]
+            if type(sequence) is not int or sequence < 0:
+                raise Denied('Invalid check request sequence')
+        else:
+            # Prior versions allowed exactly 1025 deterministic candidates.
+            # This one-time bounded reconstruction is only for legacy records;
+            # new records carry request_sequence in the indexed row.
+            prior_ids = {row[0] for row in legacy_ids}
+            sequence = -1
+            found = set()
+            for candidate in range(LEGACY_CHECK_REQUEST_SEQUENCE_COUNT):
+                candidate_id = digest(canonical({'cache_request': cache_request,
+                                                 'sequence': candidate}))
+                if candidate_id in prior_ids:
+                    sequence = candidate
+                    found.add(candidate_id)
+            if found != prior_ids:
+                raise Denied('Invalid legacy check request identity')
+        sequence += 1
+        if sequence > MAX_CHECK_REQUEST_SEQUENCE:
+            raise Busy('Check request sequence exhausted')
+        job_id = digest(canonical({'cache_request': cache_request, 'sequence': sequence}))
+        if acceptance._present(project.root, f'check-jobs/{job_id}'):
+            raise Denied('Incomplete check request record')
+        return job_id, False, sequence
 
     cache_configured = not custom and bool(project.config.sandbox.check_cache_paths)
     with contextlib.ExitStack() as stack:
@@ -790,7 +896,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
         # Pending retries have priority even after the owner releases the lock.
         if cache_configured:
             with lock(project.root / 'locks/check-jobs.lock'):
-                pending_id, exists = request_slot()
+                pending_id, exists, _ = request_slot()
                 if exists:
                     _state_purpose(project, pending_id, purpose)
                     _retire_superseded(project, owner, purpose, keep={pending_id}, replaced_by=pending_id)
@@ -817,8 +923,11 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
         job_id = digest(canonical(identity))
         directory = root(project) / job_id
         with lock(project.root / 'locks/check-jobs.lock'):
+            if not pending_binding:
+                _release_stale(project, capture['code_digest'], identity['execution'], env, current,
+                               protect={job_id})
             if cache_configured:
-                pending_id, exists = request_slot()
+                pending_id, exists, request_sequence = request_slot()
                 if exists:
                     _state_purpose(project, pending_id, purpose)
                     _retire_superseded(project, owner, purpose, keep={pending_id}, replaced_by=pending_id)
@@ -837,21 +946,23 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 _retire_superseded(project, owner, purpose, keep={job_id}, replaced_by=job_id)
                 return _delivered_summary(project, job_id, owner)
             if shared_key is not None and not fresh:
-                for other in (strict_jobs(project) if cache_configured else raw_jobs(project)).values():
-                    if (other.get('shared_key') == shared_key and reusable(other)
-                            and cache_matches(project, other, current)
-                            and not (root(project) / other['id'] / 'cancel.json').exists()):
-                        job = _subscribe(context, other, purpose=purpose,
-                                         request=cache_request if cache_configured else None,
-                                         request_id=job_id if cache_configured else None,
-                                         request_fresh=fresh if cache_configured else None,
-                                         request_bounds=env_bounds if cache_configured else None,
-                                         request_reuse=project.config.sandbox.check_reuse if cache_configured else None)
-                        # The shared job is the surviving work, so it is never
-                        # the one this request replaces.
-                        _retire_superseded(project, owner, purpose,
-                                           keep={other['id'], job['id']}, replaced_by=job['id'])
-                        return job
+                other = _shared_candidate(project, shared_key)
+                if other is not None:
+                    if (not reusable(other) or not cache_matches(project, other, current)
+                            or (root(project) / other['id'] / 'cancel.json').exists()):
+                        raise Denied('Check reuse index disagrees with its source record')
+                    job = _subscribe(context, other, purpose=purpose,
+                                     request=cache_request if cache_configured else None,
+                                     request_id=job_id if cache_configured else None,
+                                     request_sequence=request_sequence if cache_configured else None,
+                                     request_fresh=fresh if cache_configured else None,
+                                     request_bounds=env_bounds if cache_configured else None,
+                                     request_reuse=project.config.sandbox.check_reuse if cache_configured else None)
+                    # The shared job is the surviving work, so it is never
+                    # the one this request replaces.
+                    _retire_superseded(project, owner, purpose,
+                                       keep={other['id'], job['id']}, replaced_by=job['id'])
+                    return job
             pending = _pending_jobs(project)
             counted = {job['id'] for job in pending}
             superseded = _superseded(project, owner, purpose, keep={job_id})
@@ -862,7 +973,6 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
             freed = [job for job in superseded
                      if job['id'] in counted and _withdrawable(project, job)]
             unfinished = len(pending) - len(freed)
-            _make_room(project)
             if unfinished >= context.config.limits.check_pending:
                 raise Busy('Check job queue is full')
             mkdir(directory)
@@ -876,6 +986,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                        'inputs_bound_required': context.config.sandbox.check_reuse}
                 if cache_configured:
                     job['cache_request'] = cache_request
+                    job['request_sequence'] = request_sequence
                     # Durable request mode and bounds survive binding and
                     # start; they are validated and compared on every lookup,
                     # even when the environment itself is unbound (None).
@@ -909,8 +1020,7 @@ def _withdrawable(project, job):
     A shared execution still runs for its remaining consumers, so it keeps
     its place in the queue until the last consumer leaves.
     """
-    records = list(raw_jobs(project).values())
-    return not _interest(records, job['id'], exclude_id=job['id'])
+    return not _interest(project, job['id'], exclude_id=job['id'])
 
 
 def _retire_superseded(project, role, purpose, *, keep=frozenset(), replaced_by=None):
@@ -1103,52 +1213,37 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
             'next_offset': end if end < len(text) else None}
 
 
-def _interest(records, original_id, *, exclude_id=None):
-    """Whether any consumer other than ``exclude_id`` still wants the job."""
-    return any(not record.get('detached') and record.get('id') != exclude_id
-               and (record.get('id') == original_id or record.get('shared_job') == original_id)
-               for record in records)
+def _interest(project, original_id, *, exclude_id=None):
+    from .acceptance import _jobs
+    with _jobs(project) as db:
+        return bool(db.execute(
+            'SELECT 1 FROM check_jobs WHERE valid=1 AND detached=0 '
+            'AND (? IS NULL OR id<>?) AND (id=? OR shared_job=?) LIMIT 1',
+            (exclude_id, exclude_id, original_id, original_id)).fetchone())
 
 
 def _pending_jobs(project):
-    """Physical jobs that still demand execution, counted against the cap.
-
-    A job whose owner replaced it has no demand left, so it leaves the
-    queue. A shared execution still runs for its remaining consumers, so it
-    keeps its place until the last consumer leaves.
-    """
-    records = list(raw_jobs(project).values())
+    records = _indexed_jobs(
+        project,
+        "SELECT id,job FROM check_jobs WHERE valid=1 AND shared_job IS NULL "
+        "AND status IN ('queued','running') ORDER BY created_at,id")
     pending = []
     for record in records:
-        if not isinstance(record, dict) or record.get('shared_job'):
-            continue
-        if record.get('status') not in ('queued', 'running'):
-            continue
-        if record.get('replaced_by') and not _interest(records, record['id'], exclude_id=record['id']):
+        if record.get('replaced_by') and not _interest(project, record['id'], exclude_id=record['id']):
             continue
         pending.append(record)
     return pending
 
 
 def _superseded(project, role, purpose, *, keep=frozenset()):
-    """This role's own unfinished physical jobs that a same-purpose request replaces.
-
-    Only the calling role's own physical jobs are eligible: a subscription
-    belongs to its subscriber and another role's job is never this role's
-    demand to retire.
-    """
     if purpose is None:
         return []
-    found = []
-    for record in sorted(raw_jobs(project).values(), key=lambda value: value['id']):
-        if record.get('shared_job'):
-            continue
-        if record.get('role') != role or record.get('purpose') != purpose:
-            continue
-        if record.get('id') in keep or record.get('status') not in ('queued', 'running'):
-            continue
-        found.append(record)
-    return found
+    records = _indexed_jobs(
+        project,
+        "SELECT id,job FROM check_jobs WHERE valid=1 AND role=? AND purpose=? "
+        "AND shared_job IS NULL AND status IN ('queued','running') ORDER BY id",
+        (role, purpose))
+    return [record for record in records if record.get('id') not in keep]
 
 
 def _state_purpose(project, job_id, purpose):
@@ -1188,8 +1283,7 @@ def _withdraw_locked(project, job_id, *, role, replaced_by=None):
         raw['replaced_by'] = replaced_by
         raw['acknowledged'] = True
     write_job(project, job_id, raw)
-    records = list(raw_jobs(project).values())
-    interested = _interest(records, original_id, exclude_id=job_id)
+    interested = _interest(project, original_id, exclude_id=job_id)
     if replaced_by is not None and not interested and raw.get('status') == 'queued':
         # The replaced job never started: it leaves the queue at once, so the
         # runner never spends a slot on it.
@@ -1210,6 +1304,7 @@ def cancel(context, job_id):
 
 def acknowledge(project, role, ids):
     with lock(project.root / 'locks/check-jobs.lock'):
+        acknowledged = {}
         for job_id in ids:
             job = read(project, job_id)
             if job['role'] != role:
@@ -1217,12 +1312,26 @@ def acknowledge(project, role, ids):
             if job['status'] in ('queued', 'running'):
                 continue
             original_id = job.get('shared_job', job_id)
-            for raw in list(raw_jobs(project).values()):
+            from .acceptance import _jobs
+            with _jobs(project, locked=True) as db:
+                related = [json.loads(raw) for valid, raw in db.execute(
+                    'SELECT valid, job FROM check_jobs WHERE id IN (?, ?) UNION '
+                    'SELECT valid, job FROM check_jobs WHERE shared_job=?',
+                    (job_id, original_id, original_id)) if valid]
+            # Look up only the result and its reverse edges, not role history.
+            for raw in related:
+                if raw.get('role') != role:
+                    continue
                 same_result = (not job.get('detached') and raw.get('role') == role
                                and raw.get('shared_job', raw.get('id')) == original_id)
                 if raw.get('id') == job_id or same_result:
                     raw['acknowledged'] = True
                     write_job(project, raw['id'], raw)
+                    if not reusable(raw):
+                        acknowledged[raw['id']] = bool(raw.get('shared_job'))
+        # Reusable executions belong to the source lifecycle, not delivery.
+        _release_locked(project, sorted(acknowledged,
+                                        key=lambda key: not acknowledged[key]))
 
 
 def run_one(project, stop, *, sandbox_factory=Sandbox):
@@ -1251,7 +1360,7 @@ def _run_one(project, stop, sandbox_factory, invalid):
         return {'status': 'disk-reserve'}
     blocked = False
     candidates = []
-    for job in raw_jobs(project).values():
+    for job in _pending_jobs(project):
         if not job.get('shared_job') and job.get('status') in ('queued', 'running'):
             candidates.append((root(project) / job['id'] / 'job.json', job))
     for path, job in sorted(candidates, key=lambda pair: pair[1].get('created_at', '')):
@@ -1639,19 +1748,22 @@ def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
     default wait, so a recorded deferral is never unbounded. Only finite
     positive epoch bounds are accepted.
     """
-    job = read(project, job_id)
-    if job['role'] != role:
-        raise Denied('Check wait belongs to another role')
-    if wait_until is None:
-        wait_until = time.time() + project.config.limits.default_wait_seconds
-    deadline = _positive_finite_deadline(wait_until)
-    if deadline is None:
-        raise Denied('Invalid check wait bound')
-    record = {'id': job_id, 'inputs': wait_signature(project), 'wait_until': deadline}
-    if continuation is not None:
-        record['continuation'] = {k: continuation[k] for k in ('run', 'snapshot', 'code_digest', 'summary', 'state') if k in continuation}
-    write_json(root(project) / (role + '.wait.json'), record)
-    return record
+    with lock(project.root / 'locks/check-jobs.lock'):
+        job = read(project, job_id)
+        if job['role'] != role:
+            raise Denied('Check wait belongs to another role')
+        if wait_until is None:
+            wait_until = time.time() + project.config.limits.default_wait_seconds
+        deadline = _positive_finite_deadline(wait_until)
+        if deadline is None:
+            raise Denied('Invalid check wait bound')
+        record = {'id': job_id, 'inputs': wait_signature(project), 'wait_until': deadline}
+        if continuation is not None:
+            record['continuation'] = {k: continuation[k] for k in ('run', 'snapshot', 'code_digest', 'summary', 'state') if k in continuation}
+        name = role + '.wait.json'
+        with project.insights.ledger.write('check_jobs', [name]):
+            write_json(root(project) / name, record)
+        return record
 
 
 def deferral(project, role):
@@ -1697,7 +1809,10 @@ def deferrals(project):
             held[name] = hold
     return held
 def clear_wait(project, role):
-    (root(project) / (role + '.wait.json')).unlink(missing_ok=True)
+    name = role + '.wait.json'
+    with lock(project.root / 'locks/check-jobs.lock'):
+        with project.insights.ledger.write('check_jobs', [name]):
+            (root(project) / name).unlink(missing_ok=True)
 
 
 def continuation(project, role, snapshot, *, discovery=None):

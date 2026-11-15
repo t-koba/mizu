@@ -19,6 +19,8 @@ from .check_job_index import entry_key
 from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
 
 MAX_BYTES = 1048576
+#: Request sequences fit SQLite's signed 64-bit integer storage domain.
+MAX_CHECK_REQUEST_SEQUENCE = (1 << 63) - 1
 # Reserve half the receipt envelope for scope; full receipts still use MAX_BYTES.
 MAX_ACCEPTANCE_SCOPE_BYTES = MAX_BYTES // 2
 MAX_INVALID_PRODUCER_DIAGNOSTIC_ENTRIES = 32
@@ -104,6 +106,12 @@ def read_job(project, job_id):
         raise InvalidProducer(job_id, 'job_schema')
     if ('cache_input_empty' in job
             and (job.get('kind') != 'verify' or not _digest(job.get('cache_input')))):
+        raise InvalidProducer(job_id, 'job_schema')
+    if ('request_sequence' in job
+            and (type(job['request_sequence']) is not int or not 0 <= job['request_sequence'] <= MAX_CHECK_REQUEST_SEQUENCE
+                 or job.get('kind') != 'verify' or not _digest(job.get('cache_request'))
+                 or job_id != digest(canonical({'cache_request': job['cache_request'],
+                                                'sequence': job['request_sequence']})))):
         raise InvalidProducer(job_id, 'job_schema')
     if not valid_cache_diagnostics(job.get('cache_diagnostics', [])):
         raise InvalidProducer(job_id, 'job_schema')

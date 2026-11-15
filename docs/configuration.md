@@ -428,6 +428,14 @@ only through existing schedules or subscriptions; skipped runs consume no
 events, and repeated state-based triggers coalesce through the existing
 durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 
+Check-job evidence uses source-owned lifecycle release, not a retention count
+or TTL (`check_retained` is no longer accepted). Bound submissions release only
+obsolete completed reusable input identities; terminal acknowledgement releases
+unreferenced non-reusable jobs/subscriptions. Current command variants, typed
+subscription/wait references, unread results, physical jobs and pending or
+uncertain evidence are protected. Immutable acceptance receipts are independent.
+See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limits.
+
 | Key | Scope and description |
 |---|---|
 | `lock_timeout_seconds` | Integer 0–86,400, default `30`. Operator host/load policy for **each** blocking lock-acquisition half: the in-process guard and POSIX/Windows kernel retries use the same captured value. `0` makes one immediate attempt per half; it does not disable locking. Contention still raises `Busy`; `blocking=false` remains immediate regardless of this setting. |
@@ -464,7 +472,6 @@ durable stores (see `docs/operations.md` and `docs/scheduling.md`).
 | `parallel_runs`, `parallel_consults` | Independently bounded global caller execution slots and per-consultation role fan-out; admitted callers lend their slot to children, so `parallel_runs = 1` permits consultation/delegation |
 | `parallel_checks` | Shared compute slots for asynchronous sandbox checks, independent of the model admission slots (1-64; default 2). The check runner takes one slot per running job, and a job that cannot take one waits without holding a slot. See [check jobs](check-jobs.md) |
 | `check_pending` | Unfinished check jobs retained per project (1-1024; default 32). A submission beyond the bound is refused rather than queued without limit. See [check jobs](check-jobs.md) |
-| `check_retained` | Total retained check-job record target including subscriptions (1-1024; default 1024), separate from unfinished jobs. New records require enough safe acknowledged victims to reach the target; insufficient victims refuse without partial eviction. Lowering the target preserves ineligible evidence. The fixed `MAX_CHECK_RETAINED = 1024` ceiling bounds linear metadata scans and request-identity search; it is defensive, not a format limit. See [check jobs](check-jobs.md) |
 | `prior_role_report_preview_bytes` | UTF-8 bytes per prior-role check-continuation summary/state preview (0-128000; default 4000); 0 leaves both text fields empty. Operator context/token-budget policy. The independent `MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES` ceiling is 32,000 Unicode characters × 4 UTF-8 bytes, derived from `mizu_finish.state` (summary has a smaller protocol maximum). Incomplete trailing UTF-8 sequences are discarded. The unchanged overall check-job prompt envelope may still omit the continuation; see [check jobs](check-jobs.md) |
 | `history_temporaries` | Per-project decision-history crash-leftover recovery work budget (1-4096; default 64). The reader validates only recognized temporary/alias names and refuses before cleanup when this budget is exceeded. `MAX_HISTORY_TEMPORARIES = 4096` is a separate absolute metadata safety ceiling; it is not the default or a history-retention limit. |
 | `busy_retry_seconds` | Timed provider-selection recovery window for retrying one-shot callers (0–86,400s; default 300; 0 disables that recovery wait). Independent of execution admission. |

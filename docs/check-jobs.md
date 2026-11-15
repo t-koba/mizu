@@ -151,9 +151,9 @@ and retrieve a completion with `action=result,id=<full digest>`. Results carry
 bounded output previews and paths to complete recorded command evidence. Use
 `action=logs,id=<job>,evidence_id=<command>,offset=0,limit=8192` for full
 recorded output; continue with `content_id` and `next_offset`. Pages are capped
-at 8192 characters and changed records are refused. Logs remain untrusted data. These paths refer to command evidence in the bounded
+at 8192 characters and changed records are refused. Logs remain untrusted data. These paths refer to command evidence in the per-record-bounded
 `check-jobs/` live cache, not to durable acceptance proof: the cache is excluded
-from `mizu backup`, and its job, wait and raw-log records may be evicted or absent
+from `mizu backup`, and its job and raw-log records may be released, and wait records are absent
 after restore. A separately retained normalized receipt under
 `evidence/acceptance/` survives backup/restore, but contains command IDs and exit
 results only, not stdout, stderr or command-log bodies. A passing acceptance
@@ -203,12 +203,14 @@ active can extend the effective recovery time. Operators may choose a faster
 whole-second interval when appropriate. Changing this service policy does not change daemon
 readiness or claim lower idle cost; the default preserves the existing cadence.
 Current job state lives in the project ledger index (`ledger.sqlite3`, domain
-`check_jobs`): one row per entry of `check-jobs/` with the exact record, its
-role, status, acknowledgement and wake marker, and whether its retained
-evidence validated. Records and evidence are validated when a job is written,
+`check_jobs`): job rows hold the exact record, role, status, acknowledgement
+and wake marker, evidence validity, and a derived source/input lifecycle key.
+Reverse `shared_job` edges are indexed; a separate table in the same domain
+tracks retained wait IDs (including waits for roles no longer configured). Records and evidence are validated when a job is written,
 when the index is built and in `mizu work-items PROJECT --audit` (section
 `check_jobs`), never on a read. Runner recovery acts only on jobs whose row
-shows a scope without its receipt; evicting a job directory removes its row.
+shows a scope without its receipt; releasing a job directory removes its row. Wait creation/removal updates its
+row under the same check-job lock and crash-repair intent protocol.
 Install and enable those units before
 enabling model use of the capability. Other platforms can invoke the same
 bounded command from an operator-managed runner; they do not yet have generated
@@ -225,36 +227,44 @@ design, so there is nothing for the doctor to verify.
 `limits.parallel_checks` (default 2, range 1–64) is a shared compute semaphore,
 separate from model admission. `limits.check_pending` (default 32, range 1–1024)
 bounds unfinished jobs per project. At most 32 acceptance commands belong to one
-job. `limits.check_retained` (default 1024, range 1–1024) separately targets total
-retained records, including subscriptions. Before adding a record at the target,
-the oldest safely evictable acknowledged record is removed. Lowering the target
-does not immediately prune history: the next new record requires enough victims
-to get below the target before insertion. All required victims are preflighted
-under `check-jobs.lock`; if too few are eligible, the existing `Busy` refusal
-leaves every record intact. Unread/unacknowledged evidence, executing jobs,
-pending acceptance evidence and explicitly protected IDs remain ineligible.
-Unreferenced acknowledged records are selected before referenced ones; a
-shared-job source becomes eligible only after every subscription that references
-it is already a victim in the same preflight, so a source is not removed while a
-surviving subscription still references it. This is a local cache-eviction
-boundary, not proof that no historical citation survives. `sandbox.check_reuse`
-offers a completed passing job only while its pinned source, execution,
-dependency and cache inputs still match; reuse is an optimization and an
-acknowledged job can later be evicted at the configured count target. The
-reference graph here covers `shared_job` subscriptions, not arbitrary text in
-persistent sessions or run records. Sessions are retained audit logs and are
-backed up, while oversized tool replies can remain under `runs/<run>/tool-results`
-until run retention; neither is indexed by check-job eviction. Conversely,
-`check-jobs/` is excluded from backups, so restore can leave a historical session
-citation without its job record. Acknowledgement means delivery/handling for
-the current job projection; it does not establish that all historical
-references have disappeared. The current product therefore cannot prove global
-reference absence or promise that an old check ID will resolve after eviction or
-restore. If that archival lookup becomes a requirement, add bounded structured
-references and source-owned release events for every retained transcript before
-claiming reference-based cleanup. The fixed `MAX_CHECK_RETAINED`
-ceiling of 1024 preserves the defensive envelope for linear metadata scans and
-request-identity search; it is not an intrinsic format limit. Frozen source obeys
+job. Check-job records have no retention count, replacement count or TTL.
+Release belongs to the source that owns each lifetime:
+
+- A new submission, after freezing source and binding execution, dependency and
+  cache inputs under cache exclusion then `check-jobs.lock`, releases only
+  completed reusable candidates whose exact source/execution/environment/cache
+  identity is no longer current. Commands do not end that lifetime: all command
+  variants still capable of a current lookup survive. Unbound/unstable inputs
+  and cache-lock contention do not authorize release. Reuse probes exact indexed
+  shared keys; queue accounting selects only unfinished physical jobs; demand
+  replacement selects only the submitting role's active purpose. A cache request
+  persists its sequence in the job and index for indexed maximum lookup;
+  only legacy request IDs use their original bounded 0–1024 reconstruction.
+  Unrelated terminal history is not scanned to submit or allocate an ID.
+- Terminal-result acknowledgement releases acknowledged terminal non-reusable
+  jobs and subscriptions only when no typed reference remains. Reusable
+  executions remain owned by the source/input lifecycle, not delivery.
+
+Every surviving `shared_job` subscription (including detached or acknowledged
+subscriptions) and every retained `<role>.wait.json` ID is a reference. Expired
+waits remain references until their record is removed. Queued/running and
+physically owned jobs, cleanup failures, unread/unacknowledged results, pending
+acceptance scope without a durable receipt, explicit protected IDs, invalid,
+corrupt, unsafe or ambiguous records and unknown reference state are preserved.
+A malformed job that could conceal references or an unreadable wait record
+prevents release, rather than guessing. Nonblocking runner ownership and
+no-follow path validation protect deletion. Candidate/reverse-subscription
+selection uses the existing derived index; only selected job trees are inspected, with current wait references
+maintained in the same index on these write events, never a new read-only scan.
+A protected record can outlive its owning event; a later applicable submission
+or acknowledgement may retry release after the pin is removed.
+
+Normalized acceptance receipts, immutable objects and their first-writer index
+are independent evidence: job release never deletes or rewrites them and never
+changes CI authority. `check-jobs/` remains excluded from backups. Transcript,
+session and run-prose IDs are not typed references and may stop resolving after
+release or restore; acknowledgement is delivery/handling, not an archival
+lookup promise. Frozen source obeys
 the existing snapshot size/file/exclusion bounds. Private source/build trees are
 removed after terminal execution; only bounded evidence is retained. Cleanup
 failures retain the tree until operator recovery confirms container removal. Operators may configure `sandbox.check_cache_paths = ["target"]` to preserve
@@ -367,8 +377,10 @@ manufacture a later wake. The shared result remains readable through
 `action=result`/`action=logs`; queued or running subscriptions remain unread
 until their result is consumed. Consuming a result acknowledges equivalent
 subscriptions only for the consuming role. Evidence is retained while a surviving
-subscription references it; `limits.check_retained` includes subscriptions
-and fails closed when too few records can be safely reaped. Subscriptions consume no compute slot or private source/build tree.
+subscription references it. Result-read acknowledgement at a successful finish
+can release the unreferenced subscription; synchronous summary delivery alone
+does not discard its result/log access. Subscriptions consume no compute slot
+or private source/build tree.
 
 Reuse requires a digest-pinned image and disabled container networking. Read-only
 mounts are fingerprinted by content and filesystem identity at submission,
@@ -589,7 +601,8 @@ already marked oversized result removes the pending scope and records
 `acceptance_retention_refusal: "result_file_bytes"` in `job.json`, as does
 finalization of an oversized result. This bounded, non-authoritative disposition
 mints no proof, leaves the result bytes and execution verdict intact, and
-permits normal acknowledged cache eviction without repeated retention retries.
+permits normal source-owned cache release after acknowledgement without
+repeated retention retries.
 It cannot later promote raw result bytes, even if the read bound increases.
 Malformed or integrity-failing producer content cannot mint proof; unsafe
 paths and shared/durable store failures still refuse the operation.
@@ -601,8 +614,8 @@ bounded regular-file read: malformed JSON, invalid job schema/scope, and failed
 producer/result integrity or normalization. Healthy finalized producers still
 recover, and unrelated queued jobs still run in the existing order. No switch
 or automatic retry is added. The invalid producer is excluded **before** scheduler
-sorting/reads, not treated as successful, acknowledged, quarantined or evictable;
-its bytes and any pending-proof eviction pin are left unchanged. Existing durable
+sorting/reads, not treated as successful, acknowledged, quarantined or releasable;
+its bytes and any pending-proof release pin are left unchanged. Existing durable
 proof remains usable independently of corrupt cache bytes. The existing size-only
 retention refusal above is separate and unchanged.
 
@@ -657,9 +670,10 @@ diagnostics alone never become a completion wake. A later discovery rechecks
 files; it does not poll, acknowledge, quarantine or repair them.
 
 This boundary does not make mutation scans tolerant: submission's reuse scan,
-queue-capacity accounting (`_pending_jobs`), eviction (`_make_room`), and
-same-purpose replacement (`_superseded`/interest checks) retain their existing
-direct-read behavior and can still fail on corrupt cache content. These paths,
+queue-capacity accounting (`_pending_jobs`), and same-purpose replacement
+(`_superseded`/interest checks) can still refuse corrupt cache content.
+Source-owned release (`_release_locked`) instead preserves candidates whenever
+records or references cannot be established safely. These paths,
 and direct-ID result, cancellation and acknowledgement operations, are not
 covered by the read-discovery isolation contract.
 
@@ -735,13 +749,13 @@ the prior source-only verdict to match detached input-bound authority:
 execution remains nonreusable; retained evidence does not relax any current-source
 import, capability or completion guard.
 
-Runner recovery retries validated finalized originals in the bounded job
-cache; backup maintenance also retries synchronous run records and re-indexes
+Runner recovery retries validated finalized originals in the job
+cache with per-record bounds; backup maintenance also retries synchronous run records and re-indexes
 durable normalized objects after an object/index interruption. Old
 results without a bound scope marker are never upgraded. Check-job locks are
 released **before** acceptance retention takes its lock; finalized producers
-awaiting receipt acknowledgement cannot be evicted. After receipt retention,
-eviction is harmless. The existing backed-up `evidence` root includes all
+awaiting receipt acknowledgement cannot be released. After receipt retention,
+source-owned cache release does not affect proof. The existing backed-up `evidence` root includes all
 receipts/indexes; backup holds the acceptance lock while archiving, restore
 validates the whole store before exposing a project, and storage audit counts
 `acceptance_receipts` and refuses corrupt/unsafe/dangling proof. Receipts are

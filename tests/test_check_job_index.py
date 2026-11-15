@@ -1,4 +1,4 @@
-"""Check-job index: rebuild equality, crash repair, eviction, audit and indexed readers."""
+"""Check-job index: rebuild equality, crash repair, release, audit and indexed readers."""
 import contextlib
 import dataclasses
 import sqlite3
@@ -74,15 +74,14 @@ class CheckJobIndexTests(Fixture):
         self.build()
         self.assertEqual(rows(self.project.root)[1], [])
 
-    def test_eviction_removes_the_row_with_the_directory(self):
+    def test_release_removes_the_row_with_the_directory(self):
         job = self.queue()
         self.build()
         record = check_jobs.raw_read(self.project, job['id'])
         with lock(self.project.root / 'locks/check-jobs.lock'):
             acceptance.write_job(self.project, job['id'], {**record, 'status': 'cancelled', 'acknowledged': True})
             self.project.set_control(paused=False)
-            with self.capped(1):
-                check_jobs._make_room(self.project)
+            check_jobs._release_locked(self.project, [job['id']])
         self.assertEqual(rows(self.project.root)[0], [])
 
     def test_invalid_records_are_rows_the_audit_reports(self):
@@ -99,6 +98,28 @@ class CheckJobIndexTests(Fixture):
         path.write_bytes(original)
         self.assertTrue(self.project.work_items.audit(repair=True)['check_jobs']['repaired'] or
                         self.project.work_items.audit()['check_jobs']['consistent'])
+
+    def test_wait_references_rebuild_and_clear_without_directory_scan(self):
+        job = self.queue()
+        check_jobs.set_wait(self.project, 'worker', job['id'])
+        expected = self.project.insights.ledger.snapshot('check_jobs')
+        forget_ledger(self.project.root)
+        self.build()
+        self.assertEqual(self.project.insights.ledger.snapshot('check_jobs'), expected)
+        self.assertTrue(self.project.work_items.audit()['check_jobs']['consistent'])
+        check_jobs.clear_wait(self.project, 'worker')
+        self.assertNotIn('worker.wait.json', self.project.insights.ledger.snapshot('check_jobs')[1])
+        record = check_jobs.raw_read(self.project, job['id'])
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            acceptance.write_job(self.project, job['id'], {**record, 'status': 'cancelled', 'acknowledged': True})
+            original = type(self.project.root).iterdir
+            def selected_only(path):
+                if path == check_jobs.root(self.project):
+                    raise AssertionError('broad check-job scan')
+                return original(path)
+            with patch.object(type(self.project.root), 'iterdir', selected_only):
+                check_jobs._release_locked(self.project, [job['id']])
+        self.assertEqual(rows(self.project.root)[0], [])
 
     def test_wake_readiness_reads_columns_not_files(self):
         job = self.queue()

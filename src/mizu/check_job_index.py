@@ -8,7 +8,8 @@ entry that is not a job; those never reach callers. Evidence is therefore
 validated when a job is written, when the index is built and in the audit,
 never on a read. Subscription overlays (a job sharing another's execution)
 are applied by readers from the original's row, because they change
-whenever the original does.
+whenever the original does. Wait files have their own rows in the same domain;
+a null wait job ID means unknown reference state, never an absent reference.
 """
 from __future__ import annotations
 
@@ -21,21 +22,42 @@ from .fs import canonical, digest, safe_read
 from .ledger import Domain
 
 _TABLES = """
+CREATE TABLE check_waits(name TEXT PRIMARY KEY, job_id TEXT);
+CREATE INDEX check_waits_job ON check_waits(job_id);
 CREATE TABLE check_jobs(
     id TEXT PRIMARY KEY, valid INTEGER NOT NULL, code TEXT, role TEXT, status TEXT,
     acknowledged INTEGER, detached INTEGER, wake INTEGER, shared_job TEXT, created_at TEXT,
-    proof_pending INTEGER, job TEXT);
+    proof_pending INTEGER, job TEXT, lifecycle_key TEXT, shared_key TEXT, purpose TEXT,
+    cache_request TEXT, request_sequence INTEGER, passed INTEGER, cancel_requested INTEGER);
 CREATE INDEX check_jobs_role ON check_jobs(role, valid, acknowledged);
+CREATE INDEX check_jobs_shared ON check_jobs(shared_job);
+CREATE INDEX check_jobs_shared_key ON check_jobs(valid, shared_key, status, passed, shared_job, detached, cancel_requested, created_at);
+CREATE INDEX check_jobs_purpose ON check_jobs(valid, role, purpose, status, shared_job);
+CREATE INDEX check_jobs_request ON check_jobs(valid, cache_request, status, detached, cancel_requested, request_sequence);
+CREATE INDEX check_jobs_request_sequence ON check_jobs(valid, cache_request, request_sequence);
+CREATE INDEX check_jobs_lifecycle ON check_jobs(lifecycle_key);
 CREATE INDEX check_jobs_status ON check_jobs(valid, status, shared_job);
 """
 TERMINAL = ("completed", "interrupted", "refused", "cancelled", "cleanup_failed")
 
 
+def lifecycle_key(job):
+    """Identity shared by every command lookup on the same frozen inputs."""
+    return digest(canonical({
+        'source': job.get('code_digest'), 'execution': job.get('execution'),
+        'environment': job.get('environment'), 'verify': job.get('kind') == 'verify',
+        'cache_input': job.get('cache_input') if job.get('kind') == 'verify' else None}))
+
+
 class _CheckJobs(Domain):
     def put(self, db, entry) -> None:
-        db.execute("INSERT OR REPLACE INTO check_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", entry)
+        if len(entry) == 2:
+            db.execute("INSERT OR REPLACE INTO check_waits VALUES (?, ?)", entry)
+            return
+        db.execute("INSERT OR REPLACE INTO check_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", entry)
 
     def replace(self, db, key, entries) -> None:
+        db.execute("DELETE FROM check_waits WHERE name=?", (key,))
         db.execute("DELETE FROM check_jobs WHERE id=?", (key,))
         for entry in entries:
             self.put(db, entry)
@@ -43,11 +65,12 @@ class _CheckJobs(Domain):
     def snapshot(self, db):
         if db is None:
             return {}
-        return {row[0]: tuple(row) for row in db.execute("SELECT * FROM check_jobs")}
+        return {row[0]: tuple(row) for table in ("check_jobs", "check_waits")
+                for row in db.execute(f"SELECT * FROM {table}")}
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-CHECK_JOBS = _CheckJobs("check_jobs", 1, _TABLES)
+CHECK_JOBS = _CheckJobs("check_jobs", 6, _TABLES)
 
 
 def entry_key(name: str) -> str:
@@ -73,7 +96,7 @@ class CheckJobSource:
                 safe_read(project.root, relative, project.config.limits.file_bytes)
             except LimitExceeded:
                 pass
-            return (name, 0, "non_producer_entry", None, None, None, None, None, None, None, 0, None)
+            return (name, 0, "non_producer_entry", None, None, None, None, None, None, None, 0, None, None, None, None, None, None, None, None)
         try:
             try:
                 job = acceptance.read_job(project, name)
@@ -81,19 +104,42 @@ class CheckJobSource:
                 raise acceptance.InvalidProducer(name, "job_file_bytes") from exc
             acceptance._inspect_evidence(project, job)
         except acceptance.InvalidProducer as exc:
-            # The raw record, when it parses, still lets retention see and evict it.
+            # Keep diagnostics for invalid records; they are never release candidates.
             try:
                 raw = json.loads(safe_read(project.root, relative, project.config.limits.file_bytes))
                 raw = canonical(raw).decode() if isinstance(raw, dict) and raw.get("id") == name else None
             except (Denied, LimitExceeded, ValueError, UnicodeError, RecursionError):
                 raw = None
-            return (name, 0, exc.code, None, None, None, None, None, None, None, 0, raw)
+            return (name, 0, exc.code, None, None, None, None, None, None, None, 0, raw, None, None, None, None, None, None, None)
+        from .check_jobs import reusable
+        candidate = (job.get("status") == "completed" and reusable(job)
+                     and job.get("kind") in ("verify", "experiment", "exec")
+                     and all(acceptance._digest(job.get(key)) for key in
+                             ("code_digest", "execution", "environment")))
         wake = acceptance._present(project.root, f"check-jobs/{name}/wake.json")
+        cancel = acceptance._present(project.root, f"check-jobs/{name}/cancel.json")
         return (name, 1, None, job.get("role"), job.get("status"), int(bool(job.get("acknowledged"))),
                 int(bool(job.get("detached"))), int(bool(wake)), job.get("shared_job"),
                 job.get("created_at", ""),
                 int(job.get("acceptance_scope") is not None and not job.get("acceptance_receipt_id")),
-                canonical(job).decode())
+                canonical(job).decode(), lifecycle_key(job) if candidate else None,
+                job.get("shared_key"), job.get("purpose"), job.get("cache_request"),
+                job.get("request_sequence"),
+                int(job["passed"]) if type(job.get("passed")) is bool else None,
+                int(bool(cancel)))
+
+    def _wait_row(self, name):
+        from . import acceptance
+        relative = f"check-jobs/{name}"
+        if not acceptance._present(self.project.root, relative):
+            return None
+        try:
+            value = json.loads(safe_read(self.project.root, relative,
+                                        self.project.config.limits.file_bytes))
+            job_id = value.get('id') if isinstance(value, dict) else None
+            return name, job_id if acceptance._digest(job_id) else None
+        except (Denied, LimitExceeded, ValueError, UnicodeError, RecursionError):
+            return name, None  # Unknown reference state protects all candidates.
 
     def ledger_entries(self, *, recover: bool, skip=frozenset()):
         base = self.project.root / "check-jobs"
@@ -106,13 +152,15 @@ class CheckJobSource:
             info = child.lstat()
             if stat.S_ISLNK(info.st_mode):
                 raise Denied("Unsafe acceptance producer directory")
-            if stat.S_ISDIR(info.st_mode):
+            if child.name.endswith(".wait.json"):
+                yield self._wait_row(child.name)
+            elif stat.S_ISDIR(info.st_mode):
                 row = self._row(child.name)
                 if row is not None:
                     yield row
 
     def ledger_item(self, key: str, hint, *, recover: bool) -> list:
-        row = self._row(key)
+        row = self._wait_row(key) if key.endswith(".wait.json") else self._row(key)
         return [] if row is None else [row]
 
 
@@ -127,8 +175,8 @@ def audit(ledger, *, repair: bool) -> dict:
     repaired = bool(repair and divergent)
     if repaired:
         ledger.rebuild("check_jobs")
-    return {"jobs": len(files), "index": state, "consistent": not corrupt and not divergent,
+    return {"jobs": sum(len(row) != 2 for row in files.values()), "index": state, "consistent": not corrupt and not divergent,
             "repaired": repaired,
-            "corrupt": [{"id": key, "error": files[key][2]} for key in corrupt[:MAX_OPEN_PAGE_ROWS]],
+            "corrupt": [{"id": key, "error": files[key][2] if len(files[key]) != 2 else "wait_json"} for key in corrupt[:MAX_OPEN_PAGE_ROWS]],
             "corrupt_count": len(corrupt),
             "divergent": divergent[:MAX_OPEN_PAGE_ROWS], "divergent_count": len(divergent)}
