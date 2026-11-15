@@ -17,6 +17,29 @@ from mizu.process import run, Result
 from mizu.usage import summarize
 
 
+def _run_process_group(args, *, timeout, capture_output=False, **kwargs):
+    """Run a POSIX test helper with bounded whole-process-tree cleanup."""
+    if capture_output:
+        if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+            raise ValueError('capture_output conflicts with stdout/stderr')
+        kwargs['stdout'] = subprocess.PIPE
+        kwargs['stderr'] = subprocess.PIPE
+    process = subprocess.Popen(args, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException as error:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        if isinstance(error, subprocess.TimeoutExpired):
+            error.output = stdout
+            error.stderr = stderr
+        raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
 class RemainingTests(Fixture):
     def test_detached_descendant_cannot_hold_return_or_reader(self):
         if os.name != 'posix':
@@ -280,7 +303,9 @@ class RemainingTests(Fixture):
         if os.name == 'posix':
             # One helper forks a fresh child per point; every crash still
             # terminates via os._exit(86), with its own exit status checked.
-            result=subprocess.run([sys.executable,str(script),str(batch),'crash','batch'],env=env,capture_output=True,text=True,timeout=120)
+            # The isolated process group ensures timeout/cancellation cannot
+            # leave a forked case running after its helper is stopped.
+            result=_run_process_group([sys.executable,str(script),str(batch),'crash','batch'],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(result.returncode,0,result.stderr)
             statuses=json.loads(result.stdout)
             self.assertEqual(len(statuses),len(events))
@@ -294,6 +319,43 @@ class RemainingTests(Fixture):
                     status=result.returncode
                 self.assertIn(status,(0,86))
                 check_recovered(root)
+
+    def test_timeout_kills_forked_process_group(self):
+        if os.name != 'posix':
+            self.skipTest('POSIX process groups; Windows retains per-case subprocesses')
+        pid_file=self.root/'batch-child.pid'
+        code="""import os,sys,time
+pid=os.fork()
+if pid==0:
+    with open(sys.argv[1],'w') as stream: stream.write(str(os.getpid()))
+    time.sleep(30)
+else:
+    time.sleep(30)
+"""
+        child_pid=None
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _run_process_group([sys.executable,'-c',code,str(pid_file)],timeout=1.0,
+                                   capture_output=True,text=True)
+            self.assertTrue(pid_file.exists(), 'forked child never became ready')
+            child_pid=int(pid_file.read_text())
+            deadline=time.monotonic()+2
+            state=None
+            while time.monotonic()<deadline:
+                probe=subprocess.run(['ps','-o','stat=','-p',str(child_pid)],
+                                     capture_output=True,text=True,timeout=2)
+                states=probe.stdout.strip().split()
+                state=states[0][:1] if states else None
+                if state is None:
+                    break
+                time.sleep(.02)
+            self.assertIsNone(state, f'forked child was not reaped (ps state {state!r})')
+        finally:
+            if child_pid is None and pid_file.exists():
+                child_pid=int(pid_file.read_text())
+            if child_pid is not None:
+                try: os.kill(child_pid,signal.SIGKILL)
+                except ProcessLookupError: pass
 
     def test_special_file_after_finish_refuses_done(self):
         if not hasattr(os,'mkfifo'):self.skipTest('POSIX FIFO')
