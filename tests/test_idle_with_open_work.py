@@ -72,10 +72,10 @@ class IdleWithOpenWorkTests(Fixture):
         return self.project.snapshots.get()
 
     def run_writer(self, outcome="wait", with_progress=False, state="Parked\nNext: Inspect ready work"):
-        self.ensure_baseline(state=state)
+        self.ensure_baseline()
         def finish(ctx, prompt, profile):
             if with_progress:
-                ctx.progress_tool = True
+                (ctx.workspace / "progress.py").write_text("VALUE = 1\n")
             ctx.handle("finish", {"outcome": outcome, "summary": "Writer finished",
                                   "state": state})
         Engine(self.config, driver=ScriptDriver(finish)).run(self.project, "worker")
@@ -241,7 +241,8 @@ class IdleWithOpenWorkTests(Fixture):
                           "wait_kind": kind, "backoff_seconds": 300}
             progress = _progress_record(
                 {}, "worker", (), {name: False for name in PROGRESS_SIGNALS}, "wait",
-                ready_work=True, wait_conversion=conversion)
+                ready_work=True)
+            progress.update(schema=schema, wait_conversion=conversion)
             self.assertEqual(progress["schema"], schema)
             validate_progress(progress)
             self.assertEqual(progress_projection(progress)["wait_conversion"], conversion)
@@ -278,12 +279,13 @@ class IdleWithOpenWorkTests(Fixture):
                         _delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
         with patch.object(self.project.work_items, "page_ready", side_effect=probe):
-            snap = self.run_writer("wait")
+            snap = self.run_writer("continue", with_progress=True)
         self.assertEqual(seen.get("limit"), 1)
-        self.assertEqual(snap["progress"]["schema"], 7)
+        self.assertEqual(snap["progress"]["schema"], 5)
         self.assertIs(snap["progress"]["ready_work"], True)
         idle = self.status_idle()
-        self.assertTrue(idle["active"])
+        self.assertFalse(idle["active"])
+        self.assertEqual(idle["reason"], "has_progress")
         self.assertEqual(idle["snapshot"], snap["id"])
 
     def test_writer_run_binds_false_when_queue_empty(self):
@@ -305,13 +307,13 @@ class IdleWithOpenWorkTests(Fixture):
                         _delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
-            snap = self.run_writer("wait")
+            snap = self.run_writer("continue", with_progress=True)
         self.assertEqual(snap["progress"]["schema"], 5)
         self.assertNotIn("wait_conversion", snap["progress"])
         self.assertIs(snap["progress"]["ready_work"], None)
         idle = self.status_idle()
         self.assertFalse(idle["active"])
-        self.assertEqual(idle["reason"], "unreadable_work_state")
+        self.assertEqual(idle["reason"], "has_progress")
 
     def test_status_performs_no_live_probe(self):
         snap = self.run_writer("wait")
@@ -327,7 +329,7 @@ class IdleWithOpenWorkTests(Fixture):
 
     def test_recorded_true_survives_drop_and_due_transitions(self):
         item = self.item("ready-then-dropped")
-        snap = self.run_writer("continue")
+        snap = self.park("continue", ready_work=True)
         self.assertTrue(self.status_idle()["active"])
         # Drop the item: the old run's diagnostic must not change.
         self.project.work_items.transition(item["id"], expected_rev=1, actor="worker",
@@ -352,9 +354,9 @@ class IdleWithOpenWorkTests(Fixture):
 
     def test_blocked_due_at_finish_records_ready(self):
         self.item("blocked-due", "blocked", {"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
-        snap = self.run_writer("continue")
+        snap = self.run_writer("continue", with_progress=True)
         self.assertIs(snap["progress"]["ready_work"], True)
-        self.assertTrue(self.status_idle()["active"])
+        self.assertEqual(self.status_idle()["reason"], "has_progress")
 
     def test_blocked_without_due_at_finish_records_not_ready(self):
         self.item("blocked-plain", "blocked", {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
@@ -365,9 +367,9 @@ class IdleWithOpenWorkTests(Fixture):
     def test_doing_counts_as_ready_at_finish(self):
         item = self.item("doing-item")
         self.project.work_items.transition(item["id"], expected_rev=1, status="doing", actor="worker")
-        snap = self.run_writer("continue")
+        snap = self.run_writer("continue", with_progress=True)
         self.assertIs(snap["progress"]["ready_work"], True)
-        self.assertTrue(self.status_idle()["active"])
+        self.assertEqual(self.status_idle()["reason"], "has_progress")
 
     def test_progress_run_records_but_clears_diagnostic(self):
         self.item("ready-with-progress")
@@ -380,7 +382,7 @@ class IdleWithOpenWorkTests(Fixture):
 
     def test_read_only_run_does_not_move_recorded_diagnostic(self):
         self.item("writer-work")
-        snap = self.run_writer("continue")
+        snap = self.park("continue", ready_work=True)
         before = self.status_idle()
         self.assertTrue(before["active"])
         engine = Engine(self.config, driver=ScriptDriver())
@@ -403,11 +405,12 @@ class IdleWithOpenWorkTests(Fixture):
                         _delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
 
         with patch.object(self.project.work_items, "page_ready", side_effect=unreadable_finish_probe):
-            snap = self.run_writer("wait")
+            snap = self.run_writer("continue", with_progress=True)
         self.assertIs(snap["progress"]["ready_work"], None)
-        self.assertEqual(self.status_idle()["reason"], "unreadable_work_state")
+        self.assertEqual(self.status_idle()["reason"], "has_progress")
         # Later ledger changes do not resolve the recorded unknown.
         self.item("later-work")
         idle = self.status_idle()
-        self.assertEqual(idle["reason"], "unreadable_work_state")
+        self.assertEqual(idle["reason"], "has_progress")
+        self.assertIsNone(idle["ready_work"])
         self.assertEqual(idle["snapshot"], snap["id"])

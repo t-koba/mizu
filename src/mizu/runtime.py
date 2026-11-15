@@ -58,8 +58,10 @@ from .fs import (canonical, digest, loads_finite, lock, mkdir, now, read_json, r
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
                    text_preview, DIGEST, ID)
 from .project import Project
+from .work_items import MAX_OPEN_PAGE_ROWS
 from .readiness_witness import settled as witness_settled, witness as state_witness
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
+                       WRITER_HANDOFF_PROGRESS_SIGNALS,
                        missing_finish_recovery_due, missing_finish_streak,
                        no_progress_recovery_due, progress_disposition, progress_timestamp,
                        validate_progress)
@@ -510,7 +512,6 @@ class Context:
         self.progress_decision = False
         self.progress_insight = False
         self.progress_input = False
-        self.wait_conversion_kind: str | None = None
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
         # points at the caller; everyone else spends their own role.
@@ -1959,6 +1960,60 @@ class Context:
         write_json(self.run_dir / "commentary.json", args)
         return {"staged": True}
 
+    def _finish_progress(self, captured, finished, *, ready_work=None):
+        return _progress_record(
+            self.snapshot, self.role.name, tuple(role_progress_signals(self.config, self.role)),
+            {"tool": self.progress_tool,
+             "code": captured["code_digest"] != self.snapshot["code_digest"],
+             "state": finished["state"] != self.snapshot["state"],
+             "decision": self.progress_decision, "insight": self.progress_insight,
+             "input": self.progress_input}, finished["outcome"],
+            obligations_digest=getattr(self, "progress_obligations_digest", None), ready_work=ready_work,
+            ready_work_signature=getattr(self, "ready_work_signature", None),
+            wait_resolution_tokens=getattr(self, "wait_resolution_tokens", _READY_WORK_UNSET),
+            wait_resolution_high_water=getattr(self, "wait_resolution_high_water", _READY_WORK_UNSET))
+
+    def _check_writer_parking(self, finished):
+        """Refuse an undisposed or unprovable ready set before sealing or acking.
+
+        A validated new Next handoff is not parking. All other parking finishes
+        require a complete empty role-scoped inventory under the page API maximum.
+        Unknown waits and overflow are evidence gaps, never dispositions.
+        """
+        if finished["outcome"] not in ("wait", "blocked", "continue", "bounded"):
+            return
+        if (finished["outcome"] in ("continue", "bounded")
+                and _declared_next(finished.get("state")) is not None):
+            captured = self.project.snapshots.capture_files(self.workspace, persist=False)
+            candidate = {**finished, "parent": self.snapshot["id"],
+                         "progress": self._finish_progress(captured, finished)}
+            if _writer_next_task(self.project, candidate, self.role.name):
+                return
+        message = ("Writer parking requires a complete empty role-scoped ready inventory. "
+                   "Finish each ready item, block it on a supported named observable wait, "
+                   "drop it with a reason, or make an immediate progress-backed new Next handoff. "
+                   "A held doing item is still ready. ")
+        try:
+            page = self.project.work_items.page_ready(
+                role_name=self.role.name, limit=MAX_OPEN_PAGE_ROWS)
+            if (page.get("coverage_complete") is not True or page.get("truncated") is not False
+                    or type(page.get("total")) is not int or page["total"] < 0
+                    or not isinstance(page.get("items"), list)
+                    or len(page["items"]) != page["total"]
+                    or not isinstance(page.get("signature"), str)
+                    or not DIGEST.fullmatch(page["signature"])):
+                raise Denied("Ready inventory is incomplete, unknown, or exceeds the bounded page")
+        except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError,
+                AttributeError, RecursionError) as exc:
+            raise Denied(message + "Ready evidence unavailable or incomplete; inspect work_items_read and ready_work input "
+                         "and resolve evidence gaps before retrying.") from exc
+        if page["total"]:
+            ids = ", ".join(str(row.get("id", "unknown"))[:64] for row in page["items"][:3])
+            raise Denied(message + f"{page['total']} ready item(s), including {ids}.")
+        # Anchor the next event probe to the validated finish-time empty set,
+        # not the opening set whose removals were already handled by this run.
+        self.ready_work_signature = page["signature"]
+
     def _op_finish(self, args: dict) -> dict:
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
@@ -2057,11 +2112,11 @@ class Context:
             # A seal after any harness per-run bound is a bounded end, never
             # a fresh verdict: the unit saved what it could and runs again.
             args = {**args, "outcome": "bounded"}
-        if self.role.workspace == "write" and args["outcome"] == "wait":
-            wait_liveness, _, held_wait_kind = _writer_wait_sources(
-                self.project, self.role, releases=releases, include_structured_wait=True)
-            args["wait_liveness"] = wait_liveness
-            self.wait_conversion_kind = held_wait_kind
+        if self.role.workspace == "write":
+            self._check_writer_parking(args)
+            if args["outcome"] == "wait":
+                args["wait_liveness"] = _writer_wait_liveness(
+                    self.project, self.role, releases=releases)
         self.close_exec()
         finished = {**args, "wait_seconds": wait, "recorded_at": now(),
                     **({"bound": self.bound_hit} if self.bound_hit is not None else {})}
@@ -3646,43 +3701,14 @@ class Engine:
                         verification = {**verification, "passed": False, "invalidated": "code changed or final snapshot is unrepresentable"}
                     if finished["outcome"] == "done" and not (verification and verification["passed"]):
                         raise Denied("Code changed after verification; completion refused")
-                    selected_progress = tuple(role_progress_signals(self.config, role))
-                    observed_progress = {
-                        "tool": context.progress_tool,
-                        "code": captured["code_digest"] != context.snapshot["code_digest"],
-                        "state": finished["state"] != context.snapshot["state"],
-                        "decision": context.progress_decision,
-                        "insight": context.progress_insight,
-                        "input": context.progress_input,
-                    }
-                    # Recorded-at-finish ready-work observation: one bounded
-                    # single-row existence probe, never a live join in status.
-                    # Unreadable ledgers record explicit unknown (None) so the
-                    # diagnostic fails closed without blocking publication.
+                    # Diagnostic existence probe; parking was already checked before seal.
                     try:
-                        ready_page_at_finish = project.work_items.page_ready(
-                            limit=1, role_name=role_name)
-                        ready_work_at_finish = bool(ready_page_at_finish["items"])
-                        ready_work_complete = ready_page_at_finish.get("coverage_complete") is True
+                        ready_work_at_finish = bool(project.work_items.page_ready(
+                            limit=1, role_name=role_name)["items"])
                     except (Denied, OSError):
                         ready_work_at_finish = None
-                        ready_work_complete = False
-                    wait_conversion = _writer_wait_conversion(
-                        self.config, role, finished, ready_work_at_finish,
-                        wait_kind=getattr(context, "wait_conversion_kind", None),
-                        ready_work_complete=ready_work_complete)
-                    progress_kwargs = ({"wait_conversion": wait_conversion}
-                                       if wait_conversion is not None else {})
-                    progress = _progress_record(context.snapshot, role_name, selected_progress,
-                                               observed_progress, finished["outcome"],
-                                               obligations_digest=context.progress_obligations_digest,
-                                               ready_work=ready_work_at_finish,
-                                               ready_work_signature=getattr(context, "ready_work_signature", None),
-                                               wait_resolution_tokens=getattr(
-                                                   context, "wait_resolution_tokens", _READY_WORK_UNSET),
-                                               wait_resolution_high_water=getattr(
-                                                   context, "wait_resolution_high_water", _READY_WORK_UNSET),
-                                               **progress_kwargs)
+                    progress = context._finish_progress(
+                        captured, finished, ready_work=ready_work_at_finish)
                     snapshot = project.snapshots.create(
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
@@ -4383,8 +4409,14 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
     step = _declared_next(snapshot.get("state"))
     progress = snapshot.get("progress")
     try:
-        if (not step or progress_disposition(
-                progress, snapshot["outcome"], project.config, role_name) != "self_admit_progress"):
+        if not step or not isinstance(progress, dict):
+            return None
+        selected, signals = progress.get("selected"), progress.get("signals")
+        if (not isinstance(selected, list) or not isinstance(signals, dict)
+                or not any(name in selected and signals.get(name) is True
+                           for name in WRITER_HANDOFF_PROGRESS_SIGNALS)
+                or progress_disposition(
+                    progress, snapshot["outcome"], project.config, role_name) != "progress_requires_next"):
             return None
         parent_id = snapshot.get("parent")
         if not parent_id:
@@ -4528,70 +4560,29 @@ _WRITER_CONVERTIBLE_WAIT_KINDS = frozenset((
     "ci", "publication_ci", "proposal_merged", "record_closed"))
 
 
-def _writer_wait_conversion(config, role, finished, ready_work_present, *,
-                            wait_kind=None, ready_work_complete=False):
-    """Record complete ready-work evidence, distinguishing proven held waits."""
-    if (role.workspace != "write" or finished.get("outcome") != "wait"
-            or getattr(config.limits, "writer_wait_with_ready_work", True) is not True
-            or ready_work_present is not True or ready_work_complete is not True):
-        return None
-    kind = (wait_kind if finished.get("wait_liveness") is True
-            and wait_kind in _WRITER_CONVERTIBLE_WAIT_KINDS else None)
-    backoff = role_no_progress_backoff_seconds(config, role)
-    if type(backoff) is not int or not 1 <= backoff <= MAX_NO_PROGRESS_BACKOFF_SECONDS:
-        return None
-    reason = ("ready_work_with_pending_structured_wait" if kind is not None
-              else "ready_work_without_proven_structured_wait")
-    return {"status": "converted", "reason": reason,
-            "wait_kind": kind, "backoff_seconds": backoff}
-
 def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
                               *, project=None) -> bool:
-    """Back off for finish-authorized ready work or a proven self-wait.
+    """Back off only for a proven self-resolvable wait with no ready work.
 
-    Progress-driven Next handoffs and event subscriptions remain independent.
+    Ready-set changes and progress-backed Next handoffs use their event paths;
+    historical conversion markers remain readable but authorize no timer.
     """
-    if (role.workspace != "write"
-            or record.get("outcome") not in ("continue", "bounded", "wait")):
+    if (role.workspace != "write" or record.get("outcome") != "wait"
+            or ready_work_present is not False):
         return False
     progress = record.get("progress")
-    if record["outcome"] == "wait":
-        try:
-            validate_progress(progress)
-            timestamp = progress_timestamp(progress)
-            backoff = role_no_progress_backoff_seconds(config, role)
-            current_time = time.time() if current_time is None else current_time
-            if progress["role"] != role.name or timestamp is None or backoff <= 0 \
-                    or current_time < timestamp + backoff or project is None:
-                return False
-            if ready_work_present:
-                if getattr(config.limits, "writer_wait_with_ready_work", True) is True:
-                    conversion = progress.get("wait_conversion")
-                    if (isinstance(conversion, dict)
-                            and conversion["backoff_seconds"] == backoff):
-                        # Complete finish-time ready evidence remains sufficient
-                        # even if its held-wait witness changes before the timer.
-                        return True
-                    live, _, _ = _writer_wait_sources(
-                        project, role, include_structured_wait=True)
-                    if live is False:
-                        return True
-                    return False
-                return _writer_wait_liveness(project, role) is False
-            live, self_resolvable, _ = _writer_wait_sources(project, role)
-            return live is False and self_resolvable
-        except (Denied, AttributeError, TypeError, ValueError):
-            return False
-    if not ready_work_present:
-        return False
     try:
         validate_progress(progress)
-        policy_changed = set(progress["selected"]) != set(role_progress_signals(config, role))
-    except Exception:
-        policy_changed = False
-    disposition = progress_disposition(
-        progress, record["outcome"], config, role.name, current_time)
-    return policy_changed or disposition in ("self_admit_allowance", "self_admit_backoff")
+        timestamp = progress_timestamp(progress)
+        backoff = role_no_progress_backoff_seconds(config, role)
+        current_time = time.time() if current_time is None else current_time
+        if (progress["role"] != role.name or timestamp is None or backoff <= 0
+                or current_time < timestamp + backoff or project is None):
+            return False
+        live, self_resolvable, _ = _writer_wait_sources(project, role)
+        return live is False and self_resolvable
+    except (Denied, AttributeError, TypeError, ValueError):
+        return False
 
 
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
@@ -4873,20 +4864,21 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     ready_work: bool | None | object = _READY_WORK_UNSET,
                     ready_work_signature: str | None | object = _READY_WORK_UNSET,
                     wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET,
-                    wait_resolution_high_water: dict | object = _READY_WORK_UNSET,
-                    wait_conversion: dict | object = _READY_WORK_UNSET) -> dict:
+                    wait_resolution_high_water: dict | object = _READY_WORK_UNSET) -> dict:
     """Build compact unit evidence and its bounded consecutive no-progress count.
 
     ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
     taken at writer run completion (True/False) or None when that probe was
     unreadable. An explicit value produces a schema-2 record; omission keeps
     the legacy schema-1 shape for direct callers without an observation.
-    An explicit ready_work_signature produces schema 3, binding admission to
-    the ready set shown in the unit input rather than the finish-time probe.
+    An explicit ready_work_signature produces schema 3 and binds the ready-set
+    event baseline. It normally reflects the unit input; a validated writer
+    parking finish may reanchor it to the complete empty finish-time inventory
+    so the unit's own dispositions do not trigger a redundant wake.
     Schema 4 also records the bounded exact wait-resolution causes offered to
     the writer. Schema 5 adds a proof-set-bound shown prefix for overflow; neither
-    receipt admits an old proof on an unrelated ready-set change. Schemas 6–7
-    distinguish proven held-wait conversion from ready-only conversion.
+    receipt admits an old proof on an unrelated ready-set change. Historical
+    schemas 6–7 remain readable but new records never carry wait conversions.
     """
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
@@ -4939,10 +4931,6 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
         record.update(schema=4, wait_resolution_tokens=wait_resolution_tokens)
     if wait_resolution_high_water is not _READY_WORK_UNSET:
         record.update(schema=5, wait_resolution_high_water=wait_resolution_high_water)
-    if wait_conversion is not _READY_WORK_UNSET:
-        schema = (7 if isinstance(wait_conversion, dict) and wait_conversion.get("reason") ==
-                  "ready_work_without_proven_structured_wait" else 6)
-        record.update(schema=schema, wait_conversion=wait_conversion)
     return validate_progress(record)
 
 

@@ -474,7 +474,6 @@ class Limits:
     no_progress_recovery_after: int = 2
     no_progress_backoff_seconds: int = 0
     writer_no_progress_backoff_seconds: int = 300
-    writer_wait_with_ready_work: bool = True
     default_wait_seconds: int = 1800
     maximum_wait_seconds: int = 86400
     max_failures: int = 3
@@ -989,11 +988,13 @@ def role_work_item_events_limit(config: "Config", role: "Role") -> int:
 
 
 def role_no_progress_backoff_seconds(config: "Config", role: "Role") -> int:
-    """Effective no-progress timer wake for one role for one dispatch.
+    """Effective role backoff interval for one role for one dispatch.
 
     Schema: role override when set; otherwise writable roles inherit
     `[limits].writer_no_progress_backoff_seconds` and read-only roles inherit
-    `[limits].no_progress_backoff_seconds`. Trust: configuration. Failure:
+    `[limits].no_progress_backoff_seconds`. Writers use this only for a proven
+    self-resolvable wait with no ready work; read-only on-change roles use it
+    for no-progress re-admission. Trust: configuration. Failure:
     never raises; malformed overrides read as the applicable project value
     (load already refuses them fail-closed).
     """
@@ -1534,8 +1535,7 @@ def load(file: Path) -> Config:
                 raise ConfigError("limits.progress_signals must contain unique supported signal names")
             lim[k] = values
             continue
-        if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics",
-                 "writer_wait_with_ready_work"):
+        if k in ("missing_finish_counts_as_failure", "drain_yield", "lock_diagnostics"):
             boolean(v, f"limits.{k}")
             continue
         if k == "session_max_cost_usd":

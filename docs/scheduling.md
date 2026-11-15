@@ -112,12 +112,15 @@ scan order, other metadata changes, prompt size and equal totals cannot substitu
 for membership or exact terminal evidence. This probabilistic fingerprint is change evidence, not an
 authorization or collision-free set proof, and retains constant extra memory.
 Full and resumed/delta inputs capture that scan's signature when the ready
-projection is built. Writer snapshots store it in validated progress schema 3,
-or schema 4/5 with resolution-delivery receipts; observer
-completion cursors store it in schema 3 as `ready_work_signature` (64 lowercase
-hex, or null for no delivered input). Finish-time `ready_work`
-remains the separate True/False/null idle diagnostic, not an admission cursor.
-Work added or becoming ready during execution therefore remains new input.
+projection is built. Writer snapshots normally store it in validated progress
+schema 3, or schema 4/5 with resolution-delivery receipts; observer completion
+cursors store it in schema 3 as `ready_work_signature` (64 lowercase hex, or
+null for no delivered input). A writer parking finish reanchors its signature
+to the validated complete empty finish-time inventory, so dispositions made in
+that unit do not cause a redundant self-wake. Any ready work remaining at that
+check refuses the finish; work becoming ready after it remains new input.
+Finish-time `ready_work` remains the separate True/False/null idle diagnostic,
+not an admission cursor.
 
 A writable role with both `work_order` and `work_items_transition` also records
 progress schema 5's resolution-delivery receipts. `wait_resolution_tokens` holds
@@ -147,8 +150,8 @@ successful delivery upgrades it; older progress keeps its conservative existing
 wake behavior. Malformed receipts fail closed. All receipts live in the existing
 immutable snapshot progress record, committed only after successful delivery;
 busy admission, failed delivery and restart leave unseen causes discoverable.
-There is no separate store, generic ready-set cursor, acknowledgement or
-ready-work event.
+There is no separate store, generic ready-set cursor, acknowledgement, or
+additional event type; existing `ready_work` subscriptions use this signature.
 
 An unchanged set after `wait` parks until independent input, wait expiry or
 another genuine wake; unchanged ready work does not bypass the existing
@@ -171,10 +174,11 @@ wake-generation also admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the
-writer handoff for `continue`/`bounded` units. A no-progress writer may also
-self-admit after its configured fallback, but only while role-eligible ready
-work remains; a timer alone never admits an empty writer. Mere progress still
-requires a new actionable `Next:` for immediate writer handoff.
+writer handoff for `continue`/`bounded` units. A writer's configured fallback
+applies only to a `wait` with no role-eligible ready work and a current
+self-resolvable wait after bounded local evidence proves no live external
+source. It never admits ready work on a timer. Mere progress still requires a
+new actionable `Next:` with a selected work signal for immediate writer handoff.
 
 ### Writer Next handoff
 
@@ -196,21 +200,37 @@ record, and at least one selected work signal (`tool`, `code`, `decision`, or
 (including check-job `list`, `logs`, and queued/running `result`) do not
 count as tool work. Terminal result retrieval still qualifies as work; exact
 check-result wake/acknowledgement and verification import are unchanged. The
-declaration must differ from the exact published parent's Next. Legacy/missing/corrupt evidence or an unavailable parent fails
-closed. This reads at most one parent, adds no store or task lifecycle, and
+declaration must differ from the exact published parent's Next. Legacy, missing
+or corrupt evidence, or an unavailable parent, fails closed. This reads at most
+one parent, adds no store or task lifecycle, and
 never changes WorkItems eligibility or any wait/event routing.
 
-The separate no-progress fallback applies to `continue`/`bounded` records
-with no selected progress: `no_progress_continuations` permits its bounded
-configured immediate attempts, then `writer_no_progress_backoff_seconds`
-(default 300 seconds) permits a later admission only if the current role-filtered
-ready set is nonempty. The existing ready-set scan supplies membership-change
-and presence facts. This does not revive `done`/`blocked`, bypass producer/control
-gates, or change the daemon cadence or progress-driven immediate handoff.
+Before a writable writer parks with `wait`, `blocked`, or a `continue`/`bounded`
+finish without a validated immediate Next handoff, the host requires a complete,
+empty role-scoped ready inventory. It reads `page_ready` under its 100-row
+API maximum before sealing or applying acknowledgements; inventories larger
+than that bound fail closed.
+Unreadable evidence, false `coverage_complete`, truncation/overflow, or any ready
+item refuses the finish with a bounded actionable diagnostic. Resolve evidence
+gaps and retry in the same unit. Every ready item needs a durable disposition:
+finish it with the existing completion evidence, block it on a supported named
+observable wait, or drop it with a reason. Holding it as `doing` is not a
+disposition. Unheld open work and this role's held work count; other holders'
+work does not block the role. A progress-backed new Next may instead hand off
+immediately under the existing validation rules.
 
-A writable writer's `wait` also uses that backoff when current bounded local
-reads prove no live external source remains and either eligible ready work or a
-held self-resolvable wait exists.
+Ready-work presence alone never authorizes a timed re-admission, for either
+`wait` or no-progress `continue`/`bounded` records. Ready-set changes still wake
+through `should_run` and the configured `ready_work` event subscription;
+independent CI, operator, decision, code, work-item and wait events keep their
+existing routing and acknowledgement rules. Explicit run-level wait expiry and
+scheduled dispatch remain independent. Historical `wait_conversion` markers
+remain valid snapshot evidence and status fields, but are no longer emitted or
+timer authority. No FIFO, affinity, CI-red or check-job policy changes here.
+
+A writable writer's `wait` retains a backoff only when no eligible work is ready,
+bounded local reads prove no live external source remains, and a held
+self-resolvable wait exists.
 Two held waits are self-resolvable, not external sources: `code_change` when
 the holder is the project's sole configured `workspace = "write"` role, and
 `insight_decided` on a current, substantively answered (`accept`, `modify` or
@@ -220,7 +240,7 @@ back to its author, also annotates the held wait as self-resolvable and
 suppresses that same answered revision as an independent open-question source.
 This leaves the question and the wait pending without deciding for the writer;
 only an actual substantive current-revision decision makes it due and holder-ready. A proven
-self-resolvable wait permits the same backoff even when no ledger item is currently ready;
+self-resolvable wait permits the backoff only when no ledger item is currently ready;
 this does not reopen, unblock or transition work.
 
 This path always waits for `writer_no_progress_backoff_seconds` from the
@@ -243,30 +263,6 @@ durations are unchanged; a timer fallback is not an event subscription. The
 `idle_with_open_work` status remains the recorded-at-finish diagnostic, not a
 live scheduler verdict.
 
-When `[limits].writer_wait_with_ready_work` is enabled (default), a complete
-finish-time `page_ready(limit=1)` observation of role-eligible ready work is
-sufficient to resume the writer after the effective
-`writer_no_progress_backoff_seconds` (default 300 seconds, with the existing
-per-role override). A held structured wait is not required: a free-standing
-check/question or unknown wait liveness does not prevent unrelated ready work.
-Admission still requires current role-eligible ready work and enabled policy.
-This does not change any item's status, holder or wait, shorten
-`maximum_wait_seconds`, or add event subscriptions. Disabled policy, no ready
-work, or incomplete/absent finish-time ready evidence cannot authorize a new
-conversion; later complete evidence cannot retroactively supply that marker.
-No-live and self-resolvable fallback behavior is unchanged.
-
-The immutable snapshot status projection reports a successful conversion at
-`progress.record.wait_conversion`, including a bounded cause, wait kind and
-delay. Schema 6 retains `ready_work_with_pending_structured_wait` and the proven
-held kind; admission still matches that exact current held kind and configured
-delay for a live-source conversion. Schema 7 uses
-`ready_work_without_proven_structured_wait` with a null `wait_kind` when no live
-held kind was proven. Its ready-work conversion is independent of current
-liveness but still matches the configured delay. Both require complete positive
-finish-time ready evidence. Older snapshots remain valid; their absent markers
-do not authorize the new conversion.
-
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the
 same Next, even after work, does not renew it. When this is the dispatch cause,
@@ -277,9 +273,8 @@ system context and cache remain unchanged. Independent events keep precedence;
 
 Progress records and their allowance/backoff disposition remain bounded
 evidence. Read-only roles use that policy for on-change dispatch as described
-below. Writers use the same no-progress disposition only as a bounded fallback
-when the current role-eligible ready set is nonempty; disposition alone is not
-writer readiness and does not bypass other gates. No-progress recovery rotation
+below. For writers, allowance and elapsed no-progress backoff do not authorize
+ready-work-only admission; an immediate handoff or independent wake is required. No-progress recovery rotation
 on an already admitted run and missing-finish nudges remain defect backstops,
 not general scheduling sources.
 
@@ -331,9 +326,10 @@ substantive decision, a terminal event, a due wait, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
 inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
 operator records and changed role-eligible ready work bypass it independently
-of workspace mode. A writer Next handoff, a writer no-progress fallback with current role-eligible
-ready work, or a read-only role-specific progress continuation can also bypass
-the unchanged-code gate. Read-only roles never inherit goal/inbox/run-wait generations or the
+of workspace mode. A writer Next handoff, a writer self-resolvable-wait
+fallback with no current role-eligible ready work, or a read-only role-specific
+progress continuation can also bypass the unchanged-code gate. Read-only roles
+never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
 changes, Next handoffs and progress-only continuation; writer probes retain their existing
 subscribed-event gate. A changed code snapshot bypasses the skip for either
@@ -597,8 +593,10 @@ do not mechanically establish externality.
 
 ### Idle-with-open-work diagnostic
 
-`Project.status()` carries a bounded `idle_with_open_work` diagnostic that
-makes one accepted scheduler slice visible without changing scheduling. It is
+`Project.status()` carries a bounded `idle_with_open_work` diagnostic of a
+recorded ready-work observation, not a live admission decision. Historical
+parked snapshots remain diagnosable; new parking finishes must first satisfy
+the complete-empty-inventory invariant above. It is
 active only when the published snapshot's outcome is `wait` or `continue`
 with a no-progress record (`has_progress` false) while the ready-work
 observation recorded at writer run completion is true. That observation is

@@ -180,12 +180,18 @@ class ProgressAdmissionTests(Fixture):
         original = self.project.config
         try:
             self.project.config = self.config
+            # Input and state remain progress facts, but the public Next contract
+            # requires one of its selected work signals.
             input_only = candidate(self.config.limits.progress_signals, "input")
-            self.assertEqual(_writer_next_task(self.project, input_only, "worker"), "Add the test.")
+            self.assertIsNone(_writer_next_task(self.project, input_only, "worker"))
 
             self.project.config = with_signals(("state",))
             state_only = candidate(("state",), "state")
-            self.assertEqual(_writer_next_task(self.project, state_only, "worker"), "Add the test.")
+            self.assertIsNone(_writer_next_task(self.project, state_only, "worker"))
+
+            self.project.config = with_signals(("tool",))
+            tool_only = candidate(("tool",), "tool")
+            self.assertEqual(_writer_next_task(self.project, tool_only, "worker"), "Add the test.")
 
             self.project.config = with_signals(())
             disabled = candidate((), "input")
@@ -292,6 +298,8 @@ class ProgressAdmissionTests(Fixture):
         def actions(ctx, base):
             record = ctx.handle("submit_insight", {"title": "A tested action", "body": "Observed detail."})
             ctx.handle("decide", {"id": record["id"], "action": "accept", "reason": "Evidence supports it.", "rev": 1})
+            ctx.handle("finish", {"outcome": "continue", "summary": "Decision recorded",
+                                   "state": "Now: accepted work.\nNext: Implement the accepted finding"})
         action = self._recorded_run(actions, custom_config=config)
         self.assertTrue(action["progress"]["signals"]["tool"])
         self.assertTrue(action["progress"]["signals"]["decision"])
@@ -664,9 +672,10 @@ class ProgressAdmissionTests(Fixture):
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(roles["worker"], no_progress_backoff_seconds=60)
         config = dataclasses.replace(self.config, limits=limits, roles=roles)
-        # One role's short timer expires while the inheriting role stays parked.
+        # Writer timers no longer admit no-progress continuations; the read-only
+        # inheriting role uses its configured delay.
         self.assertEqual(progress_disposition(worker_record, "continue", config, "worker", epoch + 61),
-                         "self_admit_backoff")
+                         "parked_no_progress")
         self.assertEqual(progress_disposition(searcher_record, "continue", config, "searcher", epoch + 61),
                          "parked_no_progress")
         self.assertEqual(progress_disposition(searcher_record, "continue", config, "searcher", epoch + 3601),
@@ -749,7 +758,7 @@ class PerRoleProgressSignalsTests(Fixture):
                                  signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
         self.assertFalse(tool_only["has_progress"])
         self.assertEqual(progress_disposition(state_only, "continue", config, "worker"),
-                         "self_admit_progress")
+                         "writer_requires_work_signal")
         parked = self._record(role="worker", selected=("state",), count=1,
                               signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
         self.assertFalse(parked["has_progress"])
@@ -816,7 +825,7 @@ class PerRoleProgressSignalsTests(Fixture):
         tool_only_default = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=0,
                                          signals={**{n: False for n in PROGRESS_SIGNALS}, "tool": True})
         self.assertEqual(progress_disposition(tool_only_default, "continue", self.config, "worker"),
-                         "self_admit_progress")
+                         "progress_requires_next")
         # Recovery requires the stored selection to match the effective list.
         mismatched = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=2)
         self.assertFalse(no_progress_recovery_due(mismatched, "continue", config))

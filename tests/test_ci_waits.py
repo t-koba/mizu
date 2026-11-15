@@ -130,12 +130,12 @@ class CiWaitTests(CiWaitFixture):
             self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
             self.assertEqual(wait_due.call_count, 2)
 
-    def test_terminal_readiness_survives_ack_without_repeated_admission(self):
-        blocked = self.block()
+    def test_terminal_readiness_survives_ack_without_repeated_event_admission(self):
         self.config.roles["worker"] = dataclasses.replace(self.config.roles["worker"], on_change=True)
         engine = Engine(self.config, driver=ScriptDriver())
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         snapshot = self.project.snapshots.get()
+        blocked = self.block()
         pending = self.store.page_ready(role_name="worker")
         self.assertEqual(pending["total"], 0)
         self.poll(self.rows(state="pending"))
@@ -167,6 +167,15 @@ class CiWaitTests(CiWaitFixture):
         after_ack = self.store.page_ready(role_name="worker")
         self.assertEqual(without_blocked_age(after_ack), without_blocked_age(terminal))
         self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
+        def handoff(ctx, *_):
+            with self.assertRaisesRegex(Denied, "1 ready item"):
+                ctx.handle("finish", {"outcome": "wait", "summary": "CI observed",
+                                      "state": "Now: CI terminal but work undisposed"})
+            self.assertIsNone(ctx.finished)
+            (ctx.workspace / "progress.py").write_text("VALUE = 1\n")
+            ctx.handle("finish", {"outcome": "continue", "summary": "CI reassessed",
+                                  "state": "Now: CI terminal.\nNext: Repair the exact failed check"})
+        engine.driver = ScriptDriver(handoff)
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         projected = json.loads(engine.driver.calls[-1][1])["ready_work"]["items"][0]
         projected_live = projected["wait_liveness"]
@@ -174,9 +183,8 @@ class CiWaitTests(CiWaitFixture):
         self.assertIs(type(projected_live["blocked_age_seconds"]), int)
         self.assertGreaterEqual(projected_live["blocked_age_seconds"], 0)
         self.assertFalse(projected["wait_satisfied"])  # Terminal input is not completion.
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
         for _ in range(2):
-            self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
-            self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
             self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
         self.assertEqual(self.store.get(blocked["id"]), blocked)
         # Status uses the same exact terminal route without writing history/evidence.

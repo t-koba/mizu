@@ -21,7 +21,14 @@ WRITER_CONTINUATION_CONTRACT = (
     "`decision`, or `insight` signal. A state-only Next does not admit and may "
     "leave the writer parked; do not rely on Next as a wake signal. Use "
     "outcome=wait for external results or work not yet actionable. An admitted "
-    "continuation opens with that step as its task.")
+    "continuation opens with that step as its task. Before a writable writer parks "
+    "(wait, blocked, or continue/bounded without a validated immediate Next), "
+    "finish requires a complete empty role-scoped ready inventory. Finish each "
+    "ready item, block it on a supported named observable wait, or drop it with "
+    "a reason; held doing work is still ready. Unknown or truncated evidence "
+    "refuses finish before sealing or acknowledgements. Ready work alone never "
+    "creates a timed re-admission; use an immediate progress-backed Next or the "
+    "existing independent event/deadline paths.")
 
 
 #: MCP protocol versions accepted by the capsule and bridge servers.

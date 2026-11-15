@@ -346,6 +346,8 @@ class WriterWaitTests(Fixture):
                 snapshot, self.config, self.role(), False, self.backoff_time(snapshot), project=self.project))
             row = next(row for row in self.project.status()['blocked_work']['items'] if row['id'] == item['id'])
             self.assertIsNone(row['self_resolvable'])
+            self.project.work_items.transition(item['id'], expected_rev=item['rev'], actor='worker',
+                                               status='dropped', reason='Fixture settled')
 
     def test_external_waits_suppress_self_wait_backoff(self):
         self.block('self code', {'kind': 'code_change'})
@@ -474,39 +476,6 @@ class WriterWaitTests(Fixture):
         forget_ledger(self.project.root)
         self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
 
-    def test_ready_conversion_rechecks_readiness_but_not_wait_liveness(self):
-        self.config.roles['worker'] = dataclasses.replace(self.role(), on_change=True)
-        item = self.project.work_items.create(
-            actor='worker', idempotency_key='ready', title='Persistent ready work')['record']['work_item']
-        engine = Engine(self.config, driver=ScriptDriver())
-        result = engine.run(self.project, 'worker')
-        self.assertIs(result['finish']['wait_liveness'], False)
-        snapshot = self.project.snapshots.get()
-        stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
-        due = stamp + self.config.limits.writer_no_progress_backoff_seconds
-        self.assertFalse(should_run(self.project, snapshot, role_name='worker', current_time=due - 1))
-        for live in (True, None, False):
-            with self.subTest(live=live), patch(
-                    'mizu.runtime._writer_wait_sources', return_value=(live, False, None)):
-                self.assertTrue(should_run(self.project, snapshot, role_name='worker', current_time=due))
-                self.assertFalse(_writer_progress_fallback(
-                    snapshot, self.config, self.role(), False, due, project=self.project))
-        with patch('mizu.runtime.time.time', return_value=due), patch(
-                'mizu.runtime._writer_wait_sources', return_value=(True, False, None)):
-            # Neither a fallback timer nor plain wait becomes an event subscription.
-            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
-            self.project.set_control(wake_generation='independent-event')
-            self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
-        self.project.set_control(wake_generation=snapshot['wake_generation'])
-        with patch('mizu.runtime.time.time', return_value=due):
-            self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        self.project.work_items.transition(item['id'], expected_rev=1, actor='worker',
-                                           status='dropped', reason='Fixture settled')
-        # Consume the changed-ready-set event before testing the timer alone.
-        engine.run(self.project, 'worker')
-        snapshot = self.project.snapshots.get()
-        self.assertFalse(should_run(self.project, snapshot, role_name='worker', current_time=due + 301))
-
     def test_disabled_override_malformed_progress_and_partial_inventory_fail_closed(self):
         engine = Engine(self.config, driver=ScriptDriver())
         engine.run(self.project, 'worker')
@@ -557,221 +526,22 @@ class WriterCiWaitTests(CiWaitFixture):
             self.project, self.config.roles["worker"], include_structured_wait=True),
             (None, False, None))
 
-    def test_live_held_ci_wait_reenters_after_backoff_and_reports_conversion(self):
-        item = self.block()
-        for index in range(32):
-            self.ready_item(f"independent-ready-{index}")
-        self.dispatch()
-        self.assertEqual(_writer_wait_sources(
-            self.project, self.config.roles["worker"], include_structured_wait=True),
-            (True, False, "ci"))
-        engine = Engine(self.config, driver=ScriptDriver())
-        result = engine.run(self.project, "worker")
-        snapshot = self.project.snapshots.get()
-        conversion = {"status": "converted",
-                      "reason": "ready_work_with_pending_structured_wait",
-                      "wait_kind": "ci", "backoff_seconds": 300}
-        self.assertIs(result["finish"]["wait_liveness"], True)
-        self.assertNotIn("wait_conversion", result["finish"])
-        self.assertEqual(snapshot["progress"]["schema"], 6)
-        self.assertEqual(snapshot["progress"]["wait_conversion"], conversion)
-        self.assertEqual(self.project.status()["progress"]["record"]["wait_conversion"], conversion)
-        from mizu.snapshot import validate_progress
-        for bad in (
-                {**conversion, "status": "not-converted"},
-                {**conversion, "wait_kind": "unknown"},
-                {**conversion, "backoff_seconds": 0},
-                {**conversion, "extra": True}):
-            with self.subTest(bad=bad), self.assertRaises(Denied):
-                validate_progress({**snapshot["progress"], "wait_conversion": bad})
-        with self.assertRaises(Denied):
-            validate_progress({key: value for key, value in snapshot["progress"].items()
-                               if key != "wait_conversion"})
-        current = self.store.get(item["id"])
-        self.assertEqual((current["status"], current["holder"], current["wait"]["kind"]),
-                         ("blocked", "worker", "ci"))
-        stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
-        due = stamp + conversion["backoff_seconds"]
-        self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
-        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
-        # The finish-time wait kind is diagnostic; the policy-matched backoff
-        # and fresh eligible ready-work observation control re-admission.
-        altered = dict(snapshot)
-        altered["progress"] = dict(snapshot["progress"])
-        altered["progress"]["wait_conversion"] = {**conversion, "wait_kind": "deadline"}
-        self.assertTrue(_writer_progress_fallback(
-            altered, self.config, self.config.roles["worker"], True,
-            due, project=self.project))
-        altered["progress"]["wait_conversion"] = {**conversion, "backoff_seconds": 299}
-        self.assertFalse(_writer_progress_fallback(
-            altered, self.config, self.config.roles["worker"], True,
-            due, project=self.project))
-
-        # Complete finish-time ready evidence remains sufficient if the
-        # previously held wait disappears, changes kind, or becomes unknown.
-        for sources in ((True, False, None), (None, False, "ci"), (True, False, "deadline")):
-            with self.subTest(sources=sources), patch(
-                    "mizu.runtime._writer_wait_sources", return_value=sources):
-                self.assertTrue(_writer_progress_fallback(
-                    snapshot, self.config, self.config.roles["worker"], True,
-                    due, project=self.project))
-                self.assertTrue(should_run(
-                    self.project, snapshot, role_name="worker", current_time=due))
-
-    def test_future_deadline_item_wait_can_be_converted_without_ci_dispatch(self):
-        item = self.store.create(actor="worker", idempotency_key="deadline-held",
-                                 title="Deadline-held work")["record"]["work_item"]
-        deadline = {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}
-        self.store.transition(item["id"], expected_rev=1, actor="worker",
-                              status="blocked", wait=deadline)
-        self.ready_item("deadline-independent-ready")
-        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
-        self.assertEqual(self.project.snapshots.get()["progress"]["wait_conversion"]["wait_kind"],
-                         "deadline")
-        current = self.store.get(item["id"])
-        self.assertEqual((current["status"], current["holder"], current["wait"]),
-                         ("blocked", "worker", deadline))
-
-    def test_live_wait_conversion_requires_complete_finish_time_ready_evidence(self):
-        item = self.block()
-        self.dispatch()
-        engine = Engine(self.config, driver=ScriptDriver())
-        no_ready = engine.run(self.project, "worker")
-        self.assertIs(no_ready["finish"]["wait_liveness"], True)
-        self.assertIs(no_ready["finish"].get("wait_conversion"), None)
-        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
-        self.assertEqual(self.store.get(item["id"])["status"], "blocked")
-
-        self.ready_item("incomplete-ready")
-        snapshot_before = self.project.snapshots.get()
-        original = self.store.page_ready
-        def incomplete_page(*args, **kwargs):
-            page = original(*args, **kwargs)
-            if kwargs.get("limit") == 1:
-                page["coverage_complete"] = False
-            return page
-        with patch.object(self.store, "page_ready", side_effect=incomplete_page):
-            incomplete = engine.run(self.project, "worker")
-            self.assertIs(incomplete["finish"]["wait_liveness"], True)
-            current = self.project.snapshots.get()
-            self.assertEqual(current["parent"], snapshot_before["id"])
-            self.assertNotIn("wait_conversion", current["progress"])
-            stamp = dt.datetime.fromisoformat(current["progress"]["recorded_at"]).timestamp()
-            due = stamp + self.config.limits.writer_no_progress_backoff_seconds
-            self.assertFalse(should_run(self.project, current, role_name="worker", current_time=due))
-        # Restored completeness cannot retroactively authorize a conversion
-        # that finish-time evidence did not record.
-        self.assertFalse(should_run(self.project, current, role_name="worker", current_time=due))
-
-    def test_free_standing_question_converts_and_rechecks_policy_and_readiness(self):
-        ready = self.ready_item()
-        question = self.project.insights.submit(
-            source="worker", title="External wait", body="Q: Await operator input?",
-            base_snapshot=None, kind="question", addressee="operator")
-        engine = Engine(self.config, driver=ScriptDriver())
-        result = engine.run(self.project, "worker")
-        self.assertIs(result["finish"]["wait_liveness"], True)
-        snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot["progress"]["schema"], 7)
-        conversion = {"status": "converted",
-                      "reason": "ready_work_without_proven_structured_wait",
-                      "wait_kind": None, "backoff_seconds": 300}
-        self.assertEqual(snapshot["progress"]["wait_conversion"], conversion)
-        self.assertEqual(self.project.status()["progress"]["record"]["wait_conversion"], conversion)
-        self.assertIs(_writer_wait_liveness(self.project, self.config.roles["worker"]), True)
-        self.assertEqual(self.project.insights.read(question["id"]), question)
-        stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
-        due = stamp + conversion["backoff_seconds"]
-        self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
-        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
-        # A ready item held by another role is no longer eligible for this writer.
-        self.store.transition(ready["id"], expected_rev=1, actor="reviewer", status="doing")
-        self.assertFalse(self.store.page_ready(role_name="worker")["items"])
-        # The changed ready set may independently wake; the conversion cannot.
-        self.assertFalse(_writer_progress_fallback(
-            snapshot, self.config, self.config.roles["worker"], False, due, project=self.project))
-        self.ready_item("replacement-ready")
-        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
-        # A held CI wait is a structured source, but the explicit policy can
-        # preserve the requested run-level wait without changing the item.
-        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, writer_wait_with_ready_work=False))
-        self.project.config = self.config
-        self.assertFalse(_writer_progress_fallback(
-            snapshot, self.config, self.config.roles["worker"], True, due, project=self.project))
-        item = self.block(key="disabled-policy")
-        self.dispatch()
-        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
-        self.assertIs(result["finish"]["wait_liveness"], True)
-        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
-        current = self.store.get(item["id"])
-        self.assertEqual((current["status"], current["wait"]["kind"]), ("blocked", "ci"))
-
-    def test_unknown_liveness_converts_with_role_backoff_but_needs_current_ready_work(self):
-        ready = self.ready_item()
-        role = dataclasses.replace(self.config.roles["worker"], no_progress_backoff_seconds=17)
-        self.config = dataclasses.replace(self.config, roles={**self.config.roles, "worker": role})
-        self.project.config = self.config
-        with patch("mizu.runtime._writer_wait_sources", return_value=(None, False, None)):
-            result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
-            self.assertIsNone(result["finish"]["wait_liveness"])
-            snapshot = self.project.snapshots.get()
-            self.assertEqual(snapshot["progress"]["schema"], 7)
-            self.assertEqual(snapshot["progress"]["wait_conversion"], {
-                "status": "converted", "reason": "ready_work_without_proven_structured_wait",
-                "wait_kind": None, "backoff_seconds": 17})
-            stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
-            self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=stamp + 16))
-            self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=stamp + 17))
-            altered_role = dataclasses.replace(role, no_progress_backoff_seconds=18)
-            self.assertFalse(_writer_progress_fallback(
-                snapshot, self.config, altered_role, True, stamp + 18, project=self.project))
-            self.store.transition(ready["id"], expected_rev=1, actor="reviewer", status="doing")
-            self.assertFalse(self.store.page_ready(role_name="worker")["items"])
-            self.assertFalse(_writer_progress_fallback(
-                snapshot, self.config, role, False, stamp + 17, project=self.project))
-
-    def test_missing_or_incomplete_ready_evidence_cannot_authorize_new_conversion(self):
-        self.ready_item()
-        self.project.insights.submit(
-            source="worker", title="External wait", body="Q: Await operator input?",
-            base_snapshot=None, kind="question", addressee="operator")
-        original = self.store.page_ready
-        for unavailable in (False, True):
-            def incomplete_page(*args, **kwargs):
-                if kwargs.get("limit") == 1:
-                    if unavailable:
-                        raise Denied("Unavailable ready evidence")
-                    return {"items": [{"id": "unproven"}], "coverage_complete": False}
-                return original(*args, **kwargs)
-            with self.subTest(unavailable=unavailable):
-                with patch.object(self.store, "page_ready", side_effect=incomplete_page):
-                    Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
-                snapshot = self.project.snapshots.get()
-                self.assertNotIn("wait_conversion", snapshot["progress"])
-                stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
-                due = stamp + self.config.limits.writer_no_progress_backoff_seconds
-                # Later complete readiness does not retroactively authorize it.
-                self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
-
-    def test_other_holders_wait_does_not_count_as_conversion_witness(self):
-        item = self.block(key="other-holder", actor="reviewer")
-        self.ready_item("writer-ready")
-        self.dispatch()
-        self.assertEqual(_writer_wait_sources(
-            self.project, self.config.roles["worker"], include_structured_wait=True),
-            (False, False, None))
-        result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
-        self.assertIs(result["finish"]["wait_liveness"], False)
-        snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot["progress"]["wait_conversion"]["reason"],
-                         "ready_work_without_proven_structured_wait")
-        self.assertIsNone(snapshot["progress"]["wait_conversion"]["wait_kind"])
-        stamp = dt.datetime.fromisoformat(snapshot["progress"]["recorded_at"]).timestamp()
-        due = stamp + self.config.limits.writer_no_progress_backoff_seconds
-        self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due - 1))
-        self.assertTrue(should_run(self.project, snapshot, role_name="worker", current_time=due))
-        self.assertEqual(self.store.get(item["id"])["holder"], "reviewer")
+    def test_unknown_ci_inventory_refuses_parking_only_for_its_holder(self):
+        self.block(key="other-unknown", actor="reviewer")
+        args = {"outcome": "wait", "summary": "Waiting on external results",
+                "state": "Now: no eligible ready work"}
+        unknown = {"state": "unknown", "reason": "unavailable", "wait_kind": "ci"}
+        with patch("mizu.work_items.liveness", return_value=unknown):
+            self.assertTrue(self.context().handle("finish", args)["sealed"])
+            self.block(key="own-unknown")
+            ctx = self.context()
+            page = self.store.page_ready(role_name="worker")
+            self.assertEqual(page["total"], 0)
+            self.assertFalse(page["coverage_complete"])
+            with self.assertRaisesRegex(Denied, "evidence unavailable or incomplete"):
+                ctx.handle("finish", args)
+            self.assertIsNone(ctx.finished)
+            self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
 
     def test_exact_held_ci_request_and_terminal_evidence(self):
         role = self.config.roles['worker']
@@ -795,3 +565,185 @@ class WriterCiWaitTests(CiWaitFixture):
         self.poll()
         self.assertIs(_writer_wait_liveness(self.project, role), False)
         self.assertEqual(self.store.get(item['id'])['status'], 'blocked')
+
+
+class WriterParkingTests(Fixture):
+    def ready(self, key):
+        return self.project.work_items.create(
+            actor="worker", idempotency_key=key, title=key)["record"]["work_item"]
+
+    def finish(self, ctx, outcome="wait", **extra):
+        return ctx.handle("finish", {"outcome": outcome, "summary": "Disposition check",
+                                    "state": "Now: observed.\nNext: Inspect the remaining work", **extra})
+
+    def assert_unsealed(self, ctx):
+        self.assertIsNone(ctx.finished)
+        self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+
+    def test_all_parking_outcomes_refuse_open_and_held_doing(self):
+        item = self.ready("ready")
+        ctx = self.context()
+        for status in ("open", "doing"):
+            if status == "doing":
+                item = self.project.work_items.transition(
+                    item["id"], expected_rev=item["rev"], actor="worker", status=status)
+            for outcome in ("wait", "blocked", "continue", "bounded"):
+                with self.subTest(status=status, outcome=outcome):
+                    ctx.bound_hit = "drain" if outcome == "bounded" else None
+                    ctx.wrap_up_attempted = outcome == "bounded"
+                    with self.assertRaisesRegex(Denied, "held doing item is still ready"):
+                        self.finish(ctx, "wait" if outcome == "bounded" else outcome)
+                    self.assert_unsealed(ctx)
+        self.assertEqual(self.project.work_items.get(item["id"]), item)
+
+    def test_every_ready_item_needs_a_durable_disposition(self):
+        from support import bind_delivery
+        store = self.project.work_items
+        captured = self.project.snapshots.capture_files(self.project.workspace)
+        snapshot = self.project.snapshots.create(
+            captured, goal=self.project.goal, state="Verified delivery", run=None,
+            outcome="done", summary="Fixture verification", verification={
+                "passed": True, "code_digest": captured["code_digest"], "run": "fixture"})
+        self.project.snapshots.publish(snapshot)
+        ctx = self.context()
+        items = [self.ready(str(index)) for index in range(3)]
+        binding = bind_delivery(self.project, items[0]["id"], snapshot["id"])
+        # One completion, one named observable blocker and one reasoned drop.
+        store.transition(items[0]["id"], expected_rev=binding["rev"], actor="worker", status="done",
+                         snapshot_id=snapshot["id"])
+        store.transition(items[1]["id"], expected_rev=1, actor="worker", status="blocked",
+                         wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        with self.assertRaisesRegex(Denied, "1 ready item"):
+            self.finish(ctx)
+        self.assert_unsealed(ctx)
+        store.transition(items[2]["id"], expected_rev=1, actor="worker", status="dropped",
+                         reason="No longer needed")
+        self.assertTrue(self.finish(ctx)["sealed"])
+
+    def test_finish_empty_signature_does_not_rewake_for_own_dispositions(self):
+        item = self.ready("owned disposition")
+        def dispose_and_wait(ctx, *_):
+            ctx.handle("work_items_transition", {
+                "id": item["id"], "expected_rev": 1, "status": "blocked",
+                "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}})
+            self.finish(ctx)
+        engine = Engine(self.config, driver=ScriptDriver(dispose_and_wait))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(snapshot["progress"]["ready_work_signature"],
+                         self.project.work_items.page_ready(role_name="worker")["signature"])
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
+
+    def test_finish_inventory_uses_api_bound_not_smaller_prompt_page(self):
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_items_prompt=1))
+        self.project.config = self.config
+        self.ready("first ready")
+        self.ready("second ready")
+        with self.assertRaisesRegex(Denied, r"2 ready item\(s\)"):
+            self.finish(self.context())
+
+    def test_other_role_held_work_does_not_block_writer(self):
+        item = self.ready("other holder")
+        self.project.work_items.transition(item["id"], expected_rev=1, actor="reviewer", status="doing")
+        self.assertTrue(self.finish(self.context())["sealed"])
+
+    def test_unknown_incomplete_truncated_and_unreadable_inventory_refuse(self):
+        ctx = self.context()
+        store = self.project.work_items
+        page = store.page_ready(role_name="worker")
+        for bad in ({**page, "coverage_complete": False},
+                    {**page, "truncated": True}, {**page, "total": None},
+                    {**page, "items": [], "total": 1}, {**page, "signature": None}, {}):
+            with self.subTest(page=bad), patch.object(store, "page_ready", return_value=bad):
+                with self.assertRaisesRegex(Denied, "evidence unavailable or incomplete"):
+                    self.finish(ctx)
+                self.assert_unsealed(ctx)
+        for error in (Denied, Busy, LimitExceeded, OSError):
+            with self.subTest(error=error), patch.object(store, "page_ready", side_effect=error("fixture")):
+                with self.assertRaisesRegex(Denied, "evidence unavailable or incomplete"):
+                    self.finish(ctx)
+                self.assert_unsealed(ctx)
+        # The finish scan uses the bounded page API maximum, not the smaller
+        # prompt display setting; a real 101-row ready set is incomplete.
+        from mizu.work_items import MAX_OPEN_PAGE_ROWS
+        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, work_items_prompt=1, open_work_items=MAX_OPEN_PAGE_ROWS + 1))
+        self.project.config = self.config
+        self.project.insights.open_work_items = MAX_OPEN_PAGE_ROWS + 1
+        for index in range(MAX_OPEN_PAGE_ROWS + 1):
+            self.ready(f"overflow-{index}")
+        with self.assertRaisesRegex(Denied, "evidence unavailable or incomplete"):
+            self.finish(ctx)
+        self.assert_unsealed(ctx)
+
+    def test_refusal_does_not_ack_events_and_retry_can_seal(self):
+        records.write(self.project, event_id="parking-event", kind="operator.notice", body="Handle this",
+                      addressee="worker")
+        item = self.ready("ack retry")
+        def run(ctx, prompt, *_):
+            tokens = [entry.ack_token for entry in ctx.operator_record_manifest]
+            self.assertTrue(tokens)
+            with self.assertRaisesRegex(Denied, "1 ready item"):
+                self.finish(ctx, ack_events=tokens)
+            self.assert_unsealed(ctx)
+            self.assertTrue(records.pending(self.project, ctx.role)[0]["wake_pending"])
+            self.project.work_items.transition(item["id"], expected_rev=1, actor="worker",
+                                               status="dropped", reason="Handled")
+            self.finish(ctx, ack_events=tokens)
+        self.assertEqual(Engine(self.config, driver=ScriptDriver(run)).run(
+            self.project, "worker")["status"], "completed")
+        self.assertFalse(records.pending(self.project, self.config.roles["worker"])[0]["wake_pending"])
+        self.assertNotIn("wait_conversion", self.project.snapshots.get()["progress"])
+
+    def test_progress_backed_new_next_permits_ready_work_and_is_immediate(self):
+        from mizu.runtime import _writer_next_task
+        self.ready("handoff")
+        def run(ctx, *_):
+            (ctx.workspace / "new.py").write_text("VALUE = 1\n")
+            self.finish(ctx, "continue")
+        self.assertEqual(Engine(self.config, driver=ScriptDriver(run)).run(
+            self.project, "worker")["status"], "completed")
+        snapshot = self.project.snapshots.get()
+        self.assertEqual(_writer_next_task(self.project, snapshot, "worker"), "Inspect the remaining work")
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
+        # Repeating a handoff is parking, even with fresh code progress.
+        ctx = self.context()
+        (ctx.workspace / "new.py").write_text("VALUE = 2\n")
+        with self.assertRaisesRegex(Denied, "1 ready item"):
+            self.finish(ctx, "continue")
+        self.assert_unsealed(ctx)
+
+    def test_historical_conversions_validate_but_never_authorize_ready_only_timers(self):
+        from mizu.runtime import _progress_record
+        from mizu.snapshot import PROGRESS_SIGNALS, validate_progress
+        self.config.roles["worker"] = dataclasses.replace(self.config.roles["worker"], on_change=True)
+        self.ready("historical ready")
+        base = self.project.snapshots.get()
+        signature = self.project.work_items.page_ready(role_name="worker")["signature"]
+        for schema, kind, reason in (
+                (6, "ci", "ready_work_with_pending_structured_wait"),
+                (7, None, "ready_work_without_proven_structured_wait")):
+            conversion = {"status": "converted", "reason": reason, "wait_kind": kind,
+                          "backoff_seconds": 300}
+            progress = _progress_record(
+                base, "worker", self.config.limits.progress_signals,
+                {name: False for name in PROGRESS_SIGNALS}, "wait", ready_work=True,
+                ready_work_signature=signature, wait_resolution_tokens=[])
+            progress.update(schema=schema, wait_conversion=conversion)
+            self.assertEqual(validate_progress(progress)["schema"], schema)
+            with self.assertRaises(Denied):
+                validate_progress({**progress, "wait_conversion": {**conversion, "backoff_seconds": 0}})
+            snapshot = self.project.snapshots.create(
+                self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+                state="Historical parked wait", run=None, outcome="wait", summary="Old snapshot",
+                wake_at=4102444800, inbox_seen=self.project.insights.generation(),
+                wake_generation=self.project.control()["wake_generation"], progress=progress)
+            self.project.snapshots.publish(snapshot)
+            due = dt.datetime.fromisoformat(progress["recorded_at"]).timestamp() + 301
+            self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
+            for live in (True, False, None):
+                with patch("mizu.runtime._writer_wait_sources", return_value=(live, False, None)):
+                    self.assertFalse(_writer_progress_fallback(
+                        snapshot, self.config, self.config.roles["worker"], True, due, project=self.project))

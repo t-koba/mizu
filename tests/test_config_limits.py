@@ -216,7 +216,7 @@ class LimitsCoverageTests(unittest.TestCase):
         # These fields use the boolean, progress-signal or finite-cost validators
         # in load(), rather than the integer range table.
         special = {"lock_diagnostics", "drain_yield", "missing_finish_counts_as_failure",
-                   "writer_wait_with_ready_work", "progress_signals", "session_max_cost_usd",
+                   "progress_signals", "session_max_cost_usd",
                    "session_delta_details"}
         fields = {field.name for field in dataclasses.fields(Limits)}
         self.assertFalse(set(_LIMIT_RANGES) & special)
@@ -306,21 +306,11 @@ class PipePollConfigTests(Fixture):
 
 
 class WriterWaitPolicyConfigTests(Fixture):
-    def test_default_boolean_and_strict_type(self):
-        self.assertIs(Limits().writer_wait_with_ready_work, True)
-        original = re.sub(r'(?m)^writer_wait_with_ready_work = .*\n', '', self.file.read_text())
-        self.file.write_text(original)
-        self.assertIs(load(self.file).limits.writer_wait_with_ready_work, True)
-        for value in ('true', 'false', '1', '0', '"true"', '[]', '{}'):
-            with self.subTest(value=value):
-                self.file.write_text(original.replace(
-                    '\n[limits]\n', f'\n[limits]\nwriter_wait_with_ready_work = {value}\n'))
-                if value in ('true', 'false'):
-                    self.assertIs(load(self.file).limits.writer_wait_with_ready_work,
-                                  value == 'true')
-                else:
-                    with self.assertRaisesRegex(ConfigError, 'limits.writer_wait_with_ready_work'):
-                        load(self.file)
+    def test_obsolete_ready_work_timer_is_not_configuration(self):
+        self.file.write_text(self.file.read_text().replace(
+            '\n[limits]\n', '\n[limits]\nwriter_wait_with_ready_work = true\n'))
+        with self.assertRaisesRegex(ConfigError, 'writer_wait_with_ready_work'):
+            load(self.file)
 
 
 class RootOwnerTemplateTests(unittest.TestCase):

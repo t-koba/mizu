@@ -42,6 +42,7 @@ def _exclude_matcher(excludes):
 
 
 PROGRESS_SIGNALS = ("tool", "code", "state", "decision", "insight", "input")
+WRITER_HANDOFF_PROGRESS_SIGNALS = ("tool", "code", "decision", "insight")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 # The two opening pages are each bounded to at most 100 rows.
 MAX_WAIT_RESOLUTION_TOKENS = 200
@@ -198,7 +199,7 @@ def progress_projection(value: dict | None) -> dict | None:
 
 def progress_disposition(value: dict | None, outcome: str, config=None,
                          role_name: str | None = None, current_time: float | None = None) -> str:
-    """Bounded explanation of whether this record self-admits continue/bounded."""
+    """Bounded explanation of progress-based continuation eligibility."""
     if value is None:
         return "legacy_behavior"
     try:
@@ -211,17 +212,21 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
             selected = tuple(role_progress_signals(config, _role_config))
         except Exception:
             selected = tuple(limits.progress_signals)
-        allowance = limits.no_progress_continuations
         role = _role_name
         role_config = _role_config
-        # Effective per-role timer: roles.<name>.no_progress_backoff_seconds
-        # when set, else the workspace-specific project limit. Keep resolution
-        # centralized with the role configuration helpers.
-        backoff = role_no_progress_backoff_seconds(config, role_config)
         if set(value["selected"]) != set(selected) or value["role"] != role:
             return "reevaluate"
         if outcome not in ("continue", "bounded"):
             return "not_applicable"
+        if getattr(role_config, "workspace", None) == "write":
+            if any(name in value["selected"] and value["signals"][name]
+                   for name in WRITER_HANDOFF_PROGRESS_SIGNALS):
+                return "progress_requires_next"
+            return "writer_requires_work_signal" if value["has_progress"] else "parked_no_progress"
+        allowance = limits.no_progress_continuations
+        # Effective per-role timer: roles.<name>.no_progress_backoff_seconds
+        # when set, else the read-only project limit.
+        backoff = role_no_progress_backoff_seconds(config, role_config)
         if value["has_progress"]:
             return "self_admit_progress"
         if value["no_progress_count"] <= allowance:

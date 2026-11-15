@@ -79,6 +79,28 @@ class EventWakesGateTests(Fixture):
         self._role("worker", daemon=False, interval_seconds=0, calendar="", on_change=False,
                    decision_events=("approve",), work_item_events=())
 
+    def test_real_ready_set_change_wakes_only_on_configured_event_path(self):
+        self._role("worker", on_change=True, event_wakes=())
+        engine = Engine(self.config, driver=ScriptDriver())
+        engine.run(self.project, "worker")
+        item = self.project.work_items.create(actor="worker", idempotency_key="event-ready",
+                                               title="Ready event")["record"]["work_item"]
+        self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
+        self._role("worker", event_wakes=("ready_work",))
+        def dispose(ctx, *_):
+            self.project.work_items.transition(item["id"], expected_rev=1, actor="worker",
+                                               status="dropped", reason="Handled the ready event")
+            ctx.handle("finish", {"outcome": "wait", "summary": "Handled the ready event",
+                                  "state": "Now: waiting for another event"})
+        engine.driver = ScriptDriver(dispose)
+        self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["status"], "completed")
+        ctx = engine.driver.calls[-1][0]
+        from mizu.fs import read_json
+        self.assertEqual(read_json(ctx.run_dir / "started.json")["admission"], "ready_work")
+        # Disposition of the admitted item establishes the empty ready baseline;
+        # it does not immediately wake the writer again for its own change.
+        self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
+
     def test_each_kind_is_gated_individually(self):
         self._worker_event_only()
         self.project.set_control(wake_generation="")

@@ -63,12 +63,8 @@ class ReadyWorkTests(Fixture):
 
     def test_drain_bounded_blocked_finish_resumes_ready_work_after_drain_clears(self):
         item = self.item("drain-bound")
-        def record_ready_work(ctx, *_):
-            ctx.handle("finish", {"outcome": "wait", "summary": "Record ready set",
-                                   "state": "Now: ready work exists."})
-        Engine(self.config, driver=ScriptDriver(record_ready_work)).run(self.project, "worker")
-
         def bounded_finish(ctx, *_):
+            (ctx.workspace / 'bounded.py').write_text('VALUE = 1\n')
             self.project.set_control(draining=True)
             ctx.bound_hit = "drain"
             ctx.wrap_up_attempted = True
@@ -138,13 +134,17 @@ class ReadyWorkTests(Fixture):
 
     def test_dispatch_unchanged_and_event_gates_do_not_suppress_ready_work(self):
         self.config.roles["worker"] = dataclasses.replace(self.config.roles["worker"], on_change=True)
-        driver = ScriptDriver()
+        def dispose(ctx, *_):
+            for row in self.project.work_items.page_ready(role_name="worker")["items"]:
+                self.project.work_items.transition(row["id"], expected_rev=row["rev"], actor="worker",
+                                                   status="dropped", reason="Handled test candidate")
+        driver = ScriptDriver(dispose)
         engine = Engine(self.config, driver=driver)
         engine.run(self.project, "worker")  # Mark code observed, then keep it unchanged.
-        self.item("dispatch")
         for outcome in ("done", "wait", "continue"):
             for event_trigger in (False, True):
                 self.parked(outcome)
+                self.item(f"dispatch-{outcome}-{event_trigger}")
                 result = engine.run(self.project, "worker", event_trigger=event_trigger)
                 self.assertEqual(result["status"], "completed")
                 context = driver.calls[-1][0]
@@ -381,6 +381,7 @@ class ReadySetChangeTests(Fixture):
         return self.project.work_items.page_ready(limit=limit, role_name=role)['signature']
 
     def delivered_ready_base(self):
+        """A historical parked snapshot: new writers cannot park with ready work."""
         current = self.project.snapshots.get()
         progress = {"schema": 3, "signals": {name: False for name in PROGRESS_SIGNALS},
                     "selected": list(self.config.limits.progress_signals), "role": "worker",
@@ -397,32 +398,22 @@ class ReadySetChangeTests(Fixture):
         self.project.snapshots.publish(base)
         return self.project.snapshots.get()
 
-    def test_wait_with_unchanged_ready_work_reenters_after_backoff(self):
+    def test_historical_ready_wait_has_no_timer_but_explicit_expiry_and_operator_wake_remain(self):
         self.item('persistent')
         engine = self.engine()
-        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 7)
-        self.assertEqual(snapshot['progress']['ready_work_signature'], self.signature())
-        self.assertEqual(snapshot['progress']['wait_conversion']['reason'],
-                         'ready_work_without_proven_structured_wait')
-        self.assertTrue(self.project.status()['idle_with_open_work']['ready_work'])
+        snapshot = self.delivered_ready_base()
+        write_json(self.project.root / 'observed' / 'worker.json',
+                   {'code_digest': snapshot['code_digest']})
         stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
-        due = stamp + snapshot['progress']['wait_conversion']['backoff_seconds']
-        with patch('mizu.runtime.time.time', return_value=due - 1):
-            for _ in range(3):
-                self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
-                self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
-                self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
-        # The finish-time ready observation authorizes the normal backoff path.
-        self.assertTrue(should_run(self.project, snapshot, current_time=due, role_name='worker'))
-        # Independent run wait expiry remains a separate admission cause.
-        expired = {**snapshot, 'wake_at': 1}
-        self.assertTrue(should_run(self.project, expired, current_time=2, role_name='worker'))
-        self.project.set_control(wake_generation='new-operator-input')
+        due = stamp + self.config.limits.writer_no_progress_backoff_seconds + 1
+        self.assertFalse(should_run(self.project, snapshot, current_time=due, role_name='worker'))
+        with patch('mizu.runtime.time.time', return_value=due):
+            self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
+            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
+        self.assertTrue(should_run(self.project, {**snapshot, 'wake_at': 1},
+                                   current_time=2, role_name='worker'))
+        self.project.set_control(wake_generation='independent-event')
         self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
-        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
 
     def test_add_remove_and_equal_total_replacement_beyond_prompt_limit(self):
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
@@ -430,8 +421,8 @@ class ReadySetChangeTests(Fixture):
         self.project.config = self.config
         items = [self.item(f'offscreen-{i}') for i in range(3)]
         engine = self.engine()
-        engine.run(self.project, 'worker')
-        original = json.loads(engine.driver.calls[-1][1])['ready_work']
+        self.delivered_ready_base()
+        original = self.project.work_items.page_ready(limit=1, role_name='worker')
         old_signature = self.signature()
         self.project.work_items.transition(items[-1]['id'], expected_rev=1, actor='worker',
                                            status='dropped', reason='Replaced candidate')
@@ -441,20 +432,26 @@ class ReadySetChangeTests(Fixture):
         self.assertEqual(page['items'][0]['id'], original['items'][0]['id'])
         self.assertNotEqual(self.signature(), old_signature)
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
-        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertNotIn('skip', engine._dispatch_state(
+            self.project, 'worker', self.config.roles['worker'], event_trigger=True))
+        self.delivered_ready_base()
         extra = self.item('addition')
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
-        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
+        self.assertNotIn('skip', engine._dispatch_state(
+            self.project, 'worker', self.config.roles['worker'], event_trigger=False))
+        self.delivered_ready_base()
         self.project.work_items.transition(extra['id'], expected_rev=1, actor='worker',
                                            status='dropped', reason='Removed candidate')
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
-        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertNotIn('skip', engine._dispatch_state(
+            self.project, 'worker', self.config.roles['worker'], event_trigger=True))
+        self.delivered_ready_base()
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
 
     def test_removal_to_empty_wakes_once(self):
         item = self.item('last')
         engine = self.engine()
-        engine.run(self.project, 'worker')
+        self.delivered_ready_base()
         self.project.work_items.transition(item['id'], expected_rev=1, actor='worker',
                                            status='blocked', reason='Needs reassessment',
                                            wait={'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
@@ -466,15 +463,21 @@ class ReadySetChangeTests(Fixture):
     def test_new_ready_item_during_unit_is_not_consumed_at_finish(self):
         self.item('offered')
         before = self.signature()
-        engine = self.engine(lambda *_: self.item('arrived-during-run'))
+        def arrive_and_handoff(ctx, *_):
+            self.item('arrived-during-run')
+            (ctx.workspace / 'progress.py').write_text('VALUE = 1\n')
+            ctx.handle('finish', {'outcome': 'continue', 'summary': 'New work arrived',
+                                  'state': 'Now: changed code.\nNext: Handle newly arrived work'})
+        engine = self.engine(arrive_and_handoff)
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()
         self.assertEqual(snapshot['progress']['ready_work_signature'], before)
         self.assertNotEqual(before, self.signature())
         self.assertTrue(snapshot['progress']['ready_work'])
         self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
-        engine.driver = ScriptDriver()
-        self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+        self.assertNotIn('skip', engine._dispatch_state(
+            self.project, 'worker', self.config.roles['worker'], event_trigger=True))
+        self.delivered_ready_base()
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
 
     def test_blocked_wait_satisfaction_changes_membership_without_transition(self):
@@ -488,7 +491,9 @@ class ReadySetChangeTests(Fixture):
         with patch('mizu.work_items.liveness', return_value={
                 'state': 'due', 'reason': 'condition_met', 'wait_kind': 'deadline'}):
             self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
-            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['status'], 'completed')
+            self.assertNotIn('skip', engine._dispatch_state(
+                self.project, 'worker', self.config.roles['worker'], event_trigger=True))
+            self.delivered_ready_base()
             self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
         self.assertEqual(self.project.work_items.get(blocked['id'])['rev'], 2)
 
@@ -507,7 +512,7 @@ class ReadySetChangeTests(Fixture):
         engine.run(self.project, 'worker')
         self.assertFalse(should_run(self.project, self.project.snapshots.get()))
         self.item('same-aggregate-and-worker-set')
-        engine.run(self.project, 'worker')
+        self.delivered_ready_base()
         self.assertFalse(should_run(self.project, self.project.snapshots.get()))
 
     def test_legacy_migration_empty_and_nonempty(self):
@@ -522,12 +527,9 @@ class ReadySetChangeTests(Fixture):
         self.item('new-to-legacy')
         for progress in (None, v1, v2):
             self.assertTrue(_ready_work_changed(self.project, {**base, 'progress': progress}, role))
-        engine = self.engine()
-        engine.run(self.project, 'worker')
-        snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['schema'], 7)
-        self.assertEqual(snapshot['progress']['wait_conversion']['reason'],
-                         'ready_work_without_proven_structured_wait')
+        self.engine()
+        snapshot = self.delivered_ready_base()
+        self.assertEqual(snapshot['progress']['schema'], 3)
         self.assertFalse(_ready_work_changed(self.project, snapshot, role))
         # Invalid evidence closes, never reinterpreted as permissive legacy.
         for bad in ({}, {**snapshot['progress'], 'ready_work_signature': 'bad'}):
@@ -551,36 +553,23 @@ class ReadySetChangeTests(Fixture):
         with self.assertRaises(Denied):
             validate_progress({k: v for k, v in progress.items() if k != 'ready_work_signature'})
 
-    def test_unchanged_ready_work_self_admits_writer_after_backoff(self):
+    def test_historical_no_progress_continuations_never_self_admit_for_ready_work(self):
         self.item('persistent-ready-work')
-        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, writer_no_progress_backoff_seconds=60))
-        self.project.config = self.config
-        base = self.delivered_ready_base()
-        def finish(ctx, *_):
-            ctx.handle('finish', {'outcome': 'continue', 'summary': 'Observed only',
-                                  'state': 'An ordinary free-text rewrite\nNext: Inspect the test result'})
-        engine = self.engine(finish)
-        self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['code_digest'], base['code_digest'])
-        self.assertEqual(snapshot['progress']['ready_work_signature'], self.signature())
-        self.assertFalse(snapshot['progress']['has_progress'])
-        self.assertEqual(snapshot['progress']['no_progress_count'], 1)
+        self.engine()
+        snapshot = self.delivered_ready_base()
         stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
-        with patch('mizu.runtime.time.time', return_value=stamp + 59):
-            self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
-            self.assertEqual(engine.run(self.project, 'worker')['skipped'], 'unchanged')
-        with patch('mizu.runtime.time.time', return_value=stamp + 61):
-            self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
-            # Backoff is not a subscribed event, even when autonomous work is ready.
-            calls = len(engine.driver.calls)
-            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
-            self.assertEqual(len(engine.driver.calls), calls)
-            self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-            self.assertEqual(len(engine.driver.calls), calls + 1)
-        self.assertEqual(self.project.snapshots.get()['code_digest'], snapshot['code_digest'])
-        self.assertEqual(self.signature(), snapshot['progress']['ready_work_signature'])
+        for outcome in ('continue', 'bounded'):
+            for allowance in (0, 1):
+                for signals in (self.config.limits.progress_signals, ()):
+                    config = dataclasses.replace(self.config, limits=dataclasses.replace(
+                        self.config.limits, no_progress_continuations=allowance,
+                        progress_signals=signals))
+                    for elapsed in (1, 601):
+                        with self.subTest(outcome=outcome, allowance=allowance,
+                                          signals=signals, elapsed=elapsed):
+                            self.assertFalse(should_run(
+                                self.project, {**snapshot, 'outcome': outcome},
+                                role_name='worker', config=config, current_time=stamp + elapsed))
 
     def test_backoff_does_not_dispatch_work_held_by_another_role(self):
         item = self.item('other-role-work')
@@ -603,28 +592,6 @@ class ReadySetChangeTests(Fixture):
             self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
             self.assertEqual(len(engine.driver.calls), calls)
 
-    def test_progress_policy_change_reassesses_writer_with_ready_work(self):
-        self.item('policy-change-ready-work')
-        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, writer_no_progress_backoff_seconds=600))
-        self.project.config = self.config
-        self.delivered_ready_base()
-        def finish(ctx, *_):
-            ctx.handle('finish', {'outcome': 'continue', 'summary': 'No selected progress',
-                                  'state': 'New note\nNext: Reassess the ready task'})
-        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
-        snapshot = self.project.snapshots.get()
-        current_config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, progress_signals=()))
-        self.project.config = current_config
-        self.assertTrue(should_run(self.project, snapshot, role_name='worker',
-                                   config=current_config))
-        self.config = current_config
-        self.assertEqual(self.engine(finish).run(self.project, 'worker')['status'], 'completed')
-        malformed = {**snapshot, 'progress': {**snapshot['progress'], 'selected': 'invalid'}}
-        self.assertFalse(should_run(self.project, malformed, role_name='worker',
-                                    config=current_config))
-
     def test_progress_driven_next_handoff_remains_immediate(self):
         self.item('progress-driven-work')
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
@@ -642,23 +609,6 @@ class ReadySetChangeTests(Fixture):
         self.assertTrue(should_run(self.project, snapshot,
                                    current_time=dt.datetime.fromisoformat(
                                        snapshot['progress']['recorded_at']).timestamp() + 1,
-                                   role_name='worker'))
-
-    def test_no_progress_allowance_self_admits_writer_only_with_ready_work(self):
-        self.item('bounded-no-progress-allowance')
-        self.config = dataclasses.replace(self.config, limits=dataclasses.replace(
-            self.config.limits, no_progress_continuations=1,
-            writer_no_progress_backoff_seconds=600))
-        self.project.config = self.config
-        self.delivered_ready_base()
-        def finish(ctx, *_):
-            ctx.handle('finish', {'outcome': 'continue', 'summary': 'No selected progress',
-                                  'state': 'New note\nNext: Reassess the ready task'})
-        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
-        snapshot = self.project.snapshots.get()
-        self.assertEqual(snapshot['progress']['no_progress_count'], 1)
-        stamp = dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
-        self.assertTrue(should_run(self.project, snapshot, current_time=stamp + 1,
                                    role_name='worker'))
 
     def test_observer_records_offered_signature_not_work_arriving_during_run(self):
