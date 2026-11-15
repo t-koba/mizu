@@ -1162,7 +1162,11 @@ detected bound without declaring it:
 published `code_digest` is unchanged, so state-only republications do not
 reschedule them. The configured `publication.reviewer_role` is the exact-snapshot
 exception: it compares snapshot IDs because each published input needs its own
-typed approval, even when code is unchanged. An unacknowledged decision event
+typed review, even when code is unchanged. Only a cursor validated against the
+exact typed review snapshot and its run receipt counts as reviewed; an observed
+attempt without a verdict remains pending. Any retry comes from the role's
+existing schedule or event recovery cadence, never an immediate internal loop.
+An unacknowledged decision event
 routed to the role (`decision_events` in `own` mode, or any-source matches with
 `decision_sources = "any"` delivering
 once and admitting even deferrals), a terminal work-item event routed by
@@ -2603,12 +2607,18 @@ input snapshot, plus create-only `runs/<run>/review.json` containing
 `{snapshot: <review snapshot>, review: <same fact>}`. The snapshot preserves the
 reader's wake/lifecycle metadata. The observed cursor stores the reviewed input
 in `snapshot` and the immutable receipt ID in `review_receipt`, keeping scheduler
-and diff ancestry on the input while retaining the typed verdict separately. A
-later missing verdict or changes request never falls back to older approval.
-Legacy cursors that stored the receipt in `snapshot` remain verifiable and
-recover the reviewed input as the diff base; the next typed review writes the
-separate fields. Review receipt and input snapshots and the run receipt remain
-retained while that cursor references them; replacing it releases those roots.
+and diff ancestry on the input while retaining the typed verdict separately.
+Exact-snapshot `on_change` suppression validates that receipt and its run record;
+a cursor that only records an observed input without a typed verdict remains
+review-pending. It can be retried by the role's existing schedule or event
+recovery cadence. No immediate internal retry is added. A typed
+`changes_requested` verdict completes review of that exact input but never
+approves publication. A later missing verdict never falls back to older
+approval. Legacy cursors that stored the receipt in `snapshot` remain verifiable
+and recover the reviewed input as the diff base; the next typed review writes
+the separate fields. Review receipt and input snapshots and the run receipt
+remain retained while that cursor references them; replacing it releases those
+roots.
 Interrupted finalization does not
 advance the cursor. Reads are constant-count, receipt/cursor JSON is bounded to
 4096 UTF-8 bytes with no-follow reads, and malformed/missing evidence denies.

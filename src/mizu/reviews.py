@@ -1,8 +1,10 @@
 """Typed review receipts, bound only by the host to a reader's input snapshot.
 
 The observed cursor keeps the reviewed input snapshot separate from its
-immutable review-receipt snapshot. Neither prose, insights nor role-authored
-shared records are approval evidence.
+immutable review-receipt snapshot. Only a validated typed receipt marks that
+input reviewed for scheduling; an observed attempt without a verdict remains
+pending. Neither prose, insights nor role-authored shared records are approval
+evidence.
 """
 from __future__ import annotations
 
@@ -81,6 +83,42 @@ def record(context, finished):
     return receipt
 
 
+def cursor_review(project, config, cursor, source):
+    """Return the exact typed review represented by a source cursor.
+
+    The cursor is only complete when its immutable snapshot and create-only
+    run receipt both validate. A no-verdict observed attempt is not a review.
+    """
+    name = config.publication.reviewer_role
+    role = config.roles.get(name)
+    if not name or role is None or not authorized(config, role):
+        raise Denied("No authorized reviewer")
+    if not isinstance(cursor, dict) or not isinstance(source, dict):
+        raise Denied("Invalid review cursor")
+    source_id, code_digest = source.get("id"), source.get("code_digest")
+    if (not isinstance(source_id, str) or not DIGEST.fullmatch(source_id)
+            or not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest)):
+        raise Denied("Invalid review source")
+    has_receipt_cursor = "review_receipt" in cursor
+    receipt_id = cursor.get("review_receipt") if has_receipt_cursor else cursor.get("snapshot")
+    if not isinstance(receipt_id, str) or not DIGEST.fullmatch(receipt_id):
+        raise Denied("Invalid review receipt reference")
+    receipt = project.snapshots.get(receipt_id)
+    review = check(receipt.get("review"))
+    if (receipt.get("id") != receipt_id or cursor.get("review") != review
+            or cursor.get("snapshot") != (source_id if has_receipt_cursor else receipt_id)
+            or cursor.get("code_digest") != code_digest
+            or review["role"] != name or review["reviewed_snapshot"] != source_id
+            or receipt.get("parent") != source_id or receipt.get("run") != review["run"]
+            or receipt.get("code_digest") != code_digest):
+        raise Denied("Review does not bind this exact source")
+    saved = loads_finite(safe_read(
+        project.root, f"runs/{review['run']}/review.json", RECORD_BYTES))
+    if saved != {"snapshot": receipt_id, "review": review}:
+        raise Denied("Review run binding differs")
+    return receipt, review, saved
+
+
 def require_approval(context, code_digest):
     """Consume only the latest host-sealed exact-snapshot typed fact.
 
@@ -91,30 +129,14 @@ def require_approval(context, code_digest):
     """
     try:
         name = context.config.publication.reviewer_role
-        role = context.config.roles.get(name)
-        if role is None or not authorized(context.config, role):
-            raise Denied("No authorized reviewer")
         cursor = loads_finite(safe_read(
             context.project.root, f"observed/{name}.json", RECORD_BYTES))
-        has_receipt_cursor = "review_receipt" in cursor
-        receipt_id = cursor.get("review_receipt") if has_receipt_cursor else cursor.get("snapshot")
-        receipt = context.project.snapshots.get(receipt_id)
-        review = check(receipt.get("review"))
         source = context.snapshot
-        if (cursor.get("review") != review
-                or cursor.get("snapshot") != (source["id"] if has_receipt_cursor else receipt.get("id"))
-                or cursor.get("code_digest") != source["code_digest"]
-                or review["role"] != name or review["verdict"] != "approve"
-                or review["reviewed_snapshot"] != source["id"]
-                or receipt.get("parent") != source["id"]
-                or receipt.get("run") != review["run"]
-                or receipt["code_digest"] != code_digest
+        receipt, review, saved = cursor_review(
+            context.project, context.config, cursor, source)
+        if (review["verdict"] != "approve" or receipt["code_digest"] != code_digest
                 or source["code_digest"] != code_digest):
             raise Denied("Review does not approve this exact snapshot")
-        saved = loads_finite(safe_read(
-            context.project.root, f"runs/{review['run']}/review.json", RECORD_BYTES))
-        if saved != {"snapshot": receipt["id"], "review": review}:
-            raise Denied("Review run binding differs")
         return saved
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded) as exc:
         raise Denied("Publication requires an authorized typed approval for the exact snapshot") from exc

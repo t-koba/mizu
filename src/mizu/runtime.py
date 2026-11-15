@@ -2836,7 +2836,9 @@ class Engine:
         reviewer_role = getattr(self.config.publication, "reviewer_role", "")
         exact_snapshot_review = bool(reviewer_role and role_name == reviewer_role)
         code_unchanged = role.on_change and _on_change_observed(
-            cursor, snapshot, exact_snapshot=exact_snapshot_review)
+            cursor, snapshot, exact_snapshot=exact_snapshot_review,
+            project=project if exact_snapshot_review else None,
+            config=self.config if exact_snapshot_review else None)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
         record_state = operator_records.pending(project, role)
@@ -4613,27 +4615,30 @@ def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
                                 current_time) != "parked_no_progress"
 
 
-def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False) -> bool:
-    """True when an ``on_change`` role already observed its relevant source.
+def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
+                        project=None, config=None) -> bool:
+    """True when an ``on_change`` role completed its relevant observation.
 
-    The configured publication reviewer is bound to the exact input snapshot,
-    so its cursor is compared by snapshot ID even when code is unchanged.
-    Other roles retain code-digest deduplication. Bounds: string comparison
-    only. Trust: local operator state plus content digests, never model input.
-    Failure: never raises; unreadable cursors read as unseen.
+    The configured publication reviewer is bound to the exact input snapshot.
+    Its observation is complete only when the cursor resolves to a valid typed
+    review snapshot and create-only run receipt for that source. A verdict-less
+    attempt is not review completion; subsequent scheduled/event dispatches may
+    retry at their existing cadence, with no internal retry loop. Other roles
+    retain code-digest deduplication. Failure: never raises; invalid evidence is
+    treated as unseen.
 
-    State-only republications do not schedule ordinary ``on_change`` roles,
-    preventing no-op wake loops. Exact-snapshot reviewers are the exception:
-    each new input snapshot requires its own review receipt. Review cursors
-    name the reviewed source, not the separately stored receipt snapshot.
-    Legacy cursors without ``code_digest`` fall back to snapshot-id equality.
+    State-only republications do not schedule ordinary ``on_change`` roles.
+    Review cursors name the reviewed source, not the separate receipt snapshot.
+    Legacy typed cursors remain verifiable through the shared review validator.
     """
     try:
         if not isinstance(cursor, dict):
             return False
         if exact_snapshot:
-            current_id = snapshot.get("id")
-            return isinstance(current_id, str) and bool(current_id) and cursor.get("snapshot") == current_id
+            if project is None or config is None:
+                return False
+            reviews.cursor_review(project, config, cursor, snapshot)
+            return True
         current = snapshot.get("code_digest")
         if not isinstance(current, str) or not current:
             return cursor.get("snapshot") == snapshot.get("id")

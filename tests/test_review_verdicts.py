@@ -97,13 +97,43 @@ class ReviewVerdictTests(PublishFixture):
             goal=source["goal"], state="New state, unchanged code", run=None,
             outcome="wait", summary="New exact snapshot", parent=source["id"])
         self.project.snapshots.publish(successor)
-        result = Engine(self.config, driver=ScriptDriver()).run(
+        def approve_successor(ctx, *_):
+            ctx.handle("finish", {"outcome": "wait", "summary": "Reviewed successor.",
+                                  "review_verdict": "approve"})
+        result = Engine(self.config, driver=ScriptDriver(approve_successor)).run(
             self.project, "reviewer", scheduled_invocation=True)
         self.assertEqual(result.get("status"), "completed", result)
         self.assertEqual(read_json(
             self.project.root / "observed" / "reviewer.json")["snapshot"], successor["id"])
         self.assertEqual(Engine(self.config, driver=ScriptDriver()).run(
             self.project, "reviewer", scheduled_invocation=True).get("skipped"), "unchanged")
+
+    def test_verdictless_exact_review_remains_retryable_on_existing_schedule(self):
+        roles = dict(self.config.roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=True)
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project.config = self.config
+
+        self.review(None)
+        source = self.project.snapshots.get()
+        cursor = read_json(self.project.root / "observed" / "reviewer.json")
+        self.assertEqual(cursor["snapshot"], source["id"])
+        self.assertNotIn("review_receipt", cursor)
+        self.denied()
+
+        def no_verdict(ctx, *_):
+            ctx.handle("finish", {"outcome": "wait", "summary": "Still reviewing."})
+        retry = Engine(self.config, driver=ScriptDriver(no_verdict)).run(
+            self.project, "reviewer", scheduled_invocation=True)
+        self.assertEqual(retry.get("status"), "completed", retry)
+
+        self.review("approve")
+        completed = read_json(self.project.root / "observed" / "reviewer.json")
+        self.assertEqual(completed["review"]["reviewed_snapshot"], source["id"])
+        self.assertIn("review_receipt", completed)
+        same = Engine(self.config, driver=ScriptDriver()).run(
+            self.project, "reviewer", scheduled_invocation=True)
+        self.assertEqual(same.get("skipped"), "unchanged", same)
 
     def test_review_diff_spans_multiple_publications_from_last_reviewed_source(self):
         self.review()
