@@ -383,6 +383,23 @@ os._exit(0)
             self.assertTrue(target.exists())
             self.assertEqual(len(self.rows()), 1)
 
+    def test_restart_near_archive_deadline_preserves_remaining_cadence(self):
+        state = self.project.root / "maintenance" / "automatic-insight-archive.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        write_json(state, {"checked_at": self.epoch})
+        with patch.object(self.project.insights, "gc_decided", return_value=1) as gc:
+            with patch("mizu.insights.time.time", return_value=self.epoch + 3599), \
+                    patch("mizu.insights.time.monotonic", return_value=100):
+                self.assertEqual(self.project.insights._automatic_archive(
+                    keep_days=31, interval_seconds=3600), 0)
+            self.assertFalse(gc.called)
+
+            with patch("mizu.insights.time.time", return_value=self.epoch + 3600), \
+                    patch("mizu.insights.time.monotonic", return_value=101):
+                self.assertEqual(self.project.insights._automatic_archive(
+                    keep_days=31, interval_seconds=3600), 1)
+            gc.assert_called_once_with(keep_days=31, blocking=False)
+
     def test_zero_automatic_archive_interval_preserves_manual_gc_and_editor_ingestion(self):
         item = self.proposal("f" * 32)
         target = self.project.root / "inbox" / f"{item['id']}.json"

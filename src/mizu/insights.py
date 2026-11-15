@@ -435,17 +435,17 @@ def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str | None:
 MAX_EVIDENCE_ENTRIES = 16
 MAX_EVIDENCE_CHARS = 8192
 
-def _automatic_insight_archive_due(path: Path, instant: int, interval: int) -> bool:
-    """True when the persistent per-project archive pass is due."""
+def _automatic_insight_archive_remaining(path: Path, instant: int, interval: int) -> int:
+    """Remaining wall-clock seconds on the persisted per-project cadence."""
     missing: object = object()
     record = read_json(path, missing, max_bytes=_AUTOMATIC_INSIGHT_ARCHIVE_STATE_BYTES)
     if record is missing:
-        return True
+        return 0
     if (not isinstance(record, dict) or set(record) != {"checked_at"}
             or type(record.get("checked_at")) is not int
             or not 0 <= record["checked_at"] <= instant):
         raise Denied("Invalid automatic insight archive cadence record")
-    return instant - record["checked_at"] >= interval
+    return max(0, interval - (instant - record["checked_at"]))
 
 
 class Insights:
@@ -2587,17 +2587,21 @@ replacement insight without implying rejected substance.
         state = self.root / "maintenance" / "automatic-insight-archive.json"
         instant = int(time.time())
 
-        def record_check() -> None:
-            self._automatic_archive_last_monotonic = monotonic
+        def record_check(remaining_seconds: int | None = None) -> None:
+            elapsed = (0 if remaining_seconds is None
+                       else interval_seconds - remaining_seconds)
+            self._automatic_archive_last_monotonic = monotonic - elapsed
             self._automatic_archive_last_interval = interval_seconds
 
         try:
-            if not _automatic_insight_archive_due(state, instant, interval_seconds):
-                record_check()
+            remaining = _automatic_insight_archive_remaining(state, instant, interval_seconds)
+            if remaining:
+                record_check(remaining)
                 return 0
             with lock(self.root / "locks" / "automatic-insight-archive.lock", blocking=False):
-                if not _automatic_insight_archive_due(state, instant, interval_seconds):
-                    record_check()
+                remaining = _automatic_insight_archive_remaining(state, instant, interval_seconds)
+                if remaining:
+                    record_check(remaining)
                     return 0
                 write_json(state, {"checked_at": instant})
                 record_check()
