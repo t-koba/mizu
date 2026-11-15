@@ -13,7 +13,7 @@ from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS
 WRITER_CONTINUATION_CONTRACT = (
     "To propose an immediate writer continuation, finish with outcome=continue (or a "
     "host-sealed bounded outcome) and supply `next_step`, naming a new proposed follow-up. "
-    "The typed step must be 1–4096 printable characters, without surrounding whitespace "
+    "The typed step is a 1–4096-character printable value without surrounding whitespace "
     "or a none/nothing/n/a placeholder, and differ from the typed parent step. "
     "Legacy prose state never supplies a typed step. "
     "A malformed writer continue is refused before sealing or acknowledgements; "
