@@ -1483,11 +1483,14 @@ consecutive ordinals and a readable, canonical counter, matching sequence identi
 and clean source-owned lock witness consistent with the observed generation;
 otherwise the modern sequence is unsequenced. Gaps exclude that pair, duplicates
 block the sequence, and mixed legacy/numbered or unknown ordinals block the
-sequence. Entirely legacy sequences retain their
-start-time ordering and same-file-only pairs; timestamps never establish modern
-cross-run adjacency. Never filter invalid usage or unknown models out of the
-sequence. An invalid/missing interval blocks its sequence; any unattributable
-session blocks all pairs. Dropped/truncated files cannot supply pairs. Reject
+sequence. A valid session-generation attempt with a missing or invalid sequence
+identity blocks numbered pairing for every reset-distinct stream in that same
+session and generation; it cannot disappear into a separate unknown-identity
+group. Entirely legacy sequences retain their start-time ordering and same-file-only
+pairs; timestamps never establish modern cross-run adjacency. Never filter invalid
+usage or unknown models out of the sequence. An invalid/missing interval blocks
+its sequence; any unattributable session blocks all pairs. Dropped/truncated files
+cannot supply pairs. Reject
 endpoints overlapping any interval in their sequence (equal starts and nested
 intervals included), time-reversed or ineligible endpoints, or different exact
 provider/model/engine. Touching intervals are allowed. Reported changes are

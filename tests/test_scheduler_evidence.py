@@ -283,6 +283,59 @@ class SchedulerEvidenceTests(Fixture):
                 self.assertGreater(view["pairs"]["excluded"]["unsequenced"], 0)
                 target.unlink()
 
+    def test_unknown_sequence_identity_blocks_numbered_pairs_for_session(self):
+        for sequence_id in (None, "!" * 32):
+            with self.subTest(sequence_id=sequence_id):
+                self.sequence_state(ordinal=2, sequence_id="a" * 32)
+                self.write([attempt(0, role="worker", dispatch_ordinal=1),
+                            attempt(1, role="worker", dispatch_ordinal=2),
+                            attempt(2, role="worker", dispatch_ordinal=None,
+                                    dispatch_sequence_id=sequence_id)])
+                view = self.view()
+                self.assertEqual(view["pairs"]["valid"], 0)
+                self.assertEqual(view["pairs"]["excluded"]["unsequenced"], 1)
+
+    def test_unknown_sequence_identity_only_blocks_its_session_generation(self):
+        self.sequence_state(generation=2, ordinal=2, sequence_id="a" * 32)
+        self.sequence_state(key="b" * 64, ordinal=2, sequence_id="b" * 32)
+        self.write([attempt(0, role="worker", dispatch_ordinal=1),
+                    attempt(1, role="worker", dispatch_ordinal=2),
+                    attempt(2, role="worker", dispatch_ordinal=None,
+                            dispatch_sequence_id=None),
+                    attempt(3, role="worker", session={"key": "a" * 64, "generation": 2},
+                            dispatch_ordinal=1, dispatch_sequence_id="a" * 32),
+                    attempt(4, role="worker", session={"key": "a" * 64, "generation": 2},
+                            dispatch_ordinal=2, dispatch_sequence_id="a" * 32),
+                    attempt(5, role="worker", session={"key": "b" * 64, "generation": 1},
+                            dispatch_ordinal=1, dispatch_sequence_id="b" * 32),
+                    attempt(6, role="worker", session={"key": "b" * 64, "generation": 1},
+                            dispatch_ordinal=2, dispatch_sequence_id="b" * 32)])
+        view = self.view()
+        self.assertEqual(view["pairs"]["valid"], 2)
+        self.assertEqual(view["pairs"]["excluded"]["unsequenced"], 1)
+
+    def test_unknown_sequence_identity_blocks_all_matching_reset_stream_ids(self):
+        rows = [attempt(0, role="worker", dispatch_ordinal=1),
+                attempt(1, role="worker", dispatch_ordinal=2),
+                attempt(2, role="worker", dispatch_ordinal=1, dispatch_sequence_id="b" * 32),
+                attempt(3, role="worker", dispatch_ordinal=2, dispatch_sequence_id="b" * 32),
+                attempt(4, role="worker", dispatch_ordinal=None, dispatch_sequence_id=None)]
+        self.write(rows)
+        # Isolate generation-level attribution from the single current-counter
+        # check: either exact identity would otherwise be allowed by the pairer.
+        with patch.object(evidence, "_sequence_state", return_value=True):
+            view = self.view()
+        self.assertEqual(view["pairs"]["candidates"], 2)
+        self.assertEqual(view["pairs"]["valid"], 0)
+        self.assertEqual(view["pairs"]["excluded"]["unsequenced"], 2)
+
+    def test_legacy_missing_identity_still_pairs_within_one_file(self):
+        rows = [attempt(0), attempt(1)]
+        for row in rows:
+            row.pop("dispatch_sequence_id")
+        self.write(rows)
+        self.assertEqual(self.view()["pairs"]["valid"], 1)
+
     def test_ordinal_gaps_duplicates_unknowns_and_legacy_fail_closed(self):
         cases = [((1, 3), "ordinal_gap"), ((1, 1), "duplicate_ordinal"),
                  ((1, 2, 2, 3), "duplicate_ordinal")]

@@ -56,8 +56,8 @@ def _text(value):
 
 
 def _attempt(raw, file_index):
-    row = dict(file=file_index, sequence=None, role=None, group=None, engine=None, ordinal=None, legacy=True,
-               start=None, end=None, share=None, reason="invalid_record")
+    row = dict(file=file_index, session_base=None, sequence=None, role=None, group=None, engine=None,
+               ordinal=None, legacy=True, start=None, end=None, share=None, reason="invalid_record")
     if not isinstance(raw, dict):
         return row
     row.update(start=_timestamp(raw.get("started_at")), end=_timestamp(raw.get("ended_at")),
@@ -73,8 +73,9 @@ def _attempt(raw, file_index):
         key, generation = session.get("key"), session.get("generation")
         if (isinstance(key, str) and _KEY.fullmatch(key) and type(generation) is int
                 and 0 <= generation <= 2**31):
+            row["session_base"] = (key, generation)
             sequence_id = raw.get("dispatch_sequence_id")
-            row["sequence"] = (key, generation, sequence_id if _sequence_id(sequence_id) else None)
+            row["sequence"] = (*row["session_base"], sequence_id if _sequence_id(sequence_id) else None)
     models = raw.get("models")
     if (raw.get("models_unknown") is False and raw.get("models_truncated") is False
             and isinstance(models, list) and len(models) == 1 and isinstance(models[0], dict)):
@@ -258,6 +259,11 @@ def summarize(project):
     pair_excluded = Counter({reason: 0 for reason in PAIR_REASONS})
     pair_candidates = unpaired = 0
     unknown_sessions = any(r["sequence"] is None for r in rows)
+    # A valid session with no trustworthy sequence ID may belong to any reset
+    # stream for that generation. Keep the uncertainty local to that session
+    # rather than allowing it to disappear into the separate ``None`` group.
+    unknown_sequence_bases = {r["session_base"] for r in rows
+                              if r["session_base"] is not None and r["sequence"][2] is None}
     for sequence_key, sequence in sequences.items():
         if expired():
             break
@@ -268,6 +274,9 @@ def summarize(project):
             pair_excluded["unsequenced"] += len(sequence) // 2
             continue
         sequenced = all(r["ordinal"] is not None for r in sequence)
+        if sequenced and sequence_key[:2] in unknown_sequence_bases:
+            pair_excluded["unsequenced"] += len(sequence) // 2
+            continue
         if not sequenced and not all(r["legacy"] for r in sequence):
             pair_excluded["unsequenced"] += len(sequence) // 2
             continue
