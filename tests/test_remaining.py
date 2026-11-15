@@ -333,6 +333,7 @@ else:
     time.sleep(30)
 """
         child_pid=None
+        terminated=False
         try:
             with self.assertRaises(subprocess.TimeoutExpired):
                 _run_process_group([sys.executable,'-c',code,str(pid_file)],timeout=1.0,
@@ -346,12 +347,21 @@ else:
                                      capture_output=True,text=True,timeout=2)
                 states=probe.stdout.strip().split()
                 state=states[0][:1] if states else None
-                if state is None:
+                if state is None or state == 'Z':
                     break
                 time.sleep(.02)
-            self.assertIsNone(state, f'forked child was not reaped (ps state {state!r})')
+            self.assertIn(state,(None,'Z'),
+                f'forked child remained active (ps state {state!r})')
+            terminated=True
+            if state == 'Z':
+                # A zombie has exited; its adopter, not the killed helper,
+                # controls reaping. Reap it only if this test is its adopter.
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(child_pid,os.WNOHANG)
+            # The child is gone or terminated, so avoid signaling a reused PID.
+            child_pid=None
         finally:
-            if child_pid is None and pid_file.exists():
+            if child_pid is None and pid_file.exists() and not terminated:
                 child_pid=int(pid_file.read_text())
             if child_pid is not None:
                 try: os.kill(child_pid,signal.SIGKILL)
