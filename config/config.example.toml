@@ -149,6 +149,9 @@ selection_max_interval_seconds = 31536000 # Selector timer ceiling (1..TOML sign
 # Provisional per-source cap on unresolved live producer inputs; 0 disables.
 # Existing over-limit inputs are preserved; only the next admission is held.
 producer_inputs_per_source = 20
+# Optional producer backpressure, NOT a work-item seed cap (0 disables).
+# Requires roles.<name>.held_at_capacity = true; counts open/doing/blocked work.
+open_work_items = 0
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
 shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).
 budget_day_file_bytes = 4194304     # Day-file write/peek budget (4 MiB default); positive, up to min(TOML signed-64-bit max, sys.maxsize). Larger values allow proportionally larger resource use.
@@ -494,6 +497,7 @@ daemon = true
 # event_poll_seconds = 60
 
 [roles.searcher]
+held_at_capacity = false # Explicit opt-in to limits.open_work_items; inert at threshold 0.
 profile = "alternate"
 policy = ["policies/shared.md", "policies/searcher.md"]
 workspace = "read"

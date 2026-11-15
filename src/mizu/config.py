@@ -441,6 +441,8 @@ class Limits:
     # Provisional per-source bound on unresolved live producer inputs; 0 disables.
     # Congestion thresholds, not measured optima; see docs/configuration.md.
     producer_inputs_per_source: int = 20
+    #: Optional producer backpressure only; never a work-item storage cap.
+    open_work_items: int = 0
     daily_requests: int = 0
     shared_daily_requests: int = 0
     budget_day_file_bytes: int = 4 * 1024 * 1024
@@ -639,6 +641,7 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "pipe_poll_interval_ms": (1, 500),
                  "probe_executable_bytes": (1, TOML_INTEGER_MAX),
                  "producer_inputs_per_source": (0, 1073741824),
+                 "open_work_items": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
                  "prior_role_report_preview_bytes": (0, MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES),
                  "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
@@ -885,6 +888,8 @@ class Role:
     context_exclude: tuple[str, ...] = ()
     #: Opt-in input gate for platform timers only; empty keeps open-ended runs.
     scheduled_inputs: tuple[str, ...] = ()
+    #: Opt in to the open-work producer gate; inert for writers/non-producers.
+    held_at_capacity: bool = False
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -1725,7 +1730,7 @@ def load(file: Path) -> Config:
             raise ConfigError("Invalid role name")
         if name in RESERVED_ROLE_NAMES:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
-        keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
+        keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change", "held_at_capacity",
                     "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
                     "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
@@ -1944,6 +1949,8 @@ def load(file: Path) -> Config:
                            work_item_sources=work_sources, ci_wake=ci_wake,
                            check_result_wake=check_result_wake,
                            persistent_exec=persistent_exec,
+                           held_at_capacity=boolean(role.get("held_at_capacity", False),
+                                                    f"roles.{name}.held_at_capacity"),
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds,

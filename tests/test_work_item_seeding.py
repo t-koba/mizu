@@ -1,7 +1,9 @@
 """Work-item seeding is independent of project backlog, not transaction bounds."""
 from support import Fixture, forget_ledger
 from support import history_write_json as write_json
+from mizu.config import load
 from mizu.errors import Denied
+from mizu.project import Project
 from mizu.runtime import producer_hold
 
 
@@ -63,6 +65,24 @@ class WorkItemSeedingTests(Fixture):
         self.assertTrue(page["truncated"])
         self.assertEqual(page["overflow_count"], 108)
         self.assertIsNone(producer_hold(self.project, "searcher"))
+
+    def test_accepted_seeds_succeed_above_configured_producer_threshold(self):
+        self.file.write_text(self.file.read_text().replace("open_work_items = 0", "open_work_items = 1")
+                             .replace("held_at_capacity = false", "held_at_capacity = true"))
+        self.project = Project(load(self.file), "sample")
+        self.insights, self.store = self.project.insights, self.project.work_items
+        self.create("existing")
+        self.create("above-threshold")
+        self.assertEqual(producer_hold(self.project, "searcher")["reason"], "open_work_full")
+        for action in ("accept", "modify"):
+            for tasks in (None, self.tasks):
+                proposal = self.proposal()
+                kwargs = {} if tasks is None else {"work_items": tasks}
+                event = self.decide(proposal, action=action, **kwargs)
+                self.assertEqual(self.decide(proposal, action=action, **kwargs), event)
+                for seed in event.get("work_items", [event.get("work_item")]):
+                    self.assertEqual(self.store.get(seed["id"]), seed)
+        self.assertEqual(self.store.count_open_readonly(), 8)
 
     def test_corrupt_chain_refuses_every_seed_path_before_commit(self):
         item = self.create()["record"]["work_item"]

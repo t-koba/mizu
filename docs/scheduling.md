@@ -1002,10 +1002,21 @@ configured non-writer project roles that carry `submit_insight` (the writer
 can still resolve, merge, defer, or reject input at capacity), before any model
 or run-slot use, when their role-name source's unresolved live input count
 (undecided plus deferred; resolved and archive-only history excluded) reaches
-`[limits].producer_inputs_per_source`. The open/doing/blocked WorkItems
-count is visibility, not an admission gate: the existing bounded
-`open_work_items` prompt section reaches insight producers, decision makers,
-and work-item roles by default, with explicit context-section overrides.
+`[limits].producer_inputs_per_source` (unchanged, default 20; 0 disables).
+Independently, `[limits].open_work_items` (default **0**, disabled) can hold
+these producers only when `roles.<name>.held_at_capacity = true` (boolean,
+default **false**) and the threshold is positive. The gate holds at an
+authoritative open/doing/blocked count **>=** the configured threshold, and
+releases below it. A zero threshold or false role policy skips that metric
+entirely during admission; active gates fail closed on invalid/unreadable
+counts or policy. Neither gate cancels a running unit or limits work-item
+seeds, accept/modify transactions, or legacy reconciliation. Writers,
+non-producers, unconfigured roles, and external input channels are outside
+this gate. The existing bounded `open_work_items` prompt section still reaches
+insight producers, decision makers, and work-item roles by default, with
+explicit context-section overrides. Status continues to report workload even
+with disabled gates; an unavailable visibility metric alone does not hold a
+producer that does not need it.
 Status reports each held source (role name), reason,
 and exact `thresholds` map in `backpressure.held`. The policy applies to direct, scheduled,
 event-triggered, and daemon admission: `Engine.run` checks

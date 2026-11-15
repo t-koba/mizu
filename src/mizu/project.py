@@ -135,6 +135,7 @@ class Project:
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days,
                                  producer_inputs_per_source=config.limits.producer_inputs_per_source,
+                                 open_work_items=config.limits.open_work_items,
                                  decision_projection_records=config.limits.decision_projection_records,
                                  decision_receipt_diagnostics=config.limits.decision_receipt_diagnostics,
                                  decision_reconciliation_bytes=config.limits.decision_reconciliation_bytes,
@@ -284,13 +285,20 @@ class Project:
         return self.effective_verification_projection(snapshot)[0]
 
     def backpressure(self, *, open_count=_UNSET) -> dict:
-        """Report per-source congestion and current work load.
+        """Report configured producer/open-work congestion and current load.
 
-        Open/doing/blocked work is visibility, never an admission threshold.
-        Both ledger metrics are attempted even with the per-source bound
-        disabled. Unreadable metrics are None with load_ok False; admission
-        fails closed only for an invalid bound or unreadable enabled input
-        count. Only configured non-writer submit_insight roles are producers.
+        Both configured limits, the authoritative open/doing/blocked count,
+        per-producer unresolved live input counts (undecided plus deferred;
+        resolved and archive-only history excluded), and the currently held
+        producers with their role names, reasons, and exact thresholds. Sources
+        are generic role names; writable roles (the project writer) and
+        operator/vcs/editor channels are never producers. Counts come only
+        from the current project's Insights live inbox and WorkItems ledger;
+        no private or ignored state is read. Both metrics are attempted for
+        visibility even with disabled bounds. An unreadable metric reports
+        ``None`` and ``load_ok`` False; admission is held only when the
+        corresponding per-source bound or explicit per-role open-work policy
+        enables that metric. Invalid relevant limits fail closed.
         """
         from .scheduling import ProducerFacts, evaluate_producer
 
@@ -309,21 +317,32 @@ class Project:
                 return None
 
         producers = []
+        producer_policy = {}
         try:
             for name in self.roles:
                 role = self.config.roles.get(name)
                 if (role is not None and getattr(role, "workspace", None) != "write"
                         and "submit_insight" in set(getattr(role, "capabilities", ()) or ())):
+                    held_at_capacity = getattr(role, "held_at_capacity", False)
+                    producer_policy[name] = (held_at_capacity if type(held_at_capacity) is bool else False,
+                                             type(held_at_capacity) is bool)
                     producers.append(name)
             producers.sort()
         except Exception:
             producers = []
-        per_source_valid = True
+            producer_policy = {}
+        per_source_valid = open_limit_valid = True
         try:
             per_source_limit = _checked_limit("producer_inputs_per_source")
         except Exception:
             per_source_valid = False
             per_source_limit = _raw_limit("producer_inputs_per_source")
+        try:
+            open_limit = _checked_limit("open_work_items")
+        except Exception:
+            open_limit_valid = False
+            open_limit = _raw_limit("open_work_items")
+        limits_ok = per_source_valid and open_limit_valid
         counts: dict = {}
         supplied_open_count = open_count
         open_count = None
@@ -334,35 +353,45 @@ class Project:
         except Exception:
             counts_ok = False
         try:
-            if supplied_open_count is _UNSET:
-                open_count = self.work_items.count_open_readonly()
-            elif type(supplied_open_count) is not int or supplied_open_count < 0:
-                open_ok = False
-                open_count = None
-            else:
-                open_count = supplied_open_count
+            open_count = (self.work_items.count_open_readonly()
+                          if supplied_open_count is _UNSET else supplied_open_count)
+            if type(open_count) is not int or open_count < 0:
+                raise Denied("Invalid open work count")
         except Exception:
+            open_count = None
             open_ok = False
         # Status readability is independent of the metrics admission needs.
         held = []
         for name in producers:
+            held_at_capacity, policy_valid = producer_policy[name]
+            role_open_limit = open_limit if held_at_capacity and open_limit_valid else 0
+            role_load_ok = (per_source_valid and (not per_source_limit or counts_ok)
+                            and policy_valid
+                            and (not held_at_capacity or
+                                 (open_limit_valid and (not open_limit or open_ok))))
             decision = evaluate_producer(ProducerFacts(
                 is_producer=True, per_source_limit=per_source_limit,
-                source_pending=counts.get(name, 0),
-                load_ok=per_source_valid and (not per_source_limit or counts_ok)))
+                open_work_limit=role_open_limit, held_at_capacity=held_at_capacity,
+                source_pending=counts.get(name, 0), open_count=open_count or 0,
+                load_ok=role_load_ok))
             if decision.held:
                 thresholds = {}
                 if "per_source_full" in decision.reasons:
                     thresholds["producer_inputs_per_source"] = per_source_limit
+                if "open_work_full" in decision.reasons:
+                    thresholds["open_work_items"] = open_limit
                 if "load_unavailable" in decision.reasons:
                     if not per_source_valid or per_source_limit:
                         thresholds["producer_inputs_per_source"] = per_source_limit
+                    if held_at_capacity and (not open_limit_valid or open_limit):
+                        thresholds["open_work_items"] = open_limit
                 held.append({"source": name, "reasons": list(decision.reasons),
                              "pending": counts.get(name), "thresholds": thresholds})
-        return {"limits": {"producer_inputs_per_source": per_source_limit},
+        return {"limits": {"producer_inputs_per_source": per_source_limit,
+                           "open_work_items": open_limit},
                 "open_work_count": open_count,
                 "producer_inputs": [{"source": name, "pending": counts.get(name)} for name in producers],
-                "held": held, "load_ok": per_source_valid and counts_ok and open_ok}
+                "held": held, "load_ok": limits_ok and counts_ok and open_ok}
 
     def work_order_status(self) -> dict:
         """Operator-readable freshness for the writer's explicit order.

@@ -438,6 +438,7 @@ class Insights:
                  work_item_intent_default: str = "create", work_item_intent_by_source: dict | None = None,
                  cursor_ttl_seconds: int = 86400,
                  producer_inputs_per_source: int = 20,
+                 open_work_items: int = 0,
                  decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS,
                  decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS,
                  decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES,
@@ -448,6 +449,8 @@ class Insights:
         self.ledger.attach(INSIGHTS, InsightSource(self))
         self.retention_days = retention_days
         self.producer_inputs_per_source = producer_inputs_per_source
+        # Admission policy only; never consulted by decisions or work-item seeds.
+        self.open_work_items = open_work_items
         self.cursor_ttl_seconds = cursor_ttl_seconds
         if (type(decision_projection_records) is not int
                 or not 1 <= decision_projection_records <= MAX_DECISION_PROJECTION_RECORDS):

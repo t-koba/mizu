@@ -1,4 +1,4 @@
-"""Producer admission: per-source congestion holds.
+"""Producer admission: per-source congestion and opt-in workload holds.
 
 Only configured non-writer project roles holding ``submit_insight`` are gated, before any
 model or run-slot use. Undecided and deferred live revisions count; resolved
@@ -84,6 +84,37 @@ class ProducerConfigTests(Fixture):
                 "producer_inputs_per_source = 20",
                 f"producer_inputs_per_source = {value}"))
             with self.assertRaises(ConfigError):
+                load(self.file)
+
+
+class OpenWorkProducerConfigTests(Fixture):
+    def test_disabled_defaults_and_configured_opt_in(self):
+        self.assertEqual(self.config.limits.open_work_items, 0)
+        self.assertEqual(self.project.insights.open_work_items, 0)
+        self.assertFalse(self.config.roles["searcher"].held_at_capacity)
+        text = self.file.read_text()
+        self.file.write_text(text.replace("open_work_items = 0\n", "")
+                             .replace("held_at_capacity = false", "# held_at_capacity = false"))
+        config = load(self.file)
+        self.assertEqual(config.limits.open_work_items, 0)
+        self.assertFalse(config.roles["searcher"].held_at_capacity)
+        for threshold in (0, 1, 100, 1073741824):
+            with self.subTest(threshold=threshold):
+                self.file.write_text(text.replace("open_work_items = 0", f"open_work_items = {threshold}")
+                                     .replace("held_at_capacity = false", "held_at_capacity = true"))
+                config = load(self.file)
+                self.assertTrue(config.roles["searcher"].held_at_capacity)
+                self.assertEqual(Project(config, "sample").insights.open_work_items, threshold)
+
+    def test_invalid_policy_rejected(self):
+        text = self.file.read_text()
+        for value in ("-1", "1073741825", "true", "0.5", '\"2\"'):
+            self.file.write_text(text.replace("open_work_items = 0", f"open_work_items = {value}"))
+            with self.subTest(threshold=value), self.assertRaises(ConfigError):
+                load(self.file)
+        for value in ("0", "1", '\"true\"'):
+            self.file.write_text(text.replace("held_at_capacity = false", f"held_at_capacity = {value}"))
+            with self.subTest(role_policy=value), self.assertRaises(ConfigError):
                 load(self.file)
 
 
@@ -256,6 +287,19 @@ class ProducerEvaluatorTests(unittest.TestCase):
                 self.assertEqual(decision.reasons, reasons)
                 self.assertEqual(decision.held, bool(reasons))
 
+    def test_independent_and_combined_thresholds(self):
+        for opted_in, threshold, count, reasons in (
+                (False, 2, 2, ("per_source_full",)),
+                (True, 0, 2, ("per_source_full",)),
+                (True, 2, 1, ("per_source_full",)),
+                (True, 2, 2, ("per_source_full", "open_work_full")),
+                (True, 2, 3, ("per_source_full", "open_work_full"))):
+            with self.subTest(opted_in=opted_in, threshold=threshold, count=count):
+                decision = evaluate_producer(ProducerFacts(
+                    is_producer=True, per_source_limit=1, source_pending=1,
+                    held_at_capacity=opted_in, open_work_limit=threshold, open_count=count))
+                self.assertEqual(decision.reasons, reasons)
+
 
 class ProducerHoldTests(Fixture):
     def setUp(self):
@@ -426,6 +470,98 @@ class ProducerHoldTests(Fixture):
         self.assertTrue(should_run(self.project, snapshot, role_name="searcher"))
 
 
+class OpenWorkProducerHoldTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.project.insights.producer_inputs_per_source = 0
+
+    def policy(self, role="searcher", enabled=True):
+        self.config.roles[role] = dataclasses.replace(
+            self.config.roles[role], held_at_capacity=enabled)
+
+    def test_disabled_gates_do_not_read_work_count(self):
+        for threshold, enabled in ((0, False), (0, True), (1, False)):
+            with self.subTest(threshold=threshold, enabled=enabled):
+                self.project.insights.open_work_items = threshold
+                self.policy(enabled=enabled)
+                with patch.object(self.project.work_items, "count_open_readonly",
+                                  side_effect=AssertionError("must not read")) as count:
+                    self.assertIsNone(producer_hold(self.project, "searcher"))
+                    count.assert_not_called()
+
+    def test_active_hold_release_and_status(self):
+        self.project.insights.open_work_items = 3
+        self.policy()
+        store = self.project.work_items
+        ids = [store.create(idempotency_key=str(i), title=str(i), actor="worker")
+               ["record"]["work_item"]["id"] for i in range(3)]
+        store.transition(ids[1], expected_rev=1, status="doing", actor="worker")
+        store.transition(ids[2], expected_rev=1, status="blocked", actor="worker",
+                         wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        held = producer_hold(self.project, "searcher")
+        self.assertEqual(held["reasons"], ("open_work_full",))
+        self.assertEqual(held["open_count"], 3)
+        self.assertEqual(held["limits"]["open_work_items"], 3)
+        before = _runs(self.project)
+        for options in ({}, {"scheduled_invocation": True}, {"event_trigger": True}):
+            result = Engine(self.config, driver=ScriptDriver()).run(
+                self.project, "searcher", **options)
+            self.assertEqual(result["skip"]["reason"], "open_work_full")
+        self.assertEqual(_runs(self.project), before)
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="searcher"))
+        view = self.project.status()["backpressure"]
+        self.assertEqual(view["limits"]["open_work_items"], 3)
+        self.assertEqual(view["open_work_count"], 3)
+        self.assertEqual(view["held"], [{"source": "searcher", "pending": 0,
+                                       "reasons": ["open_work_full"],
+                                       "thresholds": {"open_work_items": 3}}])
+        store.transition(ids[0], expected_rev=1, status="dropped", actor="worker", reason="Finished")
+        self.assertIsNone(producer_hold(self.project, "searcher"))
+        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="searcher"))
+        self.assertEqual(self.project.status()["backpressure"]["held"], [])
+
+    def test_only_configured_non_writer_producers_opt_in(self):
+        self.project.insights.open_work_items = 1
+        for name in ("worker", "reporter", "searcher"):
+            self.policy(name)
+        self.config.roles["worker"] = dataclasses.replace(
+            self.config.roles["worker"], capabilities=("submit_insight",))
+        with patch.object(self.project.work_items, "count_open_readonly", return_value=1) as count:
+            for name in ("worker", "reporter", "reviewer", "operator", "vcs", "editor", "unknown"):
+                self.assertIsNone(producer_hold(self.project, name))
+            count.assert_not_called()
+            # Configured globally, but not enabled on this project.
+            self.config.roles["outside"] = dataclasses.replace(self.config.roles["searcher"], name="outside")
+            self.assertIsNone(producer_hold(self.project, "outside"))
+            count.assert_not_called()
+            self.assertEqual(producer_hold(self.project, "searcher")["reason"], "open_work_full")
+
+    def test_active_required_metric_fails_closed(self):
+        self.project.insights.open_work_items = 2
+        self.policy()
+        for value in (None, True, -1, "2", 0.5, OSError("injected")):
+            with self.subTest(value=value):
+                options = {"side_effect": value} if isinstance(value, Exception) else {"return_value": value}
+                with patch.object(self.project.work_items, "count_open_readonly", **options):
+                    held = producer_hold(self.project, "searcher")
+                    self.assertEqual(held["reason"], "load_unavailable")
+                    self.assertEqual(held["limits"]["open_work_items"], 2)
+                    view = self.project.backpressure()
+                    self.assertFalse(view["load_ok"])
+                    self.assertEqual(view["held"], [{"source": "searcher", "pending": 0,
+                                                   "reasons": ["load_unavailable"],
+                                                   "thresholds": {"open_work_items": 2}}])
+
+    def test_invalid_active_policy_fails_closed(self):
+        self.policy()
+        for bad in (None, True, -1, "2", 1073741825):
+            self.project.insights.open_work_items = bad
+            self.assertEqual(producer_hold(self.project, "searcher")["reason"], "load_unavailable")
+        self.project.insights.open_work_items = 2
+        self.policy(enabled=1)
+        self.assertEqual(producer_hold(self.project, "searcher")["reason"], "load_unavailable")
+
+
 class ProducerEventPreservationTests(Fixture):
     def test_held_event_dispatch_consumes_nothing(self):
         self.project.insights.producer_inputs_per_source = 2
@@ -465,7 +601,8 @@ class ProducerStatusTests(Fixture):
         _submit(self, "searcher", "Two")
         status = self.project.status()
         view = status["backpressure"]
-        self.assertEqual(view["limits"], {"producer_inputs_per_source": 2})
+        self.assertEqual(view["limits"], {"producer_inputs_per_source": 2,
+                                          "open_work_items": 0})
         self.assertEqual(view["open_work_count"], 0)
         counts = {row["source"]: row["pending"] for row in view["producer_inputs"]}
         self.assertEqual(counts.get("searcher"), 2)

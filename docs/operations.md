@@ -1171,8 +1171,10 @@ Only configured non-writer project roles that hold `submit_insight` are gated;
 the writer remains free to resolve, merge, defer, or reject input at capacity.
 The gate runs before any model or run-slot use, when their role-name source's current unresolved live
 input count (undecided plus deferred; resolved and archive-only history
-excluded) reaches the per-source limit. The open-work count is visibility,
-not a producer gate. `mizu status`
+excluded) reaches the per-source limit. Independently, `limits.open_work_items`
+(default **0**, disabled) holds opted-in `roles.<name>.held_at_capacity = true`
+producers (default **false**) at the open/doing/blocked threshold. This holds
+only next admission, never work-item seeding or insight decisions. `mizu status`
 reports each held role in `backpressure.held` with its reason and a `thresholds`
 map containing the exact configured bound. Operator, vcs, and
 editor input channels are never role names, so they are never held. The check applies to direct,
