@@ -18,7 +18,7 @@ import time
 from collections import Counter, defaultdict
 
 from . import platform
-from .dispatch_evidence import MAX_ORDINAL
+from .dispatch_evidence import MAX_ORDINAL, _sequence_id
 from .errors import LimitExceeded, MizuError
 from .fs import canonical, loads_finite, safe_read
 from .usage import cache_read_share, prompt_input_tokens
@@ -73,7 +73,8 @@ def _attempt(raw, file_index):
         key, generation = session.get("key"), session.get("generation")
         if (isinstance(key, str) and _KEY.fullmatch(key) and type(generation) is int
                 and 0 <= generation <= 2**31):
-            row["sequence"] = (key, generation)
+            sequence_id = raw.get("dispatch_sequence_id")
+            row["sequence"] = (key, generation, sequence_id if _sequence_id(sequence_id) else None)
     models = raw.get("models")
     if (raw.get("models_unknown") is False and raw.get("models_truncated") is False
             and isinstance(models, list) and len(models) == 1 and isinstance(models[0], dict)):
@@ -98,12 +99,14 @@ def _attempt(raw, file_index):
 
 
 def _sequence_state(project, sequence, rows):
-    """Require the source-owned counter/witness before trusting ordinals."""
+    """Require the exact source-owned counter/witness identity for ordinals."""
     roles = {row["role"] for row in rows}
     if len(roles) != 1:
         return False
     role = next(iter(roles))
-    key, generation = sequence
+    key, generation, sequence_id = sequence
+    if not _sequence_id(sequence_id):
+        return False
     if role is None or role not in project.config.roles:
         return False
     prefix = f"sessions/{role}/{key}"
@@ -113,11 +116,14 @@ def _sequence_state(project, sequence, rows):
             return False
         raw = safe_read(project.root, f"{prefix}/dispatch-order.json", 256)
         state = loads_finite(raw, object_pairs_hook=_unique_object)
-        if (not isinstance(state, dict) or set(state) != {"generation", "ordinal"}
+        if (not isinstance(state, dict)
+                or set(state) != {"generation", "ordinal", "sequence_id"}
                 or type(state["generation"]) is not int
                 or not 0 <= state["generation"] <= 2**31
                 or type(state["ordinal"]) is not int
                 or not 1 <= state["ordinal"] <= MAX_ORDINAL
+                or not _sequence_id(state["sequence_id"])
+                or state["sequence_id"] != sequence_id
                 or canonical(state) != raw
                 or state["generation"] < generation):
             return False

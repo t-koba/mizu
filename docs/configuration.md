@@ -1379,8 +1379,10 @@ conversation (applied per submission, keeping prompt caches warm), and adapter u
 keep it unless they declare a store-incompatible change. Other engines keep rotation on
 any effective change outside their live keys. The explicit fresh start is
 `mizu session reset PROJECT --role ROLE`, which deletes that role's persistent sessions
-and durable stores (refused while the role has an active run); usage and age rotation
-bounds still apply to every engine.
+and durable stores (refused while the role has an active run). It also deletes the
+current dispatch-order counter; the next persistent dispatch starts a reset-distinct
+measurement sequence, so retained old and new run evidence cannot be paired together.
+Usage and age rotation bounds still apply to every engine.
 
 Request prefix and cache partition (Pi, no configuration key). The request
 prefix is the tool definitions, then the system prompt (fixed preamble, a

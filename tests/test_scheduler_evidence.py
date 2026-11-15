@@ -8,8 +8,10 @@ import shutil
 from unittest.mock import patch
 
 from support import Fixture
+from mizu import dispatch_evidence as dispatch
 from mizu import scheduler_evidence as evidence
 from mizu.cli import execute, main, parser
+from mizu.engine_config import effective, reset_role_sessions, session_record
 from mizu.config import MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX, DispatchEvidence, SchedulerEvidence
 from mizu.errors import ConfigError, Denied
 from mizu.fs import mkdir, write_json
@@ -21,6 +23,7 @@ def attempt(index=0, **changes):
            "started_at": (origin + dt.timedelta(seconds=index * 2)).isoformat(),
            "ended_at": (origin + dt.timedelta(seconds=index * 2 + 1)).isoformat(),
            "status": "returned", "session": {"key": "a" * 64, "generation": 1},
+           "dispatch_sequence_id": "a" * 32,
            "models": [{"provider": "SENTINEL_PROVIDER", "model": "SENTINEL_MODEL"}],
            "models_unknown": False, "models_truncated": False,
            "usage": {"status": "partial", "input_tokens": 100, "cache_read_tokens": 25},
@@ -38,12 +41,13 @@ class SchedulerEvidenceTests(Fixture):
         return target
 
     def sequence_state(self, *, key="a" * 64, generation=1, ordinal=1,
-                       role="worker", witness=b"00"):
+                       sequence_id="a" * 32, role="worker", witness=b"00"):
         directory = self.project.root / "sessions" / role / key
         mkdir(directory)
         (directory / "dispatch-order.lock").write_bytes(witness)
         write_json(directory / "dispatch-order.json",
-                   {"generation": generation, "ordinal": ordinal})
+                   {"generation": generation, "ordinal": ordinal,
+                    "sequence_id": sequence_id})
         return directory
 
     def view(self):
@@ -71,7 +75,7 @@ class SchedulerEvidenceTests(Fixture):
         self.assertEqual(view["pairs"]["valid"], 5)
         self.assertEqual(view["period_utc"], {"first": rows[0]["started_at"], "last": rows[-1]["ended_at"]})
         encoded = json.dumps(view)
-        for sentinel in ("SENTINEL", "a" * 64, "b" * 64, "codex", str(self.project.root)):
+        for sentinel in ("SENTINEL", "a" * 64, "b" * 64, "a" * 32, "codex", str(self.project.root)):
             self.assertNotIn(sentinel, encoded)
         self.assertLess(len(encoded), 8192)
         self.assertIsInstance(view["groups"], dict)  # no group rows or retrieval tokens
@@ -236,6 +240,48 @@ class SchedulerEvidenceTests(Fixture):
         self.write([attempt(0, role="worker", dispatch_ordinal=8)], name="first")
         self.assertEqual(self.view()["pairs"]["valid"], 0)
         self.assertEqual(self.view()["pairs"]["excluded"]["overlap"], 1)
+
+    def test_explicit_reset_cannot_bridge_missing_first_post_reset_run(self):
+        context = self.context()
+        settings = effective(self.config, context.role, context.role.profile)
+        path, _ = session_record(context, context.role.profile, settings)
+        before = dispatch._dispatch_reservation(path.parent, 0)
+        self.write([attempt(0, role=context.role.name,
+                            session={"key": path.parent.name, "generation": 0},
+                            dispatch_ordinal=before[0], dispatch_sequence_id=before[1])],
+                   name="pre-reset")
+
+        reset_role_sessions(self.config, self.project, context.role.name)
+        new_path, _ = session_record(context, context.role.profile, settings)
+        first = dispatch._dispatch_reservation(new_path.parent, 0)
+        second = dispatch._dispatch_reservation(new_path.parent, 0)
+        self.assertEqual((first[0], second[0]), (1, 2))
+        self.assertNotEqual(before[1], first[1])
+        missing = self.write([attempt(1, role=context.role.name,
+                                      session={"key": new_path.parent.name, "generation": 0},
+                                      dispatch_ordinal=first[0], dispatch_sequence_id=first[1])],
+                             name="post-reset-first")
+        self.write([attempt(2, role=context.role.name,
+                            session={"key": new_path.parent.name, "generation": 0},
+                            dispatch_ordinal=second[0], dispatch_sequence_id=second[1])],
+                   name="post-reset-second")
+        missing.unlink()
+        self.assertEqual(self.view()["pairs"]["valid"], 0)
+
+    def test_missing_or_mismatched_sequence_identity_blocks_pair(self):
+        self.sequence_state(generation=1, ordinal=2)
+        cases = ((None, None), ("b" * 32, "b" * 32), ("!" * 32, "!" * 32))
+        for index, ids in enumerate(cases):
+            with self.subTest(ids=ids):
+                target = self.write([attempt(0, role="worker", dispatch_ordinal=1,
+                                             dispatch_sequence_id=ids[0]),
+                                     attempt(1, role="worker", dispatch_ordinal=2,
+                                             dispatch_sequence_id=ids[1])],
+                                    name=f"identity-{index}")
+                view = self.view()
+                self.assertEqual(view["pairs"]["valid"], 0)
+                self.assertGreater(view["pairs"]["excluded"]["unsequenced"], 0)
+                target.unlink()
 
     def test_ordinal_gaps_duplicates_unknowns_and_legacy_fail_closed(self):
         cases = [((1, 3), "ordinal_gap"), ((1, 1), "duplicate_ordinal"),

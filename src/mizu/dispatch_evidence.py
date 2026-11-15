@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import stat
 import time
 
@@ -15,6 +16,9 @@ MAX_TEXT = 256
 
 # Fixed on-disk integer envelope, not a retention policy.
 MAX_ORDINAL = 2**63 - 1
+
+# Fixed lowercase-hex encoding of one 128-bit dispatch-sequence identity.
+SEQUENCE_ID_HEX = 32
 
 
 def _regular(info):
@@ -55,14 +59,20 @@ def _generation(directory):
     return value["generation"]
 
 
-def _dispatch_ordinal(directory, generation, *, reserve=True):
-    """Best-effort reservation, never a wait/retry or an execution lock.
+def _sequence_id(value):
+    return (isinstance(value, str) and len(value) == SEQUENCE_ID_HEX
+            and all(char in "0123456789abcdef" for char in value))
+
+
+def _dispatch_reservation(directory, generation, *, reserve=True):
+    """Best-effort ordinal and reset-distinct identity; never a wait/retry.
 
     One current-generation JSON counter and one stable two-byte lock witness
-    live with the session. A poisoned witness is never repaired automatically:
-    an unnumbered call must not disappear and let later counters bridge it.
-    Rotation overwrites healthy counters; explicit session reset removes both.
-    Portable path checks refuse links/reparse points, without a TOCTOU claim.
+    live with the session. The counter identity survives rotation but is
+    replaced when explicit reset removes the session state. A poisoned witness
+    is never repaired automatically: an unnumbered call must not disappear and
+    let later counters bridge it. Portable path checks refuse links/reparse
+    points, without a TOCTOU claim.
     """
     fd = None
     locked = False
@@ -101,27 +111,39 @@ def _dispatch_ordinal(directory, generation, *, reserve=True):
             if not created:
                 raise ValueError("Missing dispatch counter") from None
             previous = {"generation": generation, "ordinal": 0}
+            sequence_id = secrets.token_hex(SEQUENCE_ID_HEX // 2)
         else:
             if created:
                 raise ValueError("Missing dispatch lock witness")
             previous = loads_finite(raw)
-            if (not isinstance(previous, dict) or set(previous) != {"generation", "ordinal"}
+            if (not isinstance(previous, dict)
+                    or set(previous) not in ({"generation", "ordinal"},
+                                            {"generation", "ordinal", "sequence_id"})
                     or type(previous["generation"]) is not int
                     or not 0 <= previous["generation"] <= generation
                     or type(previous["ordinal"]) is not int
                     or not 1 <= previous["ordinal"] <= MAX_ORDINAL
                     or canonical(previous) != raw):
                 raise ValueError("Invalid dispatch counter")
+            if "sequence_id" in previous:
+                sequence_id = previous["sequence_id"]
+                if not _sequence_id(sequence_id):
+                    raise ValueError("Invalid dispatch sequence identity")
+            else:
+                # Upgrade the old bounded counter in place. Historical attempts
+                # lack this identity and therefore remain unsequenced.
+                sequence_id = secrets.token_hex(SEQUENCE_ID_HEX // 2)
         ordinal = previous["ordinal"] + 1 if previous["generation"] == generation else 1
         if ordinal > MAX_ORDINAL:
             raise ValueError("Exhausted dispatch counter")
-        write_json(directory / "dispatch-order.json", {"generation": generation, "ordinal": ordinal})
+        write_json(directory / "dispatch-order.json",
+                   {"generation": generation, "ordinal": ordinal, "sequence_id": sequence_id})
         os.lseek(fd, 0, os.SEEK_SET)
         final_info = os.fstat(fd)
         if (os.read(fd, 2) != b"00" or _generation(directory) != generation
                 or not _regular(final_info) or not _same_file(final_info, path.lstat())):
             raise ValueError("Dispatch order became uncertain")
-        return ordinal
+        return ordinal, sequence_id
     except Exception:
         # Also on nonblocking contention: a future reader must not bridge this
         # unnumbered call if its run evidence is later missing. Never clear it.
@@ -140,6 +162,16 @@ def _dispatch_ordinal(directory, generation, *, reserve=True):
                     platform.unlock_fd(fd)
             with contextlib.suppress(Exception):
                 os.close(fd)
+
+
+def _dispatch_ordinal(directory, generation, *, reserve=True):
+    reservation = _dispatch_reservation(directory, generation, reserve=reserve)
+    return reservation[0] if reservation is not None else None
+
+
+def _record_dispatch_sequence(record, directory, generation, *, reserve=True):
+    reservation = _dispatch_reservation(directory, generation, reserve=reserve)
+    record["dispatch_ordinal"], record["dispatch_sequence_id"] = reservation or (None, None)
 
 
 def _text(value):
@@ -225,12 +257,12 @@ def selected_session(context, profile, settings, path):
                     # Consume a real sequence position even though attribution
                     # is rejected; if this run file disappears, the later gap
                     # prevents it from being bridged.
-                    record["dispatch_ordinal"] = _dispatch_ordinal(path.parent, _generation(path.parent))
+                    _record_dispatch_sequence(record, path.parent, _generation(path.parent))
                 except Exception:
-                    record["dispatch_ordinal"] = _dispatch_ordinal(path.parent, None, reserve=False)
+                    _record_dispatch_sequence(record, path.parent, None, reserve=False)
         elif dispatching and persistent and record["session"]["key"] is not None:
             if record.get("dispatch_ordinal") is None:
-                record["dispatch_ordinal"] = _dispatch_ordinal(path.parent, generation)
+                _record_dispatch_sequence(record, path.parent, generation)
         _save(context)
     except Exception:
         # Even an unavailable observation must not leave future ordinals free
@@ -296,7 +328,8 @@ def execute(context, driver, prompt, **kwargs):
                       "ephemeral" if getattr(context, "ephemeral", False) else "normal"),
                   "phase": "continuation" if context.turn_continuation else "initial",
                   "started_at": now(), "ended_at": None, "elapsed_seconds": None,
-                  "status": "started", "session": _unknown(reason), "dispatch_ordinal": None}
+                  "status": "started", "session": _unknown(reason), "dispatch_ordinal": None,
+                  "dispatch_sequence_id": None}
         _facts(context, record)
         if not hasattr(context, "_dispatch_evidence"):
             context._dispatch_evidence = {"schema": 1, "dropped_attempts": 0, "attempts": []}

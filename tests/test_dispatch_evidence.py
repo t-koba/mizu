@@ -150,6 +150,9 @@ class DispatchEvidenceTests(Fixture):
                 else:
                     self.assertEqual(evidence.execute(ctx, Driver(), "work"), "original return")
         self.assertEqual([self.records(c)[0]["dispatch_ordinal"] for c in contexts], [1, 2, 3])
+        sequence_ids = [self.records(c)[0]["dispatch_sequence_id"] for c in contexts]
+        self.assertEqual(len(set(sequence_ids)), 1)
+        self.assertTrue(evidence._sequence_id(sequence_ids[0]))
         self.assertEqual(summarize(self.project)["pairs"]["valid"], 1)
         # Lost/evicted evidence leaves the consumed ordinal visible as a gap.
         (contexts[1].run_dir / "dispatch-attempts.json").unlink()
@@ -166,18 +169,39 @@ class DispatchEvidenceTests(Fixture):
         settings = effective(self.config, ctx.role, ctx.role.profile)
         path, _ = session_record(ctx, ctx.role.profile, settings)
         self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 1)
+        first_state = read_json(path.parent / "dispatch-order.json")
+        sequence_id = first_state["sequence_id"]
+        self.assertTrue(evidence._sequence_id(sequence_id))
         self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 2)
         for generation in range(1, 4):
             rotate_session(path, ctx.run_dir, "test")
             self.assertEqual(evidence._dispatch_ordinal(path.parent, generation), 1)
             self.assertEqual(read_json(path.parent / "dispatch-order.json"),
-                             {"generation": generation, "ordinal": 1})
+                             {"generation": generation, "ordinal": 1,
+                              "sequence_id": sequence_id})
         self.assertEqual(sorted(p.name for p in path.parent.glob("dispatch-order*")),
                          ["dispatch-order.json", "dispatch-order.lock"])
         reset_role_sessions(self.config, self.project, ctx.role.name)
         self.assertFalse(path.parent.exists())
         path, _ = session_record(ctx, ctx.role.profile, settings)
         self.assertEqual(evidence._dispatch_ordinal(path.parent, 0), 1)
+        reset_state = read_json(path.parent / "dispatch-order.json")
+        self.assertNotEqual(reset_state["sequence_id"], sequence_id)
+
+    def test_legacy_counter_migrates_with_a_new_sequence_identity(self):
+        directory = self.context().run_dir / "legacy-counter"
+        directory.mkdir()
+        self.assertEqual(evidence._dispatch_ordinal(directory, 0), 1)
+        target = directory / "dispatch-order.json"
+        state = read_json(target)
+        sequence_id = state.pop("sequence_id")
+        write_json(target, state)
+        ordinal, migrated_id = evidence._dispatch_reservation(directory, 0)
+        self.assertEqual(ordinal, 2)
+        self.assertNotEqual(migrated_id, sequence_id)
+        self.assertTrue(evidence._sequence_id(migrated_id))
+        self.assertEqual(read_json(target), {"generation": 0, "ordinal": 2,
+                                             "sequence_id": migrated_id})
 
     def test_counter_contention_is_nonblocking_and_cannot_bridge_lost_evidence(self):
         ctx = self.context()
@@ -247,6 +271,7 @@ class DispatchEvidenceTests(Fixture):
                 with patch.object(evidence.platform, "lock_fd", side_effect=OSError("unsupported")):
                     self.assertEqual(evidence.execute(ctx, Driver(), "work"), "unchanged")
                 self.assertIsNone(self.records(ctx)[0]["dispatch_ordinal"])
+                self.assertIsNone(self.records(ctx)[0]["dispatch_sequence_id"])
 
     def test_invalid_generation_state_poisoned_and_not_repaired(self):
         ctx = self.context()

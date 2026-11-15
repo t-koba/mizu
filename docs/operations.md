@@ -944,26 +944,31 @@ These are local selections, **not proof of provider conversation/cache residency
 a cache hit, or a TTL guarantee**. Native provider state can still change.
 
 Matched persistent selections reserve a source-owned `dispatch_ordinal` (exact
-integer 1–2^63−1) per session key/generation, before the provider call can finish.
-Peeks never reserve. Ephemeral/nonpersistent selections do not; a persistent
-selection with uncertain attribution may consume an ordinal while keeping its
-session identity unknown. Instrumentation failures leave it null and poison the
-witness where possible. Legacy records omit it and remain unsequenced. Reservations
-are never reclaimed after a failed/crashed call or missing/evicted run evidence.
-The session directory owns only `dispatch-order.json` (current generation and
-last ordinal, at most 256 bytes) and a stable `dispatch-order.lock` witness
-(two preallocated bytes: `00` clean, `0!` poisoned). Updates use the portable
-cross-process lock **nonblocking**, then the normal atomic/fsynced replacement;
-there are no lock waits or retries. Generation rotation overwrites the healthy
-counter on its next reservation, not a history of counters; explicit session
-reset removes both files. Missing/corrupt/unsafe state or lock failure leaves
-order unknown. A failure poisons the witness where writable, so later calls
-cannot bridge a lost unnumbered attempt; it stays unknown until explicit session
-reset, even across rotations. Do not repair/delete individual evidence files to
-resume counting. Managed session components and regular, non-hardlinked files
-are checked without claiming portable TOCTOU pinning; the configured data root
-is trusted. As with other synchronous evidence I/O, a stalled OS operation cannot
-be preempted. This adds no execution exclusion or provider retry.
+integer 1–2^63−1) and a 32-character lowercase-hex `dispatch_sequence_id` per
+session key/generation, before the provider call can finish. The sequence identity
+is stable across generation rotations but is recreated when explicit reset removes
+the session state, so a reused deterministic session key cannot join old and new
+ordinal streams. Peeks never reserve. Ephemeral/nonpersistent selections do not; a
+persistent selection with uncertain attribution may consume an ordinal while
+keeping its session identity unknown. Instrumentation failures leave both fields
+null and poison the witness where possible. Legacy attempts without a sequence
+identity remain unsequenced; an old counter is upgraded on its next successful
+reservation. Reservations are never reclaimed after a failed/crashed call or
+missing/evicted run evidence. The session directory owns only `dispatch-order.json`
+(current generation, last ordinal, and sequence identity; at most 256 bytes) and a
+stable `dispatch-order.lock` witness (two preallocated bytes: `00` clean, `0!`
+poisoned). Updates use the portable cross-process lock **nonblocking**, then the
+normal atomic/fsynced replacement; there are no lock waits or retries. Generation
+rotation updates the healthy counter on its next reservation, not a history of
+counters; explicit session reset removes both files and the next reservation gets
+a new identity. Missing/corrupt/unsafe state or lock failure leaves order unknown.
+A failure poisons the witness where writable, so later calls cannot bridge a lost
+unnumbered attempt; it stays unknown until explicit session reset, even across
+rotations. Do not repair/delete individual evidence files to resume counting.
+Managed session components and regular, non-hardlinked files are checked without
+claiming portable TOCTOU pinning; the configured data root is trusted. As with
+other synchronous evidence I/O, a stalled OS operation cannot be preempted. This
+adds no execution exclusion or provider retry.
 
 Retention and sampling belong to
 [`[dispatch_evidence]`](configuration.md#dispatch-evidence): defaults retain a
@@ -1471,13 +1476,14 @@ points and identity without claiming POSIX path-component pinning). A single
 stalled OS operation cannot be preempted; an overrun is reported as timeout.
 There are no retries; rerunning obtains a new bounded observation, not a cursor.
 
-Pairs are conservative: within each actual session-generation, sort **all**
-numbered attempts by dispatch ordinal, then consider disjoint neighbors (1,2),
-(3,4), etc. Cross-file endpoints are allowed only with consecutive ordinals and a
-readable, canonical counter plus clean source-owned lock witness consistent with the
-observed generation; otherwise the modern sequence is unsequenced. Gaps exclude
-that pair, duplicates block the sequence, and mixed legacy/numbered or unknown
-ordinals block the sequence. Entirely legacy sequences retain their
+Pairs are conservative: within each actual session-generation-sequence
+identity, sort **all** numbered attempts by dispatch ordinal, then consider
+disjoint neighbors (1,2), (3,4), etc. Cross-file endpoints are allowed only with
+consecutive ordinals and a readable, canonical counter, matching sequence identity,
+and clean source-owned lock witness consistent with the observed generation;
+otherwise the modern sequence is unsequenced. Gaps exclude that pair, duplicates
+block the sequence, and mixed legacy/numbered or unknown ordinals block the
+sequence. Entirely legacy sequences retain their
 start-time ordering and same-file-only pairs; timestamps never establish modern
 cross-run adjacency. Never filter invalid usage or unknown models out of the
 sequence. An invalid/missing interval blocks its sequence; any unattributable

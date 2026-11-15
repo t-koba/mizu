@@ -246,6 +246,7 @@ EXTRA_CANDIDATES = {
     'snapshot_manifest.py': frozenset({'_WINDOWS_EXTENDED_PATH_UNITS',
                                        '_MAX_FILES_WHITESPACE_RUN'}),
     'model_catalog.py': frozenset({'MAXIMUM'}),
+    'dispatch_evidence.py': frozenset({'SEQUENCE_ID_HEX'}),
     'web.py': frozenset({'PROBE_MAX_HEADERS'}),
     'runtime.py': frozenset({'WRAP_UP_REQUESTS', 'WRAP_UP_TOOLS'}),
 }
@@ -492,6 +493,8 @@ DECLARATIONS = {
         'MAX_TEXT': ('256', 'safety', 'dispatch evidence / fixed persisted text-label length ceiling'),
         'MAX_ORDINAL': ('2 ** 63 - 1', 'format',
                         'dispatch evidence / fixed signed-64-bit on-disk ordinal envelope, not a retention policy'),
+        'SEQUENCE_ID_HEX': ('32', 'format',
+                            'dispatch evidence / fixed lowercase-hex encoding of a 128-bit sequence identity'),
     },
     'cli.py': {},
     'workspace_cache.py': {},
