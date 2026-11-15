@@ -553,7 +553,7 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     pending owners/tickets so prior version-1 queues can drain. Overflow and
     unreadable or invalid queue state are immediate Busy; caller-supplied
     resources that do not name a project lock path are Denied. The operator selects the
-    admission_wait_seconds bound on the wait for capacity (0 means none);
+    admission_wait_seconds bound on the wait for capacity (0 means until dispatch or cancellation);
     the bound starts when the wait starts, so a caller that is admitted
     without waiting is never refused as an expired wait, and an admitted
     run is never refused by it. Poll at idle_seconds with no role/workspace/

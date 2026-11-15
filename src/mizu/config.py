@@ -505,7 +505,7 @@ class Limits:
     parallel_consults: int = 2
     #: Operator-selected one-shot execution admission wait; 0 waits until
     #: dispatch or cancellation. Non-waiting callers still fail fast.
-    admission_wait_seconds: int = 300
+    admission_wait_seconds: int = 0
     #: Separate timed provider-selection recovery window; 0 disables it.
     busy_retry_seconds: int = 300
     #: Explicit drain yields persistent, non-ephemeral units at safe request boundaries.
