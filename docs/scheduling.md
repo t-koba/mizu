@@ -78,11 +78,14 @@ Otherwise it checks changed goal digest and operator wake-generation, then an
 independent ready-set change, owned check-result wake / receipt-pinned CI wait, and eligible operator-record
 read in evaluator order. Owned check results and operator records are checked before the `done` gate;
 the existing project wake-generation cursor remains a separate signal.
-`mizu arm` and explicit `mizu wake` advance the operator wake generation;
-`mizu resume` only clears pause/drain and resets health, leaving that generation
-unchanged. Work that became due while paused and delivered inputs still admit
-through their own readiness checks. Use `mizu wake` only for an additional
-operator-requested reevaluation when ordinary work is not due.
+`mizu arm` and explicit `mizu wake` advance the operator wake generation.
+`mizu resume` resets health and clears pause/drain; a true-to-false drain
+transition advances the generation once, so work preserved by a drain-bounded
+yield can resume without waiting for an unrelated event. Repeated clears do not
+replay the wake, and a resume without an active drain preserves the generation.
+Work that became due while paused and delivered inputs still admit through their
+own readiness checks. Use `mizu wake` only for an additional operator-requested
+reevaluation when ordinary work is not due.
 Ready work for a named role requires the `work_items_transition` capability. The writer work order (`work_order`) never admits a run: `review_due` is display only.
 It means an unheld `open` item the role can claim, or an `open`/`doing` item held by
 that role, with no structured wait. Automatic wait reopening retains the holder;
@@ -221,10 +224,11 @@ immediately under the existing validation rules.
 
 Ready-work presence alone never authorizes a timed re-admission, for either
 `wait` or no-progress `continue`/`bounded` records. Ready-set changes still wake
-through `should_run` and the configured `ready_work` event subscription;
-independent CI, operator, decision, code, work-item and wait events keep their
-existing routing and acknowledgement rules. Explicit run-level wait expiry and
-scheduled dispatch remain independent. Historical `wait_conversion` markers
+through `should_run` and the configured `ready_work` event subscription; a
+drain-to-undrained control edge is also one operator wake, consumed by the next
+snapshot's wake-generation cursor. Independent CI, decision, code, work-item and
+wait events keep their existing routing and acknowledgement rules. Explicit
+run-level wait expiry and scheduled dispatch remain independent. Historical `wait_conversion` markers
 remain valid snapshot evidence and status fields, but are no longer emitted or
 timer authority. No FIFO, affinity, CI-red or check-job policy changes here.
 

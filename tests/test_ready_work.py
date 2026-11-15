@@ -39,7 +39,8 @@ class ReadyWorkTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Parked", run=None, outcome=outcome,
             summary="Parked test", wake_at=4102444800 if outcome == "wait" else None,
-            inbox_seen=self.project.insights.generation(), wake_generation="test-wake",
+            inbox_seen=self.project.insights.generation(),
+            wake_generation=self.project.control().get("wake_generation", ""),
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(snapshot)
         return snapshot
@@ -79,16 +80,19 @@ class ReadyWorkTests(Fixture):
             self.config, self.config.roles["worker"]) + 1
         self.assertFalse(should_run(self.project, snapshot, current_time=due_time,
                                    role_name="worker"))
+        generation_before_clear = self.project.control()["wake_generation"]
         self.project.set_control(draining=False)
-        # An unchanged ready item is not a no-progress self-admission signal;
-        # the durable yield leaves it available for a later independent wake.
-        self.assertFalse(should_run(self.project, snapshot, current_time=due_time,
-                                    role_name="worker"))
-        self.assertFalse(should_run(self.project, {**snapshot, "outcome": "blocked"},
-                                    current_time=due_time, role_name="worker"))
-        self.project.set_control(wake_generation="bounded-resume")
+        generation_after_clear = self.project.control()["wake_generation"]
+        self.assertNotEqual(generation_after_clear, generation_before_clear)
+        # Clearing drain is the independent edge that admits the preserved item;
+        # unchanged readiness or another non-edge update cannot replay it.
         self.assertTrue(should_run(self.project, snapshot, current_time=due_time,
                                    role_name="worker"))
+        self.project.set_control(draining=False)
+        self.assertEqual(self.project.control()["wake_generation"], generation_after_clear)
+        consumed = {**snapshot, "wake_generation": generation_after_clear}
+        self.assertFalse(should_run(self.project, consumed, current_time=due_time,
+                                    role_name="worker"))
         self.assertEqual(self.project.work_items.page_ready(limit=1)["items"][0]["id"], item["id"])
 
     def test_blocked_rows_cannot_hide_ready_work_or_wake_on_their_own(self):

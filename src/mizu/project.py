@@ -228,10 +228,17 @@ class Project:
         error message). Any explicit ``paused`` update without a new
         ``pause_cause`` clears a prior field, so a manual pause and a
         resume never retain a stale cause; unrelated control updates
-        preserve it.
+        preserve it. A true-to-false ``draining`` transition also advances the
+        wake generation unless the same update explicitly supplies one.
         """
         with lock(self.root / "locks" / "control.lock"):
-            value = {**self.control(), **updates, "updated_at": now()}
+            previous = self.control()
+            value = {**previous, **updates, "updated_at": now()}
+            supplied_generation = updates.get("wake_generation")
+            if (previous.get("draining") is True and updates.get("draining") is False
+                    and (not isinstance(supplied_generation, str)
+                         or supplied_generation == previous.get("wake_generation"))):
+                value["wake_generation"] = uuid.uuid4().hex
             if "paused" in updates and "pause_cause" not in updates:
                 value.pop("pause_cause", None)
             write_json(self.root / "control.json", value)
