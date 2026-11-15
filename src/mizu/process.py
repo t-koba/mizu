@@ -37,19 +37,13 @@ class Result:
     survivors: tuple[str, ...] = ()
 
 
-def adapter_failure_diagnostic(result: Result, *, source: str, maximum_bytes: int) -> str:
-    """Return a bounded, labelled stderr tail only for a normal nonzero exit.
-
-    The excerpt is model-visible and external-untrusted. Other failure reasons
-    keep their existing generic handling; a disabled/invalid byte allowance
-    returns no excerpt. The hard ceiling protects callers even before config
-    validation.
-    """
-    if (result.reason != "exited" or type(result.exit_code) is not int or result.exit_code == 0
-            or type(maximum_bytes) is not int or maximum_bytes <= 0):
+def adapter_text_diagnostic(text: str, *, source: str, maximum_bytes: int,
+                            label: str = "diagnostic") -> str:
+    """Format a bounded, labelled external-untrusted adapter text tail."""
+    if not isinstance(text, str) or type(maximum_bytes) is not int or maximum_bytes <= 0:
         return ""
     limit = min(maximum_bytes, ADAPTER_DIAGNOSTIC_BYTES_MAX)
-    raw = result.stderr.encode("utf-8")
+    raw = text.encode("utf-8")
     if not raw:
         return ""
     truncated = len(raw) > limit
@@ -57,7 +51,15 @@ def adapter_failure_diagnostic(result: Result, *, source: str, maximum_bytes: in
     if not excerpt.strip():
         return ""
     tail = f"; tail capped at {limit} bytes" if truncated else ""
-    return f"\nAdapter stderr (external-untrusted; {source}{tail}):\n{excerpt}"
+    return f"\nAdapter {label} (external-untrusted; {source}{tail}):\n{excerpt}"
+
+
+def adapter_failure_diagnostic(result: Result, *, source: str, maximum_bytes: int) -> str:
+    """Return a bounded stderr tail only for a normally exited nonzero program."""
+    if result.reason != "exited" or type(result.exit_code) is not int or result.exit_code == 0:
+        return ""
+    return adapter_text_diagnostic(result.stderr, source=source,
+                                   maximum_bytes=maximum_bytes, label="stderr")
 
 
 def stop_note(result: Result) -> str:

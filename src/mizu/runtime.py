@@ -1644,6 +1644,8 @@ class Context:
             record.update(runs=[] if not_dispatched else response, requested_at=now())
             if not_dispatched:
                 record.update(outcome="not_dispatched", reason_code=response["reason_code"])
+                if "diagnostic" in response:
+                    record["diagnostic"] = response["diagnostic"]
             requests.resolve(identity, record)
             self.record_ci_request(
                 identity, marker["dispatched_at"][:10], marker["workflows"],

@@ -23,8 +23,13 @@ carries the exact `request_id`, `attempt`, `sha` and workflow set. Both runs and
 no-dispatch answers require exact request/attempt echoes. Runs must cover every
 workflow at the marker SHA; no-dispatch preserves the bounded reason above.
 A typed `unknown`, malformed, failed or lost answer leaves the attempt unresolved
-and writes no terminal outcome. Adapter timeout/output bounds and cancellation
-apply. There is no background query, automatic retry, provider-absence inference
+and writes no terminal outcome. Typed `not_dispatched` and `unknown` responses may
+carry an optional bounded `diagnostic`; it is labelled external-untrusted, is
+informational only, and never changes outcome validation or retry permission.
+A no-dispatch diagnostic is retained with its immutable outcome for replay; an
+unknown diagnostic is returned with the unresolved error and does not settle it.
+Adapter timeout/output bounds and cancellation apply. There is no background
+query, automatic retry, provider-absence inference
 or elapsed-time settlement. Only a durable `not_dispatched` result permits an
 explicit next numbered attempt; a query never authorizes redispatch by itself.
 

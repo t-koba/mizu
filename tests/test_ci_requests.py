@@ -9,8 +9,8 @@ import uuid
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.ci_requests import (CiRequests, _summary, _unresolved_summary,
-                              request_id)
+from mizu.ci_requests import (CI_DIAGNOSTIC_RECORD_BYTES, RECORD_BYTES,
+                              CiRequests, _summary, _unresolved_summary, request_id)
 from mizu.errors import Denied, LimitExceeded
 from mizu.fs import canonical, digest, mkdir, read_json
 from mizu.protocol import tool_definitions
@@ -167,6 +167,20 @@ class CiRequestTests(Fixture):
         self.assertNotIn("possibly_duplicate_spend", second)
         self.assertNotIn("possibly_duplicate_spend", store.dispatched(second["request_id"]))
         self.assertTrue(self.request(self.context({}), attempt=2)["replayed"])
+
+    def test_unknown_diagnostic_is_returned_but_does_not_settle_the_attempt(self):
+        store, identity, marker = self.pending_marker()
+        payload = {"outcome": "unknown", "request_id": identity, "attempt": 1,
+                   "diagnostic": "abcdefgh"}
+        ctx = self.context(payload, diagnostic_bytes=4)
+        with patch("mizu.runtime._vcs.request_runs_via") as dispatch:
+            with self.assertRaisesRegex(Denied, "tail capped at 4 bytes") as caught:
+                self.request(ctx)
+        dispatch.assert_not_called()
+        self.assertIn("efgh", str(caught.exception))
+        self.assertEqual(store.dispatched(identity), marker)
+        self.assertIsNone(CiRequests(self.project.root).outcome(identity))
+        self.assertFalse(store._path(identity, "request").exists())
 
     def test_unknown_query_neither_registers_nor_completes_covered_waits(self):
         ctx = self.context({"malformed": True}, poll_enabled=True)
@@ -447,6 +461,53 @@ class CiRequestTests(Fixture):
                 with self.assertRaises(Denied):
                     vcs.request_runs_via({"request_grant": True}, SHA, ["ci"],
                                          request_id=identity, attempt=2)
+
+    def test_typed_ci_diagnostic_is_bounded_configurable_and_untrusted(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        payload = {"outcome": "not_dispatched", "request_id": identity, "attempt": 1,
+                   "reason_code": "provider_rejected", "diagnostic": "abcdefgh"}
+        with patch("mizu.vcs.invoke", return_value=payload):
+            result = vcs.request_runs_via(
+                {"request_grant": True, "diagnostic_bytes": 4}, SHA, ["ci"],
+                request_id=identity)
+        self.assertEqual(result["diagnostic"],
+                         "\nAdapter diagnostic (external-untrusted; VCS; tail capped at 4 bytes):\nefgh")
+        with patch("mizu.vcs.invoke", return_value=payload):
+            hidden = vcs.request_runs_via(
+                {"request_grant": True, "diagnostic_bytes": 0}, SHA, ["ci"],
+                request_id=identity)
+        self.assertNotIn("diagnostic", hidden)
+        with patch("mizu.vcs.invoke", return_value={**payload, "diagnostic": ["bad"]}):
+            with self.assertRaisesRegex(Denied, "diagnostic"):
+                vcs.request_runs_via(
+                    {"request_grant": True, "diagnostic_bytes": 8}, SHA, ["ci"],
+                    request_id=identity)
+
+    def test_no_dispatch_diagnostic_persists_for_exact_replay(self):
+        identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
+        payload = {"outcome": "not_dispatched", "request_id": identity, "attempt": 1,
+                   "reason_code": "provider_rejected", "diagnostic": "abcdefgh"}
+        first = self.request(self.context(payload, diagnostic_bytes=4))
+        expected = "\nAdapter diagnostic (external-untrusted; VCS; tail capped at 4 bytes):\nefgh"
+        self.assertEqual(first["diagnostic"], expected)
+        self.assertEqual(CiRequests(self.project.root).outcome(identity)["diagnostic"], expected)
+        with patch("mizu.runtime._vcs.request_runs_via",
+                   side_effect=AssertionError("terminal replay cannot call the adapter")):
+            replay = self.request(self.context(runs()))
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["diagnostic"], expected)
+
+    def test_maximum_typed_diagnostic_fits_bounded_ci_record(self):
+        store, identity, marker = self.pending_marker()
+        record = {key: value for key, value in marker.items() if key != "dispatched_at"}
+        diagnostic = "x" * 8192
+        record.update(outcome="not_dispatched", reason_code="pre_dispatch_refusal", runs=[],
+                      requested_at="2026-10-21T00:00:00+00:00", diagnostic=diagnostic)
+        store.record_outcome(identity, record)
+        stored = store.outcome(identity)
+        self.assertEqual(stored["diagnostic"], diagnostic)
+        self.assertLessEqual(store._path(identity, "request").stat().st_size,
+                             CI_DIAGNOSTIC_RECORD_BYTES)
 
     def test_terminal_no_dispatch_is_durable_and_replays_without_a_provider_call(self):
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
@@ -1021,7 +1082,7 @@ class CiRequestTests(Fixture):
         store = CiRequests(self.project.root)
         identity = request_id(self.receipt["publication_id"], SHA, ["ci"])
         path = store.root / f"{identity}.request.json"
-        path.write_text(json.dumps({"request_id": identity, "pad": "x" * 9000}),
+        path.write_text(json.dumps({"request_id": identity, "pad": "x" * (RECORD_BYTES + 1)}),
                         encoding="utf-8")
         # The oversized outcome is never returned unvalidated.
         with self.assertRaises(LimitExceeded):

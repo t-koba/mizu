@@ -39,7 +39,8 @@ from .errors import Denied
 from . import lineage
 from .fs import DIGEST, atomic_write, canonical, digest, safe_read
 from .process import (
-    ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
+    ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic,
+    adapter_text_diagnostic, run,
 )
 
 #: Virtual tool prefix for injected upstream refs. Model ``files``/``read``
@@ -1884,12 +1885,31 @@ def reconcile_runs_via(settings: dict, sha: str, workflows, *, request_id: str,
     """Query one existing attempt, never dispatch. Exact identity echoes required.
 
     Runs and typed no-dispatch use the dispatch response schema, with mandatory
-    request/attempt echoes also for runs. A typed unknown contains only outcome
-    and those echoes. Unknown, malformed or lost answers leave evidence unresolved.
+    request/attempt echoes also for runs. Typed no-dispatch and unknown answers
+    may include a bounded informational ``diagnostic``. Unknown, malformed or
+    lost answers leave evidence unresolved.
     The configured adapter timeout/output bounds and cancellation apply as usual.
     """
     return _ci_runs_via(settings, "reconcile_runs", sha, workflows,
                         request_id=request_id, attempt=attempt, cancel=cancel)
+
+
+def _typed_ci_diagnostic(data: dict, settings: dict) -> str | None:
+    """Return an optional bounded informational diagnostic from a typed result."""
+    if "diagnostic" not in data:
+        return None
+    value = data["diagnostic"]
+    if not isinstance(value, str):
+        raise Denied("Invalid CI adapter diagnostic")
+    maximum = settings.get("diagnostic_bytes", ADAPTER_DIAGNOSTIC_BYTES_DEFAULT)
+    if type(maximum) is not int or maximum < 0:
+        raise Denied("Invalid VCS diagnostic byte limit")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise Denied("Invalid CI adapter diagnostic") from exc
+    formatted = adapter_text_diagnostic(value, source="VCS", maximum_bytes=maximum)
+    return formatted or None
 
 
 def _ci_runs_via(settings, op, sha, workflows, *, request_id, attempt,
@@ -1909,20 +1929,28 @@ def _ci_runs_via(settings, op, sha, workflows, *, request_id, attempt,
                 or data["attempt"] != attempt):
             raise Denied("Invalid CI reconciliation identity")
         if data.get("outcome") == "unknown":
-            if set(data) != {"outcome", "request_id", "attempt"}:
+            fields = {"outcome", "request_id", "attempt"}
+            if set(data) not in (fields, fields | {"diagnostic"}):
                 raise Denied("Invalid CI reconciliation outcome")
-            raise Denied("CI request remains unresolved")
+            diagnostic = _typed_ci_diagnostic(data, settings)
+            suffix = "" if diagnostic is None else "\n" + diagnostic
+            raise Denied("CI request remains unresolved" + suffix)
         if "outcome" not in data and set(data) != {"request_id", "attempt", "runs"}:
             raise Denied("Invalid CI reconciliation runs")
     if data.get("outcome") == "not_dispatched":
-        if (set(data) != {"outcome", "request_id", "attempt", "reason_code"}
+        fields = {"outcome", "request_id", "attempt", "reason_code"}
+        if (set(data) not in (fields, fields | {"diagnostic"})
                 or data["request_id"] != request_id or type(data["attempt"]) is not int
                 or data["attempt"] != attempt
                 or not isinstance(data["reason_code"], str)
                 or data["reason_code"] not in {"pre_dispatch_refusal", "provider_rejected"}):
             raise Denied("Invalid CI no-dispatch response")
-        return {"outcome": "not_dispatched", "request_id": request_id,
-                "attempt": attempt, "reason_code": data["reason_code"]}
+        response = {"outcome": "not_dispatched", "request_id": request_id,
+                    "attempt": attempt, "reason_code": data["reason_code"]}
+        diagnostic = _typed_ci_diagnostic(data, settings)
+        if diagnostic is not None:
+            response["diagnostic"] = diagnostic
+        return response
     if "outcome" in data:
         raise Denied("Invalid CI request outcome")
     return validate_ci_runs(data.get("runs"), sha, workflows)

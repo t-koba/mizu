@@ -499,7 +499,10 @@ DECLARATIONS = {
     'cli.py': {},
     'workspace_cache.py': {},
     'ci_requests.py': {
-        'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded evidence-record read'),
+        'RECORD_BYTES': ('8192', 'safety', 'CI requests / bounded ordinary evidence-record read'),
+        'CI_DIAGNOSTIC_RECORD_BYTES': (
+            '16384', 'safety',
+            'CI requests / bounded no-dispatch diagnostic record read with its envelope'),
     },
     'reviews.py': {
         'RECORD_BYTES': ('4096', 'safety', 'typed review / bounded cursor and immutable run receipt reads'),
@@ -537,9 +540,18 @@ DECLARATIONS = {
             'insight archive / signed 64-bit SQLite INTEGER ceiling for revisions '
             'and cursor high-water'),
     },
+    'feed_updates.py': {
+        '_STATE_BYTES': (
+            '2 * 1000 * 67 + 1024', 'safety',
+            'feed updates / bounded cursor stores at most 1000 completed and 1000 partially delivered SHA-256 identities plus its envelope'),
+    },
     'insights.py': {
         'MAX_DECISION_EVENT_BYTES': (
             '1024 * 1024', 'safety', 'insights / fixed decision-event record read and write ceiling'),
+        'AUTOMATIC_INSIGHT_ARCHIVE_INTERVAL_MAX': (
+            '2678400', 'safety', 'insights / maximum automatic archive interval (31 days)'),
+        '_AUTOMATIC_INSIGHT_ARCHIVE_STATE_BYTES': (
+            '4096', 'safety', 'insights / bounded automatic archive cadence state read'),
         'DECISION_RECEIPT_BYTES': (
             '1024', 'safety', 'insights / fixed-shape per-token decision receipt read bound'),
         'MAX_EVIDENCE_ENTRIES': (

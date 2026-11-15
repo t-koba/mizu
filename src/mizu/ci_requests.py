@@ -21,10 +21,14 @@ from pathlib import Path
 from .config import CiRequestEvidence, TOML_INTEGER_MAX
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
+from .process import ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 
-#: Bounded record size (8 KiB), like the other evidence records.
+#: Ordinary CI evidence-record read bound; markers and outcomes keep this cap.
 RECORD_BYTES = 8192
+#: Only no-dispatch outcomes with a validated diagnostic may use the larger cap.
+CI_DIAGNOSTIC_RECORD_BYTES = 16384
+MAX_CI_DIAGNOSTIC_BYTES = ADAPTER_DIAGNOSTIC_BYTES_MAX + 128
 REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
 UNKNOWN_REASON = "dispatch_outcome_timeout"
 DISPATCH_FILE = re.compile(r"([0-9a-f]{64})\.dispatch\.json\Z")
@@ -60,13 +64,18 @@ class CiRequests:
             path.lstat()
         except FileNotFoundError:
             return None
-        raw = safe_read(self.root, path.name, RECORD_BYTES)
+        maximum = CI_DIAGNOSTIC_RECORD_BYTES if kind == "request" else RECORD_BYTES
+        raw = safe_read(self.root, path.name, maximum)
         try:
             record = loads_finite(raw)
         except (ValueError, UnicodeError, RecursionError) as exc:
             raise Denied(f"Invalid CI request record: {identity}") from exc
         if not isinstance(record, dict):
             raise Denied(f"Invalid CI request record: {identity}")
+        if (kind == "request" and len(raw) > RECORD_BYTES
+                and (record.get("outcome") != "not_dispatched"
+                     or "diagnostic" not in record)):
+            raise LimitExceeded(f"CI request record exceeds {RECORD_BYTES} bytes")
         return record
 
     def outcome(self, identity: str) -> dict | None:
@@ -312,10 +321,18 @@ def _summary(record: dict, identity: str, marker: dict) -> dict | None:
             return None
         runs = []
     elif not_dispatched:
-        fields |= {"reason_code", "runs"}
+        fields |= {"reason_code", "runs", "diagnostic"}
         if (record.get("reason_code") not in ("pre_dispatch_refusal", "provider_rejected")
                 or record.get("runs") != []):
             return None
+        if "diagnostic" in record:
+            try:
+                diagnostic_bytes = len(record["diagnostic"].encode("utf-8"))
+            except (AttributeError, UnicodeEncodeError):
+                return None
+            if (not isinstance(record["diagnostic"], str)
+                    or diagnostic_bytes > MAX_CI_DIAGNOSTIC_BYTES):
+                return None
         runs = []
     else:
         fields |= {"runs"}
