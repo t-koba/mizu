@@ -193,9 +193,17 @@ class MutationIntentTests(Fixture):
 
     def test_local_refusals_leave_no_intent_and_do_not_dispatch(self):
         for case in CASES:
-            for reason in ("capability", "workspace", "pin", "adapter", "bytes", "authority"):
+            # Build each case's repository and approval once; each refusal
+            # still gets a fresh context and run directory.
+            initial, capability, template_args, _ = self.mutation(case)
+            base_config, base_role, base_workspace = initial.config, initial.role, initial.workspace
+            reasons = ("capability", "workspace", "pin", "adapter", "bytes",
+                       "authority")
+            for index, reason in enumerate(reasons):
                 with self.subTest(case=case, reason=reason):
-                    ctx, capability, args, _ = self.mutation(case)
+                    ctx = (initial if index == 0 else
+                           dispose.make_context(self, base_config, base_role, workspace=base_workspace))
+                    args = template_args.copy()
                     op = args.get("op")
                     if reason == "capability":
                         ctx.role = dataclasses.replace(ctx.role, capabilities=())
