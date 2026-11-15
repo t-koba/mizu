@@ -234,7 +234,15 @@ project.work_items.transition({item_id!r}, expected_rev={rev - 1}, status="doing
         self.assertEqual([row["status"] for row in page["items"]], ["doing"])
         self.assertEqual(len(index_rows(self.project.root)[2]), 1)
         # The next locked use repairs exactly that item in the index itself.
-        self.assertEqual(self.store.page_open()["items"], page["items"])
+        # Elapsed-age fields are recomputed at read time and can tick between pages.
+        dynamic_fields = {"doing_age_seconds", "doing_stale", "blocked_age_seconds"}
+
+        def stable_rows(rows):
+            return [{key: value for key, value in row.items() if key not in dynamic_fields}
+                    for row in rows]
+
+        repaired = self.store.page_open()["items"]
+        self.assertEqual(stable_rows(repaired), stable_rows(page["items"]))
         incremental, rebuilt = self.rebuilt()
         self.assertEqual(incremental[2], [])
         self.assertEqual(incremental, rebuilt)
