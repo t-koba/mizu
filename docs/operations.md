@@ -1420,9 +1420,8 @@ identity and version when it is present. Without configuration, a retained
 schema-1 fact remains unbound and can never become ready retroactively merely
 by later configuring values that match its response. The publication ID never
 incorporates lineage. These are external-untrusted observations at a point in
-time, not a promotion gate: they do not prevent subsequent remote movement,
-invoke promotion, gate any external consumer such as `dash-server.py`, or
-enforce any condition on an external consumer.
+time, not a promotion gate: they neither prevent subsequent remote movement
+nor invoke, gate, or enforce any condition on an external promotion consumer.
 
 ## Retain independently authenticated CI validation
 
