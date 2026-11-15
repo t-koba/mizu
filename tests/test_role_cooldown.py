@@ -256,8 +256,8 @@ capabilities = ["files", "read", "finish"]
         original = self.file.read_text()
         text = original.replace("daemon = true",
                                 "daemon = true\ndaemon_policy = \"periodic\"\ndaemon_spacing_seconds = 42", 1)
-        text = text.replace('[roles.searcher]\nprofile = "alternate"',
-                            '[roles.searcher]\nprofile = "alternate"\ndaemon_policy = "signals"\ndaemon_spacing_seconds = 7', 1)
+        text = text.replace('[roles.searcher]\n',
+                            '[roles.searcher]\ndaemon_policy = "signals"\ndaemon_spacing_seconds = 7\n', 1)
         self.file.write_text(text)
         config = load(self.file)
         self.assertEqual(config.roles["worker"].daemon_policy, "periodic")
