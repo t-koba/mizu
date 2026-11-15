@@ -1,15 +1,13 @@
-"""Finite blocked episodes: local age is replanning, never remote failure."""
+"""Blocked age is diagnostic, never replanning or remote failure evidence."""
 import datetime as dt
 import json
 from contextlib import contextmanager
 from unittest.mock import patch
 
 from support import Fixture
-from mizu.config import load, TOML_INTEGER_MAX
-from mizu.errors import ConfigError, Denied
+from mizu.errors import Denied
 from mizu.fs import read_json
 from support import history_write_json as write_json
-from mizu.project import Project
 from mizu.runtime import prompt_for, prompt_delta_for
 from mizu.work_items import WorkItems
 
@@ -37,23 +35,7 @@ class BlockedWaitAgeTests(Fixture):
     def change(self, item, status, **kwargs):
         return self.store.transition(item["id"], expected_rev=item["rev"], actor="worker", status=status, **kwargs)
 
-    def test_config_default_positive_integer_and_project_plumbing(self):
-        self.assertEqual(self.config.limits.work_items_blocked_max_age_seconds, 604800)
-        self.assertEqual(self.store.blocked_max_age_seconds, 604800)
-        base = self.file.read_text()
-        base = "".join(line for line in base.splitlines(keepends=True)
-                        if not line.startswith("work_items_blocked_max_age_seconds ="))
-        for value in (1, 604800, TOML_INTEGER_MAX):
-            self.file.write_text(base.replace("[limits]\n", f"[limits]\nwork_items_blocked_max_age_seconds = {value}\n"))
-            config = load(self.file)
-            self.assertEqual(Project(config, "sample").work_items.blocked_max_age_seconds, value)
-        for value in (0, -1, "true", "1.5", '\"10\"', TOML_INTEGER_MAX + 1):
-            self.file.write_text(base.replace("[limits]\n", f"[limits]\nwork_items_blocked_max_age_seconds = {value}\n"))
-            with self.subTest(value=value), self.assertRaises(ConfigError):
-                load(self.file)
-
     def test_age_survives_doing_delivery_rebinding_and_resets_only_on_open(self):
-        self.store.blocked_max_age_seconds = 10
         with clock(0) as start:
             item = self.block()
         with clock(3):
@@ -65,61 +47,43 @@ class BlockedWaitAgeTests(Fixture):
             item = self.change(item, "blocked", wait=CODE)
             self.assertEqual(item["blocked_since"], start)
             self.assertEqual(self.store.page_ready()["total"], 0)
-        with clock(10):
-            row = self.store.page_ready(role_name="worker")["items"][0]
-            live = row["wait_liveness"]
-            self.assertEqual((live["state"], live["reason"]), ("expired", "blocked_max_age_reached"))
-            self.assertEqual((live["blocked_age_seconds"], live["blocked_max_age_seconds"]), (10, 10))
+        with clock(10**9):
+            live = self.store.blocked_liveness_readonly()["items"][0]
+            self.assertEqual((live["state"], live["reason"]), ("pending", "condition_pending"))
+            self.assertEqual(live["blocked_age_seconds"], 10**9)
+            self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
             self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
-            for status, kwargs in (("blocked", {"wait": CODE, "scope": "Rebound", "reason": "Rebind"}),
-                                   ("doing", {}), ("open", {})):
-                with self.subTest(status=status), self.assertRaises(Denied):
-                    self.change(item, status, **kwargs)
             self.assertEqual(self.store.get(item["id"]), item)
-            item = self.change(item, "open", reason=live["reason"] + ": reassess missing evidence")
+            item = self.change(item, "doing")
+            item = self.change(item, "blocked", wait=CODE)
+            self.assertEqual(item["blocked_since"], start)
+            item = self.change(item, "open")  # Explicit holder action, not age authority.
             self.assertIsNone(item["blocked_since"])
-        with clock(12) as reopened:
+        with clock(10**9 + 1) as reopened:
             item = self.change(item, "blocked", wait=CODE)
             self.assertEqual(item["blocked_since"], reopened)
             self.assertEqual(self.store.page_ready()["total"], 0)
 
-    def test_doing_cannot_hide_age_then_reblock_expired_episode(self):
-        self.store.blocked_max_age_seconds = 10
-        with clock(0):
-            item = self.block()
-        with clock(9):
-            item = self.change(item, "doing")
-        with clock(10):
-            with self.assertRaisesRegex(Denied, "Reopen"):
-                self.change(item, "blocked", wait=CODE)
-            with self.assertRaisesRegex(Denied, "Reopen"):
-                self.change(item, "blocked", wait=FUTURE)
-            with self.assertRaisesRegex(Denied, "reason"):
-                self.change(item, "open")
-            item = self.change(item, "open", reason="blocked_max_age_reached: replan")
-            self.change(item, "blocked", wait=CODE)
-
-    def test_satisfied_wait_releases_even_after_the_age_bound(self):
-        self.store.blocked_max_age_seconds = 10
+    def test_exact_code_change_releases_even_an_ancient_wait(self):
         baseline = self.project.snapshots.get()["code_digest"]
         with clock(0):
             item = self.block()
         self.assertEqual(item["wait"]["digest"], baseline)
-        with clock(10), patch.object(self.store.snapshots, "get", return_value={"code_digest": "f" * 64}):
+        with clock(10**9), patch.object(self.store.snapshots, "get", return_value={"code_digest": "f" * 64}):
             live = self.store.page_ready(role_name="worker")["items"][0]["wait_liveness"]
             self.assertEqual(live["state"], "due")
             doing = self.change(item, "doing")
             self.assertEqual(doing["status"], "doing")
 
-    def test_due_old_wait_cannot_register_a_new_pending_wait_without_opening(self):
-        self.store.blocked_max_age_seconds = 10
-        with clock(0):
+    def test_old_doing_episode_can_register_pending_wait_without_forced_open(self):
+        with clock(0) as start:
             item = self.block()
             baseline = item["wait"]["digest"]
             item = self.change(item, "doing")
-        with clock(10), patch.object(self.store.snapshots, "get", return_value={"code_digest": baseline}):
-            with self.assertRaisesRegex(Denied, "blocked_max_age_reached"):
-                self.change(item, "blocked", wait=CODE)
+        with clock(10**9), patch.object(self.store.snapshots, "get", return_value={"code_digest": baseline}):
+            item = self.change(item, "blocked", wait=FUTURE)
+            self.assertEqual(item["blocked_since"], start)
+            self.assertEqual(self.store.page_ready()["total"], 0)
 
     def test_blocked_decision_seed_ages_without_writing_a_transition(self):
         with clock(0), patch("mizu.insights.now", return_value=START.isoformat()):
@@ -127,56 +91,54 @@ class BlockedWaitAgeTests(Fixture):
             event = self.project.insights.decide(proposal["id"], "accept", "Deliver scope", "", "run", expected_rev=1,
                 work_items=[{"title": "Contingent task", "description": "Wait for changed code", "wait": CODE}])
             seed = event["work_items"][0]
-        with clock(604800):
+        with clock(10**9):
             page = self.store.page_ready(role_name="worker")
-            self.assertEqual(page["items"][0]["wait_liveness"]["state"], "expired")
+            self.assertEqual(page["total"], 0)
+            self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "pending")
             self.assertIsNone(self.store.get(seed["id"])["holder"])
             self.assertEqual(self.store.get(seed["id"]), seed)
             self.assertEqual(self.store.page_open_readonly()["items"][0]["blocked_since"], seed["created_at"])
 
     def test_explicit_deadline_is_independent_and_clock_rollback_clamps_age(self):
-        self.store.blocked_max_age_seconds = 1
         with clock(0):
             item = self.block(wait=FUTURE)
         with clock(-1):
             row = self.store.page_open_readonly()["items"][0]
             self.assertEqual(row["blocked_age_seconds"], 0)
-        with clock(604800):
+        with clock(10**9):
             self.assertEqual(self.store.page_ready()["total"], 0)
             state = self.store.blocked_liveness_readonly()["items"][0]
-            self.assertEqual((state["state"], state["blocked_max_age_seconds"]), ("pending", None))
+            self.assertEqual((state["state"], state["blocked_age_seconds"]), ("pending", 10**9))
             item = self.change(item, "doing")
             item = self.change(item, "blocked", wait=FUTURE)
-        with clock(604800):
+        with clock(10**9):
             self.block("due", {"kind": "deadline", "at": "2000-01-01T00:00:00+00:00"})
             live = self.store.page_ready()["items"][0]["wait_liveness"]
             self.assertEqual((live["state"], live["reason"]), ("due", "condition_met"))
-            self.assertIsNone(live["blocked_max_age_seconds"])
 
-    def test_expired_status_full_delta_prompts_and_readonly_pages_do_not_write(self):
+    def test_ancient_pending_status_full_delta_prompts_and_readonly_pages_do_not_write(self):
         with clock(0):
             item = self.block()
         self.project.status()  # Initialize unrelated check-job status lock before observing writes.
         before = {p.relative_to(self.project.root): p.read_bytes()
                   for p in self.project.root.rglob("*") if p.is_file()}
-        with clock(604800), patch("mizu.work_items.lock", side_effect=AssertionError("read-only lock")):
+        with clock(10**9), patch("mizu.work_items.lock", side_effect=AssertionError("read-only lock")):
             row = self.store.page_open_readonly()["items"][0]
-            self.assertEqual(row["blocked_age_seconds"], 604800)
+            self.assertEqual(row["blocked_age_seconds"], 10**9)
             diagnostic = self.project.status()["blocked_work"]
-            self.assertEqual(diagnostic["counts"]["expired"], 1)
-            self.assertEqual(diagnostic["items"][0]["reason"], "blocked_max_age_reached")
+            self.assertEqual(diagnostic["counts"]["pending"], 1)
+            self.assertEqual(diagnostic["items"][0]["reason"], "condition_pending")
+            self.assertEqual(diagnostic["items"][0]["blocked_age_seconds"], 10**9)
         after = {p.relative_to(self.project.root): p.read_bytes()
                  for p in self.project.root.rglob("*") if p.is_file()}
         self.assertEqual(after, before)
-        with clock(604800):
+        with clock(10**9):
             context = self.context()
             full = json.loads(prompt_for(context))
             delta = json.loads(prompt_delta_for(context, []))
             for prompt in (full, delta):
-                row = prompt["ready_work"]["items"][0]
-                self.assertEqual(row["wait_liveness"]["blocked_age_seconds"], 604800)
-                self.assertEqual(row["wait_liveness"]["reason"], "blocked_max_age_reached")
-                self.assertFalse(row["wait_satisfied"])
+                self.assertEqual(prompt["ready_work"]["total"], 0)
+                self.assertEqual(prompt["ready_work"]["items"], [])
             self.assertEqual(self.store.get(item["id"]), item)
 
     def test_legacy_history_derives_first_block_and_rejects_reset_claim(self):
@@ -204,10 +166,10 @@ class BlockedWaitAgeTests(Fixture):
             fresh.get(item["id"])
         self.assertFalse(fresh.blocked_liveness_readonly()["coverage_complete"])
 
-    def test_impossible_requires_reasoned_open_but_unknown_never_releases(self):
+    def test_impossible_requires_reasoned_open_regardless_of_age(self):
         with clock(0):
             item = self.block(wait={"kind": "insight_decided", "insight": "f" * 32})
-        with clock(604800):
+        with clock(10**9):
             state = self.store.page_ready()["items"][0]["wait_liveness"]
             self.assertEqual((state["state"], state["reason"]), ("impossible", "target_missing"))
             with self.assertRaisesRegex(Denied, "Reopen"):
@@ -216,7 +178,17 @@ class BlockedWaitAgeTests(Fixture):
                 self.change(item, "open")
             item = self.change(item, "open", reason=state["reason"])
             item = self.change(item, "blocked", wait=CODE)
-            with patch.object(self.store.snapshots, "get", side_effect=Denied("unsafe")):
-                # The pure helper cannot convert unreadable snapshot evidence into expiry.
-                from mizu.work_item_waits import liveness
-                self.assertEqual(liveness(self.store, item["wait"], None, item=item)["state"], "unknown")
+
+    def test_ancient_unknown_wait_stays_blocked_without_forcing_reopen(self):
+        with clock(0) as start:
+            item = self.block()
+        with clock(10**9), patch.object(self.store.snapshots, "get", return_value={}):
+            live = self.store.blocked_liveness_readonly()["items"][0]
+            self.assertEqual(live["state"], "unknown")
+            self.assertEqual(live["blocked_age_seconds"], 10**9)
+            page = self.store.page_ready(role_name="worker")
+            self.assertEqual((page["total"], page["unknown_blocked"]), (0, 1))
+            self.assertEqual(self.store.get(item["id"]), item)
+            item = self.change(item, "doing")
+            item = self.change(item, "blocked", wait=FUTURE)
+            self.assertEqual(item["blocked_since"], start)

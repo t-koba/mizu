@@ -1799,9 +1799,6 @@ PARAMETER_DEFAULTS = {
         '1', 'configured policy', 'work items / Project supplies [limits] work_items_doing'),
     ('work_items.py', 'WorkItems.__init__', 'stale_seconds'): (
         '86400', 'configured policy', 'work items / Project supplies [limits] work_items_stale_seconds'),
-    ('work_items.py', 'WorkItems.__init__', 'blocked_max_age_seconds'): (
-        '604800', 'configured policy',
-        'work items / Project supplies [limits] work_items_blocked_max_age_seconds'),
     ('work_items.py', 'WorkItems.page_legacy', 'limit'): (
         '25', 'policy', 'work items / caller-selected legacy listing size'),
     ('work_items.py', 'WorkItems.explain', 'limit'): (
@@ -2536,12 +2533,10 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('work_items.py', 'wait_resolution_tokens', 0, 0): (
         '1', 'format', 'retained wait-resolution token / parsed revision is positive'),
     ('work_items.py', 'WorkItems.__init__', 0, 0): (
-        '1', 'configured policy', 'blocked-wait lifetime / [limits].work_items_blocked_max_age_seconds is positive'),
-    ('work_items.py', 'WorkItems.__init__', 0, 1): (
         '1', 'configured policy', 'history-temporary cleanup / [limits].history_temporaries is a positive cap'),
-    ('work_items.py', 'WorkItems.__init__', 0, 2): (
+    ('work_items.py', 'WorkItems.__init__', 0, 1): (
         '1', 'configured policy', 'doing-slot cap / project and role work_items_doing values are positive'),
-    ('work_items.py', 'WorkItems.__init__', 0, 3): (
+    ('work_items.py', 'WorkItems.__init__', 0, 2): (
         '1', 'configured policy', 'stale visibility / [limits].work_items_stale_seconds is positive'),
     ('work_items.py', 'WorkItems._create_id', 0, 0): (
         '1', 'format', 'work-item create key / the caller-supplied idempotency key is nonempty'),

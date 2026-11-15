@@ -44,7 +44,6 @@ class InsightWorkItemStatusTests(Fixture):
             "updated_at": changed["updated_at"], "current_origin_rev": 1,
             "stale": False, "doing_since": None, "doing_age_seconds": None, "doing_stale": False,
             "blocked_since": changed["updated_at"], "blocked_age_seconds": 0,
-            "blocked_max_age_seconds": 604800,
             "reason_preview": "Investigate the dependency",
             "reason_truncated": False, "wait": changed["wait"]})
         self.assertNotIn("work_item_status", other)

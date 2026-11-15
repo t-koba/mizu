@@ -239,7 +239,6 @@ insight_cursor_ttl_seconds = 86400 # Absolute insight page cursor lifetime (60-6
 pending_insights = 30            # Newest pending proposals offered per prompt. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
 work_items_doing = 1             # Per-role active doing slots (1-100); blocked waits excluded.
 work_items_stale_seconds = 86400 # Doing-age review visibility only (1-31536000); never expires a hold.
-work_items_blocked_max_age_seconds = 604800 # Non-deadline blocked waits expire for review after seven days (positive TOML integer).
 operator_record_catalog_scan_entries = 2048 # Work-item record_closed catalog directory entries; positive TOML integer.
 work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow and incomplete legacy coverage are explicit).
 session_delta_details = "elide"  # full|elide: full/delta previews use exact read references only with that grant; shared-check details and row/liveness metadata stay explicit.

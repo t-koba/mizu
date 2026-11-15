@@ -261,7 +261,7 @@ class CiWaitTests(CiWaitFixture):
         view = self.store.blocked_liveness_readonly(limit=3)
         self.assertEqual({row["state"] for row in view["items"]}, {"absent", "impossible", "due"})
         self.assertEqual(view["counts"], {"absent": 1, "impossible": 1, "due": 1,
-                                         "unknown": 0, "pending": 2, "receipt_bound": 0, "terminal": 0, "expired": 0})
+                                         "unknown": 0, "pending": 2, "receipt_bound": 0, "terminal": 0})
         self.assertEqual((view["total"], view["overflow_count"], view["truncated"]), (5, 2, True))
         self.assertTrue(view["coverage_complete"])
 
@@ -855,9 +855,8 @@ class PublicationCiWaitTests(CiWaitFixture):
         publication.mark_dispatch()
         return publication.complete(intent, sha)
 
-    def test_publication_rebinding_preserves_age_and_expires_without_remote_failure(self):
+    def test_publication_rebinding_preserves_age_without_releasing_pending_or_unknown_waits(self):
         from test_blocked_wait_age import clock
-        self.store.blocked_max_age_seconds = 10
         with clock(0) as start:
             item = self.block()
         with clock(3):
@@ -867,17 +866,20 @@ class PublicationCiWaitTests(CiWaitFixture):
                                          wait={**self.wait, "snapshot_id": child["id"]})
         self.assertEqual(item["blocked_since"], start)
         self.assertEqual(item["wait"]["snapshot_id"], child["id"])
-        with clock(10):
-            live = self.store.page_ready(role_name="worker")["items"][0]["wait_liveness"]
-            self.assertEqual((live["state"], live["reason"]), ("expired", "blocked_max_age_reached"))
+        with clock(10**9):
+            self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
+            live = self.store.blocked_liveness_readonly()["items"][0]
+            self.assertEqual((live["state"], live["reason"]), ("pending", "terminal_evidence_absent"))
+            self.assertEqual(live["blocked_age_seconds"], 10**9)
             self.assertNotIn("outcome", live)  # No receipt/dispatch is not a remote CI failure.
-            self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "expired")
-            with self.assertRaisesRegex(Denied, "Reopen"):
-                self.store.transition(item["id"], expected_rev=item["rev"], status="blocked", actor="worker",
-                                       wait=self.wait, scope="Rebind", reason="Try again")
+            item = self.store.transition(item["id"], expected_rev=item["rev"], status="blocked", actor="worker",
+                                         wait=self.wait, scope="Rebind", reason="Try again")
+            self.assertEqual(item["blocked_since"], start)
             with patch("mizu.ci_waits.terminal_evidence", side_effect=Denied("corrupt exact receipt")):
                 page = self.store.page_ready(role_name="worker")
                 self.assertEqual((page["total"], page["unknown_blocked"]), (0, 1))
+                live = self.store.blocked_liveness_readonly()["items"][0]
+                self.assertEqual((live["state"], live["blocked_age_seconds"]), ("unknown", 10**9))
         self.assertEqual(self.store.get(item["id"]), item)
 
     def test_pre_receipt_wait_pins_snapshot_digest_and_config_without_polling_or_releasing(self):

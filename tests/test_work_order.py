@@ -486,24 +486,43 @@ class WorkOrderTests(Fixture):
         ready = {"items": [{"id": "wi_" + "1" * 32,
                             "wait_liveness": {"state": "pending", "reason": "condition_pending",
                                               "blocked_since": "2030-01-01T00:00:00+00:00",
-                                              "blocked_age_seconds": 5,
-                                              "blocked_max_age_seconds": 604800}}],
+                                              "blocked_age_seconds": 5}}],
                  "total": 1, "overflow_count": 0, "truncated": False,
                  "unseeded_decisions": 0, "coverage_complete": True, "unknown_blocked": 0}
         aged_ready = copy.deepcopy(ready)
-        aged_ready["items"][0]["wait_liveness"]["blocked_age_seconds"] = 6
+        aged_ready["items"][0]["wait_liveness"]["blocked_age_seconds"] = 10**9
         self.assertEqual(_stable_ready_for_hash(ready), _stable_ready_for_hash(aged_ready))
-        expired_ready = copy.deepcopy(aged_ready)
-        expired_ready["items"][0]["wait_liveness"].update(
-            state="expired", reason="blocked_max_age_reached")
-        self.assertNotEqual(_stable_ready_for_hash(ready), _stable_ready_for_hash(expired_ready))
+        due_ready = copy.deepcopy(aged_ready)
+        due_ready["items"][0]["wait_liveness"].update(
+            state="due", reason="condition_met")
+        self.assertNotEqual(_stable_ready_for_hash(ready), _stable_ready_for_hash(due_ready))
 
         opened = {"items": [{"id": "wi_" + "1" * 32, "status": "blocked",
                             "blocked_since": "2030-01-01T00:00:00+00:00",
-                            "blocked_age_seconds": 5, "blocked_max_age_seconds": 604800}]}
+                            "blocked_age_seconds": 5}]}
         aged_opened = copy.deepcopy(opened)
-        aged_opened["items"][0]["blocked_age_seconds"] = 6
+        aged_opened["items"][0]["blocked_age_seconds"] = 10**9
         self.assertEqual(_stable_open_for_hash(opened), _stable_open_for_hash(aged_opened))
+
+    def test_ancient_pending_wait_stays_out_of_work_order_readiness(self):
+        from test_blocked_wait_age import clock
+
+        store = self.project.work_items
+        with clock(0):
+            seed = store.create(idempotency_key="waiting", title="Waiting", actor="worker")["record"]["work_item"]
+            item = store.transition(seed["id"], expected_rev=1, actor="worker", status="blocked",
+                                    wait={"kind": "code_change"})
+            context = self.context("worker")
+            opening = plan._capture_opening(context)
+            generation = plan._frozen_generation(context)
+        with clock(10**9):
+            context = self.context("worker")
+            aged = plan._capture_opening(context)
+            self.assertEqual(aged["ready_work"], opening["ready_work"])
+            self.assertEqual(aged["ready_work"]["total"], 0)
+            self.assertEqual(aged["open_work_items"]["items"][0]["blocked_age_seconds"], 10**9)
+            self.assertEqual(plan._frozen_generation(context), generation)
+            self.assertEqual(store.get(item["id"]), item)
 
     def test_decision_page_summary_is_frozen_hashed_and_used_by_status(self):
         from unittest.mock import patch

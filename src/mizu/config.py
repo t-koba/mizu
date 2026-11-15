@@ -610,8 +610,6 @@ class Limits:
     work_items_doing: int = 1
     #: Visibility only: uninterrupted doing age that warrants review.
     work_items_stale_seconds: int = 86400
-    #: Lifetime of blocked waits without an explicit deadline.
-    work_items_blocked_max_age_seconds: int = 604800
     #: Directory-entry budget for work-item record-question closure catalogs only.
     operator_record_catalog_scan_entries: int = 2048
     #: Operator-selected decision-event window per dispatch (1-100;
@@ -674,7 +672,6 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "pending_insights": (1, 1000),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000),
-                 "work_items_blocked_max_age_seconds": (1, TOML_INTEGER_MAX),
                  "operator_record_catalog_scan_entries": (1, TOML_INTEGER_MAX),
                  "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),

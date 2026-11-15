@@ -112,7 +112,9 @@ class CombinedWaitReadinessTests(CombinedFixture):
         with patch("mizu.work_item_waits.now", return_value="2099-02-01T00:00:00+00:00"):
             before = self.store.open_state_readonly(
                 limit=10, writer_roles=writers)["blocked_work"]["items"][0]
-            self.assertEqual(before["state"], "expired")
+            self.assertEqual(before["state"], "pending")
+            self.assertGreater(before["blocked_age_seconds"], 10**9)
+            self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
             self.assertFalse(_receipt_wait_due(self.store, "worker", limit=1))
             after = self.store.open_state_readonly(
                 limit=10, writer_roles=writers)["blocked_work"]["items"][0]

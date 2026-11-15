@@ -439,7 +439,7 @@ work, and the page reports `coverage_complete: false` with the bounded
 `unknown_blocked` count so a zero `total` never reads as an exhaustive claim.
 The ledger stays
 blocked at the same revision until the writer decides what work or evidence
-remains. An ordinary pending wait below its configured age bound is not ready. A holder-owned blocked `ci`,
+remains. An ordinary pending wait is not ready, regardless of age. A holder-owned blocked `ci`,
 `publication_ci`, or `proposal_merged` item also re-enters when its existing
 receipt-bound route validates local terminal evidence for its exact current
 revision, holder and wait. CI reuses the exact source/publication/check validators
@@ -450,8 +450,8 @@ facts alone. Readiness makes no adapter calls or evidence writes. Its bounded
 `wait_kind`, `outcome` (`success`/`failure`, `merged`, or a declared publication
 outcome), and `evidence: {record_digest}`; no logs or proposal body
 are copied. The digest binds the same envelope as notification delivery without exposing its record ID.
-Missing evidence stays pending until the local age bound; corrupt, ambiguous,
-mismatched or unavailable evidence is unknown and non-ready even at that bound. Notification acknowledgements stay one-shot
+Missing evidence stays pending indefinitely; corrupt, ambiguous, mismatched or
+unavailable evidence is unknown and non-ready regardless of age. Notification acknowledgements stay one-shot
 and do not remove readiness or cause a new ready-set wake. Re-evaluation neither
 imports acceptance nor closes work automatically; terminal evidence is input
 for the holder, not completion authority (`wait_satisfied` remains false).
@@ -513,11 +513,11 @@ acknowledgement is introduced.
 not a new authority or watcher. It never locks, recovers, writes, assigns or
 transitions work. Rows carry `id`, `rev`, `holder`, `wait_kind`, `state`, and a
 bounded reason code, plus `blocked_since`, `blocked_age_seconds` (integer seconds,
-clamped to zero after clock rollback), and `blocked_max_age_seconds`. States are
+clamped to zero after clock rollback). States are
 `absent` (legacy no-wait), `pending`, `due`, `impossible` (missing/withdrawn
 insight target or an exact dependency revision superseded or substantively
 conflicting), `terminal` (the same exact CI/publication/proposal route as holder
-readiness), `expired`, and `unknown`. Generic wait diagnostics without a current
+readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
 exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change`,
 `answered_own_question`, or `null`. This annotation uses the same bounded
@@ -534,27 +534,21 @@ Missing legacy bodies, orphan identity/decision records, unsafe
 paths, inconsistent revisions, incomplete archives and malformed evidence cannot
 prove an impossible releaser or terminal outcome.
 
-`[limits].work_items_blocked_max_age_seconds` defaults to **604800 seconds
-(seven days)** and accepts a positive TOML integer. Every wait without an explicit
-`deadline.at` has this bound. At the bound, a pending wait becomes `expired` with
-reason `blocked_max_age_reached`, and re-enters its holder's `ready_work` (an
-unheld decision task remains claimable). This is local replanning evidence, not
-a remote failure or satisfied condition: `wait_satisfied` remains false. Exact
-terminal/impossible reasons take precedence over expiry; unknown/unsafe evidence
-stays unknown, never a terminal claim. Explicit deadline waits retain their `at`
-semantics with `blocked_max_age_seconds: null`, regardless of blocked age. Neither
-this setting nor expiry changes ordinary schedules, daemon spacing or admission
-defaults.
+Blocked age is diagnostic only: elapsed time never changes liveness, ready-work
+membership or transition permissions. Pending and unknown releasers remain
+blocked indefinitely without exact due, terminal or impossible evidence, or an
+explicit holder/operator transition. Age never infers completion or remote
+failure. Explicit deadline waits become due only at their `at` timestamp.
 
 The first blocked timestamp is recorded in new transition events as
 `blocked_since`. Legacy histories derive it by replay, including blocked decision
 seeds, without rewriting any record. It survives publication/delivery rebinding,
 scope changes and `blocked` → `doing` → `blocked`. Only an explicit `open` revision
 resets it; `doing` and immediate reblocking cannot renew an old episode. Open
-rows and work-item projections expose age/bound too, while full and delta holder
-prompts carry them inside `wait_liveness`.
+rows and work-item projections expose age too; blocked liveness diagnostics
+include it even when the item is absent from full and delta `ready_work` prompts.
 
-On `terminal`, `impossible` or `expired`, the holder must append a reasoned
+On `terminal` or `impossible`, the holder must append a reasoned
 `blocked` → `open` transition before claiming/reblocking, naming that observation
 and what will be reassessed. A terminal completion/drop remains an explicit
 holder decision under its existing evidence rules. If the wait became stale
@@ -566,7 +560,7 @@ an adapter, or repairs history.
 
 The default is 25 rows; the internal read API accepts 1–100. Rows and response
 retain the existing 8192-byte/1-MiB bounds. Selection retains O(limit) rows in
-problem/actionable rows (`absent`, `impossible`, `due`, `terminal`, `expired`, `unknown`) before
+problem/actionable rows (`absent`, `impossible`, `due`, `terminal`, `unknown`) before
 `pending`/`receipt_bound` rows, with ledger order within each group; scan time
 follows ledger size. `total` and fixed state `counts`
 cover the full scan, including omitted rows. `truncated` and `overflow_count`

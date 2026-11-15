@@ -139,29 +139,17 @@ def blocked_start(since, record):
     return since
 
 
-def blocked_age(store, item):
+def blocked_age(item):
     since = item.get("blocked_since")
     age = (None if since is None else max(0, int(
         (dt.datetime.fromisoformat(now()) - dt.datetime.fromisoformat(since)).total_seconds())))
-    wait = item.get("wait") or {}
-    return {"blocked_since": since, "blocked_age_seconds": age,
-            "blocked_max_age_seconds": None if wait.get("kind") == "deadline" else store.blocked_max_age_seconds}
+    return {"blocked_since": since, "blocked_age_seconds": age}
 
 
 def liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None, record_question=None):
     observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
                          operator_answer=operator_answer, record_question=record_question)
-    if item is None:
-        return observed
-    age = blocked_age(store, item)
-    # Unknown/unsafe evidence never becomes a terminal claim. Expiration is
-    # local replanning authority only, not a remote failure or satisfaction.
-    if (observed["state"] in ("pending", "receipt_bound")
-            and age["blocked_max_age_seconds"] is not None
-            and age["blocked_age_seconds"] is not None
-            and age["blocked_age_seconds"] >= age["blocked_max_age_seconds"]):
-        observed = {**observed, "state": "expired", "reason": "blocked_max_age_reached"}
-    return {**observed, **age}
+    return observed if item is None else {**observed, **blocked_age(item)}
 
 
 def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None, record_question=None) -> dict:

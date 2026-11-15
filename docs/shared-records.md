@@ -221,8 +221,8 @@ the existing Insight `answer_lookup` route. `[limits].operator_record_catalog_sc
 Exhaustion, corrupt or unavailable evidence is `unknown`; a complete catalog with
 no exact authenticated answer is `pending`. At least one exact answer to the
 question writer makes liveness `due`, even if publishing is later disabled or
-multiple distinct answers exist. Non-deadline blocked-age policy still applies
-to pending waits; unknown evidence never becomes due or expired.
+multiple distinct answers exist. Blocked age is diagnostic only; pending
+and unknown waits remain blocked regardless of elapsed time.
 
 This is read-only replanning evidence: the item remains blocked until its holder
 explicitly transitions it under CAS. No additional wake, wait receipt, assignment,

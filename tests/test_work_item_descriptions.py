@@ -22,7 +22,7 @@ class WorkItemDescriptionTests(Fixture):
 
     @staticmethod
     def event_fields(record):
-        # The blocked-wait lifetime is stored separately from the versioned event schema.
+        # The first blocked timestamp is stored separately from the versioned event schema.
         return set(record) - {"blocked_since"}
 
     def create(self, **kwargs):

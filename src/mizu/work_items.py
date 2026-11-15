@@ -30,7 +30,7 @@ from . import insight_archive, work_item_retirement
 from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, normalize_record_wait
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
-                     PublicationEvidence, TOML_INTEGER_MAX)
+                     PublicationEvidence)
 from .errors import Denied, LimitExceeded, OpenWorkItemsFull
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
                  safe_read, sync_dir, text_preview, write_json)
@@ -201,7 +201,6 @@ def _directory(path: Path) -> bool:
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
-                 blocked_max_age_seconds=604800,
                  effective_verification_projection=None, operator_answer_lookup=None,
                  record_question_lookup=None, register_question_wait=None,
                  publication_evidence: PublicationEvidence | None = None,
@@ -220,9 +219,6 @@ class WorkItems:
         self.effective_verification_projection = effective_verification_projection
         self.doing_limit, self.doing_limits = doing_limit, dict(doing_limits or {})
         self.stale_seconds = stale_seconds
-        if type(blocked_max_age_seconds) is not int or not 1 <= blocked_max_age_seconds <= TOML_INTEGER_MAX:
-            raise Denied("Work-item blocked maximum age must be a positive TOML integer")
-        self.blocked_max_age_seconds = blocked_max_age_seconds
         if (type(history_temporaries) is not int
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
@@ -1670,7 +1666,7 @@ class WorkItems:
         """Build a bounded projection while the caller holds insights.lock."""
         item, since = self._indexed(item_id, locked=True)
         view = {"item": item, **self._origin_projection(item),
-                **self._hold_projection(since), **blocked_age(self, item)}
+                **self._hold_projection(since), **blocked_age(item)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
             raise LimitExceeded("Work-item projection exceeds byte bound")
         return view
@@ -1758,7 +1754,7 @@ class WorkItems:
                 since = None
             projection = {"item": current, **self._origin_projection(current),
                           **self._hold_projection(since),
-                          **blocked_age(self, {**current, "blocked_since": blocked_since})}
+                          **blocked_age({**current, "blocked_since": blocked_since})}
             if len(canonical(projection)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
             history_total = current["rev"]
@@ -1802,7 +1798,7 @@ class WorkItems:
         status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
                   "holder": item["holder"], "updated_at": item["updated_at"],
                   "current_origin_rev": origin["current_origin_rev"],
-                  "stale": origin["stale"], **self._hold_projection(since), **blocked_age(self, item)}
+                  "stale": origin["stale"], **self._hold_projection(since), **blocked_age(item)}
         if "wait_resolution" in item:
             status["wait_resolution"] = item["wait_resolution"]
         reason = item.get("reason")
@@ -2088,7 +2084,7 @@ class WorkItems:
         if item["status"] == "blocked":
             row["wait"] = item["wait"]
             row.update({key: view[key] for key in
-                        ("blocked_since", "blocked_age_seconds", "blocked_max_age_seconds")})
+                        ("blocked_since", "blocked_age_seconds")})
             if wait_liveness is not None:
                 row["wait_liveness"] = wait_liveness
         if "description" in item:
@@ -2214,7 +2210,7 @@ class WorkItems:
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
-                  ("absent", "pending", "due", "impossible", "receipt_bound", "terminal", "expired", "unknown")}
+                  ("absent", "pending", "due", "impossible", "receipt_bound", "terminal", "unknown")}
         total = 0
         open_count = 0
         eligible = 0
@@ -2242,7 +2238,7 @@ class WorkItems:
                     and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
                 wait_resolution_pending = True
             view = {"item": item, **self._origin_projection(item, entry[3:]),
-                    **self._hold_projection(since), **blocked_age(self, item)}
+                    **self._hold_projection(since), **blocked_age(item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
             open_count += 1
@@ -2268,7 +2264,7 @@ class WorkItems:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
                         continue
-                    if state["state"] not in ("due", "impossible", "absent", "terminal", "expired"):
+                    if state["state"] not in ("due", "impossible", "absent", "terminal"):
                         continue
                 if blocked_only:
                     counts[state["state"]] += 1
@@ -2537,14 +2533,9 @@ class WorkItems:
                 raise Denied("New blocked transitions require a supported observable wait")
             if blocked_waiter:
                 state = liveness(self, blocked_waiter.get("wait"), None, item=blocked_waiter)
-                bound, age = state["blocked_max_age_seconds"], state["blocked_age_seconds"]
-                aged = (state["state"] not in ("due", "terminal", "impossible", "expired")
-                        and bound is not None and age is not None and age >= bound)
-                needs_open = state["state"] in ("terminal", "impossible", "expired") or aged
-                reopen_reason = (state["reason"] if state["state"] in ("terminal", "impossible", "expired")
-                                 else "blocked_max_age_reached" if aged else state["reason"])
+                needs_open = state["state"] in ("terminal", "impossible")
                 if needs_open and (status == "blocked" or (status == "doing" and current["status"] == "blocked")):
-                    raise Denied(f"Reopen blocked work with a reason before renewing its wait: {reopen_reason}")
+                    raise Denied(f"Reopen blocked work with a reason before renewing its wait: {state['reason']}")
                 if (status == "open" and needs_open
                         and (not isinstance(reason, str) or not reason.strip())):
                     raise Denied("Reopening blocked work requires a reason")

@@ -47,7 +47,11 @@ class RecordWaitTests(Fixture):
     def test_exact_answer_is_due_without_status_delivery_or_ack_mutation(self):
         item = self.block()
         self.assertEqual(self.state(item), 'pending')
-        self.assertEqual(self.store.page_ready(role_name='worker')['total'], 0)
+        with patch('mizu.work_item_waits.now', return_value='2099-02-01T00:00:00+00:00'):
+            self.assertEqual(self.store.page_ready(role_name='worker')['total'], 0)
+            live = self.store.blocked_liveness_readonly()['items'][0]
+            self.assertEqual(live['state'], 'pending')
+            self.assertGreater(live['blocked_age_seconds'], 10**9)
         answer = self.answer()
         self.assertEqual(self.state(item), 'due')
         ready = self.store.page_ready(role_name='worker')
