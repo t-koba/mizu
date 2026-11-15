@@ -457,6 +457,42 @@ class JobTests(Fixture):
         check_jobs.clear_wait(self.project, 'worker')
         self.assertFalse(second.exists())
 
+    def test_removing_last_waited_subscription_retries_cancelled_original(self):
+        original = self.lifecycle_record(30, status='cancelled', passed=False, acknowledged=False)
+        first = self.lifecycle_record(31, status='cancelled', passed=False, acknowledged=False,
+                                      shared_job=original.name)
+        check_jobs.set_wait(self.project, 'worker', first.name)
+        check_jobs.acknowledge(self.project, 'worker', [original.name])
+        second = self.lifecycle_record(32, status='cancelled', passed=False, acknowledged=False,
+                                       shared_job=original.name)
+        self.assertTrue(original.exists() and first.exists() and second.exists())
+
+        check_jobs.set_wait(self.project, 'worker', second.name)
+        self.assertFalse(first.exists())
+        self.assertTrue(original.exists() and second.exists())  # The other typed edge still pins it.
+        check_jobs.acknowledge(self.project, 'worker', [second.name])
+        check_jobs.clear_wait(self.project, 'worker')
+        self.assertFalse(second.exists())
+        self.assertFalse(original.exists())
+
+    def test_releasing_subscription_does_not_remove_reusable_original(self):
+        original = self.lifecycle_record(33, status='completed', passed=True, acknowledged=True)
+        subscription = self.lifecycle_record(34, status='cancelled', passed=False, acknowledged=True,
+                                             shared_job=original.name)
+        check_jobs.set_wait(self.project, 'worker', subscription.name)
+        check_jobs.clear_wait(self.project, 'worker')
+        self.assertFalse(subscription.exists())
+        self.assertTrue(original.exists())
+
+    def test_explicitly_requested_reusable_original_releases_after_subscription(self):
+        original = self.lifecycle_record(35, status='completed', passed=True, acknowledged=True)
+        subscription = self.lifecycle_record(36, status='cancelled', passed=False,
+                                             acknowledged=True, shared_job=original.name)
+        with lock(self.project.root / 'locks/check-jobs.lock'):
+            check_jobs._release_locked(self.project, [subscription.name, original.name])
+        self.assertFalse(subscription.exists())
+        self.assertFalse(original.exists())
+
     def test_source_release_preserves_typed_references_and_unread_or_physical_jobs(self):
         stale = {'code_digest': 'c' * 64}
         source = self.lifecycle_record(1, **stale)
@@ -512,8 +548,7 @@ class JobTests(Fixture):
         self.assertTrue(source.exists())
         check_jobs.acknowledge(self.project, 'reviewer', [sub.name])
         self.assertFalse(sub.exists())
-        check_jobs.acknowledge(self.project, 'worker', [source.name])
-        self.assertFalse(source.exists())
+        self.assertFalse(source.exists())  # Removing the final acknowledged edge retries its original.
 
     def test_release_keeps_live_owner_lock(self):
         path = self.lifecycle_record(1, code_digest='c' * 64)

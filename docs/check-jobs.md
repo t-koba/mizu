@@ -244,8 +244,11 @@ Release belongs to the source that owns each lifetime:
 - Terminal-result acknowledgement and removal/replacement of a wait release
   acknowledged terminal non-reusable jobs and subscriptions only when no typed
   reference remains. Acknowledgement alone never releases a pinned record;
-  clearing a wait retries only its previous exact job ID. Reusable executions
-  remain owned by the source/input lifecycle, not delivery.
+  clearing a wait retries only its previous exact job ID. Removing a terminal
+  subscription also retries its exact original after the last typed edge leaves;
+  a reusable original stays source-owned unless independently selected as a
+  stale-source candidate. Reusable executions remain owned by the source/input
+  lifecycle, not delivery.
 
 Every surviving `shared_job` subscription (including detached or acknowledged
 subscriptions) and every retained `<role>.wait.json` ID is a reference. Expired

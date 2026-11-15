@@ -659,8 +659,11 @@ def _release_locked(project, ids, *, protect=frozenset()):
                 return  # An invalid record can conceal any reference.
             if db.execute('SELECT 1 FROM check_waits WHERE job_id IS NULL LIMIT 1').fetchone():
                 return  # An unreadable wait can point to any job.
-    except (Denied, OSError, ValueError, RecursionError):
+    except (Denied, LimitExceeded, OSError, ValueError, RecursionError):
         return
+    ids = tuple(ids)
+    requested_ids = set(ids)
+    retry_originals = set()
     for job_id in ids:
         if job_id in protect:
             continue
@@ -704,8 +707,28 @@ def _release_locked(project, ids, *, protect=frozenset()):
             # runner must re-read the terminal/missing job before starting.
             with project.insights.ledger.write('check_jobs', [job_id]):
                 shutil.rmtree(directory)
+            original_id = job.get('shared_job')
+            if isinstance(original_id, str):
+                retry_originals.add(original_id)
         except (Denied, Busy, LimitExceeded, OSError, ValueError, RecursionError):
             continue  # Unknown ownership, evidence or reference state is a pin.
+    # Removing the last typed subscription edge may make its original
+    # releasable. Retry only that exact parent; passing the same source-stale
+    # candidate set also preserves source-owned invalidation, while an
+    # otherwise reusable execution remains owned by its input lifecycle.
+    parents = []
+    for original_id in sorted(retry_originals):
+        if original_id in requested_ids:
+            parents.append(original_id)
+            continue
+        try:
+            original = acceptance.read_job(project, original_id)
+        except (Denied, LimitExceeded, OSError, ValueError, TypeError, RecursionError):
+            continue
+        if not reusable(original):
+            parents.append(original_id)
+    if parents:
+        _release_locked(project, parents, protect=protect)
 
 
 def _release_stale(project, source, execution, env, current, *, protect=frozenset()):
