@@ -1404,6 +1404,13 @@ def _gate_parser():
     return parser
 
 
+def check_python_syntax(root: Path = ROOT) -> None:
+    """Validate the gate's Python source without creating bytecode."""
+    for directory in ('src', 'scripts', 'tests', 'examples', 'adapters/claude'):
+        for path in (root / directory).rglob('*.py'):
+            ast.parse(path.read_text(encoding='utf-8'), filename=str(path.relative_to(root)))
+
+
 def main():
     parser = _gate_parser()
     args = parser.parse_args()
@@ -1577,9 +1584,7 @@ def main():
         checks.append(entry)
         return ended_at
     # AST checks avoid leaving bytecode inside an immutable source release.
-    for directory in ('src', 'scripts', 'tests', 'examples', 'adapters/claude'):
-        for path in (ROOT / directory).rglob('*.py'):
-            ast.parse(path.read_text(encoding="utf-8"), filename=str(path.relative_to(ROOT)))
+    check_python_syntax()
     checks.append({'name': 'python-syntax', 'status': 'pass'})
     def unittest_counts(output):
         import re

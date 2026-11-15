@@ -1175,6 +1175,17 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                '  File "/synthetic-private-host/tests/test_fake.py", line 55, in fake\n'
                'ValueError: raw_fixture_value\nRan 3 tests in 0.1s\n'
                'FAILED (failures=1, errors=2, skipped=1)\n')
+        syntax_checks = 0
+        original_syntax_check = CHECK.check_python_syntax
+
+        def check_syntax_once(*args, **kwargs):
+            nonlocal syntax_checks
+            syntax_checks += 1
+            if syntax_checks == 1:
+                return original_syntax_check(*args, **kwargs)
+
+        # Each scenario runs the gate, but the unchanged repository syntax is
+        # a shared fixture; scan it once rather than four times.
         for timed_out, metadata in ((False, True), (False, False), (True, False), (True, True)):
             with self.subTest(timed_out=timed_out, metadata=metadata), tempfile.TemporaryDirectory() as temporary:
                 report = Path(temporary) / 'report.json'
@@ -1213,7 +1224,8 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                         mock.patch.object(CHECK, 'terminate_process', side_effect=lambda p: p.kill() if timed_out else None) as terminate, \
                         mock.patch.object(CHECK.shutil, 'which', return_value=None), \
                         mock.patch.object(CHECK, 'bash_available', return_value=False), \
-                        mock.patch.object(CHECK.sys, 'stdout', output):
+                        mock.patch.object(CHECK.sys, 'stdout', output), \
+                        mock.patch.object(CHECK, 'check_python_syntax', side_effect=check_syntax_once):
                     self.assertEqual(CHECK.main(), 1)
                 receipt = json.loads(report.read_text(encoding='utf-8'))
                 entry = next(c for c in receipt['checks'] if c['name'] == 'python-unit-and-contract-tests')
@@ -1248,6 +1260,7 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 if timed_out:
                     self.assertIn(f'timed out after {timeout} s', details)
                 self.assertIn('[+', output.getvalue(), 'live timestamped output is still relayed')
+        self.assertEqual(syntax_checks, 4)
 
 
 class GateRelayBudgetTests(unittest.TestCase):
