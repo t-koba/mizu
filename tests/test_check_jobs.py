@@ -435,6 +435,28 @@ class JobTests(Fixture):
             self.submit()
         self.assertFalse(original.exists())
 
+    def test_wait_clear_preserves_reusable_source_owned_result(self):
+        result = self.lifecycle_record(20, acknowledged=True)
+        check_jobs.set_wait(self.project, 'worker', result.name)
+        check_jobs.clear_wait(self.project, 'worker')
+        self.assertTrue(result.exists())
+
+    def test_terminal_nonreusable_jobs_release_after_wait_clear_or_replacement(self):
+        first = self.lifecycle_record(21, status='cancelled', passed=False, acknowledged=False)
+        first_id = first.name
+        check_jobs.set_wait(self.project, 'worker', first_id)
+        check_jobs.acknowledge(self.project, 'worker', [first_id])
+        self.assertTrue(first.exists())  # The current wait remains a typed reference.
+
+        second = self.lifecycle_record(22, status='cancelled', passed=False, acknowledged=False)
+        second_id = second.name
+        check_jobs.set_wait(self.project, 'worker', second_id)
+        self.assertFalse(first.exists())  # Replacing the final reference retries release.
+        check_jobs.acknowledge(self.project, 'worker', [second_id])
+        self.assertTrue(second.exists())
+        check_jobs.clear_wait(self.project, 'worker')
+        self.assertFalse(second.exists())
+
     def test_source_release_preserves_typed_references_and_unread_or_physical_jobs(self):
         stale = {'code_digest': 'c' * 64}
         source = self.lifecycle_record(1, **stale)
@@ -482,7 +504,6 @@ class JobTests(Fixture):
         check_jobs.acknowledge(self.project, 'worker', [path.name])
         self.assertTrue(path.exists())
         check_jobs.clear_wait(self.project, 'worker')
-        check_jobs.acknowledge(self.project, 'worker', [path.name])
         self.assertFalse(path.exists())
         source = self.lifecycle_record(2, passed=False, acknowledged=False)
         sub = self.lifecycle_record(3, role='reviewer', status='queued',

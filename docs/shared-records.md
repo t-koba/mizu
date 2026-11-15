@@ -922,7 +922,7 @@ Current behavior can be checked in these functions (`insight.decision` uses its 
 - [`Insights.decision_events`, `acknowledge_decisions`, `due_waits`, `consume_waits`, `pending_obligations`](../src/mizu/insights.py): current decision/revision eligibility, exact receipts and consumable waits.
 - [`decision_delivery.pending`, `bind`, `read`, `acknowledge`](../src/mizu/decision_delivery.py) branch by the durable marker, carry host-only unit manifests and never fall back from shared failures. [`selection.work_inputs`](../src/mizu/selection.py) uses the same authority as runtime prompt/wake/ack, so legacy receipts cannot create a second active selection view.
 - [`work_item_events.pending`, `acknowledge`](../src/mizu/work_item_events.py): terminal projections and source-validated old receipts; [`ci_waits.pending`, `delivery`, `validate_selection`, `complete`](../src/mizu/ci_waits.py): current holder/revision/evidence checks, blocked `updated_at` ordering and explicit receipt validation.
-- [`check_jobs.pending`, `result`, `logs`, `acknowledge`, `_withdraw_locked`, `_release_locked`, `_release_stale`, `request_slot`](../src/mizu/check_jobs.py): prompt role, read versus acknowledgement authority, withdrawn demand and source-owned release by indexed typed references.
+- [`check_jobs.pending`, `result`, `logs`, `acknowledge`, `_withdraw_locked`, `_release_locked`, `_release_stale`, `request_slot`, `set_wait`, `clear_wait`](../src/mizu/check_jobs.py): prompt role, read versus acknowledgement authority, withdrawn demand and source-owned release by indexed typed references.
 - [`runtime.prompt_for`, `ci_failures_projection`, `wake_ci_failures`, `_ci_due_for`](../src/mizu/runtime.py): prompt construction and explicit CI wake selection/due policy.
 
 

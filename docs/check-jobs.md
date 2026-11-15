@@ -241,9 +241,11 @@ Release belongs to the source that owns each lifetime:
   persists its sequence in the job and index for indexed maximum lookup;
   only legacy request IDs use their original bounded 0–1024 reconstruction.
   Unrelated terminal history is not scanned to submit or allocate an ID.
-- Terminal-result acknowledgement releases acknowledged terminal non-reusable
-  jobs and subscriptions only when no typed reference remains. Reusable
-  executions remain owned by the source/input lifecycle, not delivery.
+- Terminal-result acknowledgement and removal/replacement of a wait release
+  acknowledged terminal non-reusable jobs and subscriptions only when no typed
+  reference remains. Acknowledgement alone never releases a pinned record;
+  clearing a wait retries only its previous exact job ID. Reusable executions
+  remain owned by the source/input lifecycle, not delivery.
 
 Every surviving `shared_job` subscription (including detached or acknowledged
 subscriptions) and every retained `<role>.wait.json` ID is a reference. Expired

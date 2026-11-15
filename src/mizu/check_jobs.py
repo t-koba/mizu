@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 from .admission import check_slot_exclusion
 from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
-from .errors import Busy, CaptureLimitExceeded, Denied
+from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, write_job
@@ -704,7 +704,7 @@ def _release_locked(project, ids, *, protect=frozenset()):
             # runner must re-read the terminal/missing job before starting.
             with project.insights.ledger.write('check_jobs', [job_id]):
                 shutil.rmtree(directory)
-        except (Denied, Busy, OSError, ValueError, RecursionError):
+        except (Denied, Busy, LimitExceeded, OSError, ValueError, RecursionError):
             continue  # Unknown ownership, evidence or reference state is a pin.
 
 
@@ -1736,6 +1736,30 @@ def wait_signature(project):
             'inbox': project.insights.generation()}
 
 
+def _wait_job_id(project, role):
+    try:
+        record = read_json(root(project) / (role + '.wait.json'), {},
+                           max_bytes=project.config.limits.file_bytes)
+    except (Denied, LimitExceeded, OSError, ValueError, TypeError, RecursionError):
+        return None
+    job_id = record.get('id') if isinstance(record, dict) else None
+    return job_id if isinstance(job_id, str) and DIGEST.fullmatch(job_id) else None
+
+
+def _release_wait_target(project, job_id):
+    if not isinstance(job_id, str) or not DIGEST.fullmatch(job_id):
+        return
+    from . import acceptance
+    try:
+        job = acceptance.read_job(project, job_id)
+    except (Denied, LimitExceeded, OSError, ValueError, TypeError, RecursionError):
+        return
+    # Passing reusable executions live until their exact source/input key
+    # changes; wait removal releases only delivery-owned terminal records.
+    if not reusable(job):
+        _release_locked(project, [job_id])
+
+
 def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
     """Record the role's deferral on one job and the bound that ends it.
 
@@ -1749,6 +1773,7 @@ def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
     positive epoch bounds are accepted.
     """
     with lock(project.root / 'locks/check-jobs.lock'):
+        previous_id = _wait_job_id(project, role)
         job = read(project, job_id)
         if job['role'] != role:
             raise Denied('Check wait belongs to another role')
@@ -1763,6 +1788,8 @@ def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
         name = role + '.wait.json'
         with project.insights.ledger.write('check_jobs', [name]):
             write_json(root(project) / name, record)
+        if previous_id is not None and previous_id != job_id:
+            _release_wait_target(project, previous_id)
         return record
 
 
@@ -1811,8 +1838,10 @@ def deferrals(project):
 def clear_wait(project, role):
     name = role + '.wait.json'
     with lock(project.root / 'locks/check-jobs.lock'):
+        previous_id = _wait_job_id(project, role)
         with project.insights.ledger.write('check_jobs', [name]):
             (root(project) / name).unlink(missing_ok=True)
+        _release_wait_target(project, previous_id)
 
 
 def continuation(project, role, snapshot, *, discovery=None):
