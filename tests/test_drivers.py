@@ -742,9 +742,9 @@ class SyntheticEngineTests(Fixture):
         # answer is a measurement.
         for engine, scenario in (('claude', 'no-ready'), ('codex', 'no-initialize')):
             with self.subTest(engine=engine):
-                with unittest.mock.patch(f'mizu.{engine}.startup_bound', return_value=2), \
+                with unittest.mock.patch(f'mizu.{engine}.startup_bound', return_value=1), \
                      unittest.mock.patch(f'mizu.{engine}.record_startup') as record:
-                    with self.assertRaisesRegex(ProtocolError, 'exceeded its 2 s bound'):
+                    with self.assertRaisesRegex(ProtocolError, 'exceeded its 1 s bound'):
                         self.execute(engine, scenario)
                 record.assert_not_called()
 
