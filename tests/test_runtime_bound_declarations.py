@@ -490,6 +490,8 @@ DECLARATIONS = {
     },
     'dispatch_evidence.py': {
         'MAX_TEXT': ('256', 'safety', 'dispatch evidence / fixed persisted text-label length ceiling'),
+        'MAX_ORDINAL': ('2 ** 63 - 1', 'format',
+                        'dispatch evidence / fixed signed-64-bit on-disk ordinal envelope, not a retention policy'),
     },
     'cli.py': {},
     'workspace_cache.py': {},
@@ -1873,8 +1875,6 @@ RANGE_ARGUMENTS = {
         '8', 'safety',
         'fs / bounded UUID temporary-name collision attempts; fail closed if all eight collide'),
     ('scheduler_evidence.py', 'summarize', 0, 0): (
-        '1', 'mechanism', 'scheduler evidence / begin comparison at the second entry'),
-    ('scheduler_evidence.py', 'summarize', 0, 1): (
         '0', 'mechanism', 'scheduler evidence / begin disjoint adjacent-pair grouping at the first entry'),
     ('scheduler_evidence.py', 'summarize', 2, 0): (
         '2', 'mechanism', 'scheduler evidence / adjacent-pair stride'),
@@ -1938,12 +1938,12 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('insights.py', 'Insights.history', 1, 0): (
         'end + 1', 'configured policy',
         'insight history / scan through the page end bounded by the configured read budget'),
-    ('scheduler_evidence.py', 'summarize', 1, 0): (
+    ('scheduler_evidence.py', 'summarize', 0, 0): (
         'len(sequence)', 'mechanism',
-        'scheduler evidence / overlap scan walks the already-bounded sorted sequence'),
-    ('scheduler_evidence.py', 'summarize', 1, 1): (
+        'scheduler evidence / interval-overlap scan examines each already-bounded sequence entry'),
+    ('scheduler_evidence.py', 'summarize', 1, 0): (
         'len(sequence) - 1', 'mechanism',
-        'scheduler evidence / adjacent-pair scan walks the already-bounded sorted sequence'),
+        'scheduler evidence / adjacent-pair scan stops before an unmatched final entry'),
     ('snapshot.py', 'Snapshots.merge', 0, 0): (
         'self.history_index', 'configured policy',
         'snapshot merge / ancestry walk bounded by limits.history_index parent edges'),
