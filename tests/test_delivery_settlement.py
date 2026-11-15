@@ -143,12 +143,17 @@ class DeliverySettlementTests(Fixture):
     def test_each_shared_receipt_fault_keeps_its_exact_effect_unresolved(self):
         # One run selects all four families. Decision/operator errors propagate;
         # CI/proposal errors remain suppressed under existing semantics.
-        for family, commit in product(('operator', 'decision', 'ci', 'proposal'), (False, True)):
+        for index, (family, commit) in enumerate(
+                product(('operator', 'decision', 'ci', 'proposal'), (False, True))):
             with self.subTest(family=family, committed=commit):
                 # Fresh independent fixture per fault, so a prior receipt cannot
-                # hide an effect that this run actually selected.
-                case = type(self)('test_success_binds_all_exact_manifests_and_cleans_only_after_close')
-                case.setUp()
+                # hide an effect that this run actually selected. Reuse this test's
+                # already-created fixture for the first case instead of building a
+                # ninth unused project.
+                case = self if index == 0 else type(self)(
+                    'test_success_binds_all_exact_manifests_and_cleans_only_after_close')
+                if case is not self:
+                    case.setUp()
                 try:
                     original = shared_records.atomic_write
                     def fail_receipt(path, raw, **kwargs):
@@ -180,7 +185,8 @@ class DeliverySettlementTests(Fixture):
                     settlement.cleanup(case.project.root, run)
                     case.assert_retained(run)
                 finally:
-                    case.doCleanups()
+                    if case is not self:
+                        case.doCleanups()
 
     def test_post_context_record_fault_and_terminal_cleanup_replay(self):
         original = settlement._write
