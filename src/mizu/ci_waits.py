@@ -925,7 +925,13 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
         # failures too: no selected pair is queried twice in this tick.
         responses = {}
         observed = 0
-        for item, candidate, wait in _poll_candidates(store, descendants, scan_errors, limit):
+        # With no selected pairs the response pass would hit `target not in
+        # targets` for every candidate: full enumeration and receipt resolution
+        # for no effect. Its only other contribution, scan_errors, is already
+        # collected by the first pass over the same unchanged store.
+        candidates = (_poll_candidates(store, descendants, scan_errors, limit)
+                      if targets else ())
+        for item, candidate, wait in candidates:
             target = (wait["branch"], wait["sha"])
             if target not in targets:
                 continue

@@ -94,6 +94,23 @@ class CiChangesTests(CiWaitFixture):
         self.assertTrue(ci_waits.evidence(self.store, item))
         self.assertTrue(ci_waits.evidence(self.store, new))
 
+    def test_idle_empty_page_skips_response_traversal(self):
+        items = [self.block(str(i), wait=self.make_wait(i)) for i in range(2)]
+        self.subjects = []
+        self.assertEqual(self.tick()["polled"], 2)  # enroll both targets
+        self.assertEqual(self.tick()["polled"], 0)  # caught up
+        with patch.object(ci_waits, "_poll_candidates",
+                          wraps=ci_waits._poll_candidates) as counted:
+            result = self.tick()
+        self.assertEqual((result["polled"], result["observed"]), (0, 0))
+        self.assertTrue(result["ok"])
+        # Only the single eligibility pass traverses candidates. The empty
+        # response pass used to resolve every waiter's candidates again to no
+        # effect (call count was 2); it is now skipped when no target is selected.
+        self.assertEqual(counted.call_count, 1)
+        self.assertEqual(self.calls("status"), [])
+        self.assertEqual(len(self.calls("changes")), 1)
+
     def test_subject_maps_exact_branch_and_all_pinned_shas_with_shared_reads(self):
         items = [self.block("first"), self.block("same")]
         items.append(self.block("older", wait=self.make_wait(1)))
