@@ -1443,17 +1443,19 @@ mizu --config CONFIG usage PROJECT --cache-evidence
 ```
 
 This separate, read-only mode leaves plain `mizu usage PROJECT` unchanged.
-It reads only that project's existing `runs/*/dispatch-attempts.json`, never
-calls a provider, writes telemetry, exposes model tools, or changes scheduling.
-The JSON schema-1 result has a fixed aggregate shape (under 8 KiB): UTC observed
+It reads only that project's existing `runs/*/dispatch-attempts.json` and
+`started.json`, never calls a provider, writes telemetry, exposes model tools,
+or changes scheduling.
+The JSON schema-1 result has a fixed aggregate shape (under 12 KiB): UTC observed
 period, observed/eligible attempts, exclusive static exclusion reasons, pair
 counts, cache-read-share bins/quantiles, idle-gap seconds quantiles, distributions
 **across** internal groups,
+admission-choice outcome counts and a token-weighted observed share,
 and coverage counters. No group rows, identifiers/hashes, raw labels, prompts,
 paths or error strings are emitted. Group identity internally is the actual
 session key + generation + exact provider/model, not a synthetic grouping.
 Only aggregate observations may be returned through the existing operator Q&A.
-The 8 KiB bound still includes idle-gap quantiles: the fixed shape with
+The 12 KiB bound includes idle-gap quantiles and admission outcomes: the fixed shape with
 conservative 40-character numeric placeholders and 32-character timestamps
 remains below it, including the CLI's indented JSON (covered synthetically).
 
@@ -1465,15 +1467,68 @@ mtime/name within those candidates, and `scan_seconds = 2` sets a cooperative
 monotonic deadline checked around bounded operations and through analysis.
 These are defaults, not hard maxima; increasing them can increase work and
 memory. The result's `limits` reports the configured budgets (`seconds` defaults
-to `2.0`). Per-file byte/attempt caps come from `[dispatch_evidence]`
-(defaults 256 KiB/64), separately from this scan window. A lowered byte cap can
-exclude older files; a lowered attempt cap scans only a prefix and marks
-coverage incomplete, not complete history.
-Enumeration uses no-follow directory handling; source reads use private-root
+to `2.0`). Dispatch-record byte/attempt caps come from `[dispatch_evidence]`
+(defaults 256 KiB/64), separately from this scan window. A lowered dispatch byte
+cap can exclude older files; a lowered attempt cap scans only a prefix and marks
+coverage incomplete, not complete history. The same selected run-directory
+window and deadline cover both source files. `started.json` reads use
+`min([limits].file_bytes, 64 KiB)` and the source's maximum 100 observations;
+its candidate arrays are additionally bounded by the retained file bytes and
+must match their exact recorded total. These independent limits do not alter
+source retention. Enumeration uses no-follow directory handling; source reads use private-root
 `safe_read` (refusing links/hardlinks/specials; portable platforms check reparse
 points and identity without claiming POSIX path-component pinning). A single
 stalled OS operation cannot be preempted; an overrun is reported as timeout.
 There are no retries; rerunning obtains a new bounded observation, not a cursor.
+
+`admission_outcomes` is a separate descriptive aggregate; the existing attempt
+shares and session-pair calculations are unchanged. `files_attempted` / `files_read`
+refer to `started.json`; the top-level coverage file counters still refer to
+dispatch files. The admission `excluded` counters identify missing, unavailable,
+oversized or malformed started records; missing/malformed/omitted/truncated or
+ambiguous observations; incomplete/truncated/ambiguous choice sets; selected
+candidates missing or not ready; duplicate selected admissions; incomplete
+dispatch evidence, missing/duplicate/mismatched initial joins, unknown/mismatched
+identities, unfinished dispatches and unknown denominators. These are exclusive
+first-failure counts per run within the examined window, not counts of all defects
+in each record. `omitted_observations` separately sums the retained omission counts.
+
+Only a single retained observation with outer `omitted == 0` can supply a choice
+set: multiple observations have no physical-attempt marker and are ambiguous.
+The set must have `complete is true`, exact integer `omitted == 0`, a candidate
+count equal to `total`, unique 32-lowercase-hex admission IDs, ready/busy rows,
+and exactly one ready selected candidate. `complete_choice_sets` counts these
+sets; `ready_alternatives` counts their nonselected ready candidates only.
+`same_session_alternatives` additionally requires exact known profile, engine,
+session key and generation equality with the selected candidate;
+`unknown_alternative_identities` counts alternatives for which either identity
+is unknown. Unsupported admission identities (currently engines other than
+Pi/pi-durable), explicit unknown reasons, missing keys/generations and invalid
+identity values never become same-session or affinity-eligible evidence.
+
+`selected_admissions` counts unique selected IDs from those complete sets within
+the scanned window; repeated IDs exclude every affected run, not just later rows.
+Each selection joins only its own directory's unique `execution_attempt == 1`
+row with exact run ID and `phase == initial`. Dropped/over-limit dispatch files
+or rows with missing/invalid attempt numbers cannot establish this join. Known
+profile, engine, session key and generation must match exactly on both sides.
+No later dispatch supplies a missing outcome. `valid_outcomes` additionally
+requires a settled returned/raised attempt with valid usage details and the
+existing engine-contract denominator and cache-read-share checks.
+`token_weighted_cache_read_share` is the sum of cache-read tokens divided by the
+sum of prompt-input tokens for these unique fully matched outcomes, **not** the
+mean of per-attempt shares. Both token sums remain internal; the ratio is null
+without a valid denominator, while a known zero cache-read share stays zero.
+
+Admission `coverage` is `observed_window_only` only for a nonempty valid observed
+window without exclusions or scan/dispatch coverage faults; otherwise it is
+`incomplete_unknown` (or `empty_unknown` for an empty fault-free window).
+Top-level `coverage.history` remains unknown for all sections. Missing queue
+samples do not establish no contention or zero history. These non-atomic local
+records describe choices and observed initial-dispatch usage; they cannot
+establish provider cache residency, TTL, a causal scheduling benefit, or what
+would have happened had an alternative run been selected. They authorize no
+cache-affinity ordering or other scheduling change.
 
 Pairs are conservative: within each actual session-generation-sequence
 identity, sort **all** numbered attempts by dispatch ordinal, then consider

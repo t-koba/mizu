@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import datetime as dt
 import dataclasses
 import io
@@ -12,7 +13,8 @@ from mizu import dispatch_evidence as dispatch
 from mizu import scheduler_evidence as evidence
 from mizu.cli import execute, main, parser
 from mizu.engine_config import effective, reset_role_sessions, session_record
-from mizu.config import MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX, DispatchEvidence, SchedulerEvidence
+from mizu.config import (MAX_QUEUE_OBSERVATIONS, MAX_USAGE_POLICY_COUNT, TOML_INTEGER_MAX,
+                         DispatchEvidence, SchedulerEvidence)
 from mizu.errors import ConfigError, Denied
 from mizu.fs import mkdir, write_json
 
@@ -52,6 +54,271 @@ class SchedulerEvidenceTests(Fixture):
 
     def view(self):
         return evidence.summarize(self.project)
+
+    def choice_fixture(self, name="SENTINEL_DIRECTORY", identity="1" * 32):
+        candidate = {"admission_id": identity, "readiness": "ready", "unknown_reason": None,
+                     "profile": "SENTINEL_PROFILE", "engine": "pi",
+                     "session": {"key": "a" * 64, "generation": 1, "unknown_reason": None}}
+        selected = {"admission_id": identity,
+                    "choice_set": {"complete": True, "omitted": 0, "total": 1,
+                                   "candidates": [candidate]}}
+        started = {"run": name, "queue_observations": {"version": 1, "omitted": 0, "observations": [selected]}}
+        row = attempt(run=name, execution_attempt=1, phase="initial",
+                      profile=candidate["profile"], engine="pi")
+        row["usage"].update(input_tokens=50, cache_read_tokens=25, cache_write_tokens=25)
+        return started, row
+
+    def write_choice(self, started, rows, name="SENTINEL_DIRECTORY", dropped=0):
+        target = self.write(rows, name=name, dropped=dropped)
+        write_json(target.parent / "started.json", started)
+        return target.parent
+
+    def test_admission_outcome_weighted_math_complete_alternatives_and_privacy(self):
+        for index, (uncached, cached) in enumerate(((75, 25), (0, 300))):
+            name = f"SENTINEL_RUN{index}"
+            started, row = self.choice_fixture(name, str(index + 1) * 32)
+            choices = started["queue_observations"]["observations"][0]["choice_set"]
+            candidate = choices["candidates"][0]
+            for value in range(3, 7):
+                other = copy.deepcopy(candidate)
+                other["admission_id"] = str(value) * 32
+                if value == 4:
+                    other["session"]["generation"] = 2
+                if value == 5:
+                    other["session"].update(key=None, generation=None, unknown_reason="SENTINEL_UNKNOWN")
+                if value == 6:
+                    other["readiness"] = "busy"
+                choices["candidates"].append(other)
+            choices["total"] = len(choices["candidates"])
+            row["usage"].update(input_tokens=uncached, cache_read_tokens=cached, cache_write_tokens=0)
+            later = copy.deepcopy(row)
+            later.update(execution_attempt=2, phase="continuation")
+            later["usage"]["cache_read_tokens"] = 0  # never supplies the outcome
+            self.write_choice(started, [later, row], name)
+        def snapshot():
+            return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.project.root.rglob("*") if p.is_file()}
+        before = snapshot()
+        view = self.view()
+        summary = view["admission_outcomes"]
+        self.assertEqual(summary["complete_choice_sets"], 2)
+        self.assertEqual(summary["ready_alternatives"], 6)
+        self.assertEqual(summary["same_session_alternatives"], 2)
+        self.assertEqual(summary["unknown_alternative_identities"], 2)
+        self.assertEqual(summary["selected_admissions"], 2)
+        self.assertEqual(summary["valid_outcomes"], 2)
+        self.assertEqual(summary["token_weighted_cache_read_share"], 325 / 400)
+        self.assertNotEqual(summary["token_weighted_cache_read_share"], (.25 + 1) / 2)
+        self.assertFalse(any(summary["excluded"].values()))
+        self.assertEqual(summary["coverage"], "observed_window_only")
+        self.assertEqual(before, snapshot())
+        encoded = json.dumps(view)
+        for secret in ("SENTINEL", "a" * 64, "1" * 32, "2" * 32, str(self.project.root), '"325"', '"400"'):
+            self.assertNotIn(secret, encoded)
+        self.assertNotIn("input_tokens", json.dumps(summary))
+        self.assertNotIn("cache_read_tokens", json.dumps(summary))
+
+    def test_admission_incomplete_omitted_and_ambiguous_choices(self):
+        changes = (
+            ("omitted_observations", lambda q, o, c: q.update(omitted=1)),
+            ("missing_observations", lambda q, o, c: q.update(observations=[])),
+            ("malformed_observations", lambda q, o, c: q.update(version=True)),
+            ("ambiguous_observations", lambda q, o, c: q["observations"].append(copy.deepcopy(o))),
+            ("incomplete_choices", lambda q, o, c: c.update(complete=False)),
+            ("incomplete_choices", lambda q, o, c: c.update(omitted=1)),
+            ("incomplete_choices", lambda q, o, c: c.update(total=2)),
+            ("incomplete_choices", lambda q, o, c: c.update(complete=1)),
+            ("ambiguous_choices", lambda q, o, c: c["candidates"][0].update(admission_id="bad")),
+            ("ambiguous_choices", lambda q, o, c: (c["candidates"].append(copy.deepcopy(c["candidates"][0])), c.update(total=2))),
+            ("selected_not_ready_or_missing", lambda q, o, c: o.update(admission_id="2" * 32)),
+            ("selected_not_ready_or_missing", lambda q, o, c: c["candidates"][0].update(readiness="busy")),
+        )
+        for reason, change in changes:
+            with self.subTest(reason=reason, change=change):
+                started, row = self.choice_fixture()
+                queue = started["queue_observations"]
+                observation = queue["observations"][0]
+                change(queue, observation, observation["choice_set"])
+                self.write_choice(started, [row])
+                summary = self.view()["admission_outcomes"]
+                self.assertEqual(summary["excluded"][reason], 1)
+                self.assertEqual(summary["ready_alternatives"], 0)
+                self.assertEqual(summary["valid_outcomes"], 0)
+                self.assertIsNone(summary["token_weighted_cache_read_share"])
+                self.assertEqual(summary["coverage"], "incomplete_unknown")
+
+    def test_admission_unknown_and_mismatched_identities(self):
+        changes = (
+            ("unknown_identity", lambda c, r: c["session"].update(key=None)),
+            ("unknown_identity", lambda c, r: c["session"].update(generation=None)),
+            ("unknown_identity", lambda c, r: c["session"].update(generation=True)),
+            ("unknown_identity", lambda c, r: c["session"].update(unknown_reason="unknown")),
+            ("unknown_identity", lambda c, r: c.update(unknown_reason="external_project")),
+            ("unknown_identity", lambda c, r: c.update(profile=None)),
+            ("unknown_identity", lambda c, r: (c.update(engine="codex"), r.update(engine="codex"))),
+            ("unknown_identity", lambda c, r: r["session"].update(generation=None)),
+            ("unknown_identity", lambda c, r: r.update(profile_unknown_reason="unknown")),
+            ("mismatched_identity", lambda c, r: r["session"].update(generation=2)),
+            ("mismatched_identity", lambda c, r: r["session"].update(key="b" * 64)),
+            ("mismatched_identity", lambda c, r: r.update(profile="other")),
+            ("mismatched_identity", lambda c, r: r.update(engine="pi-durable")),
+        )
+        for reason, change in changes:
+            with self.subTest(reason=reason, change=change):
+                started, row = self.choice_fixture()
+                candidate = started["queue_observations"]["observations"][0]["choice_set"]["candidates"][0]
+                change(candidate, row)
+                self.write_choice(started, [row])
+                summary = self.view()["admission_outcomes"]
+                self.assertEqual(summary["excluded"][reason], 1)
+                self.assertEqual(summary["valid_outcomes"], 0)
+                self.assertIsNone(summary["token_weighted_cache_read_share"])
+
+    def test_unknown_selected_and_alternative_sessions_never_compare_equal(self):
+        started, row = self.choice_fixture()
+        choices = started["queue_observations"]["observations"][0]["choice_set"]
+        choices["candidates"][0]["session"].update(key=None, generation=None)
+        other = copy.deepcopy(choices["candidates"][0])
+        other["admission_id"] = "2" * 32
+        choices["candidates"].append(other)
+        choices["total"] = 2
+        self.write_choice(started, [row])
+        summary = self.view()["admission_outcomes"]
+        self.assertEqual(summary["ready_alternatives"], 1)
+        self.assertEqual(summary["unknown_alternative_identities"], 1)
+        self.assertEqual(summary["same_session_alternatives"], 0)
+        self.assertEqual(summary["excluded"]["unknown_identity"], 1)
+
+    def test_admission_denominators_are_known_not_defaulted(self):
+        invalid = ({}, {"status": "unknown", "input_tokens": 50, "cache_read_tokens": 25, "cache_write_tokens": 25},
+                   {"cache_read_tokens": None}, {"cache_read_tokens": True}, {"cache_write_tokens": None},
+                   {"input_tokens": -1}, {"input_tokens": 2**63 - 1},
+                   {"input_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0})
+        for usage in invalid:
+            with self.subTest(usage=usage):
+                started, row = self.choice_fixture()
+                row["usage"].update(usage)
+                if not usage:
+                    row["usage"] = {}
+                self.write_choice(started, [row])
+                summary = self.view()["admission_outcomes"]
+                self.assertEqual(summary["excluded"]["unknown_denominator"], 1)
+                self.assertIsNone(summary["token_weighted_cache_read_share"])
+        started, row = self.choice_fixture()
+        row["usage"]["cache_read_tokens"] = 0
+        self.write_choice(started, [row])
+        summary = self.view()["admission_outcomes"]
+        self.assertEqual(summary["valid_outcomes"], 1)
+        self.assertEqual(summary["token_weighted_cache_read_share"], 0)
+
+    def test_admission_joins_are_own_run_unique_initial_attempt_only(self):
+        for reason, changes in (
+                ("missing_join", lambda r: []),
+                ("missing_join", lambda r: [{**r, "execution_attempt": 2}]),
+                ("duplicate_join", lambda r: [r, copy.deepcopy(r)]),
+                ("mismatched_join", lambda r: [{**r, "run": "another"}]),
+                ("mismatched_join", lambda r: [{**r, "phase": "continuation"}]),
+                ("incomplete_dispatch", lambda r: [r, {}]),
+                ("incomplete_dispatch", lambda r: [{**r, "execution_attempt": True}]),
+                ("unfinished_dispatch", lambda r: [{**r, "status": "started"}])):
+            with self.subTest(reason=reason):
+                started, row = self.choice_fixture()
+                self.write_choice(started, changes(row))
+                summary = self.view()["admission_outcomes"]
+                self.assertEqual(summary["excluded"][reason], 1)
+                self.assertIsNone(summary["token_weighted_cache_read_share"])
+        started, row = self.choice_fixture()
+        self.write_choice(started, [row], dropped=1)
+        self.assertEqual(self.view()["admission_outcomes"]["excluded"]["incomplete_dispatch"], 1)
+        # A duplicate selected admission in two complete retained runs poisons both.
+        self.write_choice(started, [row])
+        started, row = self.choice_fixture("SENTINEL_SECOND")
+        self.write_choice(started, [row], name="SENTINEL_SECOND")
+        summary = self.view()["admission_outcomes"]
+        self.assertEqual(summary["excluded"]["duplicate_admission"], 2)
+        self.assertEqual(summary["selected_admissions"], 0)
+        self.assertIsNone(summary["token_weighted_cache_read_share"])
+
+    def test_admission_started_reads_are_bounded_safe_and_read_only(self):
+        started, row = self.choice_fixture()
+        directory = self.write_choice(started, [row])
+        target = directory / "started.json"
+        for reason, payload in (("malformed_started", b'{"queue_observations":null,"queue_observations":{}}'),
+                                ("malformed_started", b'{"x":NaN}'),
+                                ("malformed_started", b'[]'),
+                                ("oversized_started", b' ' * (min(self.config.limits.file_bytes, evidence.MAX_STARTED_EVIDENCE_BYTES) + 1)),
+                                ("missing_observations", b'{"run":"SENTINEL_DIRECTORY"}')):
+            with self.subTest(reason=reason):
+                target.write_bytes(payload)
+                self.assertEqual(self.view()["admission_outcomes"]["excluded"][reason], 1)
+                self.assertEqual(target.read_bytes(), payload)
+        target.unlink()
+        self.assertEqual(self.view()["admission_outcomes"]["excluded"]["missing_started"], 1)
+        target.symlink_to(directory / "dispatch-attempts.json")
+        self.assertEqual(self.view()["admission_outcomes"]["excluded"]["unavailable_started"], 1)
+        target.unlink()
+        os.link(directory / "dispatch-attempts.json", target)
+        self.assertEqual(self.view()["admission_outcomes"]["excluded"]["unavailable_started"], 1)
+        target.unlink()
+        self.write_choice(started, [row])
+        with patch.object(evidence, "safe_read", wraps=evidence.safe_read) as reader:
+            self.view()
+        reads = [call for call in reader.call_args_list if call.args[1].endswith("started.json")]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(reads[0].args[2], min(self.config.limits.file_bytes, evidence.MAX_STARTED_EVIDENCE_BYTES))
+
+    def test_admission_started_read_obeys_shared_deadline(self):
+        started, row = self.choice_fixture()
+        self.write_choice(started, [row])
+        clock = [0.0]
+        original = evidence.safe_read
+        def read(*args):
+            result = original(*args)
+            if args[1].endswith("started.json"):
+                clock[0] = float(self.config.scheduler_evidence.scan_seconds) + 1
+            return result
+        with patch.object(evidence.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(evidence, "safe_read", side_effect=read) as reader:
+            view = self.view()
+        self.assertEqual(reader.call_count, 1)
+        self.assertTrue(view["coverage"]["timeout"])
+        self.assertEqual(view["admission_outcomes"]["coverage"], "incomplete_unknown")
+        self.assertIsNone(view["admission_outcomes"]["token_weighted_cache_read_share"])
+
+    def test_admission_uses_source_observation_bound_not_dispatch_attempt_limit(self):
+        self.project.config = dataclasses.replace(self.config,
+            dispatch_evidence=DispatchEvidence(max_attempts=1))
+        started, row = self.choice_fixture()
+        queue = started["queue_observations"]
+        queue["observations"] *= MAX_QUEUE_OBSERVATIONS + 1
+        self.write_choice(started, [row])
+        summary = self.view()["admission_outcomes"]
+        self.assertEqual(summary["excluded"]["truncated_observations"], 1)
+        self.assertEqual(summary["ready_alternatives"], 0)
+        self.assertIsNone(summary["token_weighted_cache_read_share"])
+
+        # The independent dispatch-attempt bound does not limit a valid choice
+        # set: two candidates can still match one exact initial attempt.
+        started, row = self.choice_fixture("SENTINEL_SECOND")
+        choices = started["queue_observations"]["observations"][0]["choice_set"]
+        other = copy.deepcopy(choices["candidates"][0])
+        other["admission_id"] = "2" * 32
+        other["session"]["generation"] = 2
+        choices["candidates"].append(other)
+        choices["total"] = 2
+        self.write_choice(started, [row], name="SENTINEL_SECOND")
+        summary = self.view()["admission_outcomes"]
+        self.assertEqual(summary["excluded"]["truncated_choices"], 0)
+        self.assertEqual(summary["ready_alternatives"], 1)
+        self.assertEqual(summary["valid_outcomes"], 1)
+
+    def test_admission_rejects_started_run_identity_mismatch(self):
+        started, row = self.choice_fixture()
+        started["run"] = "SENTINEL_WRONG_RUN"
+        self.write_choice(started, [row])
+        summary = self.view()["admission_outcomes"]
+        self.assertEqual(summary["excluded"]["malformed_started"], 1)
+        self.assertEqual(summary["selected_admissions"], 0)
+        self.assertIsNone(summary["token_weighted_cache_read_share"])
 
     def test_private_fixed_aggregate_real_independent_groups_and_read_only(self):
         rows = []
@@ -434,7 +701,7 @@ class SchedulerEvidenceTests(Fixture):
         self.assertEqual(self.view()["coverage"]["oversized_files"], 1)
         self.assertLess(len(json.dumps(view)), 8192)
 
-    def test_fixed_output_shape_retains_eight_kib_headroom(self):
+    def test_fixed_output_shape_retains_twelve_kib_headroom(self):
         self.write([attempt(0), attempt(1)])
 
         def width_envelope(value):
@@ -454,7 +721,7 @@ class SchedulerEvidenceTests(Fixture):
         envelope = width_envelope(self.view())
         envelope["period_utc"] = dict.fromkeys(("first", "last"), "9" * 32)
         for indent in (None, 2):  # include the CLI's pretty JSON and newline
-            self.assertLess(len(json.dumps(envelope, indent=indent)) + 1, 8192)
+            self.assertLess(len(json.dumps(envelope, indent=indent)) + 1, 12288)
 
     def test_candidate_enumeration_and_file_limits(self):
         for index in range(6):
@@ -500,11 +767,12 @@ class SchedulerEvidenceTests(Fixture):
                                                  attempts_per_file=64))
             self.assertEqual(view["coverage"]["candidate_entries"], min(candidates, 6))
             self.assertEqual(view["coverage"]["files_read"], min(files, candidates, 6))
-            self.assertEqual(reader.call_count, min(files, candidates, 6))
+            self.assertEqual(reader.call_count, 2 * min(files, candidates, 6))
             self.assertEqual(view["coverage"]["candidate_limit"], candidates <= 6)
             self.assertEqual(view["coverage"]["file_limit"], files < min(candidates, 6))
             # The file window selects newest-first, not enumeration order.
-            names = [call.args[1].split("/")[1] for call in reader.call_args_list]
+            names = [call.args[1].split("/")[1] for call in reader.call_args_list
+                     if call.args[1].endswith("dispatch-attempts.json")]
             self.assertEqual(names, sorted(names, reverse=True))
         self.file.write_text(original + "\n[scheduler_evidence]\nscan_seconds = 7\n")
         clock = [0]

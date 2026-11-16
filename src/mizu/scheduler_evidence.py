@@ -3,7 +3,7 @@
 Configured budgets limit diagnostic work; this aggregate is never a scheduler
 policy input.
 
-Only fixed categories, counts, UTC timestamps and numeric distributions leave
+Only fixed categories, counts, UTC timestamps, ratios and numeric distributions leave
 this module. Internal identities are never serialized, even as anonymous rows.
 """
 from __future__ import annotations
@@ -18,7 +18,9 @@ import time
 from collections import Counter, defaultdict
 
 from . import platform
+from .config import MAX_QUEUE_OBSERVATIONS
 from .dispatch_evidence import MAX_ORDINAL, _sequence_id
+from .evidence_records import MAX_STARTED_EVIDENCE_BYTES
 from .errors import LimitExceeded, MizuError
 from .fs import canonical, loads_finite, safe_read
 from .usage import cache_read_share, prompt_input_tokens
@@ -97,6 +99,109 @@ def _attempt(raw, file_index):
         "unknown_denominator" if row["share"] is None else None)
     return row
 
+
+
+# AdmissionSource can establish persistent identity only for these adapters.
+# Other engines may report usage, but that does not establish admission identity.
+def _admission_identity(row):
+    session = row.get("session")
+    if (not isinstance(session, dict) or row.get("unknown_reason") is not None
+            or session.get("unknown_reason") is not None
+            or not _text(row.get("profile")) or row.get("engine") not in ("pi", "pi-durable")):
+        return None
+    key, generation = session.get("key"), session.get("generation")
+    if (not isinstance(key, str) or not _KEY.fullmatch(key)
+            or type(generation) is not int or not 0 <= generation <= 2**31):
+        return None
+    return row["profile"], row["engine"], key, generation
+
+
+def _choice(record, max_observations, max_candidates, counts):
+    """Return one unambiguous selected admission; never infer omitted choices."""
+    queue = record.get("queue_observations")
+    if queue is None:
+        return None, "missing_observations"
+    if (not isinstance(queue, dict) or type(queue.get("version")) is not int
+            or queue["version"] != 1 or not isinstance(queue.get("observations"), list)
+            or type(queue.get("omitted")) is not int or not 0 <= queue["omitted"] <= 2**63 - 1):
+        return None, "malformed_observations"
+    counts["omitted_observations"] += queue["omitted"]
+    if queue["omitted"]:
+        return None, "omitted_observations"
+    observations = queue["observations"]
+    if len(observations) > max_observations:
+        return None, "truncated_observations"
+    if not observations:
+        return None, "missing_observations"
+    # Re-admissions have no attempt marker. Never guess which observation
+    # belongs to the initial dispatch when multiple transactions were retained.
+    if len(observations) != 1:
+        return None, "ambiguous_observations"
+    observation = observations[0]
+    if not isinstance(observation, dict) or not _sequence_id(observation.get("admission_id")):
+        return None, "malformed_observations"
+    choices = observation.get("choice_set")
+    if (not isinstance(choices, dict) or choices.get("complete") is not True
+            or type(choices.get("omitted")) is not int or choices["omitted"] != 0
+            or type(choices.get("total")) is not int or choices["total"] < 1
+            or not isinstance(choices.get("candidates"), list)
+            or len(choices["candidates"]) != choices["total"]):
+        return None, "incomplete_choices"
+    candidates = choices["candidates"]
+    if len(candidates) > max_candidates:
+        return None, "truncated_choices"
+    ids = [row.get("admission_id") if isinstance(row, dict) else None for row in candidates]
+    if any(not _sequence_id(identity) for identity in ids) or len(set(ids)) != len(ids):
+        return None, "ambiguous_choices"
+    selected = [row for row in candidates if row["admission_id"] == observation["admission_id"]]
+    if len(selected) != 1 or selected[0].get("readiness") != "ready":
+        return None, "selected_not_ready_or_missing"
+    if any(row.get("readiness") not in ("ready", "busy") for row in candidates):
+        return None, "incomplete_choices"
+    counts["complete_choice_sets"] += 1
+    identity = _admission_identity(selected[0])
+    for row in candidates:
+        if row is selected[0] or row["readiness"] != "ready":
+            continue
+        counts["ready_alternatives"] += 1
+        other = _admission_identity(row)
+        if identity is None or other is None:
+            counts["unknown_alternative_identities"] += 1
+        elif other == identity:
+            counts["same_session_alternatives"] += 1
+    return (observation["admission_id"], identity), None
+
+
+def _initial_outcome(attempts, name, identity):
+    if attempts is None:
+        return None, "incomplete_dispatch"
+    initial = [row for row in attempts if isinstance(row, dict)
+               and type(row.get("execution_attempt")) is int and row["execution_attempt"] == 1]
+    if not initial:
+        return None, "missing_join"
+    if len(initial) != 1:
+        return None, "duplicate_join"
+    row = initial[0]
+    if row.get("run") != name or row.get("phase") != "initial":
+        return None, "mismatched_join"
+    actual_identity = _admission_identity(row)
+    if (identity is None or actual_identity is None
+            or row.get("profile_unknown_reason") is not None
+            or row.get("engine_unknown_reason") is not None):
+        return None, "unknown_identity"
+    if actual_identity != identity:
+        return None, "mismatched_identity"
+    if row.get("status") not in ("returned", "raised"):
+        return None, "unfinished_dispatch"
+    usage = row.get("usage")
+    if not isinstance(usage, dict) or usage.get("status") not in ("known", "partial"):
+        return None, "unknown_denominator"
+    denominator = prompt_input_tokens(row["engine"], usage.get("input_tokens"),
+                                     usage.get("cache_read_tokens"), usage.get("cache_write_tokens"))
+    cached = usage.get("cache_read_tokens")
+    if cache_read_share(denominator, cached) is None:
+        return None, "unknown_denominator"
+    return (cached, denominator), None
 
 
 def _sequence_state(project, sequence, rows):
@@ -209,10 +314,47 @@ def summarize(project):
         coverage["scan_unavailable"] = True
     coverage["file_limit"] = len(candidates) > policy.files
     rows = []
+    admission = dict(files_attempted=0, files_read=0, omitted_observations=0,
+                     complete_choice_sets=0, ready_alternatives=0,
+                     unknown_alternative_identities=0, same_session_alternatives=0,
+                     selected_admissions=0, valid_outcomes=0, token_weighted_cache_read_share=None)
+    admission_excluded = Counter(dict.fromkeys((
+        "missing_started", "unavailable_started", "oversized_started", "malformed_started",
+        "missing_observations", "malformed_observations", "omitted_observations",
+        "truncated_observations", "ambiguous_observations", "incomplete_choices",
+        "truncated_choices", "ambiguous_choices", "selected_not_ready_or_missing",
+        "duplicate_admission", "incomplete_dispatch", "missing_join", "duplicate_join",
+        "mismatched_join", "unknown_identity", "mismatched_identity", "unfinished_dispatch",
+        "unknown_denominator"), 0))
+    selections = []
     unsafe_files = set()
     for index, (_, name) in enumerate(heapq.nlargest(policy.files, candidates)):
         if expired():
             break
+        admission["files_attempted"] += 1
+        selected = None
+        try:
+            started_maximum = min(project.config.limits.file_bytes, MAX_STARTED_EVIDENCE_BYTES)
+            raw = safe_read(project.root, f"runs/{name}/started.json", started_maximum)
+            if expired():
+                break
+            started = loads_finite(raw, object_pairs_hook=_unique_object)
+            if not isinstance(started, dict) or started.get("run") != name:
+                raise ValueError("Invalid record")
+            admission["files_read"] += 1
+            selected, reason = _choice(started, MAX_QUEUE_OBSERVATIONS, started_maximum, admission)
+            if reason:
+                admission_excluded[reason] += 1
+        except (OSError, MizuError) as exc:
+            reason = ("oversized_started" if isinstance(exc, LimitExceeded) else
+                      "missing_started" if isinstance(exc, FileNotFoundError)
+                      or isinstance(exc.__cause__, FileNotFoundError) else "unavailable_started")
+            admission_excluded[reason] += 1
+        except (ValueError, TypeError, RecursionError):
+            admission_excluded["malformed_started"] += 1
+        if expired():
+            break
+        join_attempts = None
         coverage["files_attempted"] += 1
         try:
             raw = safe_read(project.root, f"runs/{name}/dispatch-attempts.json", dispatch.max_bytes)
@@ -231,6 +373,10 @@ def summarize(project):
                 coverage["attempt_limit_files"] += 1
             if record["dropped_attempts"] or len(attempts) > dispatch.max_attempts:
                 unsafe_files.add(index)
+            if (not record["dropped_attempts"] and len(attempts) <= dispatch.max_attempts
+                    and all(isinstance(row, dict) and type(row.get("execution_attempt")) is int
+                            and row["execution_attempt"] >= 0 for row in attempts)):
+                join_attempts = attempts
             for raw_attempt in attempts[:dispatch.max_attempts]:
                 if expired():
                     unsafe_files.add(index)
@@ -243,6 +389,25 @@ def summarize(project):
             coverage["oversized_files" if isinstance(exc, LimitExceeded) else "unavailable_files"] += 1
         except (ValueError, TypeError, RecursionError):
             coverage["malformed_files"] += 1
+        if selected is not None:
+            selections.append((selected, _initial_outcome(join_attempts, name, selected[1])))
+    frequencies = Counter(selected[0] for selected, _ in selections)
+    cached_sum = prompt_sum = 0
+    for selected, (outcome, reason) in selections:
+        if expired():
+            break
+        if frequencies[selected[0]] != 1:
+            admission_excluded["duplicate_admission"] += 1
+            continue
+        admission["selected_admissions"] += 1
+        if reason:
+            admission_excluded[reason] += 1
+        else:
+            admission["valid_outcomes"] += 1
+            cached_sum += outcome[0]
+            prompt_sum += outcome[1]
+    admission["token_weighted_cache_read_share"] = cached_sum / prompt_sum if prompt_sum else None
+    admission["excluded"] = dict(admission_excluded)
     # Incomplete files cannot supply adjacency claims. Modern cross-file pairs
     # need consecutive ordinals and healthy source-owned sequence state; legacy
     # rows remain same-file only.
@@ -323,7 +488,10 @@ def summarize(project):
     coverage["history"] = "unknown"
     coverage["status"] = ("incomplete_unknown" if any(coverage[k] for k in faults) or coverage["incomplete_attempts"]
                           else "observed_window_only" if rows else "empty_unknown")
-    result = {"schema": 1, "coverage": coverage,
+    admission["coverage"] = ("incomplete_unknown" if any(admission_excluded.values())
+                             or any(coverage[k] for k in faults) else
+                             "observed_window_only" if admission["valid_outcomes"] else "empty_unknown")
+    result = {"schema": 1, "coverage": coverage, "admission_outcomes": admission,
             "limits": {"candidate_entries": policy.candidate_entries, "files": policy.files,
                        "bytes_per_file": dispatch.max_bytes, "attempts_per_file": dispatch.max_attempts, "seconds": seconds},
             "period_utc": {"first": min(timestamps).isoformat() if timestamps else None,
@@ -345,4 +513,5 @@ def summarize(project):
             "note": "Observed counts only; empty, missing and bounded history is unknown, never zero history. Nearest-rank quantiles; sparse means fewer than 5 observations. Bins are left-closed, right-open except 1. Groups use exact session key, generation, provider and model; only distributions across groups leave this view. No causal inference or scheduler authorization."}
     if expired():
         coverage["status"] = "incomplete_unknown"
+        admission["coverage"] = "incomplete_unknown"
     return result

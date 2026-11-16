@@ -1002,9 +1002,17 @@ scan_seconds = 2
 The maxima are TOML/Python representation bounds as defined above, not resource
 budgets. Raising these values can increase diagnostic work and memory. Reported
 `limits` reflect the configured budgets, with `seconds` still a JSON number
-(default `2.0`). Dispatch-record byte/attempt bounds come from
-`[dispatch_evidence]` (defaults 256 KiB/64); sparse bins still mean fewer than
-five observations. No retries, telemetry writes, scheduling changes or historical-completeness claims result from these
+(default `2.0`). The same run-directory window and deadline cover dispatch records
+and retained `started.json` admission observations. Dispatch reads use
+`[dispatch_evidence].max_bytes` / `max_attempts` (defaults 256 KiB/64).
+`started.json` reads use `min([limits].file_bytes, 64 KiB)` and the source's
+100-observation ceiling; candidate arrays are additionally bounded by that file
+read and must match their exact recorded total. These independent reader limits
+do not change source retention or admission behavior. The aggregate reports
+selected initial-dispatch outcomes and explicit unknown coverage without
+exposing identities or raw token totals.
+Sparse bins still mean fewer than five observations. No retries, telemetry writes,
+scheduling changes or historical-completeness claims result from these
 settings. See [operations](operations.md#bounded-scheduler-cache-evidence-host-only)
 for privacy, coverage and timeout semantics.
 
