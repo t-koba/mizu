@@ -755,6 +755,8 @@ DECLARATIONS = {
             '(1 << 63) - 1', 'format', 'VCS artifacts / signed-64-bit adapter byte arithmetic'),
         'MAX_CHECKS': ('1024', 'mechanism', 'VCS status / adapter payload already capped'),
         'MAX_PROPOSALS': ('256', 'mechanism', 'VCS proposals / bounded external proposal rows'),
+        'MAX_CHANGED_SUBJECTS': (
+            '256', 'mechanism', 'VCS changes / bounded external change-stream subjects'),
         'MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS': (
             '32', 'format',
             'VCS proposals / fixed lower-case SHA-256 hex suffix in generated Insight identity'),
@@ -2478,6 +2480,15 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_waits.py', '_shared_page', 2, 0): (
         '100', 'mechanism',
         'CI wait delivery / fixed maximum page size for the bounded shared receipt projection'),
+    ('ci_waits.py', '_Enrollment._read_file', 1, 0): (
+        '64', 'format',
+        'CI change enrollment / advisory observation keys are exact 64-hex SHA-256 digests'),
+    ('ci_waits.py', '_change_page', 1, 0): (
+        '2', 'format',
+        'CI change page / durable pending target frontier is an exact branch and SHA pair'),
+    ('ci_waits.py', 'poll', 1, 1): (
+        '32', 'format',
+        'CI change observation / enrollment epoch is a 32-hex UUID-4 token'),
     ('insights.py', '_validate_decision_projection', 1, 0): (
         '64', 'safety', 'decision projection / bound timestamp text before ISO-8601 parsing'),
     ('insights.py', '_validate_pending_projection', 1, 0): (

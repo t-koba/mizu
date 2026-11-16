@@ -2517,6 +2517,7 @@ refresh and the best-effort daemon periodic fetch.
 | `ci_cache_max_branches` | `128` | Retained branches per failure/success map (integer 1–2048); effective capacity is the maximum of this value, the deduplicated selected wake-branch count, and one |
 | `ci_cache_max_checks_per_branch` | `16` | Retained rows per branch (integer 1–1024, bounded by the local VCS status-parser cap); effective branch capacity times this value must not exceed 2048 |
 | `poll_enabled` | `false` | Explicit opt-in for daemon upstream/CI polling, including receipt-pinned work-item waits; `false` disables all daemon adapter calls and refuses new receipt-bound waits |
+| `change_stream_enabled` | `false` | Opt in to adapter-wide `changes` pages for receipt-wait CI observation; unsupported or invalid pages use bounded full status reads; branch-head notification polling is unchanged |
 | `poll_proposals_enabled` | `false` | Additional opt-in for daemon external-proposal observations and explicit exact-proposal merge waits; requires `poll_enabled = true` and a configured adapter; does not change CI polling |
 | `poll_interval_seconds` | `300` | Daemon poll cadence in seconds (15–86,400) |
 | `poll_max_branches` | `4` | Actual CI branches polled per daemon tick (1–64), separate from work-item CI waits |
@@ -2598,18 +2599,73 @@ tick. Adapter calls are individually capped at
 at most `poll_max_branches` actual branches per tick. Work-item CI waits have a
 separate `poll_max_ci_wait_targets` budget (default 16, range 1–64) for unique
 receipt-resolved `(branch, SHA)` pairs, not items or candidate snapshots. A
-bounded rotating window queries each selected pair at most once per tick and
+bounded rotating window (or, with `change_stream_enabled`, the change-driven
+selection below) queries each selected pair at most once per tick and
 fans the parsed response out to matching current waiters, keeping separate
 immutable per-item evidence and exact declared-check semantics. Failed reads
 advance the pair cursor too; legacy item-token cursors restart safely. Partial
 or ambiguous evidence never resolves a wait. No unbounded waiter list is
-retained; memory follows the target budget and parsed status-row limits.
+retained; memory follows the target budget, parsed status-row limits and, in
+change mode, one wait's retained candidate history.
+
+With `change_stream_enabled = true`, receipt-wait observation instead consumes
+at most one `changes` page per due tick, under the same lock and status-timeout
+cap. Request: `{op: "changes", cursor?: str, limit: int}`; the initial cursor
+is omitted. Response: exactly `{op: "changes", cursor: str|null,
+subjects: [str], next_cursor: str}` with an exact cursor echo (null initially).
+Cursors are opaque nonempty strings, at most 256 characters, without terminal
+controls. Subjects are strings without terminal controls, bounded by the
+requested limit (here `poll_max_ci_wait_targets`; protocol maximum 256) and
+adapter response byte bound. Order and duplicates are preserved by the reader.
+Exactly `{op: "changes", cursor: str|null, supported: false}` means unsupported.
+Malformed, truncated, over-budget or failed reads are errors, not unsupported;
+both paths select bounded full-read fallback for that tick. There is no retry
+loop, and the tick timestamp advances on failures too. Disabled streams make
+no changes calls and keep the existing status cadence/rotation.
+
+The product subject `ci-status:<branch>` means CI status for that exact branch
+**may have changed within the adapter's configured observation scope, including
+previously published SHAs**, not just the head. The suffix uses `vcs.check_branch`.
+Other namespaces are ignored; an invalid recognized branch triggers full-read
+fallback. Subjects are invalidation hints, never terminal evidence. Healthy
+pages select only invalidated targets and enrollment/retry targets: an empty
+page across a cadence deadline makes no receipt-wait status calls once current
+waiters are enrolled. A full status response is shared per exact branch/SHA,
+not across different SHAs; declared checks and evidence stay distinct per item.
+Publication waits use their stored pinned branch, not a later `ci_branch` setting.
+The separate branch-head notification cache still uses its ordinary CI poll.
+
+`vcs-poll.json` stores `ci_changes_cursor` separately from the local target
+rotation `ci_wait_cursor`. A fanout page is drained across ticks using bounded
+`ci_changes_pending` (`cursor`, `next_cursor`, invalidated `branches`, and an
+exact-target `after` frontier). Only local target pairs are ordered; opaque
+stream cursors are never compared. No new page is read until this page drains.
+The stream cursor advances only after all matched targets have been observed
+or durably enrolled for retry; terminal evidence is written before settlement.
+Stationary empty cursors are caught up, not an immediate reread instruction.
+Corrupt stream state forces bounded full reads and a fresh enrollment epoch.
+
+Enrollment/retry bookkeeping lives in host-only `ci-wait-observations/<item>.json`:
+`{epoch, rev, observed: [candidate-and-resolved-wait SHA-256]}`. It is advisory,
+never delivery evidence. Each file covers only the current blocked revision and
+at most retained-history-plus-one candidates; each enabled polling tick prunes
+settled/removed waits, obsolete revisions and vanished candidates. New waits,
+new receipts and new eligible descendants lack an observation and receive an
+initial full read even with empty pages. Before a selected candidate's adapter
+call its observation is durably removed: absence is also the retry queue, so
+failed/incomplete calls cannot be forgotten when a page advances. Complete
+nonterminal observations are recorded only after locked revision/receipt/candidate
+revalidation. Missing/corrupt observation files cause re-enrollment; losing this
+advisory state can add reads but cannot create terminal evidence. Target rotation
+interleaves enrollment/retries with the ordered invalidated page drain, so a
+stable enrollment/retry target cannot be starved by repeated branch hints.
 
 These serial calls have a finite per-tick bound, not a guarantee of finishing
 within the 300-second default cadence: at defaults, a slow tick can take about
 90 seconds for fetch plus branch polling and up to 240 seconds for CI-wait
 status targets; one enabled proposal page adds at most one more status-timeout
-cap. The per-project lock prevents overlapping polls; shared timestamps keep
+cap; an enabled change page adds at most one further status-timeout cap.
+The per-project lock prevents overlapping polls; shared timestamps keep
 the usual cadence, though a tick that exceeds its interval makes the next
 attempt due on the following daemon iteration. Proposal polling uses
 the same status-timeout cap and cadence, but is separately opted in with

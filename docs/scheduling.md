@@ -813,10 +813,16 @@ On each due VCS polling tick, the host selects at most
 (default 16, range 1–64), separately from the actual branch-polling budget
 `poll_max_branches`. Exact and retained descendant candidates share this target
 budget; duplicate items or candidate snapshots on one pair consume only one
-slot. There is no newest/nearest-only selection. A rotating lexicographic window
-uses one durable pair cursor in `vcs-poll.json`; legacy item-token cursors restart
-safely. Failed reads and pending/unknown responses advance the window too.
-Missing or ambiguous receipts do not enter the window or query status.
+slot. There is no newest/nearest-only selection. With `change_stream_enabled`
+disabled (the default), a rotating lexicographic window uses one durable pair
+cursor in `vcs-poll.json`; legacy item-token cursors restart safely. Failed reads
+and pending/unknown responses advance the window too. When enabled, healthy
+change pages instead select exact-branch invalidations plus new/unobserved
+wait candidates; empty pages do not cause periodic status reads. Unsupported or
+invalid pages fall back to the bounded rotating window for that tick. Page
+fanout, enrollment and retry state are described in the
+[adapter polling contract](configuration.md). Missing or ambiguous
+receipts never query status.
 
 The host streams eligible waits/candidates to select the window, then streams
 again to query each selected pair at most once and fan out that response to

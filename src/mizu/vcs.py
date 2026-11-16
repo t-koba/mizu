@@ -627,6 +627,21 @@ def check_artifacts_cursor(cursor: str) -> str:
     return cursor
 
 
+def ci_status_subject(branch: str) -> str:
+    """Branch-wide invalidation, including status for previously published SHAs."""
+    check_branch(branch)
+    return "ci-status:" + branch
+
+
+def parse_ci_status_subject(subject: str) -> str | None:
+    """Ignore other namespaces; reject malformed recognized subjects."""
+    if not subject.startswith("ci-status:"):
+        return None
+    branch = subject[len("ci-status:"):]
+    check_branch(branch)
+    return branch
+
+
 class _ChangesUnsupported(Denied):
     """The adapter explicitly reports that its optional stream is unsupported."""
 

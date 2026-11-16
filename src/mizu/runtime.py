@@ -5180,6 +5180,11 @@ def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=Tru
             target[key] = seen
     if isinstance(shared.get("ci_wait_cursor"), (str, list)):
         state["ci_wait_cursor"] = shared["ci_wait_cursor"]
+    # Copy even corrupt stream state: the CI-wait controller must recover by
+    # full reads, not silently retain an apparently caught-up local cursor.
+    for key in ("ci_changes_cursor", "ci_changes_pending", "ci_changes_epoch"):
+        if key in shared:
+            state[key] = shared[key]
     if "proposal_cursor" in shared:
         stored_cursor = shared.get("proposal_cursor")
         if stored_cursor is None:
@@ -5263,6 +5268,9 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "proposal_complete_facts": state.get("proposal_complete_facts"),
                             "last_ci_wait_poll": state.get("last_ci_wait_poll"),
                             "ci_wait_cursor": state.get("ci_wait_cursor"),
+                            "ci_changes_cursor": state.get("ci_changes_cursor"),
+                            "ci_changes_pending": state.get("ci_changes_pending"),
+                            "ci_changes_epoch": state.get("ci_changes_epoch"),
                             "failures": _clean_ci_failures(
                                 ci_state.get("failures"), config,
                                 defer_branch_cap=not ci_due),

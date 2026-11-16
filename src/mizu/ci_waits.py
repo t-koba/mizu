@@ -12,6 +12,7 @@ import contextlib
 import heapq
 import json
 import os
+import uuid
 from dataclasses import asdict
 
 from .errors import Denied, LimitExceeded
@@ -679,7 +680,158 @@ def _poll_candidates(store, descendants, errors, limit):
                     errors.append(_poll_error_code(exc))
 
 
-def poll(config, project, state, *, now, interval, reader=None):
+class _Enrollment:
+    """Disposable per-current-wait observation receipts, never CI evidence.
+
+    One file per live item; candidate hashes are bounded by retained history.
+    The polling writer prunes revisions, vanished candidates and settled items.
+    Absence means enrollment/retry is needed, including after interrupted writes.
+    """
+    def __init__(self, store, epoch):
+        self.store, self.epoch = store, epoch
+        self.cached_item, self.cached_keys = None, set()
+        self.directory = store.root / "ci-wait-observations"
+        _directory(self.directory)
+        mkdir(self.directory)
+        for path in self.directory.iterdir():
+            identifier(path.stem)
+            try:
+                item = store.current(path.stem)
+            except Denied:
+                path.unlink()
+                continue
+            if (item is None or item["status"] != "blocked"
+                    or (item.get("wait") or {}).get("kind") not in ("ci", "publication_ci")
+                    or _evidence(store, item) is not None):
+                path.unlink()
+                continue
+            keys = set()
+            for _, candidate in _candidates(store, item, True):
+                wait = _candidate_wait(store, item["wait"], candidate)
+                if wait is not None:
+                    keys.add(self.key(candidate, wait))
+            old = self._read(item)
+            kept = old & keys
+            if kept != old or not kept:
+                self._write(item, kept)
+
+    @staticmethod
+    def key(candidate, wait):
+        return digest(canonical([candidate, wait]))
+
+    def _path(self, item):
+        identifier(item["id"])
+        return self.directory / (item["id"] + ".json")
+
+    def _read(self, item):
+        identity = (item["id"], item["rev"])
+        if identity != self.cached_item:
+            keys = self._read_file(item)
+            self.cached_item, self.cached_keys = identity, keys
+        return self.cached_keys
+
+    def _read_file(self, item):
+        path = self._path(item)
+        # Canonical local schema: 64 hex chars + JSON framing per hash,
+        # and fixed epoch/revision metadata. No prompt-frame policy applies.
+        maximum = 256 + 67 * (self.store.snapshots.history_index + 1)
+        try:
+            data = loads_finite(safe_read(self.store.root,
+                path.relative_to(self.store.root).as_posix(), maximum))
+        except FileNotFoundError:
+            return set()
+        except (Denied, LimitExceeded, ValueError):
+            return set()  # corrupt advisory observations force enrollment
+        if (not isinstance(data, dict) or data.get("epoch") != self.epoch
+                or data.get("rev") != item["rev"]):
+            return set()
+        keys = data.get("observed")
+        if (not isinstance(keys, list) or len(keys) > self.store.snapshots.history_index + 1
+                or any(not isinstance(key, str) or len(key) != 64
+                       or any(c not in "0123456789abcdef" for c in key) for key in keys)):
+            return set()
+        return set(keys)
+
+    def _write(self, item, keys):
+        path = self._path(item)
+        if not keys:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+                sync_dir(self.directory)
+        else:
+            write_json(path, {"epoch": self.epoch, "rev": item["rev"],
+                              "observed": sorted(keys)})
+        self.cached_item, self.cached_keys = (item["id"], item["rev"]), keys
+
+    def needed(self, item, candidate, wait):
+        return self.key(candidate, wait) not in self._read(item)
+
+    def set(self, item, candidate, wait, observed):
+        keys = self._read(item).copy()
+        key = self.key(candidate, wait)
+        if observed:
+            keys.add(key)
+        else:
+            keys.discard(key)
+        self._write(item, keys)
+
+
+def _change_page(config, state, limit, changes_reader):
+    """One bounded page or its durable drain; no opaque cursor arithmetic."""
+    from .vcs import (check_artifacts_cursor, check_branch, parse_ci_status_subject,
+                      read_changes_or_none)
+    from .vcs_poll_policy import capped_vcs_settings, vcs_poll_status_timeout
+    cursor = state.get("ci_changes_cursor")
+    if cursor is not None:
+        check_artifacts_cursor(cursor)
+    pending = state.get("ci_changes_pending")
+    if pending is not None:
+        if (not isinstance(pending, dict)
+                or set(pending) != {"cursor", "next_cursor", "branches", "after"}
+                or pending["cursor"] != cursor):
+            raise Denied("Invalid pending CI changes")
+        check_artifacts_cursor(pending["next_cursor"])
+        branches = pending["branches"]
+        if not isinstance(branches, list) or len(branches) > limit:
+            raise Denied("Invalid pending CI branches")
+        for branch in branches:
+            check_branch(branch)
+        after = pending["after"]
+        if after != []:
+            if (not isinstance(after, list) or len(after) != 2
+                    or not all(isinstance(part, str) for part in after)):
+                raise Denied("Invalid pending CI target")
+            check_branch(after[0])
+            if after[0] not in branches:
+                raise Denied("Pending CI target is outside invalidated branches")
+            from .vcs import _SHA
+            if not _SHA.fullmatch(after[1]):
+                raise Denied("Invalid pending CI SHA")
+        return pending
+    params = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    settings = capped_vcs_settings(config.vcs, vcs_poll_status_timeout(config))
+    page = (changes_reader or read_changes_or_none)(settings, params)
+    if page is None:
+        return None
+    # The injected reader has the same validated-result contract as
+    # read_changes_or_none. Validate again at this boundary for fake readers.
+    from .vcs import parse_changes
+    if (not isinstance(page, dict)
+            or set(page) - {"op", "trust", "subjects", "next_cursor"}
+            or page.get("op", "changes") != "changes"):
+        raise Denied("Invalid normalized CI changes page")
+    page = parse_changes({"op": "changes", "cursor": cursor,
+                          "subjects": page["subjects"], "next_cursor": page["next_cursor"]},
+                         cursor=cursor, limit=limit)
+    branches = {branch for subject in page["subjects"]
+                if (branch := parse_ci_status_subject(subject)) is not None}
+    return {"cursor": cursor, "next_cursor": page["next_cursor"],
+            "branches": sorted(branches), "after": []}
+
+
+def poll(config, project, state, *, now, interval, reader=None, changes_reader=None):
     from .vcs_poll_policy import (capped_vcs_settings, upstream_fetch_due,
                                   vcs_poll_max_ci_wait_targets, vcs_poll_status_timeout)
     from .vcs import read_via
@@ -699,13 +851,71 @@ def poll(config, project, state, *, now, interval, reader=None):
     store = project.work_items
     descendants = config.vcs.get("ci_wait_descendants", True)
     try:
-        for _, _, wait in _poll_candidates(store, descendants, errors, limit):
+        enrollment = None
+        page = None
+        stream = config.vcs.get("change_stream_enabled") is True
+        if stream:
+            try:
+                epoch = state.get("ci_changes_epoch")
+                if (not isinstance(epoch, str) or len(epoch) != 32
+                        or any(c not in "0123456789abcdef" for c in epoch)):
+                    if epoch is not None:
+                        raise Denied("Invalid CI observation epoch")
+                    epoch = state["ci_changes_epoch"] = uuid.uuid4().hex
+                enrollment = _Enrollment(store, epoch)
+                page = _change_page(config, state, limit, changes_reader)
+            except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError) as exc:
+                errors.append(_poll_error_code(exc))
+                # Forget untrustworthy progress, not authoritative evidence.
+                # A new epoch also makes every surviving waiter an enrollment.
+                state["ci_changes_cursor"] = None
+                state["ci_changes_pending"] = None
+                state["ci_changes_epoch"] = uuid.uuid4().hex
+                enrollment = None
+        page_after = tuple(page["after"]) if page else ()
+        tail = False
+        enroll_after, enroll_before = set(), set()
+        scan_errors = []
+        for item, candidate, wait in _poll_candidates(store, descendants, scan_errors, limit):
             target = (wait["branch"], wait["sha"])
-            bucket = after if target > cursor else before
-            bucket.add(target)
-            if len(bucket) > limit:
-                bucket.remove(max(bucket))
+            invalidated = (page is not None and wait["branch"] in page["branches"]
+                           and target > page_after)
+            if page is not None:
+                if invalidated:
+                    after.add(target)
+                    if len(after) > limit:
+                        tail = True
+                        after.remove(max(after))
+                elif enrollment.needed(item, candidate, wait):
+                    bucket = enroll_after if target > cursor else enroll_before
+                    bucket.add(target)
+                    if len(bucket) > limit:
+                        bucket.remove(max(bucket))
+            else:
+                bucket = after if target > cursor else before
+                bucket.add(target)
+                if len(bucket) > limit:
+                    bucket.remove(max(bucket))
         targets = (sorted(after) + sorted(before))[:limit]
+        frontier = page_after
+        if page is not None:
+            # Interleave the ordered invalidation prefix with enrollments using
+            # the ordinary pair rotation. Only the next invalidated pair may
+            # advance the frontier: selecting a later enrollment cannot skip it.
+            invalidated = sorted(after)
+            enrolling = enroll_after | enroll_before
+            targets = []
+            position = cursor
+            while len(targets) < limit and (invalidated or enrolling):
+                choices = ([invalidated[0]] if invalidated else []) + list(enrolling)
+                target = min(choices, key=lambda pair: (pair <= position, pair))
+                targets.append(target)
+                position = target
+                if invalidated and target == invalidated[0]:
+                    frontier = list(invalidated.pop(0))
+                else:
+                    enrolling.remove(target)
+            tail = tail or bool(invalidated)
         # Advance the selected window even when reads fail or waiters change.
         if targets:
             state["ci_wait_cursor"] = list(targets[-1])
@@ -715,11 +925,17 @@ def poll(config, project, state, *, now, interval, reader=None):
         # failures too: no selected pair is queried twice in this tick.
         responses = {}
         observed = 0
-        for item, candidate, wait in _poll_candidates(store, descendants, errors, limit):
+        for item, candidate, wait in _poll_candidates(store, descendants, scan_errors, limit):
             target = (wait["branch"], wait["sha"])
             if target not in targets:
                 continue
+            retry_ready = enrollment is None
             try:
+                if enrollment is not None:
+                    # Durable absence is the retry queue. Clear before calling
+                    # the adapter or advancing a page, even for old waiters.
+                    enrollment.set(item, candidate, wait, False)
+                    retry_ready = True
                 if target not in responses:
                     responses[target] = None
                     params = {"branch": wait["branch"], "sha": wait["sha"]}
@@ -732,13 +948,17 @@ def poll(config, project, state, *, now, interval, reader=None):
                 if status_rows is None:
                     continue
                 rows = _terminal_rows(wait, status_rows)
-                if rows is None:
+                if rows is None and enrollment is None:
                     continue
                 with lock(project.root / "locks" / "insights.lock"):
                     current = project.work_items.current(item["id"])
                     if current != item or _evidence(project.work_items, current) is not None:
                         continue
                     if _candidate_wait(project.work_items, current["wait"], candidate) != wait:
+                        continue
+                    if rows is None:
+                        if enrollment is not None:
+                            enrollment.set(item, candidate, wait, True)
                         continue
                     binding = ("publication_id", "branch", "sha")
                     if wait["kind"] == "publication_ci":
@@ -760,6 +980,8 @@ def poll(config, project, state, *, now, interval, reader=None):
                     sync_dir(project.root)
                     write_json(path, record, exclusive=True)
                     observed += 1
+                    if enrollment is not None:
+                        enrollment.set(item, candidate, wait, False)
                     # Coarse platform-watch hint only, after durable evidence.
                     # Admission rechecks exact current holder/revision/digest.
                     with contextlib.suppress(OSError, NotImplementedError, Denied):
@@ -768,8 +990,21 @@ def poll(config, project, state, *, now, interval, reader=None):
                         mkdir(directory)
                         os.utime(directory, None, follow_symlinks=False)
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
+                if not retry_ready and len(scan_errors) < limit:
+                    scan_errors.append(_poll_error_code(exc))
                 if len(errors) < limit:
                     errors.append(_poll_error_code(exc))
+        errors.extend(scan_errors[:max(0, limit - len(errors))])
+        if page is not None:
+            if scan_errors:
+                # Unknown eligibility cannot be treated as covered. Replay the
+                # same invalidation after recovery, without advancing its frontier.
+                state["ci_changes_pending"] = page
+            elif tail:
+                state["ci_changes_pending"] = {**page, "after": frontier}
+            else:
+                state["ci_changes_cursor"] = page["next_cursor"]
+                state["ci_changes_pending"] = None
         return {"event": "ci_wait_poll", "ok": not errors, "polled": len(targets),
                 "observed": observed, "errors": errors}
     except (Denied, LimitExceeded, OSError, ValueError) as exc:
