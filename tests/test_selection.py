@@ -611,6 +611,7 @@ class SelectionTests(SelectionFixture):
                 engine._admit(self.project, role.name, role, stack, wait=False)
                 ctx = self.context()
                 ctx._slot_lease = True
+                ctx._admission_id = '1' * 32
                 deadline_before = ctx.deadline
                 budget = Budget(original_config.data / 'budget',
                                      original_config.limits.daily_requests,
@@ -640,6 +641,7 @@ class SelectionTests(SelectionFixture):
                         self.assertRaises(error):
                     engine._selection_retry_wait(ctx, self.project, stack, role, role.name, 1)
                 self.assertFalse(ctx._slot_lease)
+                self.assertIsNone(ctx._admission_id)
                 self.assertEqual(ctx.request_count, 0)
                 if guard != 'deadline':
                     self.assertEqual(ctx.deadline, deadline_before)

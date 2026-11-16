@@ -411,7 +411,9 @@ def execute(context, driver, prompt, **kwargs):
         projection = getattr(context, "_dispatch_projection", None)
         reason = ("prompt_profile_mismatch" if projection and projection["profile"] != profile
                   else "driver_session_unobserved")
+        admission_id = getattr(context, "_admission_id", None)
         record = {"execution_attempt": context.execution_attempt,
+                  "admission_id": admission_id if _sequence_id(admission_id) else None,
                   "run": context.run_dir.name, "parent_run": getattr(context, "parent_run", None),
                   "role": context.role.name, "profile": profile,
                   "profile_unknown_reason": None if profile else "selected_profile_unavailable",

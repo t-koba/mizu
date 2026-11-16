@@ -261,7 +261,7 @@ def pending(store, role):
 
 @contextlib.contextmanager
 def reservation(engine, project, role_name, *, wait=False, enqueue=False,
-                observation_sink=None, expected=None, owner_stack=None):
+                observation_sink=None, identity_sink=None, expected=None, owner_stack=None):
     """Reserve the same successor through normal FIFO, under execution locks.
 
     Fresh stop/authority/budget/disk checks and ordinary queue capacity apply
@@ -289,7 +289,7 @@ def reservation(engine, project, role_name, *, wait=False, enqueue=False,
                                  blocking=False))
         engine._check_admission(project)
         elapsed = engine._admit(project, role_name, role, stack, wait=wait,
-                                enqueue=enqueue, observation_sink=observation_sink)
+                                enqueue=enqueue, observation_sink=observation_sink, identity_sink=identity_sink)
         store = project.snapshots
         with lock(store.root / "locks" / "publication.lock"):
             pointer = pointer_at(store.root)

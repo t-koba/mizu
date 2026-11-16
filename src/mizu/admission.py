@@ -655,7 +655,7 @@ def _state_bytes(capacity: int) -> int:
 
 @contextlib.contextmanager
 def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None,
-              observation_sink=None, evidence_source=None,
+              observation_sink=None, identity_sink=None, evidence_source=None,
               evidence_source_factory=None, capture_choices=True):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
@@ -688,7 +688,10 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     capture_choices=False skips only the additional choice probes; it preserves
     the existing observation/omitted count and never changes admission.
     Later tickets are measured only by this shadow pass, never ranked.
-    Capture/sink exceptions are ignored; the yielded elapsed float is unchanged.
+    Optional identity_sink receives the source-owned queue identity after every
+    successful revalidation, including uncontended admissions. It is local
+    evidence only, not admission authority. Capture/sink exceptions are ignored;
+    the yielded elapsed float is unchanged.
     """
     stop = stop if stop is not None else threading.Event()
     admission_started = time.monotonic()
@@ -738,6 +741,9 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
                 if observation_sink is not None and queue.observation is not None:
                     with contextlib.suppress(Exception):
                         observation_sink({**queue.observation, "elapsed_seconds": elapsed})
+                if identity_sink is not None:
+                    with contextlib.suppress(Exception):
+                        identity_sink(queue.identity)
                 yield elapsed
             return
     finally:

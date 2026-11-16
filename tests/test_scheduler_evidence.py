@@ -63,7 +63,7 @@ class SchedulerEvidenceTests(Fixture):
                     "choice_set": {"complete": True, "omitted": 0, "total": 1,
                                    "candidates": [candidate]}}
         started = {"run": name, "queue_observations": {"version": 1, "omitted": 0, "observations": [selected]}}
-        row = attempt(run=name, execution_attempt=1, phase="initial",
+        row = attempt(run=name, execution_attempt=1, phase="initial", admission_id=identity,
                       profile=candidate["profile"], engine="pi")
         row["usage"].update(input_tokens=50, cache_read_tokens=25, cache_write_tokens=25)
         return started, row
@@ -117,6 +117,24 @@ class SchedulerEvidenceTests(Fixture):
         self.assertNotIn("input_tokens", json.dumps(summary))
         self.assertNotIn("cache_read_tokens", json.dumps(summary))
 
+    def test_lone_later_admission_never_joins_initial_attempt_by_session(self):
+        # The first admission was uncontended and emitted no queue observation.
+        # Only a later contended re-admission was retained, for the same session.
+        started, initial = self.choice_fixture(identity="2" * 32)
+        initial["admission_id"] = "1" * 32
+        later = copy.deepcopy(initial)
+        later.update(execution_attempt=2, admission_id="2" * 32)
+        self.write_choice(started, [initial, later])
+        view = self.view()
+        summary = view["admission_outcomes"]
+        self.assertEqual(summary["complete_choice_sets"], 1)
+        self.assertEqual(summary["selected_admissions"], 1)
+        self.assertEqual(summary["excluded"]["mismatched_identity"], 1)
+        self.assertEqual(summary["valid_outcomes"], 0)
+        self.assertIsNone(summary["token_weighted_cache_read_share"])
+        for identity in ("1" * 32, "2" * 32):
+            self.assertNotIn(identity, json.dumps(view))
+
     def test_admission_incomplete_omitted_and_ambiguous_choices(self):
         changes = (
             ("omitted_observations", lambda q, o, c: q.update(omitted=1)),
@@ -148,6 +166,11 @@ class SchedulerEvidenceTests(Fixture):
 
     def test_admission_unknown_and_mismatched_identities(self):
         changes = (
+            ("unknown_identity", lambda c, r: r.pop("admission_id")),
+            ("unknown_identity", lambda c, r: r.update(admission_id=None)),
+            ("unknown_identity", lambda c, r: r.update(admission_id="bad")),
+            ("unknown_identity", lambda c, r: r.update(admission_id="A" * 32)),
+            ("mismatched_identity", lambda c, r: r.update(admission_id="2" * 32)),
             ("unknown_identity", lambda c, r: c["session"].update(key=None)),
             ("unknown_identity", lambda c, r: c["session"].update(generation=None)),
             ("unknown_identity", lambda c, r: c["session"].update(generation=True)),

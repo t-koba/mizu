@@ -2692,7 +2692,7 @@ class Engine:
             raise InfraExceeded("Free disk space is below the configured reserve")
 
     def _admit(self, project: Project, role_name: str, role: Role, stack: contextlib.ExitStack,
-               *, wait: bool, enqueue: bool = False, observation_sink=None) -> float:
+               *, wait: bool, enqueue: bool = False, observation_sink=None, identity_sink=None) -> float:
         """Hold dispatch locks after FIFO admission and return its elapsed time."""
         resources = [role_exclusion(project.root, role_name)]
         if role.workspace == "write":
@@ -2718,6 +2718,8 @@ class Engine:
         admission_kwargs["evidence_source_factory"] = lambda: dispatch_evidence.AdmissionSource(
             self.config, project, role, ephemeral=self.ephemeral)
         admission_kwargs["capture_choices"] = self.config.limits.queue_observations > 0
+        if identity_sink is not None:
+            admission_kwargs["identity_sink"] = identity_sink
         if observation_sink is not None:
             admission_kwargs["observation_sink"] = observe
         elapsed = stack.enter_context(admission(self.config, resources, wait=wait, enqueue=enqueue,
@@ -2848,6 +2850,7 @@ class Engine:
         """
         stack.close()
         context._slot_lease = False
+        context._admission_id = None
         deadline = time.monotonic() + max(0.0, wait_seconds)
         idle = self.config.limits.idle_seconds
         while True:
@@ -2861,7 +2864,8 @@ class Engine:
                 break
             self.stop.wait(min(idle, remaining))
         self._admit(project, role_name, selection_role, stack, wait=False,
-                    observation_sink=getattr(context, "_admission_observation_sink", None))
+                    observation_sink=getattr(context, "_admission_observation_sink", None),
+                    identity_sink=lambda identity: setattr(context, "_admission_id", identity))
         context._slot_lease = True
         if context.role.workspace == "write":
             context._workspace_lease = _WorkspaceLease(self, context, stack)
@@ -3215,12 +3219,17 @@ class Engine:
                     _bound_started_evidence(started, queue_observations,
                                              started_evidence_cap)
                     write_json(run_dir / "started.json", started)
+            admission_identity = None
+            def bind_admission(identity):
+                nonlocal admission_identity
+                admission_identity = identity
             continuation = None
             lock_diagnostics.phase("admission")
             if intent is not None:
                 continuation = stack.enter_context(continuations.reservation(
                     self, project, role_name, wait=retry_busy, enqueue=enqueue_busy,
-                    observation_sink=record_admission, expected=intent, owner_stack=continuation_owner))
+                    observation_sink=record_admission, identity_sink=bind_admission,
+                    expected=intent, owner_stack=continuation_owner))
                 if continuation is None:
                     return {"skipped": "stale-continuation"}
                 admission_elapsed = continuation["admission_elapsed_seconds"]
@@ -3229,7 +3238,8 @@ class Engine:
                     return recovered
             else:
                 admission_elapsed = self._admit(project, role_name, role, stack, wait=retry_busy,
-                                               enqueue=enqueue_busy, observation_sink=record_admission)
+                                               enqueue=enqueue_busy, observation_sink=record_admission,
+                                               identity_sink=bind_admission)
                 # A yield may have committed while this ordinary wake queued.
                 # Do not allocate a different identity for the same demand.
                 if role.workspace == "write" and continuations.ready(project.snapshots, role_name):
@@ -3450,6 +3460,7 @@ class Engine:
                 context.opening_task = (dispatch_state["next_task"]
                                         if _dispatch.admission == "next_task" else None)
                 context._slot_lease = True
+                context._admission_id = admission_identity
                 context._admission_observation_sink = record_admission
                 context.ephemeral = self.ephemeral
                 context.reselection_role = selection_role

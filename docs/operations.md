@@ -1494,7 +1494,7 @@ first-failure counts per run within the examined window, not counts of all defec
 in each record. `omitted_observations` separately sums the retained omission counts.
 
 Only a single retained observation with outer `omitted == 0` can supply a choice
-set: multiple observations have no physical-attempt marker and are ambiguous.
+set; multiple observations remain conservatively excluded as ambiguous.
 The set must have `complete is true`, exact integer `omitted == 0`, a candidate
 count equal to `total`, unique 32-lowercase-hex admission IDs, ready/busy rows,
 and exactly one ready selected candidate. `complete_choice_sets` counts these
@@ -1512,6 +1512,14 @@ Each selection joins only its own directory's unique `execution_attempt == 1`
 row with exact run ID and `phase == initial`. Dropped/over-limit dispatch files
 or rows with missing/invalid attempt numbers cannot establish this join. Known
 profile, engine, session key and generation must match exactly on both sides.
+The selected queue admission ID must also match the dispatch row's source-owned
+`admission_id` (32 lowercase hex characters). Runtime captures this marker on
+every successful admission, including uncontended admissions, and refreshes it
+on re-admission; each physical dispatch snapshots the currently held marker.
+Missing or invalid markers remain unknown, and mismatched markers exclude the
+join even when the session matches. Thus a lone observation from a later
+contended re-admission cannot supply the first uncontended admission's outcome.
+IDs remain local evidence and never appear in this report.
 No later dispatch supplies a missing outcome. `valid_outcomes` additionally
 requires a settled returned/raised attempt with valid usage details and the
 existing engine-contract denominator and cache-read-share checks.

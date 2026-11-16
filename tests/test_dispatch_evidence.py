@@ -20,6 +20,17 @@ class DispatchEvidenceTests(Fixture):
     def records(self, context):
         return read_json(context.run_dir / "dispatch-attempts.json")["attempts"]
 
+    def test_each_physical_dispatch_snapshots_valid_admission_marker_or_unknown(self):
+        ctx = self.context()
+        driver = type('Driver', (), {'execute': lambda *args, **kwargs: {}})()
+        for number, identity in enumerate((None, "bad", "A" * 32, "1" * 32, "2" * 32), 1):
+            ctx.execution_attempt = number
+            if identity is not None:
+                ctx._admission_id = identity
+            evidence.execute(ctx, driver, "work")
+        self.assertEqual([r["admission_id"] for r in self.records(ctx)],
+                         [None, None, None, "1" * 32, "2" * 32])
+
     def test_start_is_crash_visible_and_missing_usage_is_unknown(self):
         seen = []
         def callback(ctx, *_):

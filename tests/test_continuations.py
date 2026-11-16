@@ -716,6 +716,9 @@ class EngineContinuationTests(ContinuationFixture):
             started = read_json(ctx.run_dir / "started.json")
             self.assertEqual(started["continuation"], c.identity(original))
             self.assertEqual(started["snapshot"], later["id"])
+            self.assertRegex(ctx._admission_id, r"^[0-9a-f]{32}$")
+            dispatch = read_json(ctx.run_dir / "dispatch-attempts.json")["attempts"][0]
+            self.assertEqual(dispatch["admission_id"], ctx._admission_id)
             self.assertEqual(read_json(self.project.root / "active/worker.json")["run"], ctx.run_dir.name)
             self.assertEqual(c.pending(self.store, "worker")["state"], "reserved")
         driver = ScriptDriver(work)

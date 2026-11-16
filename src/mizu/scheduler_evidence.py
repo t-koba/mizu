@@ -133,8 +133,8 @@ def _choice(record, max_observations, max_candidates, counts):
         return None, "truncated_observations"
     if not observations:
         return None, "missing_observations"
-    # Re-admissions have no attempt marker. Never guess which observation
-    # belongs to the initial dispatch when multiple transactions were retained.
+    # Keep multiple retained observations unknown; the exact marker check
+    # below also prevents a lone later observation joining the initial dispatch.
     if len(observations) != 1:
         return None, "ambiguous_observations"
     observation = observations[0]
@@ -172,7 +172,7 @@ def _choice(record, max_observations, max_candidates, counts):
     return (observation["admission_id"], identity), None
 
 
-def _initial_outcome(attempts, name, identity):
+def _initial_outcome(attempts, name, admission_id, identity):
     if attempts is None:
         return None, "incomplete_dispatch"
     initial = [row for row in attempts if isinstance(row, dict)
@@ -184,6 +184,10 @@ def _initial_outcome(attempts, name, identity):
     row = initial[0]
     if row.get("run") != name or row.get("phase") != "initial":
         return None, "mismatched_join"
+    if not _sequence_id(row.get("admission_id")):
+        return None, "unknown_identity"
+    if row["admission_id"] != admission_id:
+        return None, "mismatched_identity"
     actual_identity = _admission_identity(row)
     if (identity is None or actual_identity is None
             or row.get("profile_unknown_reason") is not None
@@ -390,7 +394,7 @@ def summarize(project):
         except (ValueError, TypeError, RecursionError):
             coverage["malformed_files"] += 1
         if selected is not None:
-            selections.append((selected, _initial_outcome(join_attempts, name, selected[1])))
+            selections.append((selected, _initial_outcome(join_attempts, name, *selected)))
     frequencies = Counter(selected[0] for selected, _ in selections)
     cached_sum = prompt_sum = 0
     for selected, (outcome, reason) in selections:

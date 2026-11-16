@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.admission import _Queue, role_exclusion
+from mizu.admission import _Queue, admission, role_exclusion
 from mizu.errors import Busy, Denied
 from mizu.dispatch_evidence import AdmissionSource
 from mizu.evidence_records import read_retained
@@ -268,6 +268,7 @@ class AdmissionEvidenceTests(Fixture):
             self.assertEqual(started['queue_observations']['omitted'], 0)
             self.assertEqual(row['live_ticket_ids'], [head.identity, ticket_id])
             self.assertEqual(row['admission_id'], ticket_id)
+            self.assertEqual(dispatch['attempts'][0]['admission_id'], ticket_id)
             self.assertEqual(row['bypassed_busy_ticket_ids'], [head.identity])
             self.assertTrue(row['queued'])
             self.assertEqual(row['fifo_position'], 2)
@@ -434,22 +435,63 @@ class AdmissionEvidenceTests(Fixture):
 
     def test_first_contended_readmission_attaches_to_uncontended_start(self):
         engine = Engine(self.config)
-        stacks = []
+        stacks, identities = [], []
         original = engine._admit
         def admit(*args, **kwargs):
             stacks[:] = [args[3]]
             return original(*args, **kwargs)
         def callback(ctx, *_):
+            identities.append(ctx._admission_id)
             self.assertNotIn('queue_observations', read_json(ctx.run_dir / 'started.json'))
             with self.blocked_head():
                 engine._selection_retry_wait(ctx, self.project, stacks[0], ctx.role, 'reporter', 0.0)
-        engine.driver = ScriptDriver(callback)
+            identities.append(ctx._admission_id)
+        class Driver:
+            requires_sandbox = False
+            def execute(self, ctx, prompt, *, profile=None):
+                if ctx.execution_attempt == 1:
+                    callback(ctx)
+                    return {}  # Missing finish triggers a second physical dispatch.
+                return ScriptDriver().execute(ctx, prompt, profile=profile)
+        engine.driver = Driver()
         with patch.object(engine, '_admit', side_effect=admit):
             result = engine.run(self.project, 'reporter')
-        started = read_json(self.project.root / 'runs' / result['run'] / 'started.json')
+        directory = self.project.root / 'runs' / result['run']
+        started = read_json(directory / 'started.json')
         row, = started['queue_observations']['observations']
         self.assertFalse(row['queued'])
         self.assertEqual(started['queue_observations']['omitted'], 0)
+        attempts = read_json(directory / 'dispatch-attempts.json')['attempts']
+        self.assertEqual([r['execution_attempt'] for r in attempts], [1, 2])
+        self.assertEqual([r['admission_id'] for r in attempts], identities)
+        self.assertNotEqual(identities[0], identities[1])
+        self.assertEqual(row['admission_id'], identities[1])
+
+    def test_admission_identity_callback_is_success_only_and_best_effort(self):
+        identities, observations = [], []
+        resource = role_exclusion(self.project.root, 'reporter')
+        with admission(self.config, [resource], identity_sink=identities.append,
+                       observation_sink=observations.append) as elapsed:
+            self.assertIsInstance(elapsed, float)
+        self.assertEqual(len(identities), 1)
+        self.assertRegex(identities[0], r'^[0-9a-f]{32}$')
+        self.assertEqual(observations, [])
+        with lock(resource, blocking=False):
+            with self.assertRaises(Busy):
+                with admission(self.config, [resource], identity_sink=identities.append):
+                    self.fail('Contended admission must not yield')
+        def revalidate():
+            if checks.pop():
+                raise Denied('revalidation failed')
+        checks = [False, True]  # Initial check succeeds; post-acquisition check fails.
+        with self.assertRaises(Denied):
+            with admission(self.config, [resource], check=revalidate, identity_sink=identities.append):
+                self.fail('Failed revalidation must not yield')
+        self.assertEqual(len(identities), 1)
+        def broken_sink(identity):
+            raise OSError('evidence unavailable')
+        with admission(self.config, [resource], identity_sink=broken_sink) as elapsed:
+            self.assertIsInstance(elapsed, float)
 
     def test_uncontended_run_has_no_queue_observations(self):
         result = Engine(self.config, driver=ScriptDriver()).run(self.project, 'reporter')
