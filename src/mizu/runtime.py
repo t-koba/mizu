@@ -67,7 +67,7 @@ from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
                        validate_progress)
 from .run_health import (_capture_cause, _clear_missing_finish_streak,
                          _record_health_failure, _record_missing_finish_only)
-from .protocol import DEFINITIONS, tool_definitions, validate
+from .protocol import DEFINITIONS, operation_allowed, tool_definitions, validate
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
@@ -201,7 +201,7 @@ WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidenc
 OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
-    "result_read",
+    "result_read", "ready_work_read", "work_order_read", "report_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
 
@@ -1103,7 +1103,7 @@ class Context:
                 # wrap-up tool must wait for the reduced-grant invocation;
                 # otherwise polling could reap it while that tool dispatches.
                 raise Denied(self._bound_message())
-            if operation not in self.role.capabilities:
+            if not operation_allowed(operation, self.role.capabilities):
                 raise Denied(f"Role has no capability: {operation}")
             if self.bound_hit is not None and operation not in WRAP_UP_OPS:
                 raise Denied(self._bound_message())
@@ -1299,6 +1299,26 @@ class Context:
 
     def _op_search(self, args: dict) -> dict:
         return web_operations.search(self, args)
+
+    def _op_ready_work_read(self, args: dict) -> dict:
+        if not operation_allowed("ready_work_read", self.role.capabilities):
+            raise Denied("Ready-work read requires a work capability")
+        page = self.project.work_items.page_ready(
+            limit=args.get("limit", 25), role_name=self.role.name)
+        # A tool read is not opening-page delivery: do not retain signatures,
+        # consume resolution tokens or advance the prompt high-water receipt.
+        return _ready_work_projection(page)
+
+    def _op_work_order_read(self, args: dict) -> dict:
+        if not operation_allowed("work_order_read", self.role.capabilities):
+            raise Denied("Work-order read requires the work_order grant")
+        from . import work_order
+        return work_order.projection_for(self)
+
+    def _op_report_read(self, args: dict) -> dict:
+        if not operation_allowed("report_read", self.role.capabilities):
+            raise Denied("Report read requires the report grant")
+        return {"previous_report": _previous_report(self.project)}
 
     def _op_work_items_read(self, args: dict) -> dict:
         return work_item_operations.read(self, args)
@@ -2151,6 +2171,9 @@ class Context:
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "feed_updates": _op_feed_updates, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
+        "ready_work_read": _op_ready_work_read,
+        "work_order_read": _op_work_order_read,
+        "report_read": _op_report_read,
         "work_items_read": _op_work_items_read,
         "work_items_legacy_read": _op_work_items_legacy_read,
         "work_items_reconcile": _op_work_items_reconcile,
