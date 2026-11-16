@@ -4,6 +4,7 @@ import json
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -305,6 +306,183 @@ class FeedUpdatesTests(Fixture):
         self.config = dataclasses.replace(self.config, web={**self.config.web, "feeds": [FEED]})
         self.assertEqual(len(self.read()["feeds"][0]["entries"]), 1)
 
+    def test_unchanged_configuration_cleans_only_active_role(self):
+        self.read()
+        self.read("reviewer")
+        active, dormant = self.state_path(), self.state_path("reviewer")
+        before = dormant.read_bytes()
+        active_temp = active.parent / ".new-active"
+        dormant_temp = dormant.parent / ".new-dormant"
+        root_temp = active.parent.parent / ".new-configuration"
+        old_lock = dormant.parent.with_suffix(".lock")
+        gate = active.parent.parent / feed_updates._CONFIGURATION
+        signature = gate.read_bytes()
+        for path in (active_temp, dormant_temp, root_temp, old_lock):
+            path.write_bytes(b"unfinished")
+        original = Path.iterdir
+        def iterdir(path):
+            if path == dormant.parent:
+                self.fail("Unchanged read traversed dormant state")
+            return original(path)
+        with patch.object(Path, "iterdir", iterdir):
+            result = self.read()
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["feeds"][0]["entries"], [])
+        self.assertFalse(active_temp.exists())
+        self.assertFalse(root_temp.exists())
+        self.assertFalse(old_lock.exists())
+        self.assertEqual(gate.read_bytes(), signature)
+        self.assertTrue(dormant_temp.exists())
+        self.assertEqual(dormant.read_bytes(), before)
+        self.read("reviewer")
+        self.assertFalse(dormant_temp.exists())
+
+    def test_unchanged_configuration_refuses_unexpected_root_entries(self):
+        self.read()
+        base = self.state_path().parent.parent
+        for name in ("unexpected", digest(b"unconfigured-role")):
+            with self.subTest(name=name):
+                path = base / name
+                if name == "unexpected":
+                    path.write_bytes(b"unexpected")
+                else:
+                    path.mkdir()
+                try:
+                    with self.assertRaises(Denied):
+                        self.read()
+                finally:
+                    path.unlink() if name == "unexpected" else path.rmdir()
+
+    def test_unchanged_configuration_refuses_unsafe_dormant_role_entries(self):
+        self.read()
+        self.read("reviewer")
+        cursor = self.state_path("reviewer")
+        cursor.unlink()
+        role = cursor.parent
+        role.rmdir()
+        target = self.root / "outside-dormant-state"
+        target.write_bytes(b"untouched")
+        for kind in ("file", "symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                if kind == "file":
+                    role.write_bytes(b"not a directory")
+                else:
+                    try:
+                        if kind == "symlink":
+                            role.symlink_to(target.parent, target_is_directory=True)
+                        else:
+                            role.hardlink_to(target)
+                    except (OSError, NotImplementedError):
+                        self.skipTest("Link creation unavailable")
+                try:
+                    with self.assertRaises(Denied):
+                        self.read()
+                    self.assertEqual(target.read_bytes(), b"untouched")
+                finally:
+                    role.unlink()
+
+    def test_missing_or_corrupt_configuration_forces_full_reconciliation(self):
+        self.read()
+        self.read("reviewer")
+        dormant = self.state_path("reviewer")
+        base = dormant.parent.parent
+        gate = base / feed_updates._CONFIGURATION
+        valid, cursor = gate.read_bytes(), dormant.read_bytes()
+        for content in (None, b"", b"x" * 64, b"x" * 65, b"x" * 10000):
+            with self.subTest(content_size=None if content is None else len(content)):
+                gate.unlink()
+                if content is not None:
+                    gate.write_bytes(content)
+                leftovers = [dormant.parent / ".new-dormant", base / ".new-gate"]
+                for path in leftovers:
+                    path.write_bytes(b"unfinished")
+                self.assertTrue(self.read()["complete"])
+                self.assertTrue(all(not path.exists() for path in leftovers))
+                self.assertEqual(gate.read_bytes(), valid)
+                self.assertEqual(dormant.read_bytes(), cursor)
+
+    def test_unsafe_configuration_gate_fails_closed(self):
+        self.read()
+        gate = self.state_path().parent.parent / feed_updates._CONFIGURATION
+        valid = gate.read_bytes()
+        target = self.root / "outside-configuration"
+        target.write_bytes(valid)
+        for kind in ("symlink", "hardlink", "directory"):
+            with self.subTest(kind=kind):
+                gate.unlink()
+                if kind == "directory":
+                    gate.mkdir()
+                else:
+                    try:
+                        gate.symlink_to(target) if kind == "symlink" else gate.hardlink_to(target)
+                    except (OSError, NotImplementedError):
+                        self.skipTest("Link creation unavailable")
+                try:
+                    with self.assertRaises(Denied):
+                        self.read()
+                    self.assertEqual(target.read_bytes(), valid)
+                finally:
+                    gate.rmdir() if kind == "directory" else gate.unlink()
+                    gate.write_bytes(valid)
+
+    def test_unchanged_configuration_refuses_unsafe_active_cleanup(self):
+        self.read()
+        path = self.state_path()
+        target = self.root / "outside-active-state"
+        target.write_bytes(b"untouched")
+        temporary = path.parent / ".new-unsafe"
+        try:
+            temporary.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlink creation unavailable")
+        with self.assertRaises(Denied):
+            self.read()
+        self.assertEqual(target.read_bytes(), b"untouched")
+        temporary.unlink()
+        # A matching signature cannot authorize a linked active-role tree.
+        path.unlink()
+        path.parent.rmdir()
+        path.parent.symlink_to(target.parent, target_is_directory=True)
+        with self.assertRaises(Denied):
+            self.read()
+
+    def test_configuration_change_during_observation_reconciles_late_state(self):
+        self.read("reviewer")
+        removed = self.state_path("reviewer")
+        ctx = self.context("reviewer")  # old configuration pinned for this read
+        def operation(*args):
+            self.config = dataclasses.replace(self.config, roles={k: v for k, v in self.config.roles.items()
+                                                                 if k != "reviewer"})
+            self.read()  # a configuration change retires the still-fetching role
+            self.assertFalse(removed.parent.exists())
+            return self.observe(*args)
+        with patch.object(ctx, "_bounded_web_operation", side_effect=operation):
+            self.assertTrue(ctx._op_feed_updates({})["complete"])
+        self.assertTrue(removed.exists())  # late cursor transaction still finishes
+        self.read()
+        self.assertFalse(removed.parent.exists())  # it cannot bless resurrected state
+
+    def test_failed_reconciliation_does_not_record_configuration(self):
+        self.read()
+        self.read("reviewer")
+        removed = self.state_path("reviewer")
+        gate = removed.parent.parent / feed_updates._CONFIGURATION
+        before = gate.read_bytes()
+        self.config = dataclasses.replace(self.config, roles={k: v for k, v in self.config.roles.items()
+                                                             if k != "reviewer"})
+        original = Path.rmdir
+        def rmdir(path):
+            if path == removed.parent:
+                raise OSError("cleanup failed")
+            return original(path)
+        with patch.object(Path, "rmdir", rmdir), self.assertRaisesRegex(OSError, "cleanup failed"):
+            self.read()
+        self.assertEqual(gate.read_bytes(), before)
+        self.assertTrue(removed.parent.exists())
+        self.assertTrue(self.read()["complete"])
+        self.assertFalse(removed.parent.exists())
+        self.assertNotEqual(gate.read_bytes(), before)
+
     def test_concurrent_reads_serialize_cursor_consumption(self):
         self.config = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits,
                                                                                 tool_response_bytes=4096))
@@ -369,8 +547,11 @@ class FeedUpdatesTests(Fixture):
         self.assertTrue(all(path.exists() for path in
                             (searcher_removed, reviewer_removed, searcher_live, reviewer_live)))
 
+        dormant_temp = reviewer_removed.parent / ".new-dormant"
+        dormant_temp.write_bytes(b"unfinished")
         self.config = dataclasses.replace(self.config, web={**self.config.web, "feeds": [OTHER]})
         self.read()  # reviewer remains configured but is dormant during cleanup
+        self.assertFalse(dormant_temp.exists())
         self.assertFalse(searcher_removed.exists())
         self.assertFalse(reviewer_removed.exists())
         self.assertTrue(searcher_live.exists())
@@ -494,7 +675,7 @@ class FeedUpdatesTests(Fixture):
         ctx = self.context("searcher")
         ctx.role = dataclasses.replace(ctx.role, capabilities=ctx.role.capabilities + ("feed_updates",))
         with (patch.object(ctx, "_bounded_web_operation") as observe,
-              patch.object(feed_updates, "safe_write") as write_cursor):
+              patch.object(feed_updates, "safe_write", wraps=feed_updates.safe_write) as write_state):
             for _ in range(2):
                 page = ctx.handle("feed_updates", {})
                 self.assertTrue(page["truncated"])
@@ -519,7 +700,8 @@ class FeedUpdatesTests(Fixture):
                     self.assertEqual(status["entries"], [])
                     self.assertFalse(self.state_path(feed=status["feed"]).exists())
             observe.assert_not_called()
-            write_cursor.assert_not_called()
+            self.assertEqual(write_state.call_count, 1)
+            self.assertEqual(write_state.call_args.args[1], feed_updates._CONFIGURATION)
 
     def test_truncated_feed_does_not_block_small_healthy_feed(self):
         self.config = dataclasses.replace(self.config, web={**self.config.web, "feeds": [FEED, OTHER]},
@@ -589,7 +771,7 @@ class FeedUpdatesTests(Fixture):
                             "errors": [], "overflow": False, "complete": True}
                 original = feed_updates.safe_write
                 def write(root, name, data):
-                    if name != digest(feeds[0].encode()) + ".json":
+                    if name not in (feed_updates._CONFIGURATION, digest(feeds[0].encode()) + ".json"):
                         raise OSError("disk full")
                     return original(root, name, data)
                 with patch.object(ctx, "_bounded_web_operation", side_effect=operation), \

@@ -16,6 +16,7 @@ from .fs import ATOMIC_WRITE_TEMP_PREFIX, DIGEST, canonical, digest, loads_finit
 # at most 1000 completed and 1000 partially delivered SHA-256 identities,
 # plus a fixed version/scope envelope, never XML.
 _STATE_BYTES = 2 * 1000 * 67 + 1024
+_CONFIGURATION = "configuration"
 
 
 def _previous(root, name, role, feed):
@@ -60,19 +61,37 @@ def _regular(path):
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
             or getattr(info, "st_file_attributes", 0) & 0x400):
         raise Denied("Unsafe feed cursor file")
+    return info
 
 
-def _retire(base, roles, configured):
+def _configuration_matches(base, signature):
+    try:
+        info = _regular(base / _CONFIGURATION)
+    except FileNotFoundError:
+        return False
+    # Corrupt content triggers reconciliation; unsafe paths must still fail.
+    return (info.st_size == len(signature)
+            and safe_read(base, _CONFIGURATION, len(signature)) == signature)
+
+
+def _retire(base, roles, configured, active=None):
     """Validate cleanup targets before deleting; never recurse or follow links.
 
     All cursor access uses the project lock, including retirement. Old role lock
     files are obsolete: no caller opens them, so the same gate can retire them.
     The project lock itself lives outside this tree and lasts with the project.
+    Always validate the root; a matching configuration limits child scans to the
+    active role, without trusting the names or types of dormant root entries.
     """
     files, directories = [], []
     for path in base.iterdir():
         if DIGEST.fullmatch(path.name):
             _directory(path)
+            if active is not None:
+                if path.name not in roles:
+                    raise Denied("Unexpected feed cursor role")
+                if path.name != active:
+                    continue
             if path.name not in roles:
                 directories.append(path)
             for child in path.iterdir():
@@ -83,7 +102,10 @@ def _retire(base, roles, configured):
                 if path.name not in roles or temporary or child.name not in configured:
                     _regular(child)
                     files.append(child)
-        elif path.suffix == ".lock" and DIGEST.fullmatch(path.stem):
+        elif path.name == _CONFIGURATION:
+            _regular(path)
+        elif (path.name.startswith(ATOMIC_WRITE_TEMP_PREFIX)
+              or path.suffix == ".lock" and DIGEST.fullmatch(path.stem)):
             _regular(path)
             files.append(path)
         else:
@@ -119,7 +141,7 @@ def _fit_row(row, room):
     return None
 
 
-def _read_feed(context, role, root, name, status, room):
+def _read_feed(context, role, root, name, status, room, signature):
     """Consume one worker result before starting the next worker.
 
     Only returnable rows escape this frame, not the observation or identity set.
@@ -134,6 +156,13 @@ def _read_feed(context, role, root, name, status, room):
     # The network worker never holds this gate. Reopen the latest cursor only
     # here: another caller may have committed or retired state during the fetch.
     with lock(context.project.root / "feed-updates.lock"):
+        # A different configuration may have swept while this worker observed.
+        # Its gate must not bless state resurrected by this late transaction.
+        if not _configuration_matches(root.parent, signature):
+            try:
+                (root.parent / _CONFIGURATION).unlink()
+            except FileNotFoundError:
+                pass
         mkdir(root)
         _directory(root)
         try:
@@ -214,9 +243,16 @@ def read(context):
     with lock(context.project.root / "feed-updates.lock"):
         mkdir(root.parent)
         _directory(root.parent)
-        _retire(root.parent, {digest(name.encode()) for name in context.config.roles}, names)
+        roles = {digest(name.encode()) for name in context.config.roles}
+        signature = digest(canonical({"version": 1, "roles": sorted(roles), "feeds": sorted(names)})).encode()
+        unchanged = _configuration_matches(root.parent, signature)
         mkdir(root)
         _directory(root)
+        # Reconcile dormant roles only when configuration changes (or its
+        # bounded gate is absent/corrupt). Active-role leftovers retire always.
+        _retire(root.parent, roles, names, root.name if unchanged else None)
+        if not unchanged:
+            safe_write(root.parent, _CONFIGURATION, signature)
     room = context.config.limits.tool_response_bytes - len(canonical(response))
     for feed in feeds:
         status = _status(feed)
@@ -227,7 +263,7 @@ def read(context):
         response["truncated"] = True
         return response
     for status in response["feeds"]:
-        room = _read_feed(context, role, root, digest(status["feed"].encode()) + ".json", status, room)
+        room = _read_feed(context, role, root, digest(status["feed"].encode()) + ".json", status, room, signature)
         # Once finalized, this feed needs no further failure reserve. Reclaim
         # only metadata slack, never entries or optional detail already charged.
         metadata = {**status, "entries": []}
