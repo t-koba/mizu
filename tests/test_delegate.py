@@ -11,6 +11,7 @@ from mizu.errors import (AuthorityGrantMismatch, Cancelled, ConfigError, Denied,
 from mizu.admission import role_exclusion
 from mizu.drivers import admit_invocation
 from mizu.fs import held, lock, read_json, write_json
+from mizu.protocol import tool_definitions
 from mizu.runtime import Engine, check_delegate_role
 
 
@@ -126,7 +127,7 @@ class DelegateTests(Fixture):
             else:
                 decoded = json.JSONDecoder().raw_decode(prompt)[0]
                 self.assertEqual(decoded["unit_tool_surface"]["tools"],
-                                 ["mizu_" + c for c in ctx.role.capabilities])
+                                 [tool["name"] for tool in tool_definitions(ctx.role.capabilities)])
                 self.assertNotIn("mizu_delegate", decoded["unit_tool_surface"]["tools"])
                 self.assertNotIn("mizu_exec", decoded["unit_tool_surface"]["tools"])
                 self.assertEqual(ctx.goal, pinned)
