@@ -1026,7 +1026,7 @@ scheduled runs likewise recheck their inputs (`src/mizu/services.py` and
 ## Producer admission
 
 Producer admission (`src/mizu/scheduling.py` `ProducerFacts` /
-`evaluate_producer`, `src/mizu/runtime.py` `producer_hold`) holds only
+`evaluate_producer`, `src/mizu/producer_admission.py` `producer_hold`) holds only
 configured non-writer project roles that carry `submit_insight` (the writer
 can still resolve, merge, defer, or reject input at capacity), before any model
 or run-slot use, when their role-name source's unresolved live input count
