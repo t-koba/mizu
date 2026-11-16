@@ -49,7 +49,8 @@ class DaemonProjectTests(Fixture):
         project = projects[0]
         self.assertEqual([args.args[0] for args in ready.call_args_list], [project] * 3)
         project.insights.ingest_editor.assert_has_calls(
-            [call(keep_days=self.config.limits.retention_days)] * 3)
+            [call(keep_days=self.config.limits.retention_days,
+                  archive_interval_seconds=self.config.limits.automatic_insight_archive_interval_seconds)] * 3)
         self.assertEqual(project.insights.ingest_editor.call_count, 3)
         self.assertEqual(poll.call_count, 3)
         for args, config in zip(poll.call_args_list, configs):
@@ -138,7 +139,8 @@ class DaemonProjectTests(Fixture):
                 self.assertEqual([args.args[1] for args in poll.call_args_list],
                                  [first, second, second])
                 second.insights.ingest_editor.assert_has_calls(
-                    [call(keep_days=changed.limits.retention_days)] * 2)
+                    [call(keep_days=changed.limits.retention_days,
+                          archive_interval_seconds=changed.limits.automatic_insight_archive_interval_seconds)] * 2)
                 self.assertEqual(second.insights.ingest_editor.call_count, 2)
 
     def test_data_directory_change_still_requires_restart(self):
