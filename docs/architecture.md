@@ -468,12 +468,13 @@ receipt mechanism, with a distinct pending-insight token domain; existing
 decision token identities are unchanged. Corrupt legacy receipt content yields
 a bounded unresolved diagnostic; unsafe stores fail closed. Active shared mode
 never falls back to legacy delivery or receipts. This routing does not activate
-SharedRecords or change decision cutover/reconciliation/shadow policy. That
-existing reconciliation maps **decision** receipts only: if the host later
-explicitly switches a legacy project to shared authority, previously handled
-pending-insight attention can replay. No cross-authority pending-receipt
-migration or replay-free cutover is claimed by this stage; that needs a separately
-scoped reconciliation change, not a dual-read fallback.
+SharedRecords; only the host-only reconciliation can activate it. That
+reconciliation maps both `insight.decision` and addressed `insight.pending`
+receipts: it pins current per-role pending sets and their source/receipt bytes,
+preflights existing shared receipts, writes only missing exact records, requires
+per-role parity, and publishes the one-way authority marker last. Previously
+acknowledged pending attention therefore does not replay solely because of
+cutover. There is no dual-read fallback or model-granted activation.
 
 The role explicitly selects handled tokens in `finish.ack_events`; only durable
 successful finish (and writer publication) applies receipts. Reading or finishing
