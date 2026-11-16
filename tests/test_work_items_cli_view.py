@@ -43,7 +43,7 @@ class WorkItemsCliViewTests(Fixture):
         self.assertEqual(args.project, "sample")
         self.assertEqual(args.limit, 25)
         self.assertIsNone(args.cursor)
-        self.assertEqual(args.closed, 10)
+        self.assertIsNone(args.closed)
         self.assertFalse(args.audit)
         self.assertFalse(args.repair)
 

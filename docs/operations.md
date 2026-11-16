@@ -624,6 +624,8 @@ come from the current-state index ([architecture](architecture.md#current-state-
 mizu work-items demo
 mizu work-items demo --limit 25 --cursor '<next_cursor>' --closed 10
 mizu work-items demo --limit 2 --closed 0
+mizu work-items demo --changes --limit 25
+mizu work-items demo --change-cursor '<next_cursor>' --limit 25
 mizu work-items demo --audit [--repair]
 ```
 
@@ -730,6 +732,58 @@ rebuilds the index when every history validates. Writers wait for the audit.
   Runtime prompt projection and the `work_items_read` / `work_items_legacy_read`
   operations keep their existing locked, recovering `page_open` / `page_legacy`
   behavior.
+
+#### Incremental current projections
+
+For incremental consumers, `mizu work-items PROJECT --changes [--limit N]`
+starts a separate scan of **all retained seeded current work items**, including
+terminal items. `--change-cursor TOKEN` resumes or polls it. These options are
+mutually exclusive with each other and `--cursor`, and cannot be combined with
+`--closed`, `--audit` or `--repair`. The ordinary inventory reads above remain
+available for bootstrap and recovery.
+
+The change response is exactly `{items, cursor, next_cursor, has_more}`:
+
+- `items` is a list of `{item, doing_since, blocked_since}`. `item` is the full
+  current stored record (including its ID, revision, status, accepted scope,
+  description and any delivery evidence); the two start timestamps are
+  revision-derived, or null. Records and descriptions are untrusted data.
+  This is **not** a revision/event journal: multiple changes to an item can
+  coalesce into one current projection. It excludes unseeded decisions,
+  origin staleness, wall-clock ages, live wait observations and event-delivery
+  receipts; changes to those other sources are not work-item updates.
+- `cursor` echoes the input (null for `--changes`). `next_cursor` is always a
+  non-null opaque token, including on empty pages. `has_more` means more rows
+  remain in this page sequence, not that no later updates exist. Follow
+  `next_cursor` immediately while `has_more` is true, then retain it for the
+  next poll. Upsert by item ID/revision and persist applied rows and their
+  cursor together. Retrying the same cursor is safe; cancellation between
+  requests creates no server-side session or cleanup obligation.
+- `--limit` is an exact integer 1–100 (default 25). Each projection is at most
+  131849 canonical UTF-8 bytes; the entire response is at most 1 MiB. The
+  byte budget can shorten a page before its row limit. No inventory totals or
+  subscriptions are scanned: selection uses an indexed change-position range
+  and reads at most `limit + 1` current rows.
+- Each request reads one SQLite snapshot. A page sequence fixes its high-water
+  mark but does not retain historical versions or freeze membership across
+  requests. A row updated before it is visited moves beyond that mark; the
+  completed sequence advances only to the fixed mark, so the newer row is
+  delivered on the next polling sequence. Already visited rows changed again
+  are likewise delivered again. Continue polling after a completed bootstrap
+  to catch concurrent changes. Ordering is by increasing index change position,
+  independent of timestamps; absent intervening writes, pagination is deterministic.
+- Tokens are bounded (68 ASCII characters), authenticated and bound to one
+  project's index generation. They are positions, not authority or permission
+  grants. Malformed, truncated, foreign, ahead-of-index or invalidated tokens
+  fail closed with no partial page: discard the local incremental baseline
+  and start a full resync with `--changes`. A rebuild, schema change, restore
+  or missing/recreated index invalidates old tokens; an ordinary restart does not.
+- Unlike ordinary inventory reads, change reads never issue cursors from a
+  private in-memory rebuild/repair. A missing, outdated, incomplete or
+  intent-pending index refuses the request. Retry after the next normal locked
+  recovery, or explicitly run `mizu work-items PROJECT --audit --repair` before
+  resyncing. A pending-intent repair without rebuild preserves valid tokens.
+  The read itself still acquires no record lock and repairs/writes nothing.
 
 ### Waiting on one publication's CI
 

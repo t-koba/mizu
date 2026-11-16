@@ -164,11 +164,14 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
     listing.add_argument("--branch", default=None, help="Filter by exact branch name")
     listing.add_argument("--published-sha", default=None, help="Filter by exact published SHA (40 or 64 hex)")
-    p = sub.add_parser("work-items", help="Show bounded open and recently closed work items; read-only unless --audit is given")
+    p = sub.add_parser("work-items", help="Read bounded work-item inventory or changes; read-only unless --audit is given")
     p.add_argument("project", help="Managed project name")
-    p.add_argument("--limit", type=int, default=25, help="Open items per page (1-100; default: 25)")
-    p.add_argument("--cursor", default=None, help="Opaque open-page continuation from a previous call")
-    p.add_argument("--closed", type=int, default=10, help="Closed items to include, newest first (0-100; default: 10)")
+    p.add_argument("--limit", type=int, default=25, help="Items per open/change page (1-100; default: 25)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--cursor", default=None, help="Opaque open-page continuation from a previous call")
+    mode.add_argument("--changes", action="store_true", help="Start a bounded current-projection change scan")
+    mode.add_argument("--change-cursor", default=None, help="Resume or poll from an opaque change cursor")
+    p.add_argument("--closed", type=int, default=None, help="Closed items to include, newest first (0-100; default: 10)")
     p.add_argument("--audit", action="store_true",
                    help="Under the record lock, replay every work-item history with full validation and compare it with the current-state index")
     p.add_argument("--repair", action="store_true",
@@ -543,7 +546,10 @@ def _cmd_publication_list(config, project, args):
 
 
 def _cmd_work_items(config, project, args):
-    """Read-only open plus newest-closed work-item view; no locks or recovery.
+    """Read-only inventory or incremental current records; no locks or recovery.
+
+    Change mode returns only the persistent-index change page; it never
+    computes inventory totals, event delivery, origin staleness or live waits.
 
     Schema: ``open`` and ``closed`` bounded pages, plus ``event_delivery``
     per-role subscription/pending/acknowledged summaries (at most 100 roles).
@@ -554,6 +560,8 @@ def _cmd_work_items(config, project, args):
     opened read-only by the caller.
     """
     store = project.work_items
+    if args.changes or args.change_cursor is not None:
+        return store.page_changes_readonly(cursor=args.change_cursor, limit=args.limit)
     from .work_item_events import closed_page, progress
     roles = {name: config.roles[name] for name in project.roles}
     event_delivery = progress(store, roles)
@@ -725,6 +733,9 @@ def _execute(config, args):
         return _cmd_editor_export(config, project, args)
     if args.command == "work-items":
         from .project import Project as _ReadOnlyProject
+        if ((args.changes or args.change_cursor is not None)
+                and (args.audit or args.repair or args.closed is not None)):
+            raise ConfigError("Change reads cannot be combined with --audit, --repair or --closed")
         if args.repair and not args.audit:
             raise ConfigError("--repair requires --audit")
         if args.audit:

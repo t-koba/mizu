@@ -74,11 +74,23 @@ def index_items(root, items, *, replace=False):
              (item["origin"] or {}).get("insight_id"), (item["origin"] or {}).get("rev"),
              (item.get("wait") or {}).get("kind"), None, item.get("blocked_since"), None,
              canonical(item).decode()) for item in items]
+    columns = (*COLUMNS, "change_seq")
     with contextlib.closing(sqlite3.connect(Path(root) / NAME)) as db, db:
+        state = db.execute("SELECT seq FROM item_changes WHERE singleton=1").fetchone()
+        if state is None:
+            raise AssertionError("work-item change index is not initialized")
+        sequence = state[0]
         if replace:
             db.execute("DELETE FROM items")
-        db.executemany(f"INSERT OR REPLACE INTO items({', '.join(COLUMNS)}) "
-                       f"VALUES ({', '.join('?' * len(COLUMNS))})", rows)
+            db.execute("UPDATE item_changes SET token_key=randomblob(32), seq=0 WHERE singleton=1")
+            sequence = 0
+        indexed = []
+        for row in rows:
+            sequence += 1
+            indexed.append((*row, sequence))
+        db.executemany(f"INSERT OR REPLACE INTO items({', '.join(columns)}) "
+                       f"VALUES ({', '.join('?' * len(columns))})", indexed)
+        db.execute("UPDATE item_changes SET seq=? WHERE singleton=1", (sequence,))
 
 
 def without_blocked_age(value):

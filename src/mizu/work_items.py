@@ -2379,6 +2379,47 @@ class WorkItems:
             return result, [entry[3] for entry in sorted(selected, key=lambda value: value[1])]
         return result
 
+    def page_changes_readonly(self, *, cursor=None, limit=25) -> dict:
+        """Bounded coalesced current records, not an event history or live waits.
+
+        Each call uses one persistent SQLite read snapshot. A sequence has a
+        fixed high-water mark; a row updated past it is delivered on the next
+        poll, even if it moved before being visited. Retain next_cursor on
+        every response (including empty/completed pages) and upsert by ID/rev.
+        Rebuilds invalidate cursors; pending intents refuse reads until repair.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
+            raise Denied("Work-item page limit must be an integer in [1, 100]")
+        with self._ledger.read("items", locked=False, durable=True) as db:
+            key, after, fence = ITEMS.change_position(db, cursor)
+            found = _rows(db, "SELECT change_seq, item, doing_since, blocked_since FROM items "
+                          "WHERE change_seq>? AND change_seq<=? ORDER BY change_seq LIMIT ?",
+                          (after, fence, limit + 1))
+            selected = []
+            size = 1024  # Envelope and two bounded opaque cursors.
+            position = after
+            for seq, raw, doing_since, blocked_since in found[:limit]:
+                row = {"item": json.loads(raw), "doing_since": doing_since,
+                       "blocked_since": blocked_since}
+                row_bytes = len(canonical(row))
+                if row_bytes > MAX_PROJECTION_BYTES:
+                    raise LimitExceeded("Work-item projection exceeds byte bound")
+                if size + row_bytes + 1 > MAX_OPEN_PAGE_BYTES:
+                    break
+                selected.append(row)
+                size += row_bytes + 1
+                position = seq
+            if found and not selected:
+                raise LimitExceeded("Work-item change row exceeds page byte bound")
+            more = len(found) > len(selected)
+            next_cursor = (ITEMS.change_cursor(key, position, fence) if more
+                           else ITEMS.change_cursor(key, fence))
+            result = {"items": selected, "cursor": cursor, "next_cursor": next_cursor,
+                      "has_more": more}
+            if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
+                raise LimitExceeded("Work-item page exceeds byte bound")
+            return result
+
     def page_open_readonly(self, *, cursor=None, limit=25) -> dict:
         """Return the live open page without acquiring insights.lock.
 

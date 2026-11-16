@@ -228,13 +228,15 @@ class Ledger:
             return label, contents
 
     @contextlib.contextmanager
-    def read(self, *names: str, locked: bool):
+    def read(self, *names: str, locked: bool, durable: bool = False):
         """Yield a connection inside one read transaction of valid domains.
 
         ``locked`` callers hold the record lock and persist any build or
         repair. Others never write the index: a missing, older or partial one
         is built in memory from the files, and pending intents are replayed
         into an in-memory copy, so no read returns an uncommitted state.
+        ``durable`` readers instead refuse these fallbacks: resumable change
+        cursors must refer to persistent positions, never a private repair.
         """
         domains = [self.domains[name][0] for name in names]
         with self._connect(create=locked) as db:
@@ -251,11 +253,18 @@ class Ledger:
                 db.execute("BEGIN")
                 try:
                     usable = [d.name for d in domains if self._usable(db, d)]
-                    if len(usable) == len(names) and not self._pending(db, names):
-                        yield db
-                        return
+                    if len(usable) == len(names):
+                        marks = ", ".join("?" * len(names))
+                        pending = db.execute(
+                            f"SELECT 1 FROM intents WHERE domain IN ({marks}) LIMIT 1", names).fetchone()
+                        if not pending:
+                            yield db
+                            return
                 finally:
                     db.execute("COMMIT")
+            if durable:
+                raise Denied("Work-item change index unavailable or awaiting repair; "
+                             "retry after locked recovery or run work-items --audit --repair")
             with contextlib.closing(sqlite3.connect(":memory:", isolation_level=None)) as memory:
                 if db is not None:
                     db.backup(memory)

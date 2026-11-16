@@ -664,6 +664,29 @@ interrupted build resumes; readers meanwhile build a private in-memory index
 and never write the file. The index is derived: backups exclude it and a
 restored project rebuilds it on first locked use.
 
+The CLI's separate incremental current-projection mode adds one indexed
+`change_seq` to each current item row and one singleton `item_changes` row
+(counter and cursor authentication key). Replacing a changed row advances the
+counter in the same transaction as the row replacement and intent removal;
+no-op replay preserves its position. There is no extra event journal or
+per-reader state. Each build creates a new authentication key, invalidating
+prior cursors; an unexpected removal of an indexed item also invalidates them
+rather than hiding a deletion. Current source items remain retained.
+
+Change pages require a complete persistent items domain with no pending item
+intents, checked in the same read transaction as the cursor and range query.
+They refuse private repairs/builds: their positions could otherwise disagree
+with the next durable replay. A crash before/after source-file commit leaves
+an intent and refuses a change read until locked repair; a crash during index
+replacement rolls back the position and row together. Committed positions and
+keys survive process restart. A fixed sequence high-water mark plus a last
+position pages the current-row change index in bounded queries. Updates moving
+unvisited rows past that mark are not lost: a completed sequence checkpoints
+only its original mark, and the next sequence selects those newer positions.
+This is coalesced current state, not an immutable snapshot across requests or
+a promise to deliver every intermediate revision. See the CLI response/retry
+contract in [operations](operations.md).
+
 Full-chain validation runs when a record is written, when the index is built
 and in `WorkItems.audit` (`mizu work-items PROJECT --audit`), which holds the
 record lock, replays every chain in the strictest mode (every delivery
