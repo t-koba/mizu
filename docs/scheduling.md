@@ -1136,58 +1136,108 @@ acknowledged results disappear. It is scheduling/visibility data, not acceptance
 
 Execution admission optionally supplies a best-effort local observation sink;
 its elapsed-float context-manager API and scheduling policy are unchanged.
-`Engine.run` retains these observations in `started.json` under
+`Engine.run` retains observations in `started.json` under
 `queue_observations = {version: 1, observations: [...], omitted: N}`. The run id
-in that file joins them to the later `dispatch-attempts.json` records in the
-same run directory. This is local evidence, not a public report or an ordering
-input. It does not add model calls or resource/slot lock probes.
+joins them to `dispatch-attempts.json` in the same run directory. This is local,
+source-owned evidence, not a public report or an ordering input. It adds no model
+calls. FIFO, blocked-head bypass, retry/pending reuse, cancellation and failure
+behavior are unchanged.
 
-Each observation records facts from the live ticket snapshot used by the
-**successful queue transaction**, after stale tickets were reaped; it includes
-this admission's row when the request was queued:
+An observation uses the live FIFO snapshot from the successful queue transaction,
+after stale tickets were reaped:
 
-- `admission_id`: the current request's 32-hex identity (the reused ticket id
-  when it had a persistent row); `queued`: whether that row was present;
-  `fifo_position`: its one-based position, or null for an unqueued admission.
-- `live_ticket_ids`: the exact live FIFO id order, including this request if
-  queued. `bypassed_busy_ticket_ids`: only older tickets whose resource probes
-  actually raised Busy in the existing scan. On a successful scan all older
-  tickets were resource-blocked; otherwise a ready older ticket refuses entry.
-- `later_tickets_unexamined`: the number of later tickets whose resource
-  readiness was **not checked** (zero for an unqueued admission).
-- `elapsed_seconds`: the existing monotonic elapsed admission time, also
-  yielded to the caller; it is not a wall-clock instant or the age of a reused
-  ticket across previous fail-fast invocations.
-- `profile` and `engine`: fixed configured hints only for a role with no
-  selector. Otherwise both are null with `profile_engine_reason` set to
-  `selector_not_resolved_at_admission` (or `configured_hint_unavailable` when
-  a fixed hint cannot be read); the reason is null for known hints.
-- `affinity`: always null, with `affinity_reason` set to
-  `not_available_before_dispatch`. Admission does not know a local session or
-  cache-affinity identity, much less provider residency, warmth or TTL.
+- `admission_id`: this request's 32-hex identity (the reused ticket id if queued).
+  `queued` indicates whether its row was present; `fifo_position` is its one-based
+  position, or null when unqueued.
+- `live_ticket_ids`: live FIFO order, including this request if queued.
+  `bypassed_busy_ticket_ids` names only older tickets whose resource probes
+  actually raised Busy in the decision scan. External peers skipped without a
+  probe are **not** reported as busy.
+- `later_tickets_unexamined`: later tickets not examined by the **FIFO decision
+  scan**, not by the separate evidence pass described below.
+- `elapsed_seconds`: the existing monotonic admission duration, also yielded to
+  the caller; not a wall-clock instant or a reused ticket's total lifetime.
+- `profile`, `engine`, `profile_engine_reason`: fixed configured hints for this
+  role only. Selectors remain null with `selector_not_resolved_at_admission`;
+  unavailable fixed hints use `configured_hint_unavailable`.
+- `affinity` remains null with `affinity_reason = not_available_before_dispatch`.
+  Neither this field nor the session facts below assert provider cache state.
 
-The live order is **not a complete ready candidate/choice set**. Readiness of
-later tickets is unknown, and no other tickets' profiles or affinities are
-available from queue rows. Do not rank choices or attribute cache benefits from
-these observations alone.
+`choice_set = {candidates: [...], total: N, omitted: N, complete: bool}` includes
+all live queued candidates, including later tickets, and the current request.
+An unqueued current request is appended to the FIFO list for evidence only.
+Each candidate has `admission_id`, `readiness`, `unknown_reason`, fixed configured
+`profile`/`engine` when attributable, and
+`session = {key, generation, unknown_reason}`. Session keys are the existing
+content-bound SHA-256 local directory keys, not native/provider session IDs.
+Generation is read at admission using the dispatch evidence reader (missing
+`generation.json` means zero); admission never reserves a dispatch ordinal,
+creates a session or resolves a selector.
 
-Bounds and failure behavior: each id list normally has at most
-`limits.admission_queue_capacity` entries. While prior version-1 tickets drain,
-reads allow up to `max(admission_queue_capacity, parallel_runs)` entries; this
-does not increase new-enqueue capacity. Each id is 32 hex characters, and all
-other fields are fixed-schema bounded scalars or fixed reasons. A run retains
-up to its configured `[limits].queue_observations` observed contended
-admissions (including later successful selection-retry re-admissions), but
-trims the sample to the `started.json` retained-evidence read cap (64 KiB, or
-lower `file_bytes`); every observation not retained increments `omitted`
-instead of growing the record. Uncontended admissions
-with no live tickets, unsuccessful/cancelled admissions and failed dispatch
-revalidations emit nothing. A successful unqueued bypass does emit evidence,
-with no queue position. Capture/sink failures do not refuse admission; missing
-or stale evidence is not proof of no contention. No resource/project paths,
-prompts, token payloads, native/provider session ids or arbitrary configuration
-are copied. Queue schema, ticket lifetime, pending reuse, FIFO and blocked-head
-bypass, lock order and cancellation remain unchanged.
+The evidence-only pass runs after the FIFO decision scan allows this request
+through, but **before** acquiring its lasting dispatch locks. Each probe takes
+resources in ticket order, then a slot, nonblocking, under the existing queue
+transaction. Temporary locks are released before the next candidate and before
+the original admission acquisition. `ready` means both resources and a slot were
+observed available together; `busy` means a resource or all slots were observed
+busy. These are sequential observations, not a simultaneous reservation, a
+promise of later availability, or eligibility past FIFO and other runtime gates.
+They never change which request is selected.
+
+`unknown` is separate from `ready` and `busy`, and must never be counted as
+eligible. It covers external projects, legacy tickets without evidence metadata,
+absent observers, unresolved selectors, nonpersistent/ephemeral sessions,
+unreproducible or stale identity bindings, unsafe paths/generation records, and
+any readiness not established by the probes. The current source attests only
+its Engine's project: other managed projects remain
+`project_or_role_identity_unavailable`. Pi family indirection is unknown rather
+than invoking its potentially locking/writing selection logic. Native Codex/Claude
+persistent identities remain `session_identity_unavailable_at_admission`: they
+require the dispatch Context's pinned goal/policy, not an unbounded pre-dispatch
+snapshot/policy read or a guess about that Context. Supported fixed Pi/Pi-durable
+session identity uses the existing conversation-identity logic, not a parallel
+key algorithm.
+A resource-busy candidate can have known `busy` readiness but unknown session
+facts (`resources_busy`): generation is not read without its resources held.
+Known session facts are observations at admission, not proof of the session
+ultimately selected after routing, recovery or rotation.
+
+Version-1 queue tickets may now carry optional
+`evidence = {binding: <64-hex SHA-256>}`. This hashes the fixed role/profile,
+effective settings and content identity; it copies none of those inputs into
+the queue. The observer must reproduce it from its current source configuration
+and project before reporting known readiness. Old tickets still drain unchanged;
+even the current request's retained legacy/stale metadata is not silently
+upgraded by an observer. An unqueued current request supplies its own fresh
+binding. Metadata has the ticket's existing lifetime and is removed with that
+row, including on death/reaping.
+
+Bounds and omissions: `total` is at most
+`max(admission_queue_capacity, parallel_runs) + 1` (the extra request is unqueued).
+`complete` is true only when every candidate is retained and every readiness
+is known; unknown session facts on a resource-busy candidate do not themselves
+make readiness incomplete. `omitted` counts candidates not retained and
+`total = len(candidates) + omitted`. Unknown candidates remain represented, not
+silently excluded. The configured `[limits].queue_observations` bounds retained
+contended admissions, including successful retry re-admissions. Setting it to
+zero retains only the outer omitted count and disables the additional choice-set
+probes. The existing `started.json` cap (64 KiB or lower `file_bytes`) also
+applies: trim alternative candidate details first, keeping the current candidate
+if it fits, and mark the choice set incomplete with exact omissions. If necessary
+remove whole observations and increment the outer `omitted` count. The ordinary
+live-id lists remain subject to the same cap; a view too large even without
+candidate details is omitted as a whole. Run retention owns the evidence's
+lifetime.
+
+Uncontended admissions with no live tickets, unsuccessful/cancelled admissions
+and failed dispatch revalidations emit nothing. Successful unqueued bypasses do
+emit evidence, with no queue position. Capture, identity and sink failures never
+refuse admission; missing/stale evidence is not proof of no contention. No
+resource/project paths, prompts, credentials, token payloads, native/provider
+session IDs or arbitrary configuration are copied. No record claims cache
+residency, warmth or TTL. Outcome analysis continues to use the existing
+`cache_read_tokens / input_tokens` share (unknown when unavailable), not a new
+cache measurement; a choice observation alone cannot attribute a cache benefit.
 
 ## Internal writer-continuation registry
 

@@ -170,14 +170,23 @@ class QueueTests(Fixture):
                     self.assertEqual(probes, [head.resources, tuple(
                         p.relative_to(self.config.data / 'projects').as_posix() for p in current)])
                     if observe:
-                        self.assertEqual(rows, [{
+                        choice = rows[0]['choice_set']
+                        self.assertEqual(choice['total'], 3)
+                        self.assertEqual(choice['omitted'], 0)
+                        self.assertFalse(choice['complete'])
+                        self.assertEqual([r['admission_id'] for r in choice['candidates']], order)
+                        self.assertTrue(all(r['readiness'] == 'unknown' and
+                                            r['unknown_reason'] == 'legacy_metadata_missing'
+                                            for r in choice['candidates']))
+                        self.assertEqual([{k: v for k, v in row.items() if k != 'choice_set'}
+                                          for row in rows], [{
                             'admission_id': order[1], 'queued': True, 'fifo_position': 2,
                             'live_ticket_ids': order, 'bypassed_busy_ticket_ids': [order[0]],
                             'later_tickets_unexamined': 1, 'elapsed_seconds': elapsed,
                             'affinity': None, 'affinity_reason': 'not_available_before_dispatch'}])
                         raw = canonical(rows)
                         for forbidden in (str(self.root).encode(), b'sample', b'resources',
-                                          b'prompt', b'payload', b'provider', b'session'):
+                                          b'prompt', b'payload', b'provider', b'session.json'):
                             self.assertNotIn(forbidden, raw)
                 # The now-ready head still prevents an unqueued newcomer.
                 with self.assertRaises(Busy), admission(self.config, observation_sink=rows.append):
@@ -1454,7 +1463,11 @@ class QueueTests(Fixture):
                 role = self.config.roles[role_name]
                 seen = {}
 
-                def fake_admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None):
+                def fake_admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None,
+                                   observation_sink=None, evidence_source_factory=None,
+                                   capture_choices=True):
+                    self.assertTrue(callable(evidence_source_factory))
+                    self.assertTrue(capture_choices)
                     seen['resources'] = tuple(resources)
                     return contextlib.nullcontext(0.0)
 

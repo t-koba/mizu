@@ -156,8 +156,10 @@ def _bound_started_evidence(record, queue, maximum=MAX_STARTED_EVIDENCE_BYTES):
     """Trim the optional queue sample to the retained-evidence byte cap.
 
     Keep the oldest observations and count every dropped row in
-    ``queue["omitted"]``. This is called before every started.json write,
-    including after the continuation identity is added. If the base record
+    ``queue["omitted"]``. If needed, omit choice candidates first, retaining
+    the selected candidate when it fits and marking that set incomplete. This
+    is called before every started.json write, including after the continuation
+    identity is added. If the base record
     alone exceeds the cap, leave it unchanged: this owner only controls the
     optional sample, not the rest of the run record.
     """
@@ -177,6 +179,17 @@ def _bound_started_evidence(record, queue, maximum=MAX_STARTED_EVIDENCE_BYTES):
             record.update(candidate)
             return record
         if observations:
+            choices = observations[-1].get("choice_set")
+            if choices and choices["candidates"]:
+                # Keep the selected candidate if possible; discard alternatives
+                # as a batch so trimming work is linear in the bounded view.
+                current = [row for row in choices["candidates"]
+                           if row["admission_id"] == observations[-1]["admission_id"]]
+                retained = current if len(current) < len(choices["candidates"]) else []
+                choices["omitted"] += len(choices["candidates"]) - len(retained)
+                choices["candidates"] = retained
+                choices["complete"] = False
+                continue
             observations.pop()
             queue["omitted"] += 1
             continue
@@ -2700,6 +2713,11 @@ class Engine:
             "stop": self.stop,
             "check": lambda: self._check_admission(project),
         }
+        # Ticket metadata is needed only if this request queues or a contended
+        # transaction records its alternatives. Defer identity work until then.
+        admission_kwargs["evidence_source_factory"] = lambda: dispatch_evidence.AdmissionSource(
+            self.config, project, role, ephemeral=self.ephemeral)
+        admission_kwargs["capture_choices"] = self.config.limits.queue_observations > 0
         if observation_sink is not None:
             admission_kwargs["observation_sink"] = observe
         elapsed = stack.enter_context(admission(self.config, resources, wait=wait, enqueue=enqueue,

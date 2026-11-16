@@ -19,7 +19,7 @@ from pathlib import Path
 from datetime import datetime
 
 from .errors import Busy, Denied
-from .fs import ID, canonical, lock, now, write_json
+from .fs import DIGEST, ID, canonical, lock, now, write_json
 
 
 def role_exclusion(project: Path, role: str) -> Path:
@@ -101,6 +101,17 @@ class _Full(Busy):
     """Queue overflow is a deferral, not another wait for a pending place."""
 
 
+def _probe_path(path):
+    """Evidence never treats an unsafe lock witness as availability."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or getattr(info, "st_file_attributes", 0) & 0x400):
+        raise ValueError("Unsafe candidate lock witness")
+
+
 def _valid_resource(resource):
     """Whether a resource path names a project-relative lock the queue holds."""
     if not isinstance(resource, str):
@@ -176,8 +187,12 @@ def _read_state(root: Path, capacity: int, state_bytes: int) -> list:
     for ticket in tickets:
         if (not isinstance(ticket, dict)
                 or not {"id", "owner", "resources"} <= set(ticket)
-                or not set(ticket) <= {"id", "owner", "resources", "enqueued_at", "external"}
+                or not set(ticket) <= {"id", "owner", "resources", "enqueued_at", "external", "evidence"}
                 or ("external" in ticket and type(ticket["external"]) is not bool)
+                or ("evidence" in ticket and not (
+                    isinstance(ticket["evidence"], dict) and set(ticket["evidence"]) == {"binding"}
+                    and isinstance(ticket["evidence"]["binding"], str)
+                    and DIGEST.fullmatch(ticket["evidence"]["binding"])))
                 or not isinstance(ticket["id"], str) or len(ticket["id"]) != 32
                 or any(c not in "0123456789abcdef" for c in ticket["id"])
                 or type(ticket["owner"]) is not int or not 0 <= ticket["owner"] < capacity
@@ -215,12 +230,15 @@ class _Queue:
     New tickets record enqueued_at as bounded, aware ISO-8601 display metadata;
     it never affects ordering, cancellation or kernel-lock liveness. Older
     tickets without that metadata retain their unknown start time.
-    No Context, provider state, PID, clock lease or cache prediction is stored.
+    Optional evidence metadata is one source-binding hash, not configuration
+    or session/provider state. No Context, PID, clock lease or cache prediction
+    is stored.
     Kernel locks make dead owners reclaimable without PID-reuse/TTL guesses.
     All dispatch locks are nonblocking, including the short queue transaction.
     """
 
-    def __init__(self, config, resources, *, reuse_pending=False, observe=False):
+    def __init__(self, config, resources, *, reuse_pending=False, observe=False,
+                 evidence_source=None, evidence_source_factory=None, capture_choices=True):
         self.root = config.data / "slots"
         self.capacity = config.limits.admission_queue_capacity
         self.slots = config.limits.parallel_runs
@@ -267,6 +285,19 @@ class _Queue:
         self.pending_claim = None
         self.observe = observe
         self.observation = None
+        self.evidence_source = evidence_source
+        self.evidence_source_factory = evidence_source_factory
+        self.capture_choices = bool(capture_choices)
+
+    def _evidence_source(self):
+        if self.evidence_source is None and self.evidence_source_factory is not None:
+            factory, self.evidence_source_factory = self.evidence_source_factory, None
+            try:
+                self.evidence_source = factory()
+            except Exception:
+                # Evidence is optional; failure never changes admission.
+                self.evidence_source = None
+        return self.evidence_source
 
     def _pending_key(self):
         # Different Mizu state roots are independent admission domains even
@@ -332,6 +363,10 @@ class _Queue:
                       "resources": list(self.resources), "enqueued_at": now()}
             if self.external:
                 ticket["external"] = True
+            source = self._evidence_source()
+            if source is not None:
+                with contextlib.suppress(Exception):
+                    ticket["evidence"] = source.metadata
             tickets.append(ticket)
             self._write(tickets)
             if self.reuse_pending:
@@ -355,15 +390,80 @@ class _Queue:
                     raise Busy("Older execution admission resource is unavailable")
             stack.enter_context(lock(path, blocking=False))
 
-    def _slots(self, stack):
+    def _slots(self, stack, *, observe=False):
         for index in range(self.slots):
-            manager = lock(self.root / f"{index}.lock", blocking=False)
+            path = self.root / f"{index}.lock"
+            if observe:
+                _probe_path(path)
+            manager = lock(path, blocking=False)
             try:
                 stack.enter_context(manager)
                 return
             except Busy:
                 continue
         raise Busy("All configured execution slots are in use")
+
+    def _candidate(self, ticket):
+        """Evidence-only probes; release all temporary locks before returning."""
+        row = {"admission_id": ticket["id"], "readiness": "unknown",
+               "unknown_reason": "readiness_not_established", "profile": None, "engine": None,
+               "session": {"key": None, "generation": None,
+                           "unknown_reason": "readiness_not_established"}}
+        try:
+            if ticket.get("external"):
+                row["unknown_reason"] = "external_project"
+                return row
+            if "evidence" not in ticket:
+                row["unknown_reason"] = "legacy_metadata_missing"
+                return row
+            source = self._evidence_source()
+            if source is None:
+                return row
+            row.update(source(ticket, held=False))
+            if row["unknown_reason"] is not None:
+                return row
+            # Evidence refuses unsafe managed paths rather than following them
+            # while probing. This does not change the existing decision scan.
+            for resource in ticket["resources"]:
+                path = self.paths.get(resource, self.projects / resource)
+                _probe_path(path)
+                for parent in (path.parent, path.parent.parent):
+                    info = parent.lstat()
+                    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                        raise ValueError("Unsafe candidate path")
+            with contextlib.ExitStack() as probe:
+                try:
+                    self._resources(probe, ticket["resources"])
+                except Busy:
+                    row.update(readiness="busy", unknown_reason=None)
+                    row["session"]["unknown_reason"] = "resources_busy"
+                    return row
+                row.update(source(ticket, held=True))
+                if row["unknown_reason"] is not None:
+                    return row
+                try:
+                    self._slots(probe, observe=True)
+                except Busy:
+                    row.update(readiness="busy", unknown_reason=None)
+                else:
+                    row.update(readiness="ready", unknown_reason=None)
+        except Exception:
+            row.update(readiness="unknown", unknown_reason="unsafe_or_unavailable_identity")
+            row["session"] = {"key": None, "generation": None,
+                              "unknown_reason": "unsafe_or_unavailable_identity"}
+        return row
+
+    def _choices(self, tickets):
+        candidates = [dict(ticket) for ticket in tickets]
+        if not any(t["id"] == self.identity for t in candidates):
+            current = {"id": self.identity, "resources": list(self.resources), "external": self.external}
+            source = self._evidence_source()
+            if source is not None:
+                current["evidence"] = source.metadata
+            candidates.append(current)
+        rows = [self._candidate(ticket) for ticket in candidates]
+        return {"candidates": rows, "total": len(candidates), "omitted": 0,
+                "complete": all(row["readiness"] != "unknown" for row in rows)}
 
     def attempt(self, *, enqueue):
         """Return a held ExitStack, or Busy with no dispatch locks held.
@@ -384,6 +484,7 @@ class _Queue:
                 self.identity = uuid.uuid4().hex
                 tickets = self._read()
             attempt = contextlib.ExitStack()
+            bypassed = []
             try:
                 for ticket in tickets:
                     if ticket["id"] == self.identity:
@@ -397,8 +498,13 @@ class _Queue:
                         with contextlib.ExitStack() as probe:
                             self._resources(probe, ticket["resources"])
                     except Busy:
+                        bypassed.append(ticket["id"])
                         continue
                     raise Busy("Older execution admission is ready")
+                choices = None
+                if self.observe and self.capture_choices and tickets:
+                    with contextlib.suppress(Exception):
+                        choices = self._choices(tickets)
                 self._resources(attempt, self.resources)
                 self._slots(attempt)
                 if self.alive is not None:
@@ -406,8 +512,8 @@ class _Queue:
                     # Free the pending place in the same transaction as its
                     # row: no peer may observe a free row with a held lock.
                     self._release_pending()
-                # Shadow evidence only: use the scan just performed, never
-                # probe later tickets or take another lock to fill a view.
+                # The choice probes above are shadow observations, not inputs
+                # to the unchanged FIFO decision or the held dispatch stack.
                 if self.observe and tickets:
                     with contextlib.suppress(Exception):
                         order = [t["id"] for t in tickets]
@@ -415,11 +521,14 @@ class _Queue:
                         self.observation = {
                             "admission_id": self.identity, "queued": position is not None,
                             "fifo_position": position, "live_ticket_ids": order,
-                            # On success every ticket before this request
-                            # reached the Busy branch of the existing scan.
-                            "bypassed_busy_ticket_ids": order[:position - 1] if position else order[:],
+                            # External peers are skipped without a probe and
+                            # must not be reported as source-observed busy.
+                            "bypassed_busy_ticket_ids": bypassed,
                             "later_tickets_unexamined": len(order) - position if position else 0,
-                            "affinity": None, "affinity_reason": "not_available_before_dispatch"}
+                            "affinity": None, "affinity_reason": "not_available_before_dispatch",
+                            "choice_set": choices or {"candidates": [], "total": len(order) + (position is None),
+                                                      "omitted": len(order) + (position is None),
+                                                      "complete": False}}
                 return attempt
             except Busy:
                 attempt.close()
@@ -540,19 +649,24 @@ def _state_bytes(capacity: int) -> int:
     longest = f"{'a' * 63}/locks/run-{'a' * 63}.lock"
     return len(canonical({"version": 1, "tickets": []})) + capacity * len(canonical(
         {"id": "f" * 32, "owner": capacity - 1, "resources": [longest, longest],
-         "enqueued_at": "2099-01-01T00:00:00.000000+00:00", "external": False}))
+         "enqueued_at": "2099-01-01T00:00:00.000000+00:00", "external": False,
+         "evidence": {"binding": "f" * 64}}))
 
 
 @contextlib.contextmanager
 def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, check=None,
-              observation_sink=None):
+              observation_sink=None, evidence_source=None,
+              evidence_source_factory=None, capture_choices=True):
     """Admit one work unit; lend nothing and never preempt an active driver.
 
     New-enqueue capacity is admission_queue_capacity, independent of
     parallel_runs. Reads accept up to max(admission_queue_capacity, parallel_runs)
     pending owners/tickets so prior version-1 queues can drain. Overflow and
     unreadable or invalid queue state are immediate Busy; caller-supplied
-    resources that do not name a project lock path are Denied. The operator selects the
+    resources that do not name a project lock path are Denied. Optional
+    evidence_source supplies a binding hash and read-only candidate facts;
+    only an observation sink enables extra nonblocking shadow probes. Evidence
+    failures never refuse admission. The operator selects the
     admission_wait_seconds bound on the wait for capacity (0 means until dispatch or cancellation);
     the bound starts when the wait starts, so a caller that is admitted
     without waiting is never refused as an expired wait, and an admitted
@@ -568,8 +682,12 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     Optional observation_sink receives one local dict only after successful
     revalidation with live tickets. Its two id lists are bounded by
     max(admission_queue_capacity, parallel_runs), including prior version-1
-    tickets; it contains no paths/payloads, and later-ticket readiness remains
-    unexamined.
+    tickets. The optional choice_set also includes an unqueued current
+    request (at most one extra candidate), with source-observed nonblocking
+    resource/slot readiness or explicit unknowns. It contains no paths/payloads.
+    capture_choices=False skips only the additional choice probes; it preserves
+    the existing observation/omitted count and never changes admission.
+    Later tickets are measured only by this shadow pass, never ranked.
     Capture/sink exceptions are ignored; the yielded elapsed float is unchanged.
     """
     stop = stop if stop is not None else threading.Event()
@@ -581,7 +699,9 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     # refuse a run that never queued.
     deadline = None
     queue = _Queue(config, resources, reuse_pending=bool(not wait and enqueue),
-                   observe=observation_sink is not None)
+                   observe=observation_sink is not None, evidence_source=evidence_source,
+                   evidence_source_factory=evidence_source_factory,
+                   capture_choices=capture_choices)
     if not wait and enqueue:
         _reuse_pending_admission(queue)
     try:

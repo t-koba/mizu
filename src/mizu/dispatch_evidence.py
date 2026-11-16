@@ -6,9 +6,10 @@ import os
 import secrets
 import stat
 import time
+from types import SimpleNamespace
 
 from . import platform
-from .fs import _same_file, canonical, loads_finite, now, safe_read, write_json
+from .fs import _same_file, canonical, digest, loads_finite, now, safe_read, write_json
 from .usage import attempt_usage
 
 #: Fixed safety ceiling for persisted text labels; not a retention budget.
@@ -57,6 +58,97 @@ def _generation(directory):
             or canonical(value) != raw):
         raise ValueError("Invalid observed session generation")
     return value["generation"]
+
+
+class AdmissionSource:
+    """Bounded config binding and read-only local session facts, never selection.
+
+    Queue tickets carry only the binding hash. Peers must reproduce it from
+    their own current configuration; no ticket supplies an identity or path.
+    This source can attest only its Engine's project. Cross-project identity,
+    selectors and Pi family indirection remain explicitly unknown.
+    """
+
+    def __init__(self, config, project, role, *, ephemeral=False):
+        self.config, self.project, self.role = config, project, role
+        self.ephemeral = ephemeral
+        self.prepared = {}
+        self.metadata = {"binding": self._prepare(role)["binding"]}
+
+    def _prepare(self, role, *, refresh=False):
+        if not refresh and role.name in self.prepared:
+            return self.prepared[role.name]
+        from .engine_config import conversation_identity, effective
+        value = {"profile": None, "engine": None, "key": None,
+                 "unknown_reason": "selector_not_resolved_at_admission"}
+        # Fixed-schema hash only; never persist the config it binds.
+        binding = {"role": role.name, "profile": role.profile, "selector": role.selector,
+                   "workspace": role.workspace, "ephemeral": self.ephemeral}
+        if not role.selector:
+            settings = effective(self.config, role, role.profile)
+            binding["settings"] = settings
+            value.update(profile=role.profile, engine=settings["engine"])
+            if self.ephemeral or settings["session"] != "persistent":
+                value["unknown_reason"] = "nonpersistent_session"
+            elif settings["engine"] not in ("pi", "pi-durable"):
+                # Native identities bind the dispatch's pinned goal/policy.
+                # Admission has no Context yet; do not perform unbounded
+                # snapshot/policy reads or guess what dispatch will pin.
+                value["unknown_reason"] = "session_identity_unavailable_at_admission"
+            else:
+                context = SimpleNamespace(config=self.config, role=role)
+                identity = conversation_identity(context, settings)
+                value.update(key=digest(canonical(identity)), unknown_reason=None)
+                binding["identity"] = identity
+        value["binding"] = digest(canonical(binding))
+        self.prepared[role.name] = value
+        return value
+
+    def __call__(self, ticket, *, held):
+        session = {"key": None, "generation": None, "unknown_reason": "resources_not_held"}
+        result = {"profile": None, "engine": None, "session": session,
+                  "unknown_reason": "unsafe_or_stale_identity"}
+        resources = ticket["resources"]
+        prefix = self.project.name + "/locks/"
+        roles = [p[len(prefix) + 4:-5] for p in resources
+                 if p.startswith(prefix + "run-") and p.endswith(".lock")]
+        if len(roles) != 1 or any(not p.startswith(prefix) for p in resources):
+            result["unknown_reason"] = "project_or_role_identity_unavailable"
+            return result
+        role = self.role if roles[0] == self.role.name else self.config.roles.get(roles[0])
+        if role is None:
+            return result
+        expected = [prefix + f"run-{role.name}.lock"]
+        if role.workspace == "write":
+            expected.append(prefix + "workspace.lock")
+        if resources != expected:
+            return result
+        value = self._prepare(role, refresh=not held)
+        if ticket["evidence"] != {"binding": value["binding"]}:
+            return result
+        result.update(profile=value["profile"], engine=value["engine"], unknown_reason=value["unknown_reason"])
+        if value["unknown_reason"] is not None:
+            session["unknown_reason"] = value["unknown_reason"]
+        elif held:
+            directory = self.project.root / "sessions" / role.name / value["key"]
+            # Refuse links, special directories and Pi family state. Resolving
+            # a family can write/take a blocking lock; admission never does so.
+            for parent in (directory.parent.parent, directory.parent, directory):
+                try:
+                    info = parent.lstat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise ValueError("Unsafe admission session path")
+            if value["engine"] == "pi":
+                for marker in (directory / "family-owner.json", directory.parent / "families-v2"):
+                    try:
+                        marker.lstat()
+                    except FileNotFoundError:
+                        continue
+                    raise ValueError("Pi family identity unresolved at admission")
+            session.update(key=value["key"], generation=_generation(directory), unknown_reason=None)
+        return result
 
 
 def _sequence_id(value):
