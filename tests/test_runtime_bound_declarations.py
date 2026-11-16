@@ -2373,7 +2373,7 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('runtime.py', 'Context._op_finish', 1, 1): (
         '64', 'format',
         'finish / acknowledgement-token length follows the public maxLength contract'),
-    ('runtime.py', '_producer_limit', 2, 0): (
+    ('producer_admission.py', '_producer_limit', 2, 0): (
         '1073741824', 'configured policy',
         'producer holds / open_work_items and producer_inputs_per_source use the configured range'),
     ('snapshot.py', 'validate_next_step', 0, 0): (
@@ -3550,7 +3550,8 @@ def sibling():
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py',
                 'usage.py', 'config.py', 'runtime.py',
-                'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'services.py', 'vcs.py',
+                'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'producer_admission.py',
+                'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
                 'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
                 'budget.py', 'fs.py', 'role_state.py', 'snapshot.py'):
