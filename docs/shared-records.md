@@ -356,15 +356,16 @@ configuration validation. An omitted kind table is disabled; only explicitly
 declared kinds are enabled. Disabling a kind stops new writes and new deliveries,
 not audit retrieval, already-frozen acknowledgements or existing receipts.
 Permanent retention is the only policy implemented today: there is no TTL,
-automatic deletion, expiry or redaction. The product retention policy has no
-fixed horizon: records and receipts remain while a declared source, audit,
-wait, work-item history, backup or other live reference requires them. An
-acknowledgement alone never authorizes deletion or releases another reference.
-Product-owned, bounded reclamation after every source owner proves an object
-unreferenced is required but not yet implemented; until then, all records and
-receipts remain. Unknown, corrupt, incomplete or over-budget reference evidence
-must fail closed and keep the data. Both content and closure records, plus exact
-receipts, remain in the existing backup/restore audit members.
+automatic deletion, expiry, redaction or SharedRecords collector. No stored kind
+currently has a proven release path, so all canonical envelopes and per-role
+receipts remain. Acknowledgement or source-current ineligibility does not release
+audit evidence. Unknown, corrupt, incomplete or over-budget reference evidence
+must fail closed and keep the data. The project backup format includes managed
+records, receipts and delivery settlements; restoring an archive may reintroduce
+its captured state. External archive existence and retention are not observable
+by Mizu and are operator-owned: an archive is an independent snapshot, not a live
+reference in the managed project's release graph. Mizu does not inventory,
+rewrite or delete external archives.
 
 Pending enabled records with `wake = true` admit the addressed role through the
 existing event and on-change gates (`operator_record` admission). Armed daemon readiness consults
@@ -618,11 +619,11 @@ of unresolved receipt effects and no SharedRecords collector or deletion path.
 
 `SharedRecords` has no delete/prune operation, so no stored kind is currently
 reclaimable. Operator and host record declarations require permanent retention.
-Runtime delivery pins now cover the four source families above. They establish
-only the execution lifetime boundary, not a complete source/receipt/backup
-reference index. Reads and acknowledgements retain their existing per-family
-source-current semantics. Other host consumers of `freeze()` must provide their
-own lifetime owner before any future collector could reclaim their records.
+Runtime delivery pins cover the four source families above; they establish only
+the execution lifetime boundary, not a complete source/receipt reference graph.
+Reads and acknowledgements retain their existing per-family source-current
+semantics. Other host consumers of `freeze()` must provide an exact lifetime
+owner before any future source-specific release can reclaim their records.
 
 | Kind or family | Authoritative references | Current release path |
 |---|---|---|
@@ -636,24 +637,25 @@ own lifetime owner before any future collector could reclaim their records.
 | Per-role acknowledgement receipts | Exact role, record ID, and record digest; acknowledgement is audit evidence, not a release signal. | No receipt-deletion path exists; keep the record while any receipt remains. |
 
 Backups include `shared-records`, `shared-record-receipts` and runtime delivery
-settlements; restore can reintroduce them. Backup retention/removal is not integrated with a live-record
-reference index, so a future collector must treat each retained backup as a
-reference and rebuild those references on restore. **No current kind is proven
-eligible for deletion.**
+settlements; restoring an archive may reintroduce its captured files. Mizu does
+not enumerate or manage external archive paths, so archive retention/deletion is
+operator-owned and is not part of the live managed-project reference graph.
+Restore reconstructs managed state from the archive; derived indexes remain
+rebuildable from canonical records. **No current kind is proven eligible for
+deletion, and no collector exists.**
 
-A bounded implementation must make references source-owned and exact, with a
-per-record reverse index so work follows changed references rather than scanning
-the store. Runtime execution pins supply one prerequisite, not that index;
-unsettled or unrecoverable units keep those pins. Source owners must add references
-before committing source events (an orphan pin only leaks) and release them only
-after the source change commits (a lost release only leaks). A collector may
-remove only an explicitly eligible kind whose complete per-record index has no
-edge from any source, active manifest, receipt, audit history or retained
-backup. Source owners, backup capture/restore and the collector must serialize
-reference updates through the same index protocol; incomplete index evidence
-blocks deletion. Legacy, unsupported, corrupt, ambiguous or over-budget
-references remain permanent. Acknowledgement time and a global TTL never
-authorize deletion.
+A future release path must be source-owned and exact: each eligible kind needs a
+documented release condition that accounts for source history, active manifests,
+receipts and audit obligations, plus a lock boundary that prevents concurrent
+writers from losing references. Add reference tracking only for a concrete kind
+with proven releasable records, and keep work proportional to changed references;
+do not add a generic deletion API or global reverse index speculatively. Source
+owners must commit new references before a source transition can rely on them
+and release them only after that transition commits. Incomplete, corrupt,
+ambiguous, unsafe or over-budget evidence keeps the data. Legacy and unsupported
+kinds remain permanent. External archives are outside this predicate; restoring
+one can reintroduce its captured managed state. Acknowledgement time and a global
+TTL never authorize deletion.
 
 ## CI-wait explicit-receipt preflight (shadow only)
 
