@@ -358,6 +358,30 @@ class FeedUpdatesTests(Fixture):
         self.assertEqual(gate.stat().st_ino, inode)
         self.assertTrue(unrelated.exists())
 
+    def test_removed_feed_cursors_retired_for_dormant_configured_roles(self):
+        self.config = dataclasses.replace(self.config, web={**self.config.web, "feeds": [FEED, OTHER]})
+        self.read()
+        self.read("reviewer")
+        searcher_removed = self.state_path(feed=FEED)
+        reviewer_removed = self.state_path("reviewer", feed=FEED)
+        searcher_live = self.state_path(feed=OTHER)
+        reviewer_live = self.state_path("reviewer", feed=OTHER)
+        self.assertTrue(all(path.exists() for path in
+                            (searcher_removed, reviewer_removed, searcher_live, reviewer_live)))
+
+        self.config = dataclasses.replace(self.config, web={**self.config.web, "feeds": [OTHER]})
+        self.read()  # reviewer remains configured but is dormant during cleanup
+        self.assertFalse(searcher_removed.exists())
+        self.assertFalse(reviewer_removed.exists())
+        self.assertTrue(searcher_live.exists())
+        self.assertTrue(reviewer_live.exists())
+
+        self.config = dataclasses.replace(self.config, web={**self.config.web, "feeds": [FEED, OTHER]})
+        restored = self.read("reviewer")["feeds"]
+        self.assertEqual(restored[0]["feed"], FEED)
+        self.assertEqual(len(restored[0]["entries"]), 1)
+        self.assertTrue(reviewer_live.exists())
+
     def test_role_cleanup_refuses_unsafe_trees_without_partial_deletion(self):
         self.read()
         self.read("reviewer")

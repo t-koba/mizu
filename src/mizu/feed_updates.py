@@ -62,7 +62,7 @@ def _regular(path):
         raise Denied("Unsafe feed cursor file")
 
 
-def _retire(base, root, roles, configured):
+def _retire(base, roles, configured):
     """Validate cleanup targets before deleting; never recurse or follow links.
 
     All cursor access uses the project lock, including retirement. Old role lock
@@ -75,8 +75,6 @@ def _retire(base, root, roles, configured):
             _directory(path)
             if path.name not in roles:
                 directories.append(path)
-            elif path != root:
-                continue
             for child in path.iterdir():
                 cursor = child.suffix == ".json" and DIGEST.fullmatch(child.stem)
                 temporary = child.name.startswith(ATOMIC_WRITE_TEMP_PREFIX)
@@ -216,7 +214,7 @@ def read(context):
     with lock(context.project.root / "feed-updates.lock"):
         mkdir(root.parent)
         _directory(root.parent)
-        _retire(root.parent, root, {digest(name.encode()) for name in context.config.roles}, names)
+        _retire(root.parent, {digest(name.encode()) for name in context.config.roles}, names)
         mkdir(root)
         _directory(root)
     room = context.config.limits.tool_response_bytes - len(canonical(response))

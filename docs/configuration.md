@@ -2371,13 +2371,14 @@ is retained. A project-level lock serializes cleanup and each feed's comparison
 against the latest cursor, response sizing and state replacement (not the whole
 multi-feed read); different projects/roles do not consume each other's entries. Concurrent observations can finish out of order;
 an older observation replacing a newer set can cause repeats, not consume unseen
-entries. The writer removes state for roles no longer in `config.roles`, feeds
-no longer configured for the calling role, and that role's uncommitted
-atomic-write leftovers on the next read. Cleanup is confined to this project's
-feed tree and refuses unexpected paths, linked or non-regular cleanup files,
-and non-directory role paths. Obsolete per-role lock files are retired under
-the same gate; no caller uses them. The single `<project>/feed-updates.lock`
-inode is never unlinked during use; project deletion removes the remaining state.
+entries. On the next read, the writer removes state for roles no longer in
+`config.roles`, cursors for feeds no longer configured across every configured
+role (including dormant roles), and recognized uncommitted atomic-write
+leftovers. Cleanup is confined to this project's feed tree and refuses
+unexpected paths, linked or non-regular cleanup files, and non-directory role
+paths. Obsolete per-role lock files are retired under the same gate; no caller
+uses them. The single `<project>/feed-updates.lock` inode is never unlinked
+during use; project deletion removes the remaining state.
 
 `complete` means identity coverage and successful cursor persistence, not full
 article content or freshness beyond the fetch cache policy. A compact row with
