@@ -1069,7 +1069,7 @@ def parse_status_checks(data: dict) -> list:
     """Validate a ``status`` adapter response into normalized check rows.
 
     Schema: ``{"checks": [{check, state, sha, url?, run?, started_at?,
-    completed_at?, job_seconds?, workflow_run_id?, job_id?, run_attempt?, repository?}]}``; ``check`` 1-256
+    completed_at?, job_seconds?, group?, namespace?, attempt?}]}``; ``check`` 1-256
     chars without newline/NUL, ``state`` 1-64 chars without newline/NUL,
     ``sha`` 40/64 lowercase hex, optional ``url`` at most 4096 chars
     without newline/NUL, optional ``run`` 1-128 chars without
@@ -1083,10 +1083,10 @@ def parse_status_checks(data: dict) -> list:
     which this function recomputes: a supplied value is only accepted when
     it matches the recomputed one. Bounds: at most 1024
     checks. Optional typed execution identity is all-or-nothing:
-    workflow_run_id/job_id are 1-128 ASCII digits, job_id equals run,
-    run_attempt is an integer in [1, 1073741824], and repository is an
-    owner/name token of at most 256 chars. The adapter attests its fixed
-    repository namespace; legacy rows without the bundle stay unattributed.
+    run plus group (1-128 chars), namespace (1-256 chars), and attempt
+    (integer in [1, 1073741824]). Text identities are opaque and reject
+    terminal controls; group need not equal run. The adapter attests its fixed
+    namespace; legacy rows without the bundle stay unattributed.
     Partial/malformed bundles deny the whole response. Trust: adapter
     facts stay external-untrusted; this only validates shape. Failure:
     ``Denied`` on missing/malformed shapes, on a completion that precedes
@@ -1104,7 +1104,7 @@ def parse_status_checks(data: dict) -> list:
     for entry in checks:
         if not isinstance(entry, dict) or set(entry) - {"check", "state", "sha", "url", "run",
                                                        "started_at", "completed_at", "job_seconds",
-                                                       "workflow_run_id", "job_id", "run_attempt", "repository"}:
+                                                       "group", "namespace", "attempt"}:
             raise Denied("Invalid VCS status check entry")
         check = check_ci_name(entry.get("check"))
         state = entry.get("state")
@@ -1126,23 +1126,17 @@ def parse_status_checks(data: dict) -> list:
                 raise Denied("Invalid CI run identity")
             _reject_terminal_controls(run, "Invalid CI run identity")
             row["run"] = run
-        identity = {"workflow_run_id", "job_id", "run_attempt", "repository"}
+        identity = {"group", "namespace", "attempt"}
         if identity & set(entry):
-            if not identity <= set(entry):
+            if not (identity | {"run"}) <= set(entry):
                 raise Denied("Incomplete CI execution identity")
-            for key in ("workflow_run_id", "job_id"):
+            for key, maximum in (("group", 128), ("namespace", 256)):
                 value = entry[key]
-                if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,128}", value):
+                if not isinstance(value, str) or not value or len(value) > maximum:
                     raise Denied("Invalid CI execution identity")
-            if entry["job_id"] != entry.get("run"):
-                raise Denied("CI job identity differs from run")
-            if type(entry["run_attempt"]) is not int or not 1 <= entry["run_attempt"] <= 1073741824:
+                _reject_terminal_controls(value, "Invalid CI execution identity")
+            if type(entry["attempt"]) is not int or not 1 <= entry["attempt"] <= 1073741824:
                 raise Denied("Invalid CI run attempt")
-            repo = entry["repository"]
-            if (not isinstance(repo, str) or len(repo) > 256
-                    or not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", repo)
-                    or repo.split("/")[1] in {".", ".."}):
-                raise Denied("Invalid CI repository")
             row.update({key: entry[key] for key in identity})
         started = completed = None
         for key, label in (("started_at", "start"), ("completed_at", "completion")):

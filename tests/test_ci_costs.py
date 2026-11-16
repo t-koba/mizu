@@ -17,18 +17,20 @@ from mizu.runtime import Context
 SHA = "a" * 40
 PUB = "b" * 64
 DAY = "2026-07-20"
+RUN = "exec:α / west"
+GROUP = "pipeline:build #1"
+NAMESPACE = "tenant:west region"
 
 
 def check(**changes):
-    return {"check": "core", "state": "success", "sha": SHA, "run": "22",
-            "repository": "owner/project", "workflow_run_id": "11", "job_id": "22",
-            "run_attempt": 1, "started_at": "2026-07-21T00:00:00+00:00",
+    return {"check": "core", "state": "success", "sha": SHA, "run": RUN,
+            "namespace": NAMESPACE, "group": GROUP, "attempt": 1, "started_at": "2026-07-21T00:00:00+00:00",
             "completed_at": "2026-07-21T00:01:00+00:00", **changes}
 
 
 def request(**changes):
     return {"date": DAY, "request_id": "c" * 64, "publication_id": PUB, "sha": SHA,
-            "workflows": ["ci"], "runs": [{"workflow": "ci", "run_id": "11", "head_sha": SHA}],
+            "workflows": ["ci"], "runs": [{"workflow": "ci", "run_id": RUN, "head_sha": SHA}],
             "covered": [], "state": "resolved", **changes}
 
 
@@ -47,42 +49,60 @@ class IdentityTests(unittest.TestCase):
     def test_typed_bundle_and_legacy_stay_distinct(self):
         row = vcs.parse_status_checks({"checks": [check()]})[0]
         self.assertEqual(row["job_seconds"], 60)
-        self.assertEqual(row["job_id"], row["run"])
+        self.assertEqual(tuple(row[key] for key in ("run", "group", "namespace", "attempt")),
+                         (RUN, GROUP, NAMESPACE, 1))
         legacy = {"check": "core", "state": "success", "sha": SHA, "run": "opaque"}
-        self.assertNotIn("repository", vcs.parse_status_checks({"checks": [legacy]})[0])
+        self.assertNotIn("namespace", vcs.parse_status_checks({"checks": [legacy]})[0])
         del legacy["run"]
-        self.assertNotIn("workflow_run_id", vcs.parse_status_checks({"checks": [legacy]})[0])
+        self.assertNotIn("group", vcs.parse_status_checks({"checks": [legacy]})[0])
 
     def test_every_partial_or_malformed_bundle_denies_whole_response(self):
+        from itertools import combinations
+
         bad = []
-        for key in ("workflow_run_id", "job_id", "run_attempt", "repository", "run"):
-            row = check()
-            del row[key]
-            bad.append(row)
+        identity = {key: check()[key] for key in ("run", "group", "namespace", "attempt")}
+        base = {key: value for key, value in check().items() if key not in identity}
+        for size in range(1, 4):
+            for keys in combinations(identity, size):
+                if keys != ("run",):  # run alone remains a valid legacy wake identity
+                    bad.append({**base, **{key: identity[key] for key in keys}})
         for key, values in {
-            "workflow_run_id": [1, "", "run-1", "１", "1" * 129, None],
-            "job_id": [22, "23", "22\n", "1" * 129],
-            "run_attempt": [True, 0, -1, 1.0, "1", 1073741825, None],
-            "repository": ["owner", "/project", "owner/", "owner/project/other",
-                           "owner/..", "owner/a b", "owner/a\n", "o/" + "r" * 255, None],
+            "run": [1, "", "x" * 129, None],
+            "group": [1, "", "x" * 129, None, [], {}],
+            "namespace": [1, "", "x" * 257, None, [], {}],
+            "attempt": [True, False, 0, -1, 1.0, "1", 1073741825, None, float("inf"), float("nan")],
         }.items():
             bad.extend(check(**{key: value}) for value in values)
+        for key in ("run", "group", "namespace"):
+            bad.extend(check(**{key: "x" + control})
+                       for control in ("\n", "\r", "\t", "\x00", "\x1b", "\x7f", "\x85", "\u202e"))
+        for key in ("workflow_run_id", "job_id", "run_attempt", "repository"):
+            bad.append(check(**{key: "obsolete"}))
         for row in bad:
             with self.subTest(row=row), self.assertRaises(Denied):
                 vcs.parse_status_checks({"checks": [check(), row]})
 
+    def test_opaque_text_preserves_exact_values_and_accepts_bounds(self):
+        for changes in ({"run": "x" * 128, "group": "y" * 128,
+                         "namespace": "z" * 256, "attempt": 1073741824},
+                        {"run": "001", "group": "1", "namespace": "not owner/name: α"},
+                        {"run": "same", "group": "same", "namespace": "../many / segments"}):
+            row = vcs.parse_status_checks({"checks": [check(**changes)]})[0]
+            for key, value in changes.items():
+                self.assertEqual(row[key], value)
+
 
 class ProjectionTests(unittest.TestCase):
-    def test_exact_join_dedups_polls_but_counts_attempts_and_jobs(self):
-        read = Mock(return_value=status(check(), check(), check(run_attempt=2),
-                                        check(run="23", job_id="23")))
+    def test_exact_join_dedups_polls_but_counts_attempts_and_groups(self):
+        read = Mock(return_value=status(check(), check(), check(attempt=2),
+                                        check(group="other group")))
         out = observed_costs(page(request(), request(request_id="d" * 64)), read)
         read.assert_called_once_with(PUB)
         self.assertEqual(out["observed_wall_seconds"], 180)
         self.assertEqual(out["days"][0]["timed_executions"], 3)
         self.assertEqual(out["conflicting_execution_day_observations"], 0)
-        self.assertFalse(out["repository_conflict"])
-        self.assertEqual(out["repository"], "owner/project")
+        self.assertFalse(out["namespace_conflict"])
+        self.assertEqual(out["namespace"], NAMESPACE)
         self.assertEqual(out["days"][0]["date"], DAY)  # completion is next day
         self.assertEqual(out["coverage"], "partial")
         self.assertEqual(out["days"][0]["requests"][0]["status_evidence"]["evidence_id"], "observation")
@@ -92,15 +112,15 @@ class ProjectionTests(unittest.TestCase):
     def test_distinct_receipt_observations_share_only_exact_execution_tuples(self):
         other = "f" * 64
         observations = {PUB: status(check()),
-                        other: status(check(), check(run_attempt=2), publication=other)}
+                        other: status(check(), check(attempt=2), publication=other)}
         read = Mock(side_effect=observations.__getitem__)
         out = observed_costs(page(request(), request(publication_id=other)), read)
         self.assertEqual(read.call_count, 2)
         self.assertEqual(out["observed_wall_seconds"], 120)
         self.assertEqual(out["days"][0]["timed_executions"], 2)
 
-    def test_sha_workflow_and_publication_must_all_match(self):
-        for row in (check(sha="d" * 40), check(workflow_run_id="99")):
+    def test_sha_run_and_publication_must_all_match(self):
+        for row in (check(sha="d" * 40), check(run="unrequested")):
             out = observed_costs(page(request()), lambda _: status(row))
             self.assertIsNone(out["observed_wall_seconds"])
             self.assertEqual(out["days"][0]["requests"][0]["unmatched_rows"], 1)
@@ -109,18 +129,51 @@ class ProjectionTests(unittest.TestCase):
             self.assertIsNone(out["observed_wall_seconds"])
             self.assertEqual(out["days"][0]["requests"][0]["status"], "publication_mismatch")
 
-    def test_conflicting_repository_namespace_cannot_join(self):
-        out = observed_costs(page(request()), lambda _: status(check(), check(repository="other/project")))
-        self.assertTrue(out["repository_conflict"])
-        self.assertIsNone(out["repository"])
+    def test_run_join_is_exact_and_never_uses_group(self):
+        for run, group in (("unrequested", RUN), (RUN.upper(), GROUP),
+                           (" " + RUN, GROUP), ("001", "1")):
+            dispatch = request() if run != "001" else request(
+                runs=[{"workflow": "ci", "run_id": "1", "head_sha": SHA}])
+            out = observed_costs(page(dispatch), lambda _: status(check(run=run, group=group)))
+            report = out["days"][0]["requests"][0]
+            self.assertIsNone(out["observed_wall_seconds"])
+            self.assertEqual(report["unmatched_rows"], 1)
+            self.assertEqual(report["unobserved_run_ids"], [dispatch["runs"][0]["run_id"]])
+
+    def test_exact_runs_and_groups_are_distinct_but_check_names_are_not_identity(self):
+        runs = [{"workflow": str(i), "run_id": run, "head_sha": SHA}
+                for i, run in enumerate((RUN, "001", "1"))]
+        out = observed_costs(page(request(runs=runs)), lambda _: status(
+            check(), check(check="renamed"), check(run="001"), check(run="1"),
+            check(group=GROUP.upper()), check(group=" " + GROUP)))
+        self.assertEqual(out["observed_wall_seconds"], 300)
+        self.assertEqual(out["days"][0]["timed_executions"], 5)
+        self.assertEqual(out["days"][0]["requests"][0]["unobserved_run_ids"], [])
+
+    def test_namespace_conflicts_across_receipts_are_exact_and_page_local(self):
+        other = "f" * 64
+        for namespace in (NAMESPACE.upper(), " " + NAMESPACE):
+            observations = {PUB: status(check()), other: status(
+                check(namespace=namespace), publication=other)}
+            out = observed_costs(page(request(), request(publication_id=other)), observations.__getitem__)
+            self.assertTrue(out["namespace_conflict"])
+            self.assertIsNone(out["observed_wall_seconds"])
+            self.assertEqual([row["unmatched_rows"] for row in out["days"][0]["requests"]], [1, 1])
+            self.assertEqual(observed_costs(page(request()), observations.__getitem__)["observed_wall_seconds"], 60)
+
+    def test_conflicting_namespaces_cannot_join(self):
+        out = observed_costs(page(request()), lambda _: status(check(), check(namespace="other/project")))
+        self.assertTrue(out["namespace_conflict"])
+        self.assertIsNone(out["namespace"])
         self.assertIsNone(out["observed_wall_seconds"])
         self.assertEqual(out["days"][0]["requests"][0]["unmatched_rows"], 2)
 
-    def test_legacy_partial_missing_running_and_unresolved_are_visible(self):
-        legacy = {"check": "legacy", "state": "success", "sha": SHA, "run": "11"}
-        running = check(run="23", job_id="23", state="in_progress")
+    def test_legacy_missing_running_and_unresolved_are_visible(self):
+        legacy = {key: value for key, value in check().items()
+                  if key not in {"group", "namespace", "attempt"}}
+        running = check(group="running group", state="in_progress")
         del running["completed_at"]
-        no_times = check(run="24", job_id="24")
+        no_times = check(group="untimed group")
         del no_times["completed_at"], no_times["started_at"]
         out = observed_costs(page(request(), request(request_id="d" * 64, runs=[], state="unresolved")),
                              lambda _: status(legacy, running, no_times, check()))
@@ -140,15 +193,15 @@ class ProjectionTests(unittest.TestCase):
         read.assert_not_called()
         report = out["days"][0]["requests"][0]
         self.assertEqual(report["status"], "not_dispatched")
-        self.assertEqual(report["unobserved_workflow_run_ids"], [])
+        self.assertEqual(report["unobserved_run_ids"], [])
         self.assertIsNone(out["observed_wall_seconds"])
 
     def test_absent_coverage_is_null_not_zero(self):
         for observation in (status(), status({"check": "legacy", "state": "success", "sha": SHA})):
             out = observed_costs(page(request()), lambda _: observation)
             self.assertIsNone(out["observed_wall_seconds"])
-            self.assertFalse(out["repository_conflict"])
-            self.assertIsNone(out["repository"])
+            self.assertFalse(out["namespace_conflict"])
+            self.assertIsNone(out["namespace"])
         read = Mock(side_effect=Denied("unavailable"))
         out = observed_costs(page(request(), request(request_id="d" * 64)), read)
         read.assert_called_once_with(PUB)
@@ -156,15 +209,15 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(out["days"][0]["requests"][0]["status"], "unavailable")
         empty = observed_costs(page(), read)
         self.assertIsNone(empty["observed_wall_seconds"])
-        self.assertFalse(empty["repository_conflict"])
-        self.assertIsNone(empty["repository"])
+        self.assertFalse(empty["namespace_conflict"])
+        self.assertIsNone(empty["namespace"])
         zero = check(completed_at=check()["started_at"])
         self.assertEqual(observed_costs(page(request()), lambda _: status(zero))["observed_wall_seconds"], 0)
 
     def test_running_and_missing_duration_states_do_not_become_cost(self):
         terminal_without_end = check(state="success")
         del terminal_without_end["completed_at"]
-        running_with_interval = check(state="in_progress", run="23", job_id="23")
+        running_with_interval = check(state="in_progress", group="running group")
         out = observed_costs(page(request()),
                              lambda _: status(terminal_without_end, running_with_interval))
         report = out["days"][0]["requests"][0]
@@ -180,6 +233,24 @@ class ProjectionTests(unittest.TestCase):
             out = observed_costs(page(*requests), lambda _: status(*rows))
             self.assertIsNone(out["observed_wall_seconds"])
             self.assertEqual(out["conflicting_execution_day_observations"], expected_conflicts)
+
+    def test_conflicting_sha_for_exact_execution_cannot_double_count(self):
+        other, other_sha = "f" * 64, "d" * 40
+        observations = {PUB: status(check()), other: status(
+            check(sha=other_sha), publication=other, sha=other_sha)}
+        other_request = request(publication_id=other, sha=other_sha,
+                                runs=[{"workflow": "ci", "run_id": RUN, "head_sha": other_sha}])
+        out = observed_costs(page(request(), other_request), observations.__getitem__)
+        self.assertIsNone(out["observed_wall_seconds"])
+        self.assertEqual(out["conflicting_execution_day_observations"], 1)
+
+    def test_projection_never_mutates_dispatch_or_status_evidence(self):
+        import copy
+
+        dispatches, observation = page(request()), status(check(), check())
+        before = copy.deepcopy((dispatches, observation))
+        observed_costs(dispatches, lambda _: observation)
+        self.assertEqual((dispatches, observation), before)
 
 
 class CostReadTests(Fixture):
@@ -204,7 +275,7 @@ class CostReadTests(Fixture):
         self.store.mark_dispatch(identity, {**base, "dispatched_at": "2026-07-21T08:59:00+09:00"})
         if resolved:
             self.store.record_outcome(identity, {**base, "requested_at": "2026-07-21T00:05:00Z",
-                                                "runs": [{"workflow": w, "run_id": "11", "head_sha": SHA}
+                                                "runs": [{"workflow": w, "run_id": RUN, "head_sha": SHA}
                                                          for w in workflows]})
         return identity
 
@@ -235,7 +306,7 @@ class CostReadTests(Fixture):
 
     def test_malformed_status_is_unavailable_without_erasing_dispatch(self):
         self.dispatch()
-        with patch("mizu.vcs.invoke", return_value={"checks": [check(run_attempt=0)]}):
+        with patch("mizu.vcs.invoke", return_value={"checks": [check(attempt=0)]}):
             out = self.ctx.handle("vcs_read", {"op": "ci_costs"})
         self.assertEqual(out["total"], 1)
         self.assertIsNone(out["observed_wall_seconds"])

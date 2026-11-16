@@ -2872,7 +2872,7 @@ Cancellation uses the existing status adapter cancellation path.
 
 The result (also exposed at top level of its evidence envelope) has
 `{days, observed_wall_seconds, measure: "runner_wall_seconds", coverage: "partial",
-deduplication: "page_local", repository, repository_conflict,
+deduplication: "page_local", namespace, namespace_conflict,
 conflicting_execution_day_observations, total, offset, limit, next_offset,
 truncated, scan_stopped}`. Each day has `{date, requests, observed_wall_seconds,
 timed_executions, coverage: "partial"}`. Each request preserves the validated
@@ -2880,9 +2880,11 @@ local dispatch projection (`request_id`, `publication_id`, `sha`, `date`,
 `workflows`, `runs`, `covered`, `state`) plus `status_evidence`, `status`
 (`unavailable`, `publication_mismatch`, `missing_checks`, `observed`), counters
 `identityless_rows`, `unmatched_rows`, `matched_rows`, `running_rows`,
-`missing_duration_rows`, and `unobserved_workflow_run_ids`. Running rows have
-reported state `running`/`in_progress`/`queued`/`pending` or a start without a
-completion; a missing duration is not estimated from the current time.
+`missing_duration_rows`, `state_timing_conflicts`, and `unobserved_run_ids`. Running rows have
+reported state `running`/`in_progress`/`queued`/`pending`;
+`state_timing_conflicts` counts running rows that also report a complete interval.
+Rows without a complete interval have a missing duration, which is not estimated
+from the current time.
 These counters describe observations, not distinct executions.
 
 The validated request scan is shared with `ci_requests` and uses
@@ -3001,35 +3003,42 @@ content: results and retained evidence remain `external-untrusted`. Supporting
 this response schema and codepoint-boundary rejection is the operator adapter's
 responsibility; this read-side API does not modify or deploy that adapter.
 
-`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?, started_at?, completed_at?, job_seconds?, workflow_run_id?, job_id?, run_attempt?, repository?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed; optional `started_at`/`completed_at` timezone-aware ISO 8601 timestamps of at most 64 chars, which carry when a check started and completed so the job time of a run is derivable from the rows without a project-specific reporter; omit them when the provider cannot report them; when both times are present the completion must not precede the start (the comparison is on the parsed instants, so the same instants in another offset are accepted), an out-of-order pair is `Denied` for the whole response rather than a silently dropped row, and a row carrying both times also carries the derived `job_seconds` (at most seven days), which the product recomputes and never takes from the provider)); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. Artifact listing pages follow the scope/cursor contract above; `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, size, offset, next_offset, page_digest, trust}` (see the byte-page contract above; whole-file reads remain available with the configured character cap (524288 by default)). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are recorded as one deduplicated insight per proposal (`proposal-<32 hex>` from the proposal id): identical facts are a read-only no-op with no rev bump, while changed head/base/check/state facts revise the record (`record_proposal_state` returns `changed`). The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
+`status` responses are normalized to `{op, branch, checks: [{check, state, sha, url?, run?, started_at?, completed_at?, job_seconds?, group?, namespace?, attempt?}], trust}` (at most 1024 checks; `check` 1-256 chars, `state` 1-64 chars, `sha` 40/64 hex, `url` max 4096 chars, optional `run` 1-128 chars without newlines/NUL as the opaque adapter run identity, stable per CI run across polls; omit `run` when the adapter cannot report it, in which case wake stays sha-keyed; optional `started_at`/`completed_at` timezone-aware ISO 8601 timestamps of at most 64 chars, which carry when a check started and completed so the job time of a run is derivable from the rows without a project-specific reporter; omit them when the provider cannot report them; when both times are present the completion must not precede the start (the comparison is on the parsed instants, so the same instants in another offset are accepted), an out-of-order pair is `Denied` for the whole response rather than a silently dropped row, and a row carrying both times also carries the derived `job_seconds` (at most seven days), which the product recomputes and never takes from the provider)); malformed shapes are `Denied`. `log`/`comments` pass through with `trust: external-untrusted`. Artifact listing pages follow the scope/cursor contract above; `artifact` responses are normalized to `{op, branch, sha?, artifact, digest, content, size, offset, next_offset, page_digest, trust}` (see the byte-page contract above; whole-file reads remain available with the configured character cap (524288 by default)). Results stay `external-untrusted`; an unconfigured adapter fails closed as today, and any role holding `vcs_read` with a visible workspace may use both ops. `proposals` responses are normalized to `{op, branch?, proposals: [{id, state, head, base, draft, mergeable?, checks?, reviews?, url?}], complete?, cursor?, trust}` (at most 256 proposals; `id` 1-128 chars, `state` `open`/`closed`/`merged`, endpoints live `{repo, ref, sha}` or explicit tombstones `{deleted: true, repo, ref}` for removed forks, `draft` bool, `mergeable` bool or unknown, CI check rows reused with each row keeping its own tested sha (rollup checks may run on a merge commit rather than the head sha, so the adapter omits rather than misattaches them), `reviews` at most 64 `{reviewer, verdict, sha}` rows (`approved`/`changes_requested`/`dismissed`, each bound to the exact revision reviewed; absent means unknown, never none), `url` max 4096 chars). The envelope may carry `complete` (bool) and an opaque `cursor` (max 256 chars) for truncated enumerations: callers resume with the cursor, observation flows on partial evidence, and safe mutation stays blocked while required evidence is unavailable. A missing or truncated row never implies terminal disposition; only a reported `state` does. Proposal observations are recorded as one deduplicated insight per proposal (`proposal-<32 hex>` from the proposal id): identical facts are a read-only no-op with no rev bump, while changed head/base/check/state facts revise the record (`record_proposal_state` returns `changed`). The body carries facts only, never per-run log URLs. Check details use a fixed 16-KiB UTF-8 budget; oversized sets retain a failure-first bounded preview plus a deterministic SHA-256 over all normalized check name/state/SHA facts, so omitted rows still trigger revisions and can be queried through `vcs_read proposals`. Missing rows in even a complete enumeration never imply closed, merged, or any other terminal state; only an explicit validated row can revise an existing record.
 
-Status execution identity is an optional complete bundle:
-`workflow_run_id` and `job_id` are strings of 1-128 ASCII digits;
-`run_attempt` is an integer (not a boolean) in 1..1073741824; `repository` is
-`owner/name`, at most 256 characters, owner `[A-Za-z0-9_-]+`, name
-`[A-Za-z0-9_.-]+` except `.`/`..`. `job_id` must equal the existing `run` field.
-If any bundle field is supplied, all four plus `run` are required; a partial
-or malformed identity denies the whole status response. Legacy rows, with or
-without an opaque `run`, remain valid and explicitly identityless in costs;
-no identities are inferred from URLs, names, timestamps or opaque run strings.
-The operator-confirmed adapter contract attests one fixed repository namespace
-and `workflow_run_id` equal to the workflow `run_id` recorded by CI requests;
-this is external-untrusted adapter evidence, not independently authenticated
-repository provenance. Conflicting repository attestations within a cost page
-refuse attribution for that page (`repository_conflict: true`).
+Status execution identity is an optional complete bundle: existing `run`
+(1-128 characters), `group` (1-128 characters), `namespace` (1-256 characters),
+and `attempt` (integer, not a boolean, in 1..1073741824). Text identities are
+nonempty opaque strings without terminal controls (C0/DEL/C1/bidi controls).
+There is no numeric, URL, owner/name or other provider syntax requirement;
+values are preserved exactly, with no trimming, case folding or normalization.
+`group` need not equal `run`. Supplying any of `group`, `namespace`, or
+`attempt` requires the entire bundle including `run`; a partial or malformed
+identity denies the whole status response. Legacy rows, with or without an
+opaque `run` alone, remain valid and explicitly identityless in costs; no
+identities are inferred from URLs, names, timestamps or run strings alone.
+The adapter attests one fixed namespace and an execution `run` equal to the
+exact `vcs_request.runs[].run_id` recorded by CI requests. This is
+external-untrusted adapter evidence, not independently authenticated provenance.
+Conflicting namespace attestations within a cost page refuse attribution for
+that page (`namespace_conflict: true`, `namespace: null`); an absent namespace
+is also null, never inferred. The provider-specific `workflow_run_id`, `job_id`,
+`run_attempt`, and `repository` status fields are not accepted. Previously
+retained evidence is not rewritten.
 
 Costs join only a validated request and matching publication receipt/SHA, then
-status rows with that SHA and a typed workflow-run ID explicitly recorded in
-the validated outcome. Unknown dispatch outcomes remain unresolved with no
-joinable runs. Execution identity is the exact
-`(repository, sha, workflow_run_id, job_id, run_attempt)` tuple; identical
-observations count once, different attempts separately. Incompatible durations
+status rows with that SHA and an exact execution `run` explicitly recorded in
+the validated outcome (not `group`). Unknown dispatch outcomes remain unresolved
+with no joinable runs. Execution identity is the exact
+`(namespace, run, group, attempt)` tuple; identical observations count once,
+different runs, groups and attempts separately. Incompatible durations, SHAs
 or dispatch days for one execution are excluded and counted as conflicts,
 not arbitrarily selected. Check times may cross midnight: the UTC dispatch
 day, not completion or polling day, owns the observation. Existing receipt,
-status timing and evidence validation remain in force; no second persistent
-cost authority, repository inference, new configuration or external adapter
-change is introduced.
+status timing, ordinary status settlement, run-based wake semantics and evidence
+validation remain in force; no second persistent cost authority, identity
+inference, new configuration or external adapter change is introduced. An
+adapter adopting typed cost attribution must supply the complete opaque bundle;
+an adapter reporting only legacy status rows continues to settle CI normally.
 
 
 The daemon polls CI only when `poll_enabled` is true, on the same `poll_interval_seconds` cadence under the same per-project lock and shared timestamps: each tick derives branches from injected refs (all when they fit `poll_max_branches`, else a rotating window tracked in poll state so every branch is covered; `main` when no refs exist), calls `status` once per branch with the `poll_status_timeout_seconds` per-call cap, and caches failure/success evidence without creating insights. Each successful tick refreshes the shared `vcs-poll.json` `failures` map and bounded `successes` evidence map (each using the configured retention, default 128 branches x 16 checks within 2048 rows): polled failure branches are replaced wholesale, polled success evidence is retained for cross-poll comparison, unpolled branches are kept, and refs that vanished are pruned. Green/superseding failure facts therefore update independently of insight decisions. A projected failure is annotated `nondeterministic: true` with one validated `passed_on` branch only if the retained success cache contains the same SHA/check; this is informational, does not clear the failure or change wake/gate/retry behavior, and absence of an annotation is not proof of determinism because evidence is bounded. `should_run` and dispatch admission consult cached failures (best-effort local read, never an adapter call), wake a role with `ci_wake` while a red remains on the configured wake set (`ci_branch` plus extras), and expose the unfiltered per-branch failure projection as `ci_failures` to `vcs_read` roles with admission `ci` in `started.json`. Adapter errors leave cached facts untouched. Explicit branch lists longer than `poll_max_branches` are refused. Failures become visible `ci_poll` events (`ok: false`) and never publish a snapshot; `last_poll` advances on failure too so one bad adapter cannot busy-loop.

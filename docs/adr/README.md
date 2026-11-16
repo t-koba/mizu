@@ -368,26 +368,29 @@ read, using the existing receipt/branch/SHA validation and retained evidence;
 no head lookup or rerun. Status failure is explicit unavailable evidence, not
 an absent dispatch or a retry.
 
-The operator-confirmed identity contract adds an optional complete status
-bundle: `workflow_run_id`/`job_id` (1–128 ASCII digits), `run_attempt`
-(integer 1–1073741824), `repository` (`owner/name`, max 256). `job_id` equals
-existing `run`; the workflow-run ID names the CI-request outcome's `run_id`.
-All bundle fields plus `run` are required if any is present. Malformed/partial
-bundles deny the entire status response; legacy rows remain valid but
-unattributed. The adapter attests a fixed repository namespace; conflicting
-repository attestations within a page refuse attribution. This namespace is
-external-untrusted adapter evidence, not independently proved provenance.
-No repository or execution identity is inferred from URLs, check names,
-timestamps, opaque run fields or optional receipt lineage.
+The identity contract adds an optional complete status bundle: existing opaque
+`run` (1–128 characters), opaque `group` (1–128) and `namespace` (1–256), and
+`attempt` (integer 1–1073741824, not a boolean). Text is nonempty and rejects
+terminal controls; no provider syntax or equality between group and run is
+required. Supplying group, namespace or attempt requires all fields including
+run. Malformed/partial bundles deny the entire status response; legacy rows,
+including run-only rows, remain valid but unattributed. The adapter attests a
+fixed namespace; conflicting namespace attestations within a page refuse
+attribution (`namespace_conflict`). This namespace is external-untrusted adapter
+evidence, not independently proved provenance. No identity is inferred from
+URLs, check names, timestamps, run-only fields or optional receipt lineage.
+Provider-specific status identity fields are not accepted; retained evidence
+is not rewritten. Ordinary status settlement and run-based wake are unchanged.
 
-The join checks validated request/publication identity and SHA, then typed
-workflow-run IDs explicitly recorded in the outcome. Deduplicate exact
-repository/SHA/workflow-run/job/attempt tuples within the page; real attempts
-count separately. Attribute to the UTC dispatch day even across midnight;
-conflicting durations or dispatch days for one execution are excluded and
-reported. Per-request coverage preserves unresolved dispatches, unavailable
-or missing checks, identityless/unmatched rows, running and durationless rows,
-and unobserved workflow runs, with successful status evidence references.
+The join checks validated request/publication identity and SHA, then exact
+execution run IDs explicitly recorded in the outcome's `runs[].run_id` (not
+group). Deduplicate exact namespace/run/group/attempt tuples within the page;
+real attempts and distinct runs/groups count separately. Attribute to the UTC
+dispatch day even across midnight; conflicting durations, SHAs or dispatch days
+for one execution are excluded and reported. Per-request coverage preserves
+unresolved dispatches, unavailable or missing checks, identityless/unmatched
+rows, running and durationless rows, and unobserved run IDs, with successful
+status evidence references.
 `observed_wall_seconds` is null without timed attributed executions, not zero.
 The protocol documents all fields and bound/failure behavior.
 

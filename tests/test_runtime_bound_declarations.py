@@ -1553,6 +1553,9 @@ CALLS = {
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
+        ('Context._op_ready_work_read', 'self.project.work_items.page_ready', 'limit', 0): (
+            "args.get('limit', 25)", 'mechanism',
+            'runtime / ready-work tool defaults to its compact bounded page'),
         ('Context._op_vcs_read_publications', 'Publication.list_receipts', 'limit', 0): (
             '100', 'mechanism', 'runtime / publication receipt public page bound'),
         ('Context._op_vcs_read_ci_requests',
@@ -2053,7 +2056,10 @@ COMPARISON_BOUND_ARGUMENTS = {
         'CI cost attribution / incompatible durations for one execution are not summed'),
     ('ci_costs.py', 'observed_costs', 1, 3): (
         '1', 'safety',
-        'CI cost projection / expose a repository only when exactly one is attested'),
+        'CI cost attribution / incompatible SHAs for one execution are ambiguous'),
+    ('ci_costs.py', 'observed_costs', 1, 4): (
+        '1', 'safety',
+        'CI cost projection / expose a namespace only when exactly one is attested'),
     ('ci_observation.py', 'ci_cache_limits', 0, 0): (
         '1', 'configured policy',
         'CI cache / branch retention follows the positive [vcs].ci_cache_max_branches range'),
@@ -2923,9 +2929,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('vcs.py', 'parse_status_checks', 2, 0): (
         '1073741824', 'mechanism',
         'VCS CI status / local positive run-attempt field ceiling before identity binding'),
-    ('vcs.py', 'parse_status_checks', 1, 3): (
-        '256', 'safety',
-        'VCS CI status / bound untrusted repository namespace text'),
     ('vcs.py', '_check_repo', 1, 0): (
         '256', 'safety',
         'VCS proposal endpoints / bound repository text from the external observation'),
