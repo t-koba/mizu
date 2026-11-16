@@ -410,6 +410,15 @@ max_bytes = 524288           # Maximum adapter request/response payload (512 KiB
 artifact_full_read_chars = 524288 # Whole-file artifact character cap (positive signed-64-bit integer); not a paged-file cap.
 # artifact_page_bytes = 65536 # Omit to derive min(524288, max(1, max_bytes // 8)); explicit 1..max(1, max_bytes // 8).
 diagnostic_bytes = 2048      # Model-visible stderr tail or typed CI outcome diagnostic; 0 disables, maximum 8192.
+change_stream_enabled = false # Opt-in read-only adapter-wide changes; no polling, consumer or grant changes.
+# Request: {op: "changes", limit: 1..256, cursor?: opaque string} (cursor 1..256 chars, no controls).
+# Response: {op: "changes", cursor: exact request cursor or null initially,
+#            subjects: [opaque strings], next_cursor: nonempty opaque string (same bounds)}.
+# At most limit subjects, no terminal controls; invoke's timeout/max_bytes apply.
+# Only exact {op: "changes", cursor: echoed cursor, supported: false} signals unsupported.
+# read_changes_or_none returns None when disabled/unsupported for full-read fallback;
+# malformed responses and invocation failures are denied. No retries or cursor storage.
+# Results are external-untrusted; the adapter owns subjects, detection and cursor validity.
 ci_branch = ""               # Authoritative CI/reporting branch exposed as ci_branch to vcs_read roles (e.g. "mizu"); empty disables exposure.
 ci_wake_extra_branches = [] # Add up to 64 valid branches to CI wake selection; combined with ci_branch (empty default preserves prior behavior).
 ci_cache_max_branches = 128 # Retention per failure/success map (1-2048); effective capacity also fits every selected wake branch.

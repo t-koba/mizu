@@ -350,7 +350,7 @@ def read_ref(project_root: Path, name: str) -> str:
 #: ``artifacts`` lists CI-recorded artifact files for a branch revision;
 #: ``artifact`` reads one listed text file with a digest binding.
 READ_OPS = frozenset({"status", "log", "comments", "proposals", "acquire",
-                      "artifacts", "artifact"})
+                      "artifacts", "artifact", "changes"})
 #: Mutating adapter operations served by ``vcs_publish`` behind a recorded
 #: human ``GO <branch>`` approval bound to branch and code digest.
 PUBLISH_OPS = frozenset({"push", "pr"})
@@ -564,6 +564,8 @@ ACQUIRE_SCOPES = frozenset({"head", "full"})
 
 #: Maximum CI artifact entries per ``artifacts`` response.
 MAX_ARTIFACTS = 256
+#: Maximum opaque subjects per ``changes`` response.
+MAX_CHANGED_SUBJECTS = 256
 #: Tool-schema maximum opaque artifact-list cursor characters.
 MAX_ARTIFACT_CURSOR = 256
 #: Tool-schema maximum opaque proposal-pagination cursor characters.
@@ -623,6 +625,63 @@ def check_artifacts_cursor(cursor: str) -> str:
         raise Denied("Invalid VCS artifacts cursor")
     _reject_terminal_controls(cursor, "Invalid VCS artifacts cursor")
     return cursor
+
+
+class _ChangesUnsupported(Denied):
+    """The adapter explicitly reports that its optional stream is unsupported."""
+
+
+def parse_changes(data: dict, *, cursor=None,
+                  limit: int = MAX_CHANGED_SUBJECTS) -> dict:
+    """Validate one adapter-wide change page, without interpreting subjects.
+
+    Schema: ``{op: "changes", cursor, subjects: [str], next_cursor: str}``.
+    ``cursor`` must echo the requested cursor (null on the initial read).
+    Both cursors use ``check_artifacts_cursor``; next_cursor is never null.
+    At most ``limit`` subjects (maximum 256), with no terminal controls;
+    individual string lengths are bounded only by invoke's payload limit.
+    Order and duplicates are preserved. The adapter owns detection, cursor
+    validity and stream scope (the configured adapter, not a branch/forge).
+    An exact ``{op: "changes", cursor, supported: false}`` response raises
+    ``_ChangesUnsupported``; every other malformed shape raises ``Denied``.
+    Trust: external-untrusted; no cursor state, authentication or semantics.
+    """
+    if not isinstance(data, dict):
+        raise Denied("VCS changes must be a JSON object")
+    if (data.get("op") != "changes" or "cursor" not in data
+            or data["cursor"] != cursor):
+        raise Denied("VCS changes must echo the requested op and cursor")
+    if set(data) == {"op", "cursor", "supported"} and data["supported"] is False:
+        raise _ChangesUnsupported("VCS changes are unsupported")
+    if set(data) != {"op", "cursor", "subjects", "next_cursor"}:
+        raise Denied("Invalid VCS changes response fields")
+    next_cursor = check_artifacts_cursor(data["next_cursor"])
+    subjects = data["subjects"]
+    if not isinstance(subjects, list) or len(subjects) > min(limit, MAX_CHANGED_SUBJECTS):
+        raise Denied("VCS changes must carry subjects within the requested limit")
+    for subject in subjects:
+        if not isinstance(subject, str):
+            raise Denied("Invalid VCS changed subject")
+        _reject_terminal_controls(subject, "Invalid VCS changed subject")
+    return {"subjects": subjects, "next_cursor": next_cursor}
+
+
+def read_changes_or_none(settings: dict, params: dict, *, cancel=lambda: False) -> dict | None:
+    """Read optional changes, or return None so the caller can do a full read.
+
+    Disabled by default (``change_stream_enabled``); disabled calls do no I/O.
+    Unsupported means only the explicit, scope-bound response documented in
+    ``parse_changes``, never a malformed response or a transport failure.
+    Otherwise return ``read_via``'s external-untrusted result. No retries,
+    cursor storage or evidence persistence; cancellation/timeout/byte bounds
+    pass through ``invoke``. All other failures propagate as ``Denied``.
+    """
+    if settings.get("change_stream_enabled") is not True:
+        return None
+    try:
+        return read_via(settings, "changes", params, cancel=cancel)
+    except _ChangesUnsupported:
+        return None
 
 
 def parse_artifacts(data: dict, *, branch: str, sha=None,
@@ -829,7 +888,7 @@ def check_ci_name(check) -> str:
 
 def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
              preserve_status_rows: bool = False) -> dict:
-    """Invoke a read-only adapter operation (``status``/``log``/``comments``/``acquire``/``artifacts``/``artifact``).
+    """Invoke a read-only adapter operation from ``READ_OPS``.
 
     Schema: ``params`` must include ``branch`` for addressed reads
     (``status``/``log``/``comments``/``artifacts``/``artifact``);
@@ -855,7 +914,12 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
     branch revision with optional ``sha``, row ``limit`` (default/max
     MAX_ARTIFACTS) and opaque ``cursor``. Each page requires exact scope
     echoes, ``artifacts`` and ``next_cursor`` (null at EOF); no row count
-    implies completeness. Adapter cursor refusals propagate. ``artifact`` reads
+    implies completeness. Adapter cursor refusals propagate. ``changes`` is
+    opt-in via ``change_stream_enabled``: adapter-wide opaque subjects with
+    optional ``cursor`` and row ``limit`` (default/max MAX_CHANGED_SUBJECTS).
+    Responses echo op and cursor; see ``parse_changes`` for the schema and
+    ``read_changes_or_none`` for explicit disabled/unsupported fallback.
+    ``artifact`` reads
     one listed text file (``{"branch", "artifact", optional "sha"}``)
     or a UTF-8 byte page with paired ``offset``/``limit``. Page hashes are
     recomputed locally; the whole-file hash is checked only for complete
@@ -872,6 +936,20 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
         raise Denied("Invalid VCS read parameters")
     if "check" in params and op != "log":
         raise Denied("check is only valid for log reads")
+    if op == "changes":
+        if settings.get("change_stream_enabled") is not True:
+            raise Denied("VCS changes are disabled")
+        if set(params) - {"cursor", "limit"}:
+            raise Denied("Invalid VCS changes parameters")
+        limit = params.get("limit", MAX_CHANGED_SUBJECTS)
+        if type(limit) is not int or not 1 <= limit <= MAX_CHANGED_SUBJECTS:
+            raise Denied("Invalid VCS changes row limit")
+        request = {"op": op, "limit": limit}
+        cursor = None
+        if "cursor" in params:
+            request["cursor"] = cursor = check_artifacts_cursor(params["cursor"])
+        page = parse_changes(invoke(settings, request, cancel=cancel), cursor=cursor, limit=limit)
+        return {"op": op, **page, "trust": "external-untrusted"}
     if op == "acquire":
         # Exact-revision acquisition: the adapter materializes the
         # (id, sha, scope) content named here and echoes the bound
