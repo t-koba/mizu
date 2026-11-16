@@ -11,6 +11,7 @@ from mizu.errors import Busy, Cancelled, ConfigError, Denied, LimitExceeded, Pro
 from mizu.fs import canonical, digest, lock, mkdir, read_json
 from support import history_write_json as write_json
 from mizu.project import Project, initialize
+from mizu.protocol import tool_definitions
 from mizu.smoke_refs import shared_lock
 from mizu.runtime import Engine, should_run
 
@@ -1577,7 +1578,7 @@ class WrapUpTests(Fixture):
             self.assertIn("mizu_finish", notice)
             self.assertNotIn("mizu_files", notice)
             self.assertEqual(json.loads(original)["unit_tool_surface"]["tools"],
-                             ["mizu_" + c for c in self.config.roles["worker"].capabilities])
+                             [tool["name"] for tool in tool_definitions(self.config.roles["worker"].capabilities)])
             with self.assertRaisesRegex(Denied, "no capability"):
                 ctx.handle("files", {})
             seen.append("wrap-up")
