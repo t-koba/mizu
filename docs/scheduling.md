@@ -1154,7 +1154,7 @@ after stale tickets were reaped:
   actually raised Busy in the decision scan. External peers skipped without a
   probe are **not** reported as busy.
 - `later_tickets_unexamined`: later tickets not examined by the **FIFO decision
-  scan**, not by the separate evidence pass described below.
+  scan**. Choice capture adds no follow-up readiness probes.
 - `elapsed_seconds`: the existing monotonic admission duration, also yielded to
   the caller; not a wall-clock instant or a reused ticket's total lifetime.
 - `profile`, `engine`, `profile_engine_reason`: fixed configured hints for this
@@ -1170,43 +1170,45 @@ Each candidate has `admission_id`, `readiness`, `unknown_reason`, fixed configur
 `profile`/`engine` when attributable, and
 `session = {key, generation, unknown_reason}`. Session keys are the existing
 content-bound SHA-256 local directory keys, not native/provider session IDs.
-Generation is read at admission using the dispatch evidence reader (missing
-`generation.json` means zero); admission never reserves a dispatch ordinal,
-creates a session or resolves a selector.
+The selected candidate's generation is read at admission using the dispatch
+evidence reader (missing `generation.json` means zero); alternative generations
+remain unknown. Admission never reserves a dispatch ordinal, creates a session
+or resolves a selector.
 
-The evidence-only pass runs after the FIFO decision scan allows this request
-through, but **before** acquiring its lasting dispatch locks. Each probe takes
-resources in ticket order, then a slot, nonblocking, under the existing queue
-transaction. Temporary locks are released before the next candidate and before
-the original admission acquisition. `ready` means both resources and a slot were
-observed available together; `busy` means a resource or all slots were observed
-busy. These are sequential observations, not a simultaneous reservation, a
-promise of later availability, or eligibility past FIFO and other runtime gates.
-They never change which request is selected.
+Choice capture runs only after the real FIFO scan allows this request through
+and its actual resource and execution-slot acquisitions succeed. It acquires
+**no additional role/workspace exclusions or execution-slot locks**. The selected
+request can be `ready` only with those actual locks held and an attributable
+identity; only its session facts are read, while its resources remain held.
+An earlier candidate is `busy` only when the real FIFO scan already observed
+its resource lock unavailable (`bypassed_busy_ticket_ids`). No alternative's
+profile, engine or session identity is resolved. External and later/unexamined
+tickets remain `unknown`; they are not probed even when they might be ready.
+These facts never change which request is selected or promise later availability.
 
 `unknown` is separate from `ready` and `busy`, and must never be counted as
-eligible. It covers external projects, legacy tickets without evidence metadata,
-absent observers, unresolved selectors, nonpersistent/ephemeral sessions,
-unreproducible or stale identity bindings, unsafe paths/generation records, and
-any readiness not established by the probes. The current source attests only
-its Engine's project: other managed projects remain
-`project_or_role_identity_unavailable`. Pi family indirection is unknown rather
-than invoking its potentially locking/writing selection logic. Native Codex/Claude
-persistent identities remain `session_identity_unavailable_at_admission`: they
-require the dispatch Context's pinned goal/policy, not an unbounded pre-dispatch
-snapshot/policy read or a guess about that Context. Supported fixed Pi/Pi-durable
-session identity uses the existing conversation-identity logic, not a parallel
-key algorithm.
-A resource-busy candidate can have known `busy` readiness but unknown session
-facts (`resources_busy`): generation is not read without its resources held.
-Known session facts are observations at admission, not proof of the session
-ultimately selected after routing, recovery or rotation.
+eligible. For the selected request it also covers legacy tickets without
+metadata, absent observers, unresolved selectors, nonpersistent/ephemeral
+sessions, unreproducible or stale identity bindings, unsafe session paths or
+generation records, and unavailable identity. Pi family indirection remains
+unknown rather than invoking its potentially locking/writing selection logic.
+Native Codex/Claude persistent identities remain
+`session_identity_unavailable_at_admission`: they require the dispatch Context's
+pinned goal/policy, not an unbounded pre-dispatch snapshot/policy read or a guess
+about that Context. Supported fixed Pi/Pi-durable session identity uses the
+existing conversation-identity logic, not a parallel key algorithm.
+A bypassed resource-busy candidate has known `busy` readiness but unknown session
+facts (`resources_busy`), even without identity metadata. Known selected session
+facts are observations at admission, not proof of the session ultimately
+selected after routing, recovery or rotation. Unobserved alternatives keep the
+choice set incomplete; the scheduler aggregate fails closed rather than
+attributing eligibility or affinity to them.
 
 Version-1 queue tickets may now carry optional
 `evidence = {binding: <64-hex SHA-256>}`. This hashes the fixed role/profile,
 effective settings and content identity; it copies none of those inputs into
 the queue. The observer must reproduce it from its current source configuration
-and project before reporting known readiness. Old tickets still drain unchanged;
+and project before reporting the selected request ready. Old tickets still drain unchanged;
 even the current request's retained legacy/stale metadata is not silently
 upgraded by an observer. An unqueued current request supplies its own fresh
 binding. Metadata has the ticket's existing lifetime and is removed with that
@@ -1220,8 +1222,8 @@ make readiness incomplete. `omitted` counts candidates not retained and
 `total = len(candidates) + omitted`. Unknown candidates remain represented, not
 silently excluded. The configured `[limits].queue_observations` bounds retained
 contended admissions, including successful retry re-admissions. Setting it to
-zero retains only the outer omitted count and disables the additional choice-set
-probes. The existing `started.json` cap (64 KiB or lower `file_bytes`) also
+zero retains only the outer omitted count and disables choice-set detail
+capture. The existing `started.json` cap (64 KiB or lower `file_bytes`) also
 applies: trim alternative candidate details first, keeping the current candidate
 if it fits, and mark the choice set incomplete with exact omissions. If necessary
 remove whole observations and increment the outer `omitted` count. The ordinary

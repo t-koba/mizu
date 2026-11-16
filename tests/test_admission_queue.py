@@ -150,7 +150,9 @@ class QueueTests(Fixture):
                     def resources(queue_obj, stack, paths):
                         probes.append(tuple(paths))
                         return original(queue_obj, stack, paths)
-                    with patch.object(_Queue, '_resources', resources):
+                    with patch.object(_Queue, '_resources', resources), \
+                            patch.object(_Queue, '_slots', autospec=True,
+                                         side_effect=_Queue._slots) as slots:
                         with admission(self.config, current, enqueue=True,
                                        observation_sink=sink) as elapsed:
                             self.assertIsInstance(elapsed, float)
@@ -167,6 +169,7 @@ class QueueTests(Fixture):
                             for t in (before[0], before[2]):
                                 with self.assertRaises(Busy), head._pending(t['owner']):
                                     pass
+                    self.assertEqual(slots.call_count, 1)
                     self.assertEqual(probes, [head.resources, tuple(
                         p.relative_to(self.config.data / 'projects').as_posix() for p in current)])
                     if observe:
@@ -175,9 +178,10 @@ class QueueTests(Fixture):
                         self.assertEqual(choice['omitted'], 0)
                         self.assertFalse(choice['complete'])
                         self.assertEqual([r['admission_id'] for r in choice['candidates']], order)
-                        self.assertTrue(all(r['readiness'] == 'unknown' and
-                                            r['unknown_reason'] == 'legacy_metadata_missing'
-                                            for r in choice['candidates']))
+                        self.assertEqual([r['readiness'] for r in choice['candidates']],
+                                         ['busy', 'unknown', 'unknown'])
+                        self.assertEqual([r['unknown_reason'] for r in choice['candidates']],
+                                         [None, 'legacy_metadata_missing', 'readiness_not_established'])
                         self.assertEqual([{k: v for k, v in row.items() if k != 'choice_set'}
                                           for row in rows], [{
                             'admission_id': order[1], 'queued': True, 'fifo_position': 2,
@@ -185,7 +189,7 @@ class QueueTests(Fixture):
                             'later_tickets_unexamined': 1, 'elapsed_seconds': elapsed,
                             'affinity': None, 'affinity_reason': 'not_available_before_dispatch'}])
                         raw = canonical(rows)
-                        for forbidden in (str(self.root).encode(), b'sample', b'resources',
+                        for forbidden in (str(self.root).encode(), b'sample', b'"resources"',
                                           b'prompt', b'payload', b'provider', b'session.json'):
                             self.assertNotIn(forbidden, raw)
                 # The now-ready head still prevents an unqueued newcomer.

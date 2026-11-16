@@ -101,17 +101,6 @@ class _Full(Busy):
     """Queue overflow is a deferral, not another wait for a pending place."""
 
 
-def _probe_path(path):
-    """Evidence never treats an unsafe lock witness as availability."""
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-            or getattr(info, "st_file_attributes", 0) & 0x400):
-        raise ValueError("Unsafe candidate lock witness")
-
-
 def _valid_resource(resource):
     """Whether a resource path names a project-relative lock the queue holds."""
     if not isinstance(resource, str):
@@ -390,11 +379,9 @@ class _Queue:
                     raise Busy("Older execution admission resource is unavailable")
             stack.enter_context(lock(path, blocking=False))
 
-    def _slots(self, stack, *, observe=False):
+    def _slots(self, stack):
         for index in range(self.slots):
             path = self.root / f"{index}.lock"
-            if observe:
-                _probe_path(path)
             manager = lock(path, blocking=False)
             try:
                 stack.enter_context(manager)
@@ -403,16 +390,23 @@ class _Queue:
                 continue
         raise Busy("All configured execution slots are in use")
 
-    def _candidate(self, ticket):
-        """Evidence-only probes; release all temporary locks before returning."""
+    def _candidate(self, ticket, *, bypassed):
+        """Reuse transaction facts; never lock or resolve an alternative."""
         row = {"admission_id": ticket["id"], "readiness": "unknown",
                "unknown_reason": "readiness_not_established", "profile": None, "engine": None,
                "session": {"key": None, "generation": None,
                            "unknown_reason": "readiness_not_established"}}
+        if ticket.get("external"):
+            row["unknown_reason"] = "external_project"
+            return row
+        if ticket["id"] != self.identity:
+            if ticket["id"] in bypassed:
+                row.update(readiness="busy", unknown_reason=None)
+                row["session"]["unknown_reason"] = "resources_busy"
+            return row
+        # Called only after this request's real resource and slot acquisitions.
+        # Keep identity failures explicit even when its locks are held.
         try:
-            if ticket.get("external"):
-                row["unknown_reason"] = "external_project"
-                return row
             if "evidence" not in ticket:
                 row["unknown_reason"] = "legacy_metadata_missing"
                 return row
@@ -422,38 +416,16 @@ class _Queue:
             row.update(source(ticket, held=False))
             if row["unknown_reason"] is not None:
                 return row
-            # Evidence refuses unsafe managed paths rather than following them
-            # while probing. This does not change the existing decision scan.
-            for resource in ticket["resources"]:
-                path = self.paths.get(resource, self.projects / resource)
-                _probe_path(path)
-                for parent in (path.parent, path.parent.parent):
-                    info = parent.lstat()
-                    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                        raise ValueError("Unsafe candidate path")
-            with contextlib.ExitStack() as probe:
-                try:
-                    self._resources(probe, ticket["resources"])
-                except Busy:
-                    row.update(readiness="busy", unknown_reason=None)
-                    row["session"]["unknown_reason"] = "resources_busy"
-                    return row
-                row.update(source(ticket, held=True))
-                if row["unknown_reason"] is not None:
-                    return row
-                try:
-                    self._slots(probe, observe=True)
-                except Busy:
-                    row.update(readiness="busy", unknown_reason=None)
-                else:
-                    row.update(readiness="ready", unknown_reason=None)
+            row.update(source(ticket, held=True))
+            if row["unknown_reason"] is None:
+                row.update(readiness="ready", unknown_reason=None)
         except Exception:
             row.update(readiness="unknown", unknown_reason="unsafe_or_unavailable_identity")
             row["session"] = {"key": None, "generation": None,
                               "unknown_reason": "unsafe_or_unavailable_identity"}
         return row
 
-    def _choices(self, tickets):
+    def _choices(self, tickets, bypassed):
         candidates = [dict(ticket) for ticket in tickets]
         if not any(t["id"] == self.identity for t in candidates):
             current = {"id": self.identity, "resources": list(self.resources), "external": self.external}
@@ -461,7 +433,8 @@ class _Queue:
             if source is not None:
                 current["evidence"] = source.metadata
             candidates.append(current)
-        rows = [self._candidate(ticket) for ticket in candidates]
+        bypassed = set(bypassed)
+        rows = [self._candidate(ticket, bypassed=bypassed) for ticket in candidates]
         return {"candidates": rows, "total": len(candidates), "omitted": 0,
                 "complete": all(row["readiness"] != "unknown" for row in rows)}
 
@@ -501,10 +474,6 @@ class _Queue:
                         bypassed.append(ticket["id"])
                         continue
                     raise Busy("Older execution admission is ready")
-                choices = None
-                if self.observe and self.capture_choices and tickets:
-                    with contextlib.suppress(Exception):
-                        choices = self._choices(tickets)
                 self._resources(attempt, self.resources)
                 self._slots(attempt)
                 if self.alive is not None:
@@ -512,8 +481,12 @@ class _Queue:
                     # Free the pending place in the same transaction as its
                     # row: no peer may observe a free row with a held lock.
                     self._release_pending()
-                # The choice probes above are shadow observations, not inputs
-                # to the unchanged FIFO decision or the held dispatch stack.
+                # Observe only facts established by the real transaction,
+                # with the selected request's actual dispatch locks still held.
+                choices = None
+                if self.observe and self.capture_choices and tickets:
+                    with contextlib.suppress(Exception):
+                        choices = self._choices(tickets, bypassed)
                 if self.observe and tickets:
                     with contextlib.suppress(Exception):
                         order = [t["id"] for t in tickets]
@@ -665,7 +638,7 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     unreadable or invalid queue state are immediate Busy; caller-supplied
     resources that do not name a project lock path are Denied. Optional
     evidence_source supplies a binding hash and read-only candidate facts;
-    only an observation sink enables extra nonblocking shadow probes. Evidence
+    only an observation sink enables capture of transaction facts. Evidence
     failures never refuse admission. The operator selects the
     admission_wait_seconds bound on the wait for capacity (0 means until dispatch or cancellation);
     the bound starts when the wait starts, so a caller that is admitted
@@ -683,11 +656,13 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
     revalidation with live tickets. Its two id lists are bounded by
     max(admission_queue_capacity, parallel_runs), including prior version-1
     tickets. The optional choice_set also includes an unqueued current
-    request (at most one extra candidate), with source-observed nonblocking
-    resource/slot readiness or explicit unknowns. It contains no paths/payloads.
-    capture_choices=False skips only the additional choice probes; it preserves
-    the existing observation/omitted count and never changes admission.
-    Later tickets are measured only by this shadow pass, never ranked.
+    request (at most one extra candidate). Only the selected request's held
+    resources/slot and resource-busy tickets bypassed by the real FIFO scan
+    establish readiness; all other candidates remain unknown. No additional
+    resource/slot locks are acquired, and only the selected session is read.
+    It contains no paths/payloads. capture_choices=False skips choice details;
+    it preserves the observation/omitted count and never changes admission.
+    Later tickets remain unexamined, never ranked.
     Optional identity_sink receives the source-owned queue identity after every
     successful revalidation, including uncontended admissions. It is local
     evidence only, not admission authority. Capture/sink exceptions are ignored;

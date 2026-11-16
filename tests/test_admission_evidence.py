@@ -8,6 +8,8 @@ from support import Fixture, ScriptDriver
 from mizu.admission import _Queue, admission, role_exclusion
 from mizu.errors import Busy, Denied
 from mizu.dispatch_evidence import AdmissionSource
+from mizu.decision_reconciliation import _boundary
+from mizu.insights import Insights
 from mizu.evidence_records import read_retained
 from mizu.fs import canonical, lock, read_json, write_json
 from mizu.runtime import (Engine, MAX_STARTED_EVIDENCE_BYTES,
@@ -34,6 +36,10 @@ class AdmissionEvidenceTests(Fixture):
         self.addCleanup(queue.close)
         return queue
 
+    def selected_candidate(self, queue, ticket):
+        with queue.attempt(enqueue=False):
+            return queue._candidate(ticket, bypassed=())
+
     def test_evidence_source_factory_is_lazy_until_contention_or_enqueue(self):
         role = self.config.roles['reporter']
         resources = [role_exclusion(self.project.root, 'reporter')]
@@ -56,13 +62,13 @@ class AdmissionEvidenceTests(Fixture):
         current = self.queue('reporter', observe=True)
         current.capture_choices = False
         with self.blocked_head() as head:
-            with patch.object(current, '_choices', side_effect=AssertionError('shadow probes disabled')):
+            with patch.object(current, '_choices', side_effect=AssertionError('choice capture disabled')):
                 with current.attempt(enqueue=False):
                     choice = current.observation['choice_set']
                     self.assertEqual(current.observation['bypassed_busy_ticket_ids'], [head.identity])
         self.assertEqual(choice, {'candidates': [], 'total': 2, 'omitted': 2, 'complete': False})
 
-    def test_complete_choice_set_probes_later_candidates_without_changing_fifo_or_locks(self):
+    def test_choice_capture_does_not_exclude_alternative_reconciliation_or_change_fifo(self):
         self.config = dataclasses.replace(self.config,
             limits=dataclasses.replace(self.config.limits, parallel_runs=1))
         head, current, later = (self.queue(name, observe=True)
@@ -74,20 +80,47 @@ class AdmissionEvidenceTests(Fixture):
                 held.enter_context(lock(next(iter(queue.paths.values())), blocking=False))
                 with self.assertRaises(Busy):
                     queue.attempt(enqueue=True)
-        with lock(role_exclusion(self.project.root, 'worker'), blocking=False):
+        source = current.evidence_source
+        captured, reconciled, busy = [], [], []
+        insights = Insights(self.project.root)
+
+        def capture(ticket, *, held):
+            captured.append((ticket['id'], held))
+            if held:
+                # Deterministically enter the real consumer at the former
+                # held=True alternative-probe point. Evidence exceptions are
+                # swallowed, so retain any Busy for an explicit assertion.
+                try:
+                    with _boundary(insights, {'maintainer': {}}):
+                        reconciled.append(ticket['id'])
+                except Busy as exc:
+                    busy.append(str(exc))
+            return source(ticket, held=held)
+
+        class Capture:
+            metadata = source.metadata
+            __call__ = staticmethod(capture)
+        current.evidence_source = Capture()
+        with lock(role_exclusion(self.project.root, 'worker'), blocking=False), \
+                patch.object(current, '_slots', wraps=current._slots) as slots:
             selected = current.attempt(enqueue=False)
             with selected:
+                self.assertEqual(busy, [])
+                self.assertEqual(slots.call_count, 1)
                 view = current.observation['choice_set']
-                self.assertTrue(view['complete'])
+                self.assertFalse(view['complete'])
                 self.assertEqual(view['omitted'], 0)
                 self.assertEqual(view['total'], 3)
                 self.assertEqual([r['admission_id'] for r in view['candidates']],
                                  [head.identity, current.identity, later.identity])
                 self.assertEqual([r['readiness'] for r in view['candidates']],
-                                 ['busy', 'ready', 'ready'])
+                                 ['busy', 'ready', 'unknown'])
                 self.assertEqual(current.observation['bypassed_busy_ticket_ids'], [head.identity])
-                # Only the original selected exclusions/slot survive. All
-                # temporary alternative and workspace probes have been released.
+                self.assertEqual(reconciled, [current.identity])
+                self.assertEqual(captured, [(current.identity, False), (current.identity, True)])
+                self.assertIsNone(view['candidates'][0]['profile'])
+                self.assertIsNone(view['candidates'][2]['session']['key'])
+                # Only the actual selected exclusions/slot were acquired.
                 with self.assertRaises(Busy), lock(role_exclusion(self.project.root, 'reporter'), blocking=False):
                     pass
                 with self.assertRaises(Busy), lock(self.config.data / 'slots/0.lock', blocking=False):
@@ -99,7 +132,7 @@ class AdmissionEvidenceTests(Fixture):
                 with self.assertRaises(Busy):
                     later.attempt(enqueue=False)
         # Once the original head is ready FIFO still refuses later admission,
-        # even though the earlier shadow pass found the later candidate ready.
+        # irrespective of the incomplete evidence about the later candidate.
         with self.assertRaisesRegex(Busy, 'Older execution admission is ready'):
             later.attempt(enqueue=False)
         with lock(role_exclusion(self.project.root, 'reporter'), blocking=False):
@@ -136,13 +169,18 @@ class AdmissionEvidenceTests(Fixture):
             view = selected.observation['choice_set']
         self.assertFalse(view['complete'])
         self.assertEqual(view['omitted'], 0)
-        self.assertEqual([r['readiness'] for r in view['candidates']], ['unknown', 'ready', 'unknown', 'unknown'])
-        self.assertEqual(view['candidates'][0]['unknown_reason'], 'legacy_metadata_missing')
-        # Test same-source selector/nonpersistent reasons independently of a
-        # deliberately mismatched observer configuration above.
+        self.assertEqual([r['readiness'] for r in view['candidates']], ['busy', 'ready', 'unknown', 'unknown'])
+        self.assertIsNone(view['candidates'][0]['unknown_reason'])
+        for row in (view['candidates'][0], *view['candidates'][2:]):
+            self.assertIsNone(row['profile'])
+            self.assertIsNone(row['engine'])
+            self.assertIsNone(row['session']['key'])
+        # Test selected selector/nonpersistent reasons with actual resources
+        # held, after retiring the now-ready legacy head.
+        legacy.close()
         for queue, reason in ((unresolved, 'selector_not_resolved_at_admission'),
                               (nonpersistent, 'nonpersistent_session')):
-            row = queue._candidate({'id': queue.identity, 'resources': list(queue.resources),
+            row = self.selected_candidate(queue, {'id': queue.identity, 'resources': list(queue.resources),
                                     'evidence': queue.evidence_source.metadata})
             self.assertEqual(row['readiness'], 'unknown')
             self.assertEqual(row['unknown_reason'], reason)
@@ -159,22 +197,22 @@ class AdmissionEvidenceTests(Fixture):
             self.assertEqual(row['unknown_reason'], 'legacy_metadata_missing')
             self.assertFalse(queue.observation['choice_set']['complete'])
 
-    def test_slot_busy_is_probed_and_ephemeral_current_remains_unknown(self):
-        queue = self.queue('reporter')
-        ticket = {'id': queue.identity, 'resources': list(queue.resources),
-                  'evidence': queue.evidence_source.metadata}
-        with contextlib.ExitStack() as held:
+    def test_failed_slot_acquisition_captures_no_session_or_choice_facts(self):
+        queue = self.queue('reporter', observe=True)
+        with self.blocked_head(), contextlib.ExitStack() as held:
             for index in range(self.config.limits.parallel_runs):
                 held.enter_context(lock(self.config.data / f'slots/{index}.lock', blocking=False))
-            row = queue._candidate(ticket)
-        self.assertEqual(row['readiness'], 'busy')
-        self.assertIsNotNone(row['session']['key'])
-        self.assertEqual(row['session']['generation'], 0)
-        self.assertEqual(queue._candidate(ticket)['readiness'], 'ready')
+            with patch.object(queue, '_choices') as capture:
+                with self.assertRaisesRegex(Busy, 'All configured execution slots'):
+                    queue.attempt(enqueue=False)
+                capture.assert_not_called()
+            self.assertIsNone(queue.observation)
         queue.evidence_source = AdmissionSource(self.config, self.project,
                                                self.config.roles['reporter'], ephemeral=True)
-        ticket['evidence'] = queue.evidence_source.metadata
-        self.assertEqual(queue._candidate(ticket)['unknown_reason'], 'nonpersistent_session')
+        with self.blocked_head(), queue.attempt(enqueue=False):
+            row = queue.observation['choice_set']['candidates'][-1]
+        self.assertEqual(row['readiness'], 'unknown')
+        self.assertEqual(row['unknown_reason'], 'nonpersistent_session')
 
     def test_external_and_unsafe_or_stale_sessions_stay_unknown(self):
         selected = self.queue('reporter', observe=True)
@@ -188,19 +226,19 @@ class AdmissionEvidenceTests(Fixture):
             view = selected.observation['choice_set']
             self.assertEqual(view['candidates'][0]['unknown_reason'], 'external_project')
             self.assertEqual(selected.observation['bypassed_busy_ticket_ids'], [])
-        foreign = selected._candidate({'id': selected.identity, 'resources': ['other/locks/run-reporter.lock'],
+        foreign = self.selected_candidate(selected, {'id': selected.identity, 'resources': ['other/locks/run-reporter.lock'],
                                        'evidence': selected.evidence_source.metadata})
         self.assertEqual(foreign['readiness'], 'unknown')
         self.assertEqual(foreign['unknown_reason'], 'project_or_role_identity_unavailable')
         ticket = {'id': selected.identity, 'resources': list(selected.resources),
                   'evidence': {'binding': '0' * 64}}
-        self.assertEqual(selected._candidate(ticket)['readiness'], 'unknown')
+        self.assertEqual(self.selected_candidate(selected, ticket)['readiness'], 'unknown')
         ticket['evidence'] = selected.evidence_source.metadata
         key = selected.evidence_source._prepare(self.config.roles['reporter'])['key']
         directory = self.project.root / 'sessions/reporter' / key
         directory.mkdir(parents=True)
         (directory / 'generation.json').write_text('not a generation')
-        row = selected._candidate(ticket)
+        row = self.selected_candidate(selected, ticket)
         self.assertEqual(row['readiness'], 'unknown')
         self.assertIsNone(row['session']['key'])
         with lock(role_exclusion(self.project.root, 'reporter'), blocking=False):
@@ -213,7 +251,7 @@ class AdmissionEvidenceTests(Fixture):
             source = AdmissionSource(self.config, self.project, role)
             queue = self.queue('reporter', metadata=False)
             queue.evidence_source = source
-            row = queue._candidate({'id': queue.identity, 'resources': list(queue.resources),
+            row = self.selected_candidate(queue, {'id': queue.identity, 'resources': list(queue.resources),
                                     'evidence': source.metadata})
             self.assertEqual(row['readiness'], 'unknown')
             self.assertEqual(row['unknown_reason'], 'session_identity_unavailable_at_admission')
@@ -222,7 +260,7 @@ class AdmissionEvidenceTests(Fixture):
         directory = self.project.root / 'sessions/reporter' / key
         directory.mkdir(parents=True)
         write_json(directory / 'family-owner.json', {})
-        row = queue._candidate({'id': queue.identity, 'resources': list(queue.resources),
+        row = self.selected_candidate(queue, {'id': queue.identity, 'resources': list(queue.resources),
                                 'evidence': queue.evidence_source.metadata})
         self.assertEqual(row['readiness'], 'unknown')
         self.assertIsNone(row['session']['key'])
