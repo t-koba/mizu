@@ -1836,6 +1836,8 @@ PARAMETER_DEFAULTS = {
         '25', 'policy', 'work items / caller-selected ready-item page size'),
     ('work_items.py', 'WorkItems.page_open_readonly', 'limit'): (
         '25', 'policy', 'work items / caller-selected read-only open-item page size'),
+    ('work_items.py', 'WorkItems.page_changes_readonly', 'limit'): (
+        '25', 'policy', 'work items / caller-selected read-only change-page size'),
     ('work_items.py', 'WorkItems.blocked_liveness_readonly', 'limit'): (
         '25', 'policy', 'work items / caller-selected blocked-liveness diagnostic sample'),
     ('work_items.py', 'WorkItems.open_state_readonly', 'limit'): (
@@ -2625,6 +2627,8 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format', 'open-page cursor / the encoded work-item revision is positive'),
     ('work_items.py', 'WorkItems._page_open_impl', 0, 1): (
         '1', 'mechanism', 'open-item page / a bounded page must request at least one item'),
+    ('work_items.py', 'WorkItems.page_changes_readonly', 0, 0): (
+        '1', 'mechanism', 'work-item change page / a bounded page must request at least one change row'),
     ('work_items.py', 'WorkItems.blocked_liveness_readonly', 0, 0): (
         '1', 'mechanism', 'blocked-liveness page / a bounded page must request at least one item'),
     ('work_items.py', 'WorkItems.open_state_readonly', 0, 0): (
