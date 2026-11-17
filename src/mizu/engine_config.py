@@ -648,20 +648,23 @@ def read_prompt_state(directory):
     return record
 
 
-def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=None, row_details=None):
+def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=None, row_details=None,
+                       sections=None):
     """Atomically replace the published cursor, grant and bounded row hashes.
 
     ``broker_grant`` is replaced with this cursor only when a settled driver
     selection proved the session and bounded broker tool surface; legacy
     cursors without it remain valid. ``row_details`` is captured before dispatch
     and supplied only for an observed settled session. Neither record grants
-    authority. Failure: the atomic JSON write propagates to the caller.
+    authority. ``sections`` records delivered optional sections when supplied.
+    Failure: the atomic JSON write propagates to the caller.
     """
     from .fs import now, write_json
     write_json(directory / "prompt_state.json",
                {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now(),
                 **({"broker_grant": broker_grant} if broker_grant is not None else {}),
-                **({"row_details": row_details} if row_details is not None else {})})
+                **({"row_details": row_details} if row_details is not None else {}),
+                **({"sections": sorted(set(sections))} if sections is not None else {})})
 
 
 def save_session(path, identifier, usage):

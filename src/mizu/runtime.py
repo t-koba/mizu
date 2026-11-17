@@ -2326,7 +2326,13 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         # work-order generation, and will be offered from the next opening.
         current_generation = context.project.insights.generation()
         last = read_prompt_state(session_dir)
+        insights_delivered = last is not None and (
+            "sections" not in last
+            or (isinstance(last["sections"], list)
+                and all(isinstance(section, str) for section in last["sections"])
+                and "insights" in last["sections"]))
         if (last is not None
+                and insights_delivered
                 and last.get("inbox_generation") == current_generation
                 and last.get("snapshot") == context.snapshot["id"]):
             pending: list = []
@@ -3845,12 +3851,14 @@ class Engine:
                 # A retained host seal does not confirm session settlement.
                 if session_dir is not None and model_result.get("settled") is not False:
                     with contextlib.suppress(OSError, ValueError, TypeError):
+                        from . import prompt_sections
                         from .engine_config import write_prompt_state
                         from .unit_prompts import session_grant_evidence, session_row_evidence
                         grant = session_grant_evidence(context, session_dir)
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
                                            inbox_generation=context.inbox_seen,
                                            broker_grant=grant,
+                                           sections=sorted(prompt_sections.included(context.role)),
                                            row_details=session_row_evidence(context, session_dir, grant))
                 result["status"] = "waiting" if finished.get("wait_for_check") else "completed"
                 if check_wait is not None:

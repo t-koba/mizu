@@ -373,11 +373,13 @@ def session_row_details(context: Context, last, saved, directory) -> dict | None
     """
     try:
         required = {"snapshot", "inbox_generation", "created_at"}
-        allowed = required | {"broker_grant", "row_details"}
+        allowed = required | {"broker_grant", "row_details", "sections"}
         if (not isinstance(last, dict) or not required <= set(last) or not set(last) <= allowed
                 or not isinstance(last["snapshot"], str) or not DIGEST.fullmatch(last["snapshot"])
                 or not isinstance(last["inbox_generation"], str)
-                or not DIGEST.fullmatch(last["inbox_generation"])):
+                or not DIGEST.fullmatch(last["inbox_generation"])
+                or ("sections" in last and not (isinstance(last["sections"], list)
+                                                and all(isinstance(s, str) for s in last["sections"])))):
             return None
         created = last["created_at"]
         if (not isinstance(created, str) or len(created) > 64

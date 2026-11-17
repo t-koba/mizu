@@ -555,6 +555,55 @@ class SessionBacklogTests(Fixture):
         self.assertEqual(stated["total"], 2)
         self.assertFalse(stated["truncated"])
 
+    def test_delta_reoffers_insights_excluded_from_previous_opening(self):
+        from mizu.engine_config import write_prompt_state
+        from mizu.runtime import session_prompt
+        item = _submit(self, "worker", "Finding")
+        ctx = self.context("worker")
+        path = save_worker_session(self, {"tokens": 0})
+        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
+                           inbox_generation=self.project.insights.generation(),
+                           sections=["work_order"])
+        prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        self.assertEqual(mode, "delta")
+        self.assertIn(item["id"], {row["id"] for row in json.loads(prompt)["pending_insights"]})
+
+    def test_delta_reoffers_insights_with_malformed_sections(self):
+        from mizu.engine_config import write_prompt_state
+        from mizu.fs import write_json
+        from mizu.runtime import session_prompt
+        item = _submit(self, "worker", "Finding")
+        path = save_worker_session(self, {"tokens": 0})
+        for sections in (None, "insights", {"insights": True}, ["insights", 1]):
+            with self.subTest(sections=sections):
+                ctx = self.context("worker")
+                write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
+                                   inbox_generation=self.project.insights.generation())
+                record = read_json(path.parent / "prompt_state.json")
+                record["sections"] = sections
+                write_json(path.parent / "prompt_state.json", record)
+                prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+                self.assertEqual(mode, "delta")
+                self.assertIn(item["id"], {row["id"] for row in json.loads(prompt)["pending_insights"]})
+
+    def test_finish_records_which_sections_were_delivered(self):
+        from mizu import prompt_sections
+
+        def finish(ctx, *_):
+            ctx.handle("finish", {"outcome": "wait", "summary": "x", "state": "Now: x.\nNext: y."})
+
+        path = save_worker_session(self, {"tokens": 0})
+        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, "worker")
+        self.assertIn("insights", read_json(path.parent / "prompt_state.json")["sections"])
+
+        # A role that excludes the section must record it as not delivered,
+        # so a later re-inclusion re-offers the rows it never saw.
+        delivered = prompt_sections.included
+        with patch.object(prompt_sections, "included",
+                          side_effect=lambda role: delivered(role) - {"insights"}):
+            Engine(self.config, driver=ScriptDriver(finish)).run(self.project, "worker")
+        self.assertNotIn("insights", read_json(path.parent / "prompt_state.json")["sections"])
+
     def test_changed_delta_offers_the_same_once_captured_inventory(self):
         from mizu.runtime import session_prompt, prompt_for
         item = _submit(self, "worker", "Finding")

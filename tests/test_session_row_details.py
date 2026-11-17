@@ -234,8 +234,10 @@ class SessionRowDetailsTests(Fixture):
         bad_inbox['inbox_generation'] = 'not-a-digest'
         bad_grant = copy.deepcopy(cursor)
         bad_grant['broker_grant']['session'] = '0' * 64
+        bad_sections = copy.deepcopy(cursor)
+        bad_sections['sections'] = 'insights'
         for invalid in (None, {}, [], {**cursor, 'row_details': []}, bad_digest, over_rows,
-                        bad_key, bad_inbox, bad_grant):
+                        bad_key, bad_inbox, bad_grant, bad_sections):
             with self.subTest(invalid=invalid):
                 write_json(self.path.parent / 'prompt_state.json', invalid)
                 self.assert_fresh_references(self.peek()[1])
