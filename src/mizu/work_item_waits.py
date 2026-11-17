@@ -298,3 +298,55 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
         return result("due" if due else "pending", "condition_met" if due else "condition_pending")
     except (Busy, ConfigError, Denied, OSError, ValueError, TypeError, AttributeError, KeyError, LimitExceeded, RecursionError):
         return result("unknown", "unreadable")
+
+
+#: Witness states that may prove a wait is holder-only. A due or terminal wait
+#: needs no classifier; ``unknown`` and other non-pending states fail closed.
+_HOLDER_ONLY_STATES = ("pending", "receipt_bound")
+
+#: Known self-resolvable reasons that prove only the holder can end the wait.
+_HOLDER_ONLY_REASONS = ("sole_writer_code_change", "answered_own_question")
+
+
+def holder_only(store, item, snapshot, *, writer_roles, operator_answer=None, record_question=None) -> str | None:
+    """Positive witness that only the holder can end this wait.
+
+    Returns the liveness ``self_resolvable`` reason (``sole_writer_code_change``
+    or ``answered_own_question``) when the blocked item is held by the sole
+    independent writer and the wait is still pending on that writer's own
+    action. Returns ``None`` otherwise, failing closed.
+
+    CI and ``publication_ci`` waits are deliberately never holder-only: every
+    publication push spends a CI run (ADR-035), so the absence of a ci-request
+    record does not prove that no provider run exists. Unknown or unreadable
+    evidence also fails closed to ``None``.
+    """
+    try:
+        if not isinstance(writer_roles, (set, frozenset)) or not writer_roles:
+            return None
+        if not isinstance(item, dict):
+            return None
+        if item.get("status") != "blocked":
+            return None
+        holder = item.get("holder")
+        if holder is None:
+            return None
+        wait = item.get("wait")
+        if wait is None:
+            return None
+        if holder not in writer_roles:
+            return None
+        if set(writer_roles) != {holder}:
+            return None
+        observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
+                             operator_answer=operator_answer, record_question=record_question)
+        if not isinstance(observed, dict):
+            return None
+        if observed.get("state") not in _HOLDER_ONLY_STATES:
+            return None
+        witness = observed.get("self_resolvable")
+        if witness not in _HOLDER_ONLY_REASONS:
+            return None
+        return witness
+    except (Denied, KeyError, TypeError, AttributeError, ValueError, OSError):
+        return None

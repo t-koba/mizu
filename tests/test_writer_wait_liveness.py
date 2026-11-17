@@ -14,6 +14,7 @@ from mizu.fs import canonical, now, read_json
 from support import history_write_json as write_json
 from mizu.runtime import (Engine, _writer_progress_fallback, _writer_wait_liveness,
                            _writer_wait_sources, prompt_for, should_run)
+from mizu.work_item_waits import holder_only
 
 
 class WriterWaitTests(Fixture):
@@ -564,6 +565,148 @@ class WriterWaitTests(Fixture):
         for error in (OSError, Busy, LimitExceeded):
             with patch.object(self.project.work_items, 'open_state_readonly', side_effect=error('fixture')):
                 self.assertIsNone(_writer_wait_liveness(self.project, self.role()))
+
+
+class HolderOnlyTests(Fixture):
+    """Positive holder-only witness shared by write path and readiness."""
+
+    def block(self, key, wait):
+        store = self.project.work_items
+        item = store.create(actor='worker', idempotency_key=key, title=key)['record']['work_item']
+        return store.transition(item['id'], expected_rev=1, actor='worker',
+                                status='blocked', wait=wait)
+
+    def question(self, source='worker'):
+        return self.project.insights.submit(
+            source=source, title='Fixture question', body='Q: What should happen?',
+            base_snapshot=None, kind='question', addressee='operator')
+
+    def answer_record(self, question, event='answer'):
+        return records.write(self.project, event_id=event, kind='answer', body='Operator answer',
+                             subject={'type': 'insight', 'id': question['id'], 'rev': question['rev']})
+
+    def test_holder_only_sole_writer_code_change(self):
+        item = self.block('holder-only code', {'kind': 'code_change'})
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        self.assertEqual(fresh['holder'], 'worker')
+        self.assertEqual(holder_only(store, fresh, snapshot, writer_roles={'worker'}),
+                         'sole_writer_code_change')
+        self.assertEqual(holder_only(store, fresh, snapshot, writer_roles=frozenset({'worker'})),
+                         'sole_writer_code_change')
+
+    def test_holder_only_second_writer_denies(self):
+        item = self.block('holder-only shared', {'kind': 'code_change'})
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        self.assertIsNone(holder_only(store, fresh, snapshot,
+                                       writer_roles={'worker', 'reviewer'}))
+        self.assertIsNone(holder_only(store, fresh, snapshot,
+                                       writer_roles=frozenset({'worker', 'reviewer'})))
+
+    def test_holder_only_due_code_change_is_none(self):
+        item = self.block('holder-only due', {'kind': 'code_change'})
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        self.assertEqual(holder_only(store, fresh, snapshot, writer_roles={'worker'}),
+                         'sole_writer_code_change')
+        (self.project.workspace / 'changed.txt').write_text('changed\n')
+        published = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+            state='Changed code', run=None, outcome='wait', summary='Publish prerequisite work',
+            parent=snapshot['id'])
+        self.project.snapshots.publish(published)
+        current = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        from mizu.work_item_waits import liveness as wait_liveness
+        self.assertEqual(wait_liveness(store, fresh['wait'], current, item=fresh,
+                                       writer_roles={'worker'})['state'], 'due')
+        self.assertIsNone(holder_only(store, fresh, current, writer_roles={'worker'}))
+
+    def test_holder_only_answered_own_question(self):
+        question = self.question()
+        item = self.block('holder-only answer', {'kind': 'insight_decided', 'insight': question['id']})
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        # No authenticated answer yet: pending but not holder-only.
+        self.assertIsNone(holder_only(store, fresh, snapshot, writer_roles={'worker'},
+                                       operator_answer=records.answer_lookup(self.project)))
+        self.answer_record(question)
+        fresh = store.get(item['id'])
+        self.assertEqual(holder_only(store, fresh, snapshot, writer_roles={'worker'},
+                                     operator_answer=records.answer_lookup(self.project)),
+                         'answered_own_question')
+        # Without answer evidence the same pending wait proves nothing.
+        self.assertIsNone(holder_only(store, fresh, snapshot, writer_roles={'worker'}))
+        # A foreign question with an answer is never the holder's own wait.
+        foreign = self.question('reviewer')
+        foreign_item = self.block('holder-only foreign',
+                                  {'kind': 'insight_decided', 'insight': foreign['id']})
+        self.answer_record(foreign, 'foreign-answer')
+        fresh_foreign = store.get(foreign_item['id'])
+        self.assertIsNone(holder_only(store, fresh_foreign, snapshot, writer_roles={'worker'},
+                                       operator_answer=records.answer_lookup(self.project)))
+
+    def test_holder_only_ci_never_holder_only(self):
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        waits = [
+            {'kind': 'ci', 'publication_id': 'a' * 40, 'checks': ['unit']},
+            {'kind': 'publication_ci', 'snapshot_id': 'a' * 64, 'code_digest': 'b' * 64,
+             'branch': 'main', 'checks': ['unit']},
+        ]
+        for wait in waits:
+            with self.subTest(wait_kind=wait['kind']):
+                item = {'status': 'blocked', 'holder': 'worker', 'wait': wait}
+                self.assertIsNone(holder_only(store, item, snapshot, writer_roles={'worker'}))
+
+    def test_holder_only_status_holder_wait_is_none(self):
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        item = self.block('holder-only shape', {'kind': 'code_change'})
+        fresh = store.get(item['id'])
+        valid_wait = fresh['wait']
+        cases = {
+            'open': {**fresh, 'status': 'open'},
+            'doing': {**fresh, 'status': 'doing'},
+            'no_holder': {**fresh, 'holder': None},
+            'no_wait': {'status': 'blocked', 'holder': 'worker', 'wait': None},
+            'missing_wait': {'status': 'blocked', 'holder': 'worker'},
+            'not_dict': None,
+        }
+        for name, candidate in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(holder_only(store, candidate, snapshot,
+                                               writer_roles={'worker'}))
+        for name, roles in (('none', None), ('empty', set()), ('missing_holder', {'reviewer'}),
+                            ('list', ['worker'])):
+            with self.subTest(roles=name):
+                self.assertIsNone(holder_only(store, fresh, snapshot, writer_roles=roles))
+        self.assertIsNone(holder_only(store, {'status': 'blocked', 'holder': 'worker',
+                                               'wait': valid_wait},
+                                       snapshot, writer_roles={'worker', 'reviewer'}))
+
+    def test_holder_only_unreadable_evidence_fails_closed(self):
+        item = self.block('holder-only unreadable', {'kind': 'code_change'})
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        self.assertEqual(holder_only(store, fresh, snapshot, writer_roles={'worker'}),
+                         'sole_writer_code_change')
+        # An invalid snapshot digest is unknown, never holder-only.
+        self.assertIsNone(holder_only(store, fresh, {'code_digest': 'bad'},
+                                       writer_roles={'worker'}))
+        self.assertIsNone(holder_only(store, fresh, {'code_digest': 'bad'},
+                                       writer_roles={'worker'},
+                                       operator_answer=records.answer_lookup(self.project)))
+        # A store that cannot be read also fails closed.
+        with patch.object(store.snapshots, 'get', side_effect=OSError('unavailable')):
+            self.assertIsNone(holder_only(store, fresh, None, writer_roles={'worker'}))
+        self.assertIsNone(holder_only(None, fresh, snapshot, writer_roles={'worker'}))
 
 
 class WriterCiWaitTests(CiWaitFixture):
