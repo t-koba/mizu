@@ -757,11 +757,12 @@ A delivery holds exactly `snapshot_id`, `code_digest`, `scope_digest` (SHA-256
 of canonical accepted scope, or null) and `binding_rev`. Every subsequent
 revision inherits it, unless an explicit later doing-to-doing revision binds a
 new snapshot. Scope changes retain the old binding but require re-binding
-before completion. The schema cannot disappear; removing a binding's fields
+before snapshot-contract completion. The schema cannot disappear; removing a binding's fields
 cannot turn that same-status event into a legacy no-op. Older unmarked chains
 and closures remain readable without rewriting them.
 
-New completion requires a prior binding, exactly its `snapshot_id` and scope,
+Under the default `verified_snapshot_v1` contract, new completion requires a
+prior binding, exactly its `snapshot_id` and scope,
 and revalidates its immutable manifest. It does not capture or compare the live
 workspace, nor require that an already-bound snapshot remain in the moving
 history index. `delivered_tree` is the bound snapshot code digest. Ordinary
@@ -775,8 +776,9 @@ current indexes or configuration. Snapshots are never mutated. Storage audit
 and reclamation retain all historical delivery manifests, including bindings
 on still-doing or dropped items and superseded bindings needed for replay.
 
-Only a forward `dropped` -> `done` correction is possible: it requires a
-previously recorded valid delivery and independently retained acceptance,
+Only a forward `dropped` -> `done` correction is possible. Under
+`verified_snapshot_v1` it requires a previously recorded valid delivery and
+independently retained acceptance,
 even if the snapshot already embeds passing verification. It appends a new
 revision and leaves the dropped event intact. No other terminal reopening is
 allowed. The binding is an attributed writer declaration of delivery for the
@@ -784,6 +786,31 @@ accepted scope, not a semantic proof of arbitrary source changes. Missing,
 unsafe, corrupt or mismatched evidence refuses; lock/I/O errors propagate.
 Cancellation/process death releases kernel locks; stale CAS writes nothing and
 requires a fresh read, never an automatic retry.
+
+Work-item completion is a versioned policy, separate from the writer
+`mizu_finish(outcome="done")` verification gate. Root `completion_evidence`
+selects `verified_snapshot_v1` by default, with overrides resolved only by the
+runtime-authenticated closing actor's role. The caller cannot select a policy.
+The opt-in `holder_attestation_v1` instead requires a bounded inline `evidence`
+object with a nonblank string `statement`; other finite JSON fields are kept
+verbatim. Ordinary done requires the current holder. Dropped-to-done requires
+a nonempty reason and attributes responsibility to the correcting actor.
+Attestation does not invent a snapshot or verification: `snapshot_id`,
+`verification`, `delivered_tree`, and `verification_scope` are null. Inherited
+`delivery` stays as history, not proof; completion skips snapshot verification
+callbacks. The strict contract rejects non-null inline evidence.
+
+New done revisions record `completion_policy` and `completion_evidence`.
+Both delivery and completion replay dispatch on that recorded policy, never
+current configuration; legacy records without it replay strictly unchanged.
+Attestation replay checks finite JSON, string keys, depth 32, a fixed durable
+65536-byte canonical format ceiling, holder/correction attribution and null
+snapshot fields. Writes additionally enforce the configured attachment budget
+(default 8192 bytes). Lowering that budget cannot invalidate accepted history.
+Unknown contracts and malformed evidence fail closed, with contract/condition
+errors that do not echo payloads. This adds no done-to-reopen path: that audited
+operation remains outside this change, with evidence retained for checks and
+future reopening. Seals, acknowledgements, admission and parking are unchanged.
 
 The separately granted `work_items_create` operation calls
 `Project.work_items.create(*, idempotency_key, title, actor, origin=None)` for
@@ -860,7 +887,7 @@ transition actor. Exact receipts still identify each terminal item/revision.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
 require a scope change or an explicit doing-to-doing delivery binding. Done
-never reopens; dropped permits only the stronger forward done correction
+never reopens; dropped permits only the forward done correction
 described above. Other statuses can move to any different status, subject to
 completion evidence and the ordinary constraints. Title/origin/description/creation time stay fixed; every event
 records its revision, update time, caller-supplied actor, from/to transition,
@@ -876,12 +903,9 @@ rewritten or released automatically. These waits never assign work. Under config
 proven object/code-change waits may reopen only their holder with immutable
 proof; read-only liveness itself never changes status or the target object. The CI wait wakes only
 its current holder on retained terminal evidence, without changing item status.
-Dropping requires a nonempty reason. A new completion revalidates the
-immutable snapshot manifest named by its earlier delivery binding; it need not
-remain in the moving publication-history index. Embedded verification must
-have `passed is True` and match the snapshot's code digest, or completion pins
-an exact retained acceptance receipt and scope digest. The binding and
-verification reference are copied into the immutable completion event.
+Dropping requires a nonempty reason. Completion validates and records its
+resolved contract as described above; the default snapshot contract keeps its
+exact delivery and digest-bound verification requirements.
 Backup/restore includes these histories; storage audit/reclaim protects every
 historical delivery and completion snapshot manifest and every validated host
 publisher-outcome snapshot citation. Work-item expiration and finite host-record
@@ -960,7 +984,8 @@ The separately granted `work_items_transition` operation exposes only
 status (`open`, `doing`, `blocked`, `done`, `dropped`), with optional nonempty
 reason (1–4000 characters), structured wait (required for new blocked
 transitions), accepted scope, and 64-character lowercase digest `snapshot_id` (status-dependent: delivery binding on `doing`,
-exact prior binding on `done`). The configured worker
+exact prior binding on `done` under the default contract), and optional inline
+`evidence` for configured holder attestation. The configured worker
 example role alone holds this grant; `work_items_read` does not imply it, and
 consultation/delegation roles are explicitly forbidden from holding it. The
 runtime binds `actor` to the role name and accepts no model-supplied actor. It

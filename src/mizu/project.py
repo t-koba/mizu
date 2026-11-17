@@ -147,6 +147,7 @@ class Project:
         # Late acceptance is a separate projection; immutable snapshots stay unchanged.
         from .operator_records import answer_lookup, record_question_lookup, register_question_wait, record_answer_evidence
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
+                                    completion_evidence=config.completion_evidence,
                                     operator_answer_lookup=lambda: answer_lookup(self),
                                     writer_roles_lookup=lambda: wait_writer_roles(self.config, self.roles),
                                     record_question_lookup=lambda: record_question_lookup(self),

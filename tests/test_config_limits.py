@@ -532,5 +532,35 @@ class DiagnosticSampleConfigTests(Fixture):
                 self.file.write_text(base)
 
 
+class CompletionEvidenceConfigTests(Fixture):
+    def test_omission_and_role_override(self):
+        from mizu.completion_evidence import VERIFIED_SNAPSHOT, HOLDER_ATTESTATION
+        base = re.sub(r'(?ms)^\[completion_evidence\].*?(?=^\[(?!completion_evidence\.)|\Z)', '', self.file.read_text())
+        self.file.write_text(base)
+        policy = load(self.file).completion_evidence
+        self.assertEqual((policy.default, policy.maximum_evidence_bytes, policy.by_role),
+                         (VERIFIED_SNAPSHOT, 8192, {}))
+        self.file.write_text(base + '\n[completion_evidence]\nmaximum_evidence_bytes = 65536\n'
+                             '[completion_evidence.by_role]\nworker = "holder_attestation_v1"\n')
+        policy = load(self.file).completion_evidence
+        self.assertEqual(policy.for_actor('worker'), HOLDER_ATTESTATION)
+        self.assertEqual(policy.for_actor('reviewer'), VERIFIED_SNAPSHOT)
+
+    def test_unknown_policy_keys_roles_and_invalid_budgets_fail_at_load(self):
+        base = re.sub(r'(?ms)^\[completion_evidence\].*?(?=^\[(?!completion_evidence\.)|\Z)', '', self.file.read_text())
+        for fields in ('default = "unknown_v1"', 'default = 1', 'typo = true',
+                       'maximum_evidence_bytes = 0', 'maximum_evidence_bytes = 65537',
+                       'maximum_evidence_bytes = true', 'maximum_evidence_bytes = 1.5',
+                       'by_role = []', '[completion_evidence.by_role]\nmissing_role = "holder_attestation_v1"',
+                       '[completion_evidence.by_role]\nworker = "unknown_v1"',
+                       '[completion_evidence.by_role]\nworker = false'):
+            with self.subTest(fields=fields):
+                self.file.write_text(base + '\n[completion_evidence]\n' + fields + '\n')
+                with self.assertRaises(ConfigError):
+                    load(self.file)
+        self.file.write_text(base + '\n[completion_evidence]\nmaximum_evidence_bytes = 1\n')
+        self.assertEqual(load(self.file).completion_evidence.maximum_evidence_bytes, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

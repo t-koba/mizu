@@ -89,6 +89,13 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # a role's selector key replaces its profile with one of these tables.
 # [selectors]
 
+# Work-item done contract, independent of the writer finish(done) verification gate.
+[completion_evidence]
+default = "verified_snapshot_v1"
+maximum_evidence_bytes = 8192  # Canonical JSON bytes, 1..65536; replay uses the format ceiling.
+[completion_evidence.by_role]
+# reporter = "holder_attestation_v1"  # Only configured role names; opt-in responsibility.
+
 # Optional regenerable workspace caches only. Empty roots disable cleanup.
 # Relative literal directory roots must be untracked and snapshot-excluded;
 # private/host state, links, and overlapping roots are refused.

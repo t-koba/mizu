@@ -10,6 +10,7 @@ import heapq
 import json
 import os
 
+from .completion_evidence import VERIFIED_SNAPSHOT, recorded_policy
 from .errors import Denied, LimitExceeded
 from .fs import canonical, digest, identifier, mkdir, now, safe_read, write_json
 from .work_items import (_ReverseKey, _directory, _timestamp, _timestamp_order,
@@ -43,7 +44,7 @@ def _payload(store, item, sources=None):
                                             item["origin"]),
                verification=({"sha256": digest(canonical(item["verification"])),
                               "passed": True, "code_digest": item["verification"]["code_digest"]}
-                             if item["status"] == "done" else None))
+                             if item["status"] == "done" and recorded_policy(item) == VERIFIED_SNAPSHOT else None))
     row["routing"] = "known" if row["origin_source"] is not None else "unknown"
     if len(canonical(row)) > MAX_CLOSED_ROW_BYTES:
         raise LimitExceeded("Work-item event exceeds row byte bound")

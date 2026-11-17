@@ -326,6 +326,59 @@ blocked conditions; the finish outcome and structured wake source record why a
 unit stopped, while prose `state` is a short working note and typed `next_step` proposes an
 immediate handoff, not a parallel backlog.
 
+## Work-item completion evidence
+
+Work-item `done` uses the authenticated closing actor's role to resolve this
+root policy, not the item's origin or a caller-supplied policy:
+
+```toml
+[completion_evidence]
+default = "verified_snapshot_v1"
+maximum_evidence_bytes = 8192
+[completion_evidence.by_role]
+# reporter = "holder_attestation_v1"
+```
+
+Omission keeps the strict `verified_snapshot_v1` default. Only those two
+versioned names and configured role names are accepted. Unknown keys, names,
+roles, noninteger budgets, and budgets outside 1–65536 fail at configuration
+load; there is no schema fallback. `by_role` overrides `default` only for that
+closing role. This policy grants no tool capability.
+
+- `verified_snapshot_v1` requires the existing exact doing-to-doing published
+  snapshot/scope delivery binding and passing digest-bound embedded verification
+  or retained acceptance. Dropped-to-done correction requires independently
+  retained acceptance even if embedded verification passes. A non-null inline
+  `evidence` is refused rather than ignored.
+- `holder_attestation_v1` requires an inline `evidence` JSON object on
+  `mizu_work_items_transition(status="done")`, with a nonblank string
+  `statement`. Other fields are preserved without interpretation. Ordinary
+  completion must be by the current holder. A dropped-to-done correction must
+  supply a nonempty reason; the correcting actor assumes responsibility.
+  No snapshot is required or synthesized: `snapshot_id`, `verification`,
+  `delivered_tree`, and `verification_scope` stay null. Any inherited `delivery`
+  remains historical attribution, not completion proof.
+
+The attachment must be finite JSON with string object keys, at most 32 nested
+levels below its root and within `maximum_evidence_bytes` canonical UTF-8 JSON
+bytes (including the canonical trailing newline). The existing aggregate
+work-item event/page byte bounds also apply. Refusals name the contract and
+failed condition, never attachment contents. All validation precedes the CAS
+append; refusal changes nothing, and stale revisions require a fresh read.
+This is an inline audited attachment, not external evidence storage: do not put
+secrets or private paths in it.
+
+New done records retain `completion_policy` and `completion_evidence` in by-ID
+and history reads. Replay validates the **recorded** contract, never current
+policy; its fixed 65536-byte/32-level format ceilings keep accepted history
+valid when the deployment budget is lowered. Legacy records without these
+fields keep their original strict snapshot contract.
+
+This changes **work-item completion only**, not the separate writer
+`mizu_finish(outcome="done")` passing-verification gate, seals, acknowledgements,
+admission, or parking. An audited done-to-reopen path remains outside this
+change; evidence is retained so checks and future reopening are possible.
+
 ## Root keys
 
 | Key | Meaning |
@@ -336,6 +389,7 @@ immediate handoff, not a parallel backlog.
 | `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit roles required) |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system. The product's reserved private evidence tree (`private-validation/`) is always left out of a capture, whatever this list holds. The product's own host state (the per-engine adapter start-up record `adapter-startup.json` and its lock) is left out for the same reason: it holds one host's measurements, not the product's source |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
+| `completion_evidence` | Versioned work-item done contract and inline evidence budget; strict snapshot default (see above) |
 | `editor` | Operator-owned search policy captured in each immutable Editor export (see [Editor search](#editor-search)) |
 
 The private evidence tree `private-validation/` holds receipts the product regenerates on demand and never commits (see [VALIDATION.md](VALIDATION.md)). A capture leaves that tree out, so a regenerated receipt never enters a published snapshot and never moves a tree's `code_digest`. The rule belongs to the product, so `exclude` cannot reintroduce it; a snapshot that already holds such a path stays readable.

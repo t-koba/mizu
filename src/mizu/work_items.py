@@ -30,7 +30,9 @@ from . import insight_archive, work_item_retirement
 from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, normalize_record_wait
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
-                     PublicationEvidence)
+                     CompletionEvidence, PublicationEvidence)
+from .completion_evidence import (VERIFIED_SNAPSHOT, HOLDER_ATTESTATION, recorded_policy,
+                                  validate_attestation)
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
                  safe_read, sync_dir, text_preview, write_json)
@@ -204,6 +206,7 @@ class WorkItems:
                  effective_verification_projection=None, operator_answer_lookup=None, writer_roles_lookup=None,
                  record_question_lookup=None, register_question_wait=None, record_answer_evidence=None,
                  publication_evidence: PublicationEvidence | None = None,
+                 completion_evidence: CompletionEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.operator_answer_lookup = operator_answer_lookup
@@ -214,6 +217,8 @@ class WorkItems:
         self.vcs = vcs or {}
         self.publication_evidence = (publication_evidence if publication_evidence is not None
                                      else PublicationEvidence())
+        self.completion_evidence = (completion_evidence if completion_evidence is not None
+                                    else CompletionEvidence())
         self.record_kinds = record_kinds or {}
         self.effective_verification = effective_verification
         # Optional proof+diagnostic callback; legacy proof-only callers keep
@@ -267,7 +272,7 @@ class WorkItems:
         raw = safe_read(self.root, name, MAX_EVENT_BYTES if event else PREVIEW_BYTES)
         try:
             value = json.loads(raw, parse_constant=_reject_json_constant)
-        except (ValueError, UnicodeError) as exc:
+        except (ValueError, UnicodeError, RecursionError) as exc:
             if len(raw) > PREVIEW_BYTES:
                 raise LimitExceeded("Work-item event exceeds byte bound") from exc
             raise Denied("Malformed work-item record") from exc
@@ -1165,6 +1170,8 @@ class WorkItems:
     def _validate_delivery(self, previous, record, *, verify_snapshots: bool = True):
         """Replay the explicit binding, without consulting mutable history/config."""
         snapshot = None
+        strict_done = record["status"] == "done" and recorded_policy(record) == VERIFIED_SNAPSHOT
+        attested_done = record["status"] == "done" and not strict_done
         marked = "delivery_schema" in record
         if "delivery_schema" in previous and not marked:
             raise Denied("A work-item transition cannot remove the delivery schema")
@@ -1190,16 +1197,16 @@ class WorkItems:
                     or not isinstance(delivery.get("code_digest"), str)
                     or not DIGEST.fullmatch(delivery["code_digest"])):
                 raise Denied("Invalid delivery snapshot")
-            if verify_snapshots:
+            if verify_snapshots and not attested_done:
                 snapshot = self.snapshots.binding(delivery["snapshot_id"])
                 if (snapshot.get("id") != delivery["snapshot_id"]
                         or snapshot.get("code_digest") != delivery["code_digest"]):
                     raise Denied("Delivery does not match its immutable snapshot")
-        if record["status"] == "done":
+        if strict_done:
             if (delivery is None or delivery != previous.get("delivery")
                     or record["snapshot_id"] != delivery["snapshot_id"]
                     or delivery["scope_digest"] != self._scope_digest(record.get("scope"))):
-                raise Denied("Completion requires a prior exact snapshot and scope delivery binding")
+                raise Denied("verified_snapshot_v1: Completion requires a prior exact snapshot and scope delivery binding")
         return binding, snapshot
 
     def _retained_verification(self, verification, code_digest, scope_digest, snapshot_id):
@@ -1212,16 +1219,24 @@ class WorkItems:
                 or not isinstance(verification["receipt_id"], str)
                 or not DIGEST.fullmatch(verification["receipt_id"])
                 or not isinstance(scope_digest, str) or not DIGEST.fullmatch(scope_digest)):
-            raise Denied("Invalid retained completion verification")
+            raise Denied("verified_snapshot_v1: Invalid retained completion verification")
         receipt = get(self.root, verification["receipt_id"])
         if (receipt["code_digest"] != code_digest
                 or digest(canonical(receipt["scope"])) != scope_digest
                 or receipt["schema"] == 2 and receipt["scope"]["ci"]["snapshot_id"] != snapshot_id):
-            raise Denied("Completion acceptance receipt code or scope mismatch")
+            raise Denied("verified_snapshot_v1: Completion acceptance receipt code or scope mismatch")
 
     def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True) -> None:
         """Validate transitions, always checking current completion evidence."""
-        fields = set(record) - {"smoke_refs", "blocked_since", "wait_resolution"}
+        fields = set(record) - {"smoke_refs", "blocked_since", "wait_resolution",
+                                "completion_policy", "completion_evidence"}
+        policy = recorded_policy(record)
+        if ("completion_policy" in record) != ("completion_evidence" in record):
+            raise Denied(f"{policy}: completion policy and evidence fields must appear together")
+        if record.get("status") != "done" and "completion_policy" in record:
+            raise Denied(f"{policy}: only done records carry completion policy and evidence")
+        if policy == VERIFIED_SNAPSHOT and record.get("completion_evidence") is not None:
+            raise Denied(f"{policy}: inline evidence is not accepted")
         if "blocked_since" in previous and "blocked_since" not in record:
             raise Denied("A transition cannot remove its blocked start")
         if "blocked_since" in record:
@@ -1273,8 +1288,11 @@ class WorkItems:
             raise Denied("A work-item transition cannot clear the accepted scope")
         if (status == "done" and (previous_scope is not None or "delivery_schema" in record)
                 and record_scope != previous_scope):
-            raise Denied("Completion cannot change the accepted scope; "
+            raise Denied(f"{policy}: Completion cannot change the accepted scope; "
                          "record the scope change in an earlier transition")
+        if (status == "done" and policy == HOLDER_ATTESTATION
+                and previous["status"] != "dropped" and actor != previous["holder"]):
+            raise Denied(f"{policy}: ordinary completion requires the current holder")
         if previous["status"] == "open" and previous["holder"] not in (None, actor):
             raise Denied("Held-open work belongs to its holder")
         resolved = "wait_resolution" in record
@@ -1292,7 +1310,8 @@ class WorkItems:
             raise Denied("Invalid work-item revision chain")
         reason = record["reason"]
         if reason is not None and (not isinstance(reason, str) or not reason.strip()):
-            raise Denied("Work-item reason must be nonempty text")
+            raise Denied(f"{policy}: Work-item reason must be nonempty text" if status == "done"
+                         else "Work-item reason must be nonempty text")
         # A scope change is its own recorded event, so it carries the reason
         # that names what it supersedes.
         if scope_changed and (reason is None or not reason.strip()):
@@ -1304,17 +1323,24 @@ class WorkItems:
                 self._stored_wait(record["wait"])
         elif record["wait"] is not None:
             raise Denied("Only blocked work items carry waits")
-        if status == "done":
+        if status == "done" and policy == HOLDER_ATTESTATION:
+            validate_attestation(record.get("completion_evidence"))
+            if any(record.get(key) is not None for key in
+                   ("snapshot_id", "verification", "delivered_tree", "verification_scope")):
+                raise Denied(f"{policy}: snapshot-related fields must be null")
+            if previous["status"] == "dropped" and reason is None:
+                raise Denied(f"{policy}: dropped correction requires a nonempty reason")
+        elif status == "done":
             sid, verification = record["snapshot_id"], record["verification"]
             if (not isinstance(sid, str) or not DIGEST.fullmatch(sid)
                     or not isinstance(verification, dict) or verification.get("passed") is not True
                     or not isinstance(verification.get("code_digest"), str)
                     or not DIGEST.fullmatch(verification["code_digest"])):
-                raise Denied("Completion requires verified snapshot evidence")
+                raise Denied("verified_snapshot_v1: passing digest-bound verification required")
             snapshot = delivery_snapshot if delivery_snapshot is not None else self.snapshots.binding(sid)
             code_digest = snapshot["code_digest"]
             if verification["code_digest"] != code_digest:
-                raise Denied("Completion evidence does not match its delivery")
+                raise Denied("verified_snapshot_v1: Completion evidence does not match its delivery")
             retained = verification.get("source") == "retained_acceptance"
             if retained and "delivery_schema" in record:
                 self._retained_verification(verification, code_digest,
@@ -1323,14 +1349,14 @@ class WorkItems:
                     or snapshot.get("id") != sid
                     or snapshot.get("verification") != verification
                     or verification["code_digest"] != snapshot.get("code_digest")):
-                raise Denied("Completion evidence does not match its verified snapshot")
+                raise Denied("verified_snapshot_v1: Completion evidence does not match its verified snapshot")
             if previous["status"] == "dropped" and (not retained or "delivery_schema" not in record):
-                raise Denied("Dropped correction requires independently retained acceptance")
+                raise Denied("verified_snapshot_v1: Dropped correction requires independently retained acceptance")
             # A closure states the tree that carries its delivery. A record
             # written before the claim existed stays readable history; a
             # closure that states a tree its snapshot does not carry fails.
             if "delivered_tree" in record and record["delivered_tree"] != code_digest:
-                raise Denied("Completion does not name the tree that carries the delivery")
+                raise Denied("verified_snapshot_v1: Completion does not name the tree that carries the delivery")
         elif (record["snapshot_id"] is not None or record["verification"] is not None
                 or record.get("delivered_tree") is not None
                 or record.get("verification_scope") is not None):
@@ -1347,7 +1373,7 @@ class WorkItems:
         retirement collects that validated record and the full chain hash.
         Status-only callers may skip superseded delivery snapshot reads, not
         chain/field validation or the current active binding. Done completion
-        proofs always retain strict verification.
+        proofs always validate their recorded versioned contract.
         """
         current = self._seed(item_id, seed_event, history_revisions=history_revisions)
         chain_hash = hashlib.sha256()
@@ -1713,9 +1739,10 @@ class WorkItems:
             current_delivery = current.get("delivery")
             if current_delivery is not None:
                 if current["status"] == "done":
-                    # The full-chain validator checked the current completion.
-                    snapshot_id = current_delivery["snapshot_id"]
-                    verified_snapshots[snapshot_id] = current_delivery["code_digest"]
+                    if recorded_policy(current) == VERIFIED_SNAPSHOT:
+                        # Only snapshot completion validated this manifest as proof.
+                        snapshot_id = current_delivery["snapshot_id"]
+                        verified_snapshots[snapshot_id] = current_delivery["code_digest"]
                 else:
                     if last_transition is None:
                         raise Denied("Current delivery lacks a validated transition")
@@ -2137,7 +2164,9 @@ class WorkItems:
             row["reason_truncated"] = clipped
         row["snapshot_id"] = item.get("snapshot_id")
         row["delivered_tree"] = item.get("delivered_tree")
-        if item["status"] == "done":
+        if "completion_policy" in item:
+            row["completion_policy"] = item["completion_policy"]
+        if item["status"] == "done" and recorded_policy(item) == VERIFIED_SNAPSHOT:
             if not isinstance(row["snapshot_id"], str) or not DIGEST.fullmatch(row["snapshot_id"]):
                 raise Denied("Closed done item lacks snapshot evidence")
             if row["delivered_tree"] is not None and (
@@ -2504,15 +2533,17 @@ class WorkItems:
         return self._page_closed_impl(limit=limit, readonly=True)
 
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
-                   wait=None, snapshot_id=None, scope=None, smoke_refs=None, _resolve_wait=False) -> dict:
+                   wait=None, snapshot_id=None, scope=None, smoke_refs=None, evidence=None, _resolve_wait=False) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
 
         The event states the scope in force for the item at that revision: a
         supplied scope sets it from this revision on, an omitted one inherits
         the previous revision's scope, a scope is never cleared, and a
         completion may not change the scope it inherits. Actor is trusted
-        caller attribution, not authorization. Done validates an
-        exact pre-existing delivery revision, never the live workspace. A doing
+        caller attribution, not authorization. Done records the resolved
+        completion contract. The default validates an
+        exact pre-existing delivery revision, never the live workspace; configured
+        holder attestation instead records a bounded inline attachment. A doing
         transition carrying snapshot_id records that delivery binding (event
         snapshot_id stays null); done carrying snapshot_id must equal it.
         Delivery binding validates retained membership under publication.lock
@@ -2523,6 +2554,16 @@ class WorkItems:
         write. Stale CAS writes nothing; cancellation/process death releases
         the shared project lock.
         """
+        policy = self.completion_evidence.for_actor(actor)
+        if evidence is not None and status != "done":
+            raise Denied(f"{policy}: inline evidence is accepted only for done")
+        if status == "done":
+            if policy == VERIFIED_SNAPSHOT and evidence is not None:
+                raise Denied(f"{policy}: inline evidence is not accepted")
+            if policy == HOLDER_ATTESTATION:
+                validate_attestation(evidence, self.completion_evidence.maximum_evidence_bytes)
+                if snapshot_id is not None:
+                    raise Denied(f"{policy}: snapshot-related fields must be null")
         if type(expected_rev) is not int or expected_rev < 1:
             raise Denied("Expected revision must be a positive integer")
         # Publication membership and this record append stay ordered together.
@@ -2550,6 +2591,9 @@ class WorkItems:
             if current["rev"] != expected_rev:
                 raise Denied("Work item changed; re-read before transitioning")
             resolution = None
+            if (status == "done" and policy == HOLDER_ATTESTATION
+                    and current["status"] != "dropped" and actor != current["holder"]):
+                raise Denied(f"{policy}: ordinary completion requires the current holder")
             if current["status"] == "open" and current["holder"] not in (None, actor):
                 raise Denied("Held-open work belongs to its holder")
             if _resolve_wait:
@@ -2619,10 +2663,10 @@ class WorkItems:
             verification = None
             verification_scope = None
             delivered_tree = None
-            if status == "done":
+            if status == "done" and policy == VERIFIED_SNAPSHOT:
                 delivery = current.get("delivery")
                 if not delivery or snapshot_id != delivery["snapshot_id"]:
-                    raise Denied("Completion requires a prior exact snapshot delivery binding")
+                    raise Denied("verified_snapshot_v1: Completion requires a prior exact snapshot delivery binding")
                 snapshot = self.snapshots.get(snapshot_id)
                 verification = snapshot.get("verification")
                 if (current["status"] == "dropped" or not isinstance(verification, dict)
@@ -2638,7 +2682,7 @@ class WorkItems:
                     else:
                         verification = None
                     if not isinstance(verification, dict):
-                        message = "Completion snapshot must have passing digest-bound verification"
+                        message = "verified_snapshot_v1: Completion snapshot must have passing digest-bound verification"
                         # Emit only fixed reason tokens, never receipt contents,
                         # paths, or arbitrary diagnostic text from a callback.
                         if isinstance(diagnostic, dict):
@@ -2666,7 +2710,7 @@ class WorkItems:
             else:
                 validate_scope(scope)
                 if status == "done" and scope != effective_scope:
-                    raise Denied("Completion cannot change the accepted scope; "
+                    raise Denied(f"{policy}: Completion cannot change the accepted scope; "
                                  "record the scope change in an earlier transition")
                 if scope != effective_scope and (reason is None or not reason.strip()):
                     raise Denied("A scope change requires a reason")
@@ -2691,6 +2735,9 @@ class WorkItems:
                       "verification": verification, "delivered_tree": delivered_tree,
                       "scope": in_force, "delivery_schema": 1, "delivery": delivery,
                       "verification_scope": verification_scope}
+            if status == "done":
+                record["completion_policy"] = policy
+                record["completion_evidence"] = evidence
             record.pop("wait_resolution", None)
             if resolution is not None:
                 record["holder"] = current["holder"]

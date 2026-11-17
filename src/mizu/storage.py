@@ -24,6 +24,7 @@ from pathlib import Path
 from .delegation_jobs import DelegationJobs
 from .admission import check_slot_exclusions, role_exclusions
 from .config import DEFAULT_WEB_CACHE_SECONDS, MAX_PROJECT_GOAL_BYTES, MEBIBYTE_BYTES
+from .completion_evidence import VERIFIED_SNAPSHOT, recorded_policy
 from .errors import Busy, Denied, LimitExceeded
 from .fs import (ATOMIC_WRITE_TEMP_PREFIX, DIGEST, PREVIEW_BYTES, atomic_write,
                  canonical, digest, identifier, lock, mkdir, now, read_json,
@@ -1157,7 +1158,8 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
                                 delivery = record.get("delivery")
                                 if delivery is not None:
                                     item_references.add(delivery["snapshot_id"])
-                                if record.get("status") == "done":
+                                if (record.get("status") == "done"
+                                        and recorded_policy(record) == VERIFIED_SNAPSHOT):
                                     digest_id = _audit_digest(record.get("snapshot_id"))
                                     if digest_id is None:
                                         raise Denied("Invalid completed snapshot reference")

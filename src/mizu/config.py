@@ -384,7 +384,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import", "doctor"})
+    "project_import", "doctor", "completion_evidence"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -1403,6 +1403,32 @@ def editor_settings(raw: dict) -> Editor:
 
 
 @dataclasses.dataclass(frozen=True)
+class CompletionEvidence:
+    default: str = "verified_snapshot_v1"
+    maximum_evidence_bytes: int = 8192
+    by_role: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def for_actor(self, actor: str) -> str:
+        return self.by_role.get(actor, self.default)
+
+
+def completion_evidence_policy(raw, roles) -> CompletionEvidence:
+    from .completion_evidence import POLICIES, MAX_EVIDENCE_BYTES
+    keys(raw, {"default", "maximum_evidence_bytes", "by_role"}, "completion_evidence")
+    values = {"default": "verified_snapshot_v1", "maximum_evidence_bytes": 8192,
+              "by_role": {}, **raw}
+    overrides = values["by_role"]
+    if not isinstance(overrides, dict) or any(role not in roles for role in overrides):
+        raise ConfigError("completion_evidence.by_role must map configured roles to policies")
+    for policy in (values["default"], *overrides.values()):
+        if not isinstance(policy, str) or policy not in POLICIES:
+            raise ConfigError("completion_evidence requires a supported versioned policy name")
+    number(values["maximum_evidence_bytes"], "completion_evidence.maximum_evidence_bytes",
+           1, MAX_EVIDENCE_BYTES)
+    return CompletionEvidence(**values)
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     file: Path
     data: Path
@@ -1440,6 +1466,7 @@ class Config:
     scheduler_evidence: SchedulerEvidence = dataclasses.field(default_factory=SchedulerEvidence)
     services: ServiceSettings = dataclasses.field(default_factory=ServiceSettings)
     editor: Editor = dataclasses.field(default_factory=Editor)
+    completion_evidence: CompletionEvidence = dataclasses.field(default_factory=CompletionEvidence)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -2136,4 +2163,5 @@ def load(file: Path) -> Config:
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})),
                   services=service_settings(data.get("services", {})),
-                  editor=editor_settings(data.get("editor", {})))
+                  editor=editor_settings(data.get("editor", {})),
+                  completion_evidence=completion_evidence_policy(data.get("completion_evidence", {}), roles))

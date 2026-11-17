@@ -64,7 +64,7 @@ class WorkItemTests(Fixture):
         calls = []
         store = WorkItems(self.project.root, self.project.snapshots, self.project.insights,
                           effective_verification=lambda value: calls.append(value['id']))
-        message = "Completion snapshot must have passing digest-bound verification"
+        message = "verified_snapshot_v1: Completion snapshot must have passing digest-bound verification"
         with self.assertRaises(Denied) as refused:
             store.transition(self.item_id, expected_rev=binding['rev'], status='done',
                              actor='worker', snapshot_id=snapshot['id'])
@@ -688,7 +688,8 @@ class WorkItemTests(Fixture):
             self.store.get(self.item_id)
         # A record written before the claim existed stays readable history.
         legacy = copy.deepcopy(completed)
-        for key in ("delivered_tree", "delivery_schema", "delivery", "verification_scope"):
+        for key in ("delivered_tree", "delivery_schema", "delivery", "verification_scope",
+                    "completion_policy", "completion_evidence"):
             del legacy[key]
         legacy["rev"] = 2
         legacy["transition"]["from"] = "open"

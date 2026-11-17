@@ -40,4 +40,4 @@ def transition(context, args: dict) -> dict:
     return context.project.work_items.transition(
         args["id"], expected_rev=args["expected_rev"], status=args["status"],
         actor=context.role.name, reason=args.get("reason"), wait=args.get("wait"),
-        snapshot_id=args.get("snapshot_id"), scope=args.get("scope"), smoke_refs=args.get("smoke_refs"))
+        evidence=args.get("evidence"), snapshot_id=args.get("snapshot_id"), scope=args.get("scope"), smoke_refs=args.get("smoke_refs"))
