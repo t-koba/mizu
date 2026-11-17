@@ -3,7 +3,7 @@ import copy
 import dataclasses
 import json
 
-from support import Fixture
+from support import Fixture, without_blocked_age
 from mizu import work_order as plan
 from mizu.errors import Denied
 from mizu.fs import digest, now, write_json
@@ -504,7 +504,7 @@ class WorkOrderTests(Fixture):
         aged_opened["items"][0]["blocked_age_seconds"] = 10**9
         self.assertEqual(_stable_open_for_hash(opened), _stable_open_for_hash(aged_opened))
 
-    def test_ancient_pending_wait_stays_out_of_work_order_readiness(self):
+    def test_ancient_pending_wait_keeps_readiness_and_diagnostic_age(self):
         from test_blocked_wait_age import clock
 
         store = self.project.work_items
@@ -518,8 +518,14 @@ class WorkOrderTests(Fixture):
         with clock(10**9):
             context = self.context("worker")
             aged = plan._capture_opening(context)
-            self.assertEqual(aged["ready_work"], opening["ready_work"])
-            self.assertEqual(aged["ready_work"]["total"], 0)
+            self.assertEqual(without_blocked_age(aged["ready_work"]),
+                             without_blocked_age(opening["ready_work"]))
+            self.assertEqual(aged["ready_work"]["total"], 1)
+            ready = aged["ready_work"]["items"][0]
+            self.assertEqual(ready["id"], item["id"])
+            self.assertEqual((ready["wait_liveness"]["state"],
+                              ready["wait_liveness"]["self_resolvable"]),
+                             ("pending", "sole_writer_code_change"))
             self.assertEqual(aged["open_work_items"]["items"][0]["blocked_age_seconds"], 10**9)
             self.assertEqual(plan._frozen_generation(context), generation)
             self.assertEqual(store.get(item["id"]), item)
