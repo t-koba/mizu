@@ -95,6 +95,33 @@ class FeedUpdatesTests(Fixture):
         self.assertNotEqual(first["identity"], fallback["identity"])
         self.assertEqual(self.read()["feeds"][0]["entries"], [])
 
+    def test_feed_search_selects_alternate_links_in_document_order(self):
+        article = "https://example.org/article"
+        alternate = f'<link rel="alternate" href="{article}"/>'
+        self_link = '<link rel="self" href="https://example.org/entry.atom"/>'
+        cases = [
+            ("alternate before self", alternate + self_link, True),
+            ("self before alternate", self_link + alternate, True),
+            ("omitted rel", f'<link href="{article}"/>' + self_link, True),
+            ("RSS text link", f"<link>{article}</link>", False),
+        ]
+        web = Web(self.config.web, self.config.data / "web-cache", self.project.root / "sources")
+        for label, links, atom in cases:
+            with self.subTest(label=label):
+                if atom:
+                    xml = ('<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+                           '<id>urn:entry:1</id><title>Article</title><summary>News</summary>'
+                           + links + '</entry></feed>')
+                else:
+                    xml = rss('<item><guid>1</guid><title>Article</title>'
+                              '<description>News</description>' + links + '</item>')
+                web.fetch = Mock(return_value={"text": xml, "id": "a" * 64})
+                self.assertEqual(web._search_feeds("article news"), ([{
+                    "title": "Article", "url": article, "summary": "News",
+                    "source": FEED, "source_receipt": "a" * 64, "score": 2,
+                }], [], 1, 1, False))
+                self.assertEqual(web.feed_entries(FEED)["entries"][0]["url"], article)
+
     def test_invalid_identities_and_overflow_never_replace_cursor(self):
         self.read()
         before = self.state_path().read_bytes()

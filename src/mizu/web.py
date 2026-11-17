@@ -619,7 +619,10 @@ class Web:
                     if item.tag.rsplit("}", 1)[-1] not in ("item", "entry"):
                         continue
                     fields = {child.tag.rsplit("}", 1)[-1]: child for child in item}
-                    title_node, link_node = fields.get("title"), fields.get("link")
+                    title_node = fields.get("title")
+                    link_node = next((child for child in item
+                                      if child.tag.rsplit("}", 1)[-1] == "link"
+                                      and child.get("rel", "alternate") == "alternate"), None)
                     title = "" if title_node is None else "".join(title_node.itertext())
                     link = "" if link_node is None else link_node.get("href", link_node.text or "")
                     summary_node = fields.get("description")
