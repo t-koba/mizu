@@ -15,7 +15,7 @@ def _wall(value):
     """Wall-clock timestamp or None for poll state merging."""
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if number != number or number in (float("inf"), float("-inf")):
         return None

@@ -1557,3 +1557,13 @@ class CiNondeterminismTests(Fixture):
             state = {"ci": {"failures": local}}
             refresh_poll_state(state, shared)
             self.assertEqual(state["ci"]["failures"], local)
+
+    def test_overflowing_poll_timestamp_does_not_abort_refresh(self):
+        from mizu.runtime import refresh_poll_state
+        for oversized in (10 ** 400, -(10 ** 400)):
+            with self.subTest(oversized=oversized > 0):
+                state = {"ci": {"last_poll": 7.0}}
+                shared = {"last_poll": oversized, "last_proposal_poll": 9.0}
+                refresh_poll_state(state, shared, refresh_ci=False)
+                self.assertEqual(state["ci"]["last_poll"], 7.0)
+                self.assertEqual(state["last_proposal_poll"], 9.0)
