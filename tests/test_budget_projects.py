@@ -1,4 +1,5 @@
 """M9: per-project request budget with an optional shared total. Offline only."""
+import json
 import os
 import tempfile
 import unittest
@@ -28,6 +29,68 @@ class PerProjectBudgetTests(unittest.TestCase):
         self.assertEqual(budget.usage("alpha")["used"], 1)
         self.assertEqual(budget.usage("beta")["used"], 1)
         self.assertEqual(budget.usage("alpha")["shared_used"], 2)
+
+    def test_malformed_ledgers_refuse_admission_without_rewriting(self):
+        budget = Budget(self.root, 1, shared_daily=1)
+        budget.take("first", project="alpha")
+        path = self.root / f"{budget._today()}.json"
+        untrusted_name = "untrusted\nproject"
+        cases = [
+            ({"requests": "damaged", "projects": {"alpha": ["first"]}},
+             ["requests-must-be-list"], 0, {"alpha": 1}),
+            ({"requests": ["first", 7], "projects": {"alpha": ["first"]}},
+             ["requests-entries-must-be-strings"], 2, {"alpha": 1}),
+            ({"requests": ["first"], "projects": "damaged"},
+             ["projects-must-be-object"], 1, {}),
+            ({"requests": ["first"], "projects": {"alpha": ["first"], untrusted_name: 7}},
+             [f"project-{untrusted_name}-must-be-list"], 1, {"alpha": 1}),
+            ({"requests": ["first"], "projects": {"alpha": ["first"], untrusted_name: [7]}},
+             [f"project-{untrusted_name}-entries-must-be-strings"],
+             1, {"alpha": 1, untrusted_name: 1}),
+            ([], ["record-must-be-object"], 0, {}),
+            ("damaged", ["record-must-be-object"], 0, {}),
+        ]
+        for record, malformed, shared, projects in cases:
+            with self.subTest(record=record):
+                # Noncanonical whitespace makes byte preservation explicit.
+                body = (json.dumps(record, indent=2) + "\n").encode()
+                path.write_bytes(body)
+                report = budget.audit()
+                self.assertEqual(report["malformed"], malformed)
+                self.assertEqual(report["shared_used"], shared)
+                self.assertEqual(report["projects"], projects)
+                # Corruption must be checked even before an idempotent retry.
+                for request, project in (("second", "beta"), ("first", "alpha")):
+                    with self.assertRaises(InfraExceeded) as caught:
+                        budget.take(request, project=project)
+                    self.assertEqual(str(caught.exception),
+                                     "UTC budget ledger is malformed; inspect data/budget")
+                    self.assertEqual(path.read_bytes(), body)
+
+    def test_null_record_is_not_a_missing_file(self):
+        budget = Budget(self.root, 1)
+        path = self.root / f"{budget._today()}.json"
+        path.write_bytes(b"null\n")
+        with self.assertRaisesRegex(InfraExceeded, "budget ledger is malformed"):
+            budget.take("first", project="alpha")
+        self.assertEqual(path.read_bytes(), b"null\n")
+        self.assertEqual(budget.audit()["malformed"], ["record-must-be-object"])
+
+    def test_legacy_record_preserves_aggregate_and_retry_is_idempotent(self):
+        budget = Budget(self.root, 1, shared_daily=2)
+        path = self.root / f"{budget._today()}.json"
+        path.write_bytes(canonical({"requests": ["legacy"]}))
+        self.assertEqual(budget.take("first", project="alpha"), 1)
+        record = json.loads(path.read_bytes())
+        self.assertEqual(record["requests"], ["legacy", "first"])
+        self.assertEqual(record["projects"], {"alpha": ["first"]})
+        body = path.read_bytes()
+        self.assertEqual(budget.take("first", project="alpha"), 1)
+        with self.assertRaisesRegex(InfraExceeded, "budget exhausted for project 'alpha'"):
+            budget.take("second", project="alpha")
+        with self.assertRaisesRegex(InfraExceeded, "shared budget exhausted"):
+            budget.take("second", project="beta")
+        self.assertEqual(path.read_bytes(), body)
 
     def test_smallest_per_config_limit_does_not_stop_other_project(self):
         # Two configs sharing one data_dir with different daily_requests.

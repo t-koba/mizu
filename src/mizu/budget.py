@@ -63,6 +63,27 @@ class Budget:
             raise Denied(f"Invalid budget project: {exc}") from exc
 
     @staticmethod
+    def _malformed(record) -> list[str]:
+        if not isinstance(record, dict):
+            return ["record-must-be-object"]
+        malformed: list[str] = []
+        requests = record.get("requests", [])
+        if not isinstance(requests, list):
+            malformed.append("requests-must-be-list")
+        elif any(not isinstance(entry, str) for entry in requests):
+            malformed.append("requests-entries-must-be-strings")
+        projects = record.get("projects", {})
+        if not isinstance(projects, dict):
+            malformed.append("projects-must-be-object")
+        else:
+            for name, entries in projects.items():
+                if not isinstance(name, str) or not isinstance(entries, list):
+                    malformed.append(f"project-{name}-must-be-list")
+                elif any(not isinstance(entry, str) for entry in entries):
+                    malformed.append(f"project-{name}-entries-must-be-strings")
+        return malformed
+
+    @staticmethod
     def _split(record: dict) -> tuple[list, dict]:
         requests = record.get("requests", [])
         if not isinstance(requests, list):
@@ -90,7 +111,7 @@ class Budget:
         request_id); a repeat returns the per-project count without charging.
         Evidence: returns the per-project count (shared count when no project
         is named) plus ``day`` in the configured zone and ``zone`` naming it. Failure: ``InfraExceeded`` when disabled, per-project
-        exhausted, shared exhausted, or oversize; legacy files without
+        exhausted, shared exhausted, malformed, or oversize; legacy files without
         ``projects`` keep their aggregate and start per-project counts at 0.
         """
         day = day or self._today()
@@ -102,9 +123,12 @@ class Budget:
             raise InfraExceeded("Model calls are disabled: set limits.daily_requests explicitly")
         with lock(self.root / "budget.lock"):
             path = self.root / f"{day}.json"
-            record = read_json(path, {"day": day, "zone": self.timezone, "requests": []})
-            if not isinstance(record, dict):
+            record = read_json(path, None)
+            if record is None and not path.exists():
                 record = {"day": day, "zone": self.timezone, "requests": []}
+            if self._malformed(record):
+                raise InfraExceeded(
+                    f"{self.timezone} budget ledger is malformed; inspect data/budget")
             record["day"] = day
             record["zone"] = self.timezone
             requests, projects = self._split(record)
@@ -147,38 +171,24 @@ class Budget:
         day = self._today()
         path = self.root / f"{day}.json"
         unreadable = False
+        missing = object()
         try:
-            record = read_json(path, None)
+            record = read_json(path, missing)
         except (OSError, ValueError):
-            record, unreadable = None, True
+            record, unreadable = missing, True
         malformed: list[str] = []
         projects: dict[str, int] = {}
         shared = 0
         if unreadable:
             malformed.append("record-unreadable")
-        elif record is None:
+        elif record is missing:
             pass
-        elif not isinstance(record, dict):
-            malformed.append("record-must-be-object")
         else:
-            requests = record.get("requests", [])
-            if not isinstance(requests, list):
-                malformed.append("requests-must-be-list")
-            else:
+            malformed = self._malformed(record)
+            if isinstance(record, dict):
+                requests, entries_by_project = self._split(record)
                 shared = len(requests)
-                if any(not isinstance(entry, str) for entry in requests):
-                    malformed.append("requests-entries-must-be-strings")
-            raw_projects = record.get("projects", {})
-            if not isinstance(raw_projects, dict):
-                malformed.append("projects-must-be-object")
-            else:
-                for name, entries in raw_projects.items():
-                    if not isinstance(name, str) or not isinstance(entries, list):
-                        malformed.append(f"project-{name}-must-be-list")
-                        continue
-                    if any(not isinstance(entry, str) for entry in entries):
-                        malformed.append(f"project-{name}-entries-must-be-strings")
-                    projects[name] = len(entries)
+                projects = {name: len(entries) for name, entries in entries_by_project.items()}
         try:
             size = path.stat().st_size
         except OSError:
