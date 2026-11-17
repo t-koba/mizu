@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from support import ROOT  # noqa: F401 (ensures src on sys.path)
+from mizu import fs, sandbox
 from mizu.errors import Busy
 from mizu.fs import lock
 
@@ -15,6 +16,89 @@ class LocalLockTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="mizu-local-lock-")
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "guard.lock"
+
+    def test_pending_kernel_acquire_is_not_cleanup_ownership(self):
+        entered = threading.Event()
+        proceed = threading.Event()
+        outcome = []
+
+        def slow_lock_fd(*args, **kwargs):
+            entered.set()
+            if not proceed.wait(timeout=10):
+                raise TimeoutError("kernel acquisition was not released")
+
+        def acquire():
+            try:
+                with lock(self.path):
+                    outcome.append(fs.held(self.path))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        with patch("mizu.fs._platform.lock_fd", side_effect=slow_lock_fd), \
+             patch("mizu.fs._platform.unlock_fd"), \
+             patch("mizu.sandbox._remove_containers") as remove:
+            other = threading.Thread(target=acquire)
+            other.start()
+            try:
+                self.assertTrue(entered.wait(timeout=10))
+                self.assertFalse(fs.held(self.path))
+                self.assertEqual(
+                    sandbox.cleanup(None, Path(self.temp.name), owner=True,
+                                    exclusion=self.path),
+                    {"removed": 0, "skipped": "role-active"})
+                remove.assert_not_called()
+            finally:
+                proceed.set()
+                other.join(timeout=10)
+            self.assertFalse(other.is_alive())
+        self.assertEqual(outcome, [True])
+        self.assertFalse(fs.held(self.path))
+
+    def test_held_tracks_successful_body_and_release(self):
+        with patch("mizu.fs._platform.lock_fd"), \
+             patch("mizu.fs._platform.unlock_fd"):
+            for error in (None, Busy("body busy"), RuntimeError("body failed")):
+                with self.subTest(error=error):
+                    self.assertFalse(fs.held(self.path))
+                    def body():
+                        with lock(self.path):
+                            self.assertTrue(fs.held(self.path))
+                            if error is not None:
+                                raise error
+                    if error is None:
+                        body()
+                    else:
+                        with self.assertRaises(type(error)):
+                            body()
+                    self.assertFalse(fs.held(self.path))
+
+    def test_failed_kernel_acquire_is_not_held(self):
+        with patch("mizu.fs._platform.unlock_fd"):
+            for error, expected in ((BlockingIOError(), Busy), (OSError(), OSError)):
+                with self.subTest(error=error), \
+                     patch("mizu.fs._platform.lock_fd", side_effect=error):
+                    with self.assertRaises(expected):
+                        with lock(self.path):
+                            self.fail("failed kernel acquisition entered body")
+                    self.assertFalse(fs.held(self.path))
+            # A failed acquisition must also release the local guard.
+            with patch("mizu.fs._platform.lock_fd"):
+                with lock(self.path, blocking=False):
+                    self.assertTrue(fs.held(self.path))
+            self.assertFalse(fs.held(self.path))
+
+    def test_successful_owner_cleanup_removes_containers(self):
+        root = Path(self.temp.name)
+        with patch("mizu.fs._platform.lock_fd") as acquire, \
+             patch("mizu.fs._platform.unlock_fd"), \
+             patch("mizu.sandbox._remove_containers",
+                   return_value={"removed": 1}) as remove:
+            with lock(self.path):
+                self.assertEqual(
+                    sandbox.cleanup(None, root, owner=True, exclusion=self.path),
+                    {"removed": 1})
+                remove.assert_called_once_with(None, root, None)
+                acquire.assert_called_once()
 
     def test_second_nonblocking_acquire_refused_when_os_lock_is_per_process(self):
         # Simulate an OS primitive that never contends within one process

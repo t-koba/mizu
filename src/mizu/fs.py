@@ -417,6 +417,8 @@ def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) 
 #: exclusion; the OS lock still provides cross-process exclusion.
 _LOCAL_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
+# Only successful kernel acquisitions, not threads waiting for the kernel.
+_LOCAL_OWNED: set[str] = set()
 # Execution-local policy, never set by loading a config or constructing a project.
 # New threads must bind their owning Config.runtime_policy() explicitly.
 _LOCAL_BLOCKING_TIMEOUT = _platform.LOCK_TIMEOUT
@@ -525,6 +527,8 @@ def _lock(path: Path, *, blocking: bool, timeout: float,
                 observation.stop()
                 observation.row["outcome"] = "blocking-io-error"
             raise Busy(f"Already running: {path.stem}") from None
+        with _LOCAL_GUARD:
+            _LOCAL_OWNED.add(key)
         if observation is not None:
             observation.advance("body")
         yield
@@ -535,6 +539,8 @@ def _lock(path: Path, *, blocking: bool, timeout: float,
             observation.row["outcome"] = "blocking-io-error"
         raise Busy(f"Already running: {path.stem}") from None
     finally:
+        with _LOCAL_GUARD:
+            _LOCAL_OWNED.discard(key)
         with contextlib.suppress(Exception):
             _platform.unlock_fd(fd)
         with contextlib.suppress(Exception):
@@ -545,19 +551,22 @@ def _lock(path: Path, *, blocking: bool, timeout: float,
 
 
 def held(path: Path) -> bool:
-    """True when this process holds ``path``'s lock right now.
+    """True when this process successfully owns ``path``'s kernel lock.
 
-    The in-process guard is taken before the kernel lock and released after
-    it, so a held guard means this process owns the kernel lock too. The
-    answer is about ownership, not contention: a caller that already owns an
-    exclusion must not read its own lock as another holder's.
+    A local guard held while waiting for the kernel is not ownership. The
+    answer is about successful kernel ownership, not local contention: a
+    caller that already owns an exclusion must not read its own lock as
+    another holder's.
 
     Bounds: one path, one boolean. Trust: local process state. Failure:
     never raises; an unreadable path reads as not held.
     """
+    try:
+        key = _local_key(path)
+    except (OSError, ValueError):
+        return False
     with _LOCAL_GUARD:
-        local = _LOCAL_LOCKS.get(_local_key(path))
-    return local is not None and local.locked()
+        return key in _LOCAL_OWNED
 
 
 def publish_pointer(root: Path, pointer: dict, *, name: str = "latest.json") -> None:
