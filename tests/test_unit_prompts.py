@@ -388,8 +388,7 @@ class ExternalCheckWakePromptTests(Fixture):
     def test_recursive_external_check_rows_are_denied(self):
         from mizu.errors import Denied
         forbidden = ({"passed_on": {"revision": "a" * 40}},
-                     {"branch": "main", "sha": "a" * 40, "check": "unit"},
-                     {"sha": "a" * 40, "check": "unit", "state": "failure"})
+                     {"branch": "main", "sha": "a" * 40, "check": "unit"})
         for builder, args in self.builders():
             for row in forbidden:
                 with self.subTest(builder=builder.__name__, row=row):
@@ -397,6 +396,11 @@ class ExternalCheckWakePromptTests(Fixture):
                     ctx.operator_record_page = {"events": [{"payload": {"nested": [row]}}]}
                     with self.assertRaisesRegex(Denied, "Per-check external observation"):
                         builder(ctx, *args)
+            terminal = {"check": "unit", "sha": "a" * 40, "state": "success", "run": "r"}
+            ctx = self.frozen_context(())
+            ctx.operator_record_page = {"events": [{"payload": {"nested": [terminal]}}]}
+            payload = json.loads(builder(ctx, *args))
+            self.assertEqual(payload["operator_records"], ctx.operator_record_page)
 
     def test_local_check_jobs_and_check_name_selectors_are_accepted(self):
         import dataclasses

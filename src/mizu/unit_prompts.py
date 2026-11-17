@@ -534,12 +534,12 @@ def _validate_opening(payload: dict) -> dict:
     """Fail closed if nested per-check external observations reach an opening.
 
     Only external row signatures and passed_on annotations are forbidden;
-    local check-job records, check-name selectors and aggregates remain valid.
+    local check-job records, CI-wait terminal rows, check-name selectors and
+    aggregates remain valid.
     """
     def walk(value):
         if isinstance(value, dict):
-            if ("passed_on" in value or {"branch", "sha", "check"} <= value.keys()
-                    or {"sha", "check", "state"} <= value.keys()):
+            if "passed_on" in value or {"branch", "sha", "check"} <= value.keys():
                 raise Denied("Per-check external observation in unit opening")
             for nested in value.values():
                 walk(nested)
@@ -574,6 +574,9 @@ def prompt_for(context: Context) -> str:
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context))
     acceptance = list(context.project.verify) if "verify" in caps else []
+    ci_branch = context.config.vcs.get("ci_branch") or None
+    if "vcs_read" not in set(context.role.capabilities):
+        ci_branch = None
     return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
@@ -604,7 +607,7 @@ def prompt_for(context: Context) -> str:
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
-                       "ci_branch": context.config.vcs.get("ci_branch") or None,
+                       "ci_branch": ci_branch,
                        "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
                                       if "ci" in prompt_sections.included(context.role) else []),
                        "previous_report": (_previous_report(context.project)
@@ -631,8 +634,9 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     reads as done), the always-present bounded ``open_work_items`` page,
     workspace markers, capability-gated acceptance commands, and a
     capability-gated ``previous_report`` preview for roles holding
-    ``report``. The opt-in ``ci`` section contains only branch and aggregate
-    summaries for all observed subjects, never per-check rows.
+    ``report``. Fixed ``ci_branch`` configuration is gated by ``vcs_read``.
+    The opt-in ``ci`` section contains only aggregate summaries for all
+    observed subjects, never per-check rows.
     The independent bounded ``ready_work`` projection follows
     this stable context in the volatile suffix, before run identity and clock.
     The charter body is supplied separately in stable system instructions;
@@ -669,6 +673,9 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     from . import work_order as _plan
     opening = _plan._capture_opening(context)
     acceptance = list(context.project.verify) if "verify" in caps else []
+    ci_branch = context.config.vcs.get("ci_branch") or None
+    if "vcs_read" not in set(context.role.capabilities):
+        ci_branch = None
     open_backlog = opening["open_backlog"]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
@@ -702,7 +709,7 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
-                       "ci_branch": context.config.vcs.get("ci_branch") or None,
+                       "ci_branch": ci_branch,
                        "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
                                       if "ci" in prompt_sections.included(context.role) else []),
                        "previous_report": (_previous_report(context.project)

@@ -5,7 +5,8 @@ section (the table ``SECTIONS``) or is a fixed key that every role receives
 (``FIXED_KEYS``: the unit statement, tool surface, snapshot pins, and every
 key that delivers an instruction or a pending obligation to the role:
 decisions, work-item events, waits, obligations, operator records, and the
-fixed external_check_wake facts and capability-gated details route). The ci
+fixed ci_branch configuration and external_check_wake facts and
+capability-gated details route). The ci
 section carries only aggregate summaries and is strictly opt-in via include.
 Default membership is one uniform rule: a section is offered when the role holds a
 capability that reads or acts on it. Sections whose projection is already
@@ -45,7 +46,7 @@ SECTIONS: dict[str, Section] = {
     "insights": Section(("pending_insights", "open_insights"),
                         frozenset({"insights", "decide"}), True),
     "research": Section(("research_state",), frozenset({"research_read", "research"}), True),
-    "ci": Section(("ci_branch", "ci_summary"), frozenset(), False),
+    "ci": Section(("ci_summary",), frozenset(), False),
     "acceptance": Section(("acceptance_commands",), frozenset({"verify"}), True),
     "report": Section(("previous_report",), frozenset({"report"}), True),
 }
@@ -56,7 +57,7 @@ FIXED_KEYS = frozenset({
     "published_snapshot", "recent_snapshots", "snapshot_delta", "workspace", "workspace_mode",
     "operator_records", "decision_events", "decision_page", "decision_receipt_diagnostics",
     "decision_task", "work_item_events", "wait_events", "ci_wait_delivery", "obligations",
-    "capture_limit", "review_authority", "external_check_wake", "run", "now", "timezone"})
+    "capture_limit", "review_authority", "ci_branch", "external_check_wake", "run", "now", "timezone"})
 
 #: Row-fingerprint groups kept for session cursors, by the section that shows them.
 ROW_GROUPS = {"open_work_items": ("open_work_items",), "check_jobs": ("check_jobs", "shared_checks")}

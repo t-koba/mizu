@@ -55,7 +55,8 @@ class PromptSectionTests(Fixture):
     def test_every_key_belongs_to_one_section_or_is_fixed(self):
         self.assertNotIn("task", prompt_sections.FIXED_KEYS)
         self.assertIn("external_check_wake", prompt_sections.FIXED_KEYS)
-        self.assertEqual(prompt_sections.SECTIONS["ci"].keys, ("ci_branch", "ci_summary"))
+        self.assertIn("ci_branch", prompt_sections.FIXED_KEYS)
+        self.assertEqual(prompt_sections.SECTIONS["ci"].keys, ("ci_summary",))
         self.assertEqual(prompt_sections.SECTIONS["ci"].capabilities, frozenset())
         self.assertFalse(prompt_sections.SECTIONS["ci"].kept_without_capability)
         seen = [k for s in prompt_sections.SECTIONS.values() for k in s.keys]
@@ -93,13 +94,16 @@ class PromptSectionTests(Fixture):
             for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
                 with self.subTest(role=role, builder=builder.__name__):
                     ctx = self.context(role)
+                    ctx.config = dataclasses.replace(
+                        ctx.config, vcs={**ctx.config.vcs, "ci_branch": "main"})
                     default = json.loads(builder(ctx, *args))
-                    self.assertNotIn("ci_branch", default)
+                    expected_branch = "main" if "vcs_read" in ctx.role.capabilities else None
+                    self.assertEqual(default["ci_branch"], expected_branch)
                     self.assertNotIn("ci_summary", default)
                     self.assertIn("external_check_wake", default)
                     ctx.role = dataclasses.replace(ctx.role, context_include=("ci",))
                     included = json.loads(builder(ctx, *args))
-                    self.assertIn("ci_branch", included)
+                    self.assertEqual(included["ci_branch"], expected_branch)
                     self.assertIn("ci_summary", included)
                     self.assertEqual(included["external_check_wake"], default["external_check_wake"])
 
