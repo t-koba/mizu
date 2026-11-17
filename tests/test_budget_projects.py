@@ -67,6 +67,62 @@ class PerProjectBudgetTests(unittest.TestCase):
                                      "UTC budget ledger is malformed; inspect data/budget")
                     self.assertEqual(path.read_bytes(), body)
 
+    def test_inconsistent_shared_totals_refuse_without_rewriting(self):
+        budget = Budget(self.root, 1, shared_daily=1)
+        path = self.root / f"{budget._today()}.json"
+        cases = [
+            ({"projects": {"alpha": ["a"]}}, "requests-key-missing"),
+            ({"requests": [], "projects": {"alpha": ["a"]}},
+             "requests-shorter-than-project-totals"),
+            ({"requests": ["a"], "projects": {"alpha": ["a"], "beta": ["a"]}},
+             "requests-shorter-than-project-totals"),
+        ]
+        for record, reason in cases:
+            with self.subTest(record=record):
+                body = (json.dumps(record, indent=2) + "\n").encode()
+                path.write_bytes(body)
+                with self.assertRaisesRegex(InfraExceeded, "budget ledger is malformed"):
+                    budget.take("b", project="beta")
+                self.assertEqual(budget.audit()["malformed"], [reason])
+                self.assertEqual(budget.peek("beta")["status"], "unavailable")
+                self.assertEqual(path.read_bytes(), body)
+
+    def test_unnamed_admission_uses_shared_count_and_identity(self):
+        budget = Budget(self.root, 1, shared_daily=0)
+        path = self.root / f"{budget._today()}.json"
+        body = b'{"requests":["old"]}'
+        path.write_bytes(body)
+        with self.assertRaisesRegex(InfraExceeded, "daily model-request budget exhausted"):
+            budget.take("new", project="")
+        self.assertEqual(path.read_bytes(), body)
+        self.assertEqual(budget.take("old", project=""), 1)
+        self.assertEqual(path.read_bytes(), body)
+        path.unlink()
+        budget = Budget(self.root, 2)
+        self.assertEqual(budget.take("a"), 1)
+        self.assertEqual(budget.take("b"), 2)
+        record = json.loads(path.read_bytes())
+        self.assertEqual(record["requests"], ["a", "b"])
+        self.assertEqual(record["projects"], {})
+        body = path.read_bytes()
+        self.assertEqual(budget.take("a"), 2)
+        with self.assertRaisesRegex(InfraExceeded, "daily model-request budget exhausted"):
+            budget.take("c")
+        self.assertEqual(path.read_bytes(), body)
+
+    def test_invalid_json_and_encoding_refuse_without_rewriting(self):
+        budget = Budget(self.root, 1)
+        path = self.root / f"{budget._today()}.json"
+        for body in (b'{', b'{"requests":[],"extra":1e9999}',
+                     b'{"requests":["\\ud800"],"projects":{}}'):
+            with self.subTest(body=body):
+                path.write_bytes(body)
+                with self.assertRaises(InfraExceeded) as caught:
+                    budget.take("new", project="alpha")
+                self.assertEqual(str(caught.exception),
+                                 "UTC budget ledger is malformed; inspect data/budget")
+                self.assertEqual(path.read_bytes(), body)
+
     def test_null_record_is_not_a_missing_file(self):
         budget = Budget(self.root, 1)
         path = self.root / f"{budget._today()}.json"

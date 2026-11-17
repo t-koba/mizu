@@ -81,6 +81,15 @@ class Budget:
                     malformed.append(f"project-{name}-must-be-list")
                 elif any(not isinstance(entry, str) for entry in entries):
                     malformed.append(f"project-{name}-entries-must-be-strings")
+        if not malformed:
+            if "requests" not in record:
+                malformed.append("requests-key-missing")
+            else:
+                valid_total = sum(len(entries) for name, entries in projects.items()
+                                  if isinstance(name, str) and isinstance(entries, list)
+                                  and all(isinstance(entry, str) for entry in entries))
+                if len(requests) < valid_total:
+                    malformed.append("requests-shorter-than-project-totals")
         return malformed
 
     @staticmethod
@@ -123,7 +132,11 @@ class Budget:
             raise InfraExceeded("Model calls are disabled: set limits.daily_requests explicitly")
         with lock(self.root / "budget.lock"):
             path = self.root / f"{day}.json"
-            record = read_json(path, None)
+            try:
+                record = read_json(path, None)
+            except (ValueError, UnicodeError, RecursionError) as exc:
+                raise InfraExceeded(
+                    f"{self.timezone} budget ledger is malformed; inspect data/budget") from exc
             if record is None and not path.exists():
                 record = {"day": day, "zone": self.timezone, "requests": []}
             if self._malformed(record):
@@ -132,7 +145,7 @@ class Budget:
             record["day"] = day
             record["zone"] = self.timezone
             requests, projects = self._split(record)
-            entries = projects.get(project, [])
+            entries = requests if project == "" else projects.get(project, [])
             if request_id in entries:
                 return len(entries)
             if len(entries) >= self.daily:
@@ -143,11 +156,16 @@ class Budget:
             if self.shared_daily > 0 and len(requests) >= self.shared_daily:
                 raise InfraExceeded(f"{self.timezone} daily model-request shared budget exhausted")
             entries = [*entries, request_id]
-            projects[project] = entries
+            if project != "":
+                projects[project] = entries
             requests = [*requests, request_id]
             record["requests"] = requests
             record["projects"] = projects
-            body = canonical(record)
+            try:
+                body = canonical(record)
+            except (ValueError, UnicodeError, RecursionError) as exc:
+                raise InfraExceeded(
+                    f"{self.timezone} budget ledger is malformed; inspect data/budget") from exc
             if len(body) > self.day_file_bytes:
                 raise InfraExceeded("Budget day-file exceeds byte bound; inspect data/budget")
             atomic_write(path, body)
@@ -247,6 +265,13 @@ class Budget:
                     or any(not isinstance(name, str) or not isinstance(entries, list)
                            or any(not isinstance(item, str) for item in entries)
                            for name, entries in projects.items())):
+                raise ValueError
+            if "requests" not in record:
+                raise ValueError
+            valid_total = sum(len(entries) for name, entries in projects.items()
+                              if isinstance(name, str) and isinstance(entries, list)
+                              and all(isinstance(entry, str) for entry in entries))
+            if len(requests) < valid_total:
                 raise ValueError
             return {"status": "current", "day": day, "zone": self.timezone,
                     "used": len(projects.get(project, [])), "limit": self.daily,
