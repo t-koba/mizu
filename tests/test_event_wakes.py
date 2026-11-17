@@ -57,7 +57,7 @@ class EventWakesGateTests(Fixture):
             return patch(target, **({"return_value": value} if not callable(value) else {"side_effect": value}))
         return {
             "wait": ("worker", [p("mizu.runtime.check_jobs.wake_ready", True)]),
-            "ci": ("worker", [p("mizu.runtime._ci_due_for", [{"x": 1}])]),
+            "ci": ("worker", [p("mizu.runtime._ci_due_for_with_facts", ([{"x": 1}], []))]),
             "operator": ("reviewer", [p("mizu.runtime._operator_woke", True)]),
             "decision": ("worker", [p("mizu.runtime._decision_delivery_state",
                                       {"events": [{"action": "approve"}], "diagnostics": []})]),
