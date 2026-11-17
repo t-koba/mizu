@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import time
 
-from .ci_observation import (MAX_CI_WAKE_BRANCHES, _valid_ci_run,
+from .ci_observation import (MAX_CI_WAKE_BRANCHES, _valid_ci_run, _valid_ci_summary_fact,
                              effective_ci_wake_branches, wake_ci_observation)
 from .fs import read_json, write_json
 
@@ -24,6 +24,24 @@ from .fs import read_json, write_json
 DEFAULT_CI_REWAKE_SECONDS = 1800
 #: Version of the per-role CI wake record.
 CI_WAKE_VERSION = 2
+
+
+def wake_facts_cover_due(offered_facts, frozen_facts) -> bool:
+    """Match every frozen aggregate fact to a valid offered fact (never raises).
+
+    Both inputs are lists of the exact CI summary schema. Empty or malformed
+    frozen facts fail closed; additional offered facts do not block settlement.
+    This pure check reads no cache and compares all fields, not just revisions.
+    """
+    try:
+        return (isinstance(offered_facts, list) and isinstance(frozen_facts, list)
+                and bool(frozen_facts)
+                and all(_valid_ci_summary_fact(fact)
+                        and any(_valid_ci_summary_fact(offered) and offered == fact
+                                for offered in offered_facts)
+                        for fact in frozen_facts))
+    except Exception:
+        return False
 
 
 def _ci_rewake_seconds(project_config) -> float:

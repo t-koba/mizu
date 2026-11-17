@@ -1,12 +1,15 @@
 """Operator-selected CI/reporting branch context (no guessing, no hardcode)."""
 import dataclasses
 import json
+import time
 import unittest
-from support import Fixture
+from unittest.mock import patch
+from support import Fixture, ScriptDriver
+from mizu import ci_wake
 from mizu.config import load
 from mizu.errors import ConfigError
-from mizu.fs import mkdir
-from mizu.runtime import Context, prompt_delta_for, prompt_for
+from mizu.fs import mkdir, read_json, write_json
+from mizu.runtime import Context, Engine, prompt_delta_for, prompt_for, session_prompt
 
 
 def _configured(fixture, branch):
@@ -218,6 +221,130 @@ class CiWakeTests(Fixture):
         config = dataclasses.replace(config, roles=roles)
         self.assertFalse(should_run(self.project, snap, current_time=time.time(),
                                    role_name="worker", config=config))
+
+
+class CiWakeSettlementTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.config = _red_config(self)
+        self.project.set_control(wake_generation="")
+        self.head = self.project.snapshots.get()["id"]
+        self.fixed_now = time.time()
+        clock = patch("mizu.runtime.time.time", return_value=self.fixed_now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.rows, self.facts = self._due()
+        self.assertTrue(self.rows)
+
+    def _due(self):
+        return ci_wake._ci_due_for_with_facts(
+            self.project, self.config, "worker", self.head, self.fixed_now)
+
+    def _offer(self):
+        """Capture settlement at driver entry, before publication can refresh it."""
+        driver = ScriptDriver()
+        execute = driver.execute
+        offered = []
+
+        def capture(context, prompt, *, profile=None):
+            offered.append((ci_wake.read_ci_wake(self.project, "worker"),
+                            json.loads(prompt), self._due()[0]))
+            return execute(context, prompt, profile=profile)
+
+        with patch.object(driver, "execute", side_effect=capture):
+            result = Engine(self.config, driver=driver).run(
+                self.project, "worker", event_trigger=True)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(offered), 1)
+        return result, offered[0]
+
+    def _assert_frozen_record(self, record):
+        self.assertIsNotNone(record)
+        self.assertEqual(record["snapshot"], self.head)
+        self.assertEqual(record["fact_sha256"],
+                         ci_wake._ci_wake_fact_digest(self.rows, ("mizu",)))
+
+    def test_pre_offer_failure_does_not_consume_wake(self):
+        driver = ScriptDriver()
+        sentinel = RuntimeError("prompt construction failed")
+        with patch("mizu.runtime.session_prompt", side_effect=sentinel):
+            with self.assertRaises(RuntimeError) as raised:
+                Engine(self.config, driver=driver).run(
+                    self.project, "worker", event_trigger=True)
+        self.assertIs(raised.exception, sentinel)
+        self.assertEqual(driver.calls, [])
+        self.assertIsNone(ci_wake.read_ci_wake(self.project, "worker"))
+        self.assertTrue(self._due()[0])
+
+    def test_opening_offer_settles_wake(self):
+        _, (record, opening, due) = self._offer()
+        self._assert_frozen_record(record)
+        self.assertEqual(opening["external_check_wake"]["facts"], self.facts)
+        self.assertEqual(due, [])
+
+    def test_resumed_delta_offer_settles_wake(self):
+        from mizu.engine_config import effective, save_session, session_record
+
+        first = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
+        self.assertEqual(first["status"], "completed")
+        self.head = self.project.snapshots.get()["id"]
+        context = _context(self, self.config, "worker")
+        settings = effective(self.config, context.role, context.role.profile)
+        path, _ = session_record(context, context.role.profile, settings)
+        save_session(path, "test-session", {"tokens": 0})
+        # A new CI run wakes the resumed conversation despite the first settlement.
+        write_json(self.project.root / "vcs-poll.json", {"failures": {"mizu": [
+            {"sha": RED_SHA, "check": "Offline checks", "run": "attempt-2"}]}})
+        self.rows, self.facts = self._due()
+        self.assertTrue(self.rows)
+        prior = ci_wake.read_ci_wake(self.project, "worker")
+        result, (record, opening, due) = self._offer()
+        self._assert_frozen_record(record)
+        self.assertNotEqual(record["fact_sha256"], prior["fact_sha256"])
+        self.assertEqual(opening["external_check_wake"]["facts"], self.facts)
+        self.assertEqual(due, [])
+        projection = read_json(self.project.root / "runs" / result["run"] / "prompt_projection.json")
+        self.assertEqual(projection["prompt_mode"], "delta")
+
+    def test_cache_change_during_prompt_construction_keeps_new_observation_due(self):
+        new_sha = "b" * 40
+
+        def change_cache(*args, **kwargs):
+            built = session_prompt(*args, **kwargs)
+            write_json(self.project.root / "vcs-poll.json", {"failures": {"mizu": [
+                {"sha": new_sha, "check": "Offline checks", "run": "attempt-2"}]}})
+            return built
+
+        with patch("mizu.runtime.session_prompt", side_effect=change_cache):
+            _, (record, opening, due) = self._offer()
+        self._assert_frozen_record(record)
+        self.assertEqual(opening["external_check_wake"]["facts"], self.facts)
+        self.assertTrue(due)
+        self.assertEqual({row["sha"] for row in due}, {new_sha})
+        self.assertNotEqual(record["fact_sha256"],
+                            ci_wake._ci_wake_fact_digest(due, ("mizu",)))
+        self.head = self.project.snapshots.get()["id"]
+        self.assertTrue(self._due()[0])
+
+    def test_missing_or_altered_fact_prevents_settlement(self):
+        fact = self.facts[0]
+        cover = ci_wake.wake_facts_cover_due
+        for offered in ([], [{**fact, "non_passing_checks": 2}],
+                        [{**fact, "may_be_incomplete": not fact["may_be_incomplete"]}]):
+            with self.subTest(offered=offered):
+                self.assertFalse(cover(offered, [fact]))
+        self.assertTrue(cover([{**fact, "revision": "b" * 40}, fact], [fact]))
+        for offered, frozen in (([fact], []), (None, [fact]), ([fact], None),
+                                ([fact], (fact,)), ((fact,), [fact]),
+                                ([fact], [fact, {}]), ([{}], [fact]),
+                                ([fact], [{**fact, "extra": True}]),
+                                ([fact], [{**fact, "non_passing_checks": True}])):
+            with self.subTest(offered=offered, frozen=frozen):
+                self.assertFalse(cover(offered, frozen))
+        self.assertTrue(cover([None, {}, fact], [fact]))
+        other = {**fact, "subject": "release"}
+        self.assertFalse(cover([fact], [fact, other]))
+        self.assertTrue(cover([other, fact], [fact, other]))
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
 from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _ci_due, _ci_due_for, _ci_due_for_with_facts, _ci_rewake_seconds,
                       _ci_wake_enabled, _ci_wake_fact_digest, _ci_wake_path,
-                      _normalize_ci_wake_branches, read_ci_wake, write_ci_wake)
+                      _normalize_ci_wake_branches, read_ci_wake, wake_facts_cover_due, write_ci_wake)
 from .budget import Budget
 from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
                      MEBIBYTE_BYTES, Config, Role, load,
@@ -3355,12 +3355,6 @@ class Engine:
                     write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
                 admission = _dispatch.admission
                 _ci_wake_branches = effective_ci_wake_branches(self.config)
-                if ci_present:
-                    try:
-                        _ci_head = snapshot["id"] if isinstance(snapshot, dict) else None
-                        write_ci_wake(project, role_name, _ci_wake_branches, ci_present, _ci_head, time.time())
-                    except Exception:
-                        pass
                 started = {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission_elapsed_seconds": round(admission_elapsed, 6),
@@ -3546,6 +3540,16 @@ class Engine:
                 check_jobs.mark_wake_delivered(project, role_name,
                     [j['id'] for j in decoded.get('check_jobs', [])
                      if j.get('status') in check_jobs.TERMINAL_WAKE_STATUSES], run_id)
+                # Settle only the frozen CI observation actually offered, once
+                # before dispatch; prompt construction may have raced a cache update.
+                if ci_failures:
+                    try:
+                        _offered_facts = (decoded.get("external_check_wake") or {}).get("facts", [])
+                        if wake_facts_cover_due(_offered_facts, dispatch_state["external_check_wake_facts"]):
+                            write_ci_wake(project, role_name, _ci_wake_branches, ci_failures,
+                                          snapshot["id"] if isinstance(snapshot, dict) else None, time.time())
+                    except Exception:
+                        pass
                 fallback_attempt = 0
                 fallback_wait_deadline = None
                 retry_budgets: dict = {}
