@@ -869,10 +869,12 @@ class CiRunIdentityTests(Fixture):
         mkdir(run)
         ctx = Context(cfg, self.project, cfg.roles["reporter"], run,
                       self.project.snapshots.get(), self.project.workspace)
-        prompt_rows = {row["check"]: row
-                       for row in json.loads(prompt_for(ctx))["ci_failures"]}
-        self.assertEqual(prompt_rows["unit"]["run"], "run-1")
-        self.assertNotIn("run", prompt_rows["lint"])
+        opening = json.loads(prompt_for(ctx))
+        # Per-check rows (with or without run identity) never enter the opening;
+        # the adapter's current_ci_failures above keeps run identity intact.
+        self.assertNotIn("ci_failures", opening)
+        self.assertNotIn("ci_failures_may_be_truncated", opening)
+        self.assertIn("external_check_wake", opening)
 
 
 class CiFailureProjectionTests(Fixture):
@@ -971,24 +973,37 @@ class CiFailureProjectionTests(Fixture):
         self.assertEqual(len(rows), 32)
         self.assertTrue(may_be_truncated)
         context = self._prompt_context()
+        import dataclasses
+        context.role = dataclasses.replace(context.role, context_include=("ci",))
         full = json.loads(prompt_for(context))
         delta = json.loads(prompt_delta_for(context, []))
         for projection in (full, delta):
-            self.assertEqual(len(projection["ci_failures"]), 32)
-            self.assertIs(projection["ci_failures_may_be_truncated"], True)
+            # No per-check rows in any opening; the opt-in aggregate marks the
+            # projection bound through may_be_incomplete instead.
+            self.assertNotIn("ci_failures", projection)
+            self.assertNotIn("ci_failures_may_be_truncated", projection)
+            self.assertTrue(projection["ci_summary"])
+            self.assertTrue(all(fact["may_be_incomplete"] for fact in projection["ci_summary"]))
+            self.assertTrue(all({"subject", "revision", "outcome",
+                                 "non_passing_checks", "may_be_incomplete"} == set(fact)
+                                for fact in projection["ci_summary"]))
 
     def test_prompt_marker_is_null_without_capability_or_readable_cache(self):
         import json
         from unittest import mock
         from mizu.runtime import prompt_for
+        import dataclasses
         no_capability = json.loads(prompt_for(self._prompt_context(with_vcs_read=False)))
-        self.assertIsNone(no_capability["ci_failures"])
-        self.assertIsNone(no_capability["ci_failures_may_be_truncated"])
+        self.assertNotIn("ci_failures", no_capability)
+        self.assertNotIn("ci_failures_may_be_truncated", no_capability)
+        self.assertNotIn("ci_summary", no_capability)  # ci is opt-in
+        self.assertIn("external_check_wake", no_capability)
         context = self._prompt_context()
+        context.role = dataclasses.replace(context.role, context_include=("ci",))
         with mock.patch("mizu.ci_observation.read_json", side_effect=OSError("unreadable")):
             unreadable = json.loads(prompt_for(context))
-        self.assertEqual(unreadable["ci_failures"], [])
-        self.assertIsNone(unreadable["ci_failures_may_be_truncated"])
+        self.assertEqual(unreadable["ci_summary"], [])
+        self.assertNotIn("ci_failures", unreadable)
 
     def test_pruning_deleted_branch_is_not_reported_as_truncation(self):
         import dataclasses

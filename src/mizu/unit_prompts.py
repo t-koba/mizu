@@ -576,9 +576,9 @@ def prompt_for(context: Context) -> str:
     acceptance = list(context.project.verify) if "verify" in caps else []
     return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
-                       "external_check_wake": _external_check_wake(context),
                        "goal_digest": context.goal_digest,
                        "admission": context.admission,
+                       "external_check_wake": _external_check_wake(context),
                        "published_snapshot": _published_snapshot(context),
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
                                             for s in context.project.snapshots.history(
@@ -674,10 +674,10 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
     return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
-                       "external_check_wake": _external_check_wake(context),
                        "goal_digest": context.goal_digest,
                        **(grant_transition or {}),
                        "admission": context.admission,
+                       "external_check_wake": _external_check_wake(context),
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
