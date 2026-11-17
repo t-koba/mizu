@@ -26,13 +26,14 @@ UNKNOWN = object()
 
 
 def retention_policy(data):
-    """Read the optional data-dir selection retention policy; absence keeps defaults."""
+    """Read optional selection policy; absence keeps defaults, malformed records refuse."""
     path = data / 'selection' / 'policy.json'
+    missing = object()
     try:
-        value = read_json(path, default=None, max_bytes=SELECTION_POLICY_BYTES)
+        value = read_json(path, default=missing, max_bytes=SELECTION_POLICY_BYTES)
     except (OSError, ValueError, Denied, LimitExceeded) as exc:
         raise ConfigError('Unreadable selection retention policy') from exc
-    if value is None:
+    if value is missing:
         return MAX_TERMINAL_CONTRIBUTIONS, MAX_PROBE_EVENTS
     if (not isinstance(value, dict)
             or set(value) != {'version', 'terminal_contributions', 'probe_events'}

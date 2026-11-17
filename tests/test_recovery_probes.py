@@ -1176,13 +1176,26 @@ class RecoveryProbeTests(SelectionFixture):
                       {'version': 1, 'terminal_contributions': 256, 'probe_events': 8193},
                       {'version': 2, 'terminal_contributions': 256, 'probe_events': 8},
                       {'version': 1, 'terminal_contributions': 256, 'probe_events': 8,
-                       'extra': 1}, []):
+                       'extra': 1}, None, []):
             write_json(path, value)
             with self.subTest(value=value), self.assertRaises(ConfigError):
                 State(self.config)
         path.write_bytes(b'x' * 1025)
         with self.assertRaises(ConfigError):
             State(self.config)
+
+    def test_selection_retention_policy_null_is_not_absence(self):
+        from mizu.selection import retention_policy
+        path = self.config.data / 'selection' / 'policy.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for raw in (b'null', b'[]', b'"text"', b'{corrupt'):
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(ConfigError, 'selection retention policy'):
+                    retention_policy(self.config.data)
+                self.assertEqual(path.read_bytes(), raw)
+        path.unlink()
+        self.assertEqual(len(retention_policy(self.config.data)), 2)
 
     def test_intent_reservation_covers_maximum_terminal_event(self):
         from mizu.probes import _event
