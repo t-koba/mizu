@@ -441,8 +441,8 @@ subscription/admission behavior rather than gaining a duplicate attention wake;
 a new insight revision reopens attention. Urgency stays display-only, with no
 admission bypass, priority ordering or response deadline enabled.
 
-Model-facing prompt rows, insight tool reads/lists, and `insight.pending`
-event payloads display stored routing `addressee` as `attention`, resolving
+Model-facing prompt rows, insight tool reads/lists, and delivered
+`insight.pending` rows display stored routing `addressee` as `attention`, resolving
 `writer` to the submitting `source`; explicit targets remain unchanged. They
 omit `addressee`. Undecided rows additionally show `decide: "you"` exactly when
 the reader has the `decide` tool capability, irrespective of routing or source.

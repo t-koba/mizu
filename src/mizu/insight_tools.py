@@ -32,18 +32,20 @@ def display_insight(record: dict, capabilities) -> dict:
 
 
 def display_decision_events(events, capabilities) -> list:
-    """Project pending insight payloads without changing event identity.
+    """Project delivered flat ``insight.pending`` rows without changing identity.
 
-    Event ids, subjects, ack tokens and digest-bound identity stay byte-identical.
-    Non-insight events pass through untouched.
+    Runtime delivers each pending row as ``dict(payload, ack_token=...)``:
+    routing fields are top-level, with no nested ``payload`` envelope. Event
+    identity and acknowledgement tokens stay byte-identical; non-insight and
+    unknown shapes pass through untouched.
     """
     projected = []
     for event in events:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        if not isinstance(payload, dict) or event.get("kind") != "insight.pending":
+        if (isinstance(event, dict) and event.get("kind") == "insight.pending"
+                and "addressee" in event):
+            projected.append(display_insight(event, capabilities))
+        else:
             projected.append(event)
-            continue
-        projected.append({**event, "payload": display_insight(payload, capabilities)})
     return projected
 
 

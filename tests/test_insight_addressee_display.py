@@ -2,27 +2,21 @@
 from copy import deepcopy
 import json
 
-from support import Fixture
+from support import Fixture, ScriptDriver
+from mizu.runtime import Engine
 from mizu.insights import insight_metadata
 from mizu.unit_prompts import prompt_delta_for, prompt_for
 
 
 def _pending_event(source="operator", addressee="writer"):
-    """The payload shape delivered by decision_delivery for an insight."""
+    """The flattened row shape delivered by decision_delivery for an insight."""
     return {
-        "schema": 1,
-        "id": "insight.pending/abc123",
-        "kind": "insight.pending",
+        "event": "abc123", "insight": "i1", "rev": 1,
+        "kind": "insight.pending", "insight_kind": "proposal", "urgency": "normal",
+        "title": "Editorial", "body": "Body", "source": source,
         "created_at": "2026-11-17T00:00:00+00:00",
-        "writer": "host.insights",
-        "subject": {"event": "abc123", "insight": "i1", "rev": 1},
-        "payload": {
-            "title": "Editorial", "body": "Body", "source": source,
-            "created_at": "2026-11-17T00:00:00+00:00",
-            "insight": "i1", "rev": 1, "kind": "insight.pending",
-            "target": source if addressee == "writer" else addressee,
-            "addressee": addressee,
-        },
+        "target": source if addressee == "writer" else addressee,
+        "addressee": addressee,
         "ack_token": "0" * 64,
     }
 
@@ -127,20 +121,34 @@ class InsightAddresseeDisplayTests(Fixture):
             ctx.decision_events = [event]
             for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
                 row = json.loads(prompt)["decision_events"][0]
-                target = event["payload"]["target"]
-                self._assert_display(row["payload"], target, can_decide=role == "worker")
+                target = event["target"]
+                self._assert_display(row, target, can_decide=role == "worker")
                 # Only the displayed routing/decision fields change; all other
-                # payload content and event identity/ack binding stay exact.
-                expected_payload = {k: v for k, v in event["payload"].items() if k != "addressee"}
-                expected_payload["attention"] = target
+                # row content and the ack binding stay exact.
+                expected = {k: v for k, v in event.items() if k != "addressee"}
+                expected["attention"] = target
                 if role == "worker":
-                    expected_payload["decide"] = "you"
-                self.assertEqual(row, {**event, "payload": expected_payload})
-                self.assertEqual(row["id"], event["id"])
-                self.assertEqual(row["subject"], event["subject"])
+                    expected["decide"] = "you"
+                self.assertEqual(row, expected)
+                self.assertEqual(row["event"], event["event"])
                 self.assertEqual(row["ack_token"], event["ack_token"])
             self.assertEqual(ctx.decision_events[0], original)
         self.assertEqual(event, original)
+
+    def test_real_delivered_event_is_projected_in_the_prompt(self):
+        item = self._submit(source="worker", addressee="writer")
+        captured = {}
+
+        def driver(ctx, prompt, *_):
+            captured["rows"] = json.loads(prompt)["decision_events"]
+            ctx.handle("finish", {"outcome": "wait", "summary": "S", "state": "N"})
+
+        Engine(self.config, driver=ScriptDriver(driver)).run(self.project, "worker")
+        rows = [row for row in captured["rows"] if row.get("kind") == "insight.pending"]
+        self.assertEqual(len(rows), 1)
+        self._assert_display(rows[0], "worker", can_decide=True)
+        self.assertEqual(rows[0]["insight"], item["id"])
+        self.assertTrue(rows[0]["ack_token"])
 
     def test_decision_event_alias_resolves_in_full_and_delta_prompts(self):
         for source in ("operator", "searcher", "worker"):
