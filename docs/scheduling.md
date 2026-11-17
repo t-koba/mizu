@@ -242,7 +242,10 @@ A writable writer's `wait` retains a backoff only when no eligible work is ready
 bounded local reads prove no live external source remains, and a held
 self-resolvable wait exists.
 Two held waits are self-resolvable, not external sources: `code_change` when
-the holder is the project's sole configured `workspace = "write"` role, and
+the holder is the only project-assigned `workspace = "write"` role with an
+independent dispatch route (`event_wakes`, `daemon`, `interval_seconds` or
+`calendar`); a delegated-only second write role does not make the wait external.
+The other is
 `object_resolved` on an Insight (historically `insight_decided`) with a current, substantively answered (`accept`, `modify` or
 `reject`) `kind = "question"` authored by that holder. Exactly one enabled,
 authenticated operator `answer` to that same current question revision, routed
@@ -262,7 +265,8 @@ its current revision, a pending external ledger wait, or a
 held CI wait with an exact publication/SHA dispatch request and no terminal
 evidence; `false` for proven absence/terminal/self-resolvable sources; `null`
 for unknown evidence. Future deadlines, pending dependencies, questions awaiting
-another role's decision, code-change waits with another authorized writer, and
+another role's decision, code-change waits with another independently dispatched
+project writer, and
 pending proposal waits remain external sources. Admission rechecks current
 liveness. Check discovery, strict insight counts and the configured work-item
 prompt page bound the local reads; incomplete, ambiguous, corrupt or unreadable
@@ -542,8 +546,9 @@ insight target or an exact dependency revision superseded or substantively
 conflicting), `terminal` (the same exact CI/publication/proposal route as holder
 readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
-exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change`,
-`answered_own_question`, or `null`. This annotation uses the same bounded
+exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change` (the holder
+is the only project writer with independent dispatch), `answered_own_question`,
+or `null`. This annotation uses the same bounded
 read-only projection and does not change the wait's state or readiness. Operator
 answer evidence uses at most one read-only catalog scan per projection, only
 when an eligible own-question wait needs it; the writer wait-source check reuses
