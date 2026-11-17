@@ -60,6 +60,25 @@ class JobTests(Fixture):
         self.assertEqual(check_jobs.read(self.project, job['id'])['commands'], ['echo one'])
         self.assertFalse(FakeSandbox.calls)
 
+    def test_completed_verification_requires_strict_success_in_job_and_result(self):
+        for job_passed, record in ((False, {'passed': 'false'}),
+                                   (False, {'passed': True}),
+                                   (True, {'passed': 'false'}),
+                                   (False, [])):
+            with self.subTest(job_passed=job_passed, record=record):
+                ctx, job = self.submit()
+                directory = check_jobs.root(self.project) / job['id']
+                raw = read_json(directory / 'job.json')
+                raw.update(status='completed', passed=job_passed)
+                write_json(directory / 'job.json', raw)
+                result_directory = check_jobs.root(self.project) / raw.get('shared_job', job['id'])
+                write_json(result_directory / 'result.json', record)
+                result = check_jobs.result(ctx, job['id'])
+                self.assertFalse(result['accepted_for_current_source'])
+                self.assertIsNone(ctx.verification)
+                self.assertFalse((ctx.run_dir / 'verification.json').exists())
+                self.assertEqual(result['result'], record if isinstance(record, dict) else {})
+
     def test_matching_completion_is_imported_in_later_unit(self):
         ctx, job = self.submit()
         self.run_job()

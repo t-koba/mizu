@@ -1168,10 +1168,13 @@ def result(context, job_id):
         from .acceptance import valid_cache_diagnostics
         if not valid_cache_diagnostics(record['cache_diagnostics']):
             raise Denied('Malformed check cache diagnostics')
+    if not isinstance(record, dict):
+        record = {}
     output['result'] = record
     if job['kind'] == 'verify' and job['status'] in ('completed', 'refused', 'interrupted', 'cleanup_failed'):
         output['accepted_for_current_source'] = False
-    if job['kind'] == 'verify' and job['status'] == 'completed' and record.get('passed'):
+    if (job['kind'] == 'verify' and job['status'] == 'completed'
+            and record.get('passed') is True and job.get('passed') is True):
         context.close_exec()
         capture = project.snapshots.capture_files(context.workspace)
         # Import the execution's proof, not its mutable compiler outputs.
