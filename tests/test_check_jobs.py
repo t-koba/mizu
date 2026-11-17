@@ -371,11 +371,18 @@ class JobTests(Fixture):
             ctx._op_finish({'outcome': 'wait', 'summary': 'Retain only the needed check',
                             'state': 'Waiting', 'wait_for_check': retained['id'],
                             'release_checks': [obsolete['id']]})
-        Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
-        self.assertEqual(check_jobs.read(self.project, obsolete['id'])['status'], 'cancelled')
-        self.assertTrue(check_jobs.read(self.project, obsolete['id'])['acknowledged'])
+        # Pin the directory as a live owner would, so acknowledgement cannot
+        # reclaim it before its cancellation state is inspected.
+        directory = check_jobs.root(self.project) / obsolete['id']
+        with lock(directory / 'owner.lock'):
+            Engine(self.config, driver=ScriptDriver(act)).run(self.project, 'worker')
+            self.assertEqual(check_jobs.read(self.project, obsolete['id'])['status'], 'cancelled')
+            self.assertEqual(check_jobs.raw_read(self.project, obsolete['id'])['status'], 'cancelled')
+            self.assertTrue(check_jobs.read(self.project, obsolete['id'])['acknowledged'])
         self.assertEqual(check_jobs.pending(self.project, 'worker'), [])
         self.assertTrue(check_jobs.waiting(self.project, 'worker'))
+        check_jobs.acknowledge(self.project, 'worker', [obsolete['id']])
+        self.assertFalse(directory.exists())
 
     def lifecycle_record(self, number, **fields):
         from mizu.acceptance import write_job
@@ -716,8 +723,13 @@ class JobTests(Fixture):
 
     def test_queued_cancellation_prevents_execution_and_wakes_owner(self):
         ctx, job = self.submit()
-        self.assertTrue(check_jobs.cancel(ctx, job['id'])['cancel_requested'])
-        self.assertEqual(self.run_job()['status'], 'cancelled')
+        directory = check_jobs.root(self.project) / job['id']
+        with lock(directory / 'owner.lock'):
+            self.assertTrue(check_jobs.cancel(ctx, job['id'])['cancel_requested'])
+            self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'cancelled')
+            self.assertTrue((directory / 'cancel.json').exists())
+            self.assertFalse(FakeSandbox.calls)
+            self.assertEqual(self.run_job()['status'], 'idle')
         self.assertFalse(FakeSandbox.calls)
         self.assertTrue(check_jobs.pending(self.project, 'worker'))
         self.assertNotIn('accepted_for_current_source', check_jobs.result(ctx, job['id']))
@@ -1140,6 +1152,7 @@ class SharingTests(PurposeTests):
         reader = self.context('reviewer'); second = check_jobs.join(reader, first['id'])
         check_jobs.cancel(ctx, first['id'])
         self.assertEqual(check_jobs.read(self.project, first['id'])['status'], 'cancelled')
+        self.assertEqual(check_jobs.raw_read(self.project, first['id'])['status'], 'queued')
         self.assertFalse((check_jobs.root(self.project)/first['id']/'cancel.json').exists())
         self.run_job()
         self.assertEqual(check_jobs.result(reader, second['id'])['status'], 'completed')
@@ -1254,6 +1267,8 @@ class SharingTests(PurposeTests):
         class Cancelling(FakeSandbox):
             def execute(inner,*args,**kwargs):
                 check_jobs.cancel(ctx,first['id'])
+                self.assertEqual(check_jobs.raw_read(self.project, first['id'])['status'], 'running')
+                self.assertFalse((check_jobs.root(self.project) / first['id'] / 'cancel.json').exists())
                 return super().execute(*args,**kwargs)
         check_jobs.run_one(self.project,threading.Event(),sandbox_factory=Cancelling)
         self.assertEqual(check_jobs.read(self.project,first['id'])['status'],'cancelled')
@@ -2266,12 +2281,17 @@ class CacheInputTests(Fixture):
             with self.assertRaises(Busy):
                 check_jobs.submit(ctx, fresh=True)
             check_jobs.cancel(ctx, job['id'])
-            with self.assertRaises(Busy):
-                check_jobs.submit(ctx)
+            self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'cancelled')
+            replacement = check_jobs.submit(ctx)
+            self.assertNotEqual(replacement['id'], job['id'])
+            self.assertEqual(check_jobs.submit(ctx)['id'], replacement['id'])
             with self.assertRaises(Busy):
                 check_jobs.submit(ctx, fresh=True)
-        self.assertEqual(self.run_job()['status'], 'cancelled')
-        self.assertNotEqual(check_jobs.submit(ctx, fresh=True)['id'], job['id'])
+            check_jobs.cancel(ctx, replacement['id'])
+        self.assertEqual(self.run_job()['status'], 'idle')
+        self.assertFalse(FakeSandbox.calls)
+        fresh = check_jobs.submit(ctx, fresh=True)
+        self.assertNotIn(fresh['id'], (job['id'], replacement['id']))
 
     def test_non_ownership_errors_do_not_queue(self):
         ctx = self.context()

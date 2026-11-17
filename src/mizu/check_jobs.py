@@ -1307,9 +1307,9 @@ def _withdraw_locked(project, job_id, *, role, replaced_by=None):
         raw['acknowledged'] = True
     write_job(project, job_id, raw)
     interested = _interest(project, original_id, exclude_id=job_id)
-    if replaced_by is not None and not interested and raw.get('status') == 'queued':
-        # The replaced job never started: it leaves the queue at once, so the
-        # runner never spends a slot on it.
+    if not interested and raw.get('status') == 'queued':
+        # The job never started: withdraw its queued demand immediately, even
+        # when the runner cannot reach it to process cancel.json.
         raw['status'] = 'cancelled'
         write_job(project, job_id, raw)
     if not interested:
