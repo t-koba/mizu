@@ -186,6 +186,24 @@ class PersistentExecTests(Fixture):
             self.assertEqual(result['reason'], 'malformed_completion')
             self.assertTrue(self.ctx.exec_session.closed)
 
+    def test_short_terminated_malformed_frames_and_incomplete_frame(self):
+        import mizu.persistent_exec as transport
+        self.ctx.config = dataclasses.replace(self.ctx.config, limits=dataclasses.replace(
+            self.ctx.config.limits, command_seconds=2))
+        self.ctx.sandbox.config = self.ctx.config
+        original = transport.send_bounded
+        for suffix, expected in ((b"bad\\037", 'malformed_completion'),
+                                 (b"x\\037", 'malformed_completion'),
+                                 (b"25", 'timeout')):
+            def send_frame(proc, frame, *, suffix=suffix, **kwargs):
+                token = re.search(rb'MIZU:([a-f0-9]{32}):', frame)[1]
+                original(proc, b"printf '\\036MIZU:" + token + b":" + suffix + b"'\n", **kwargs)
+            with self.subTest(suffix=suffix), patch.object(
+                    transport, 'send_bounded', side_effect=send_frame):
+                result = self.call('printf not-sent')
+                self.assertTrue(self.ctx.exec_session.closed)
+                self.assertEqual(result['reason'], expected)
+
     def test_partial_send_and_malformed_frame_remove(self):
         import mizu.persistent_exec as transport
         original = transport.send_bounded

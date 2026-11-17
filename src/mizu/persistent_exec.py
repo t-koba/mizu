@@ -209,9 +209,11 @@ class ExecSession:
                         statuses[key] = status
                         del buffers[key][match.start():match.end()]
                     # The trailer is at most three decimal digits plus US.
-                    elif prefix in buffers[key] and len(buffers[key].split(prefix, 1)[1]) > 4 and not match:
-                        reason = "malformed_completion"
-                        break
+                    elif prefix in buffers[key] and not match:
+                        trailer = buffers[key].split(prefix, 1)[1]
+                        if b"\x1f" in trailer or len(trailer) > 4:
+                            reason = "malformed_completion"
+                            break
                     used = sum(map(len, buffers.values()))
                     # Permit only the fixed framing overhead until both frames
                     # arrive; enforce the exact output bound on completion.
