@@ -873,12 +873,15 @@ class DeadlineTests(Fixture):
 
     def test_proxy_join_response_is_not_cut_short_by_caller_rpc_timeout(self):
         def respond(*_):
-            time.sleep(.15)
+            # Reply must exceed the caller budget so the join exemption is
+            # what lets this succeed; both leave room for a slow runner's
+            # real TCP connect and serialization before the reply phase.
+            time.sleep(2)
             return {"answer": "child completed"}
         with Bridge(respond, tool_definitions(("delegate",)), timeout=1, transport="tcp") as bridge:
             config = read_json(bridge.config_file)
             self.assertEqual(config["joined_operations"], ["delegate"])
-            config["timeout_ms"] = 50
+            config["timeout_ms"] = 500
             self.assertEqual(forward(config, "delegate", {}), {"answer": "child completed"})
 
 
