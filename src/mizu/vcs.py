@@ -27,6 +27,7 @@ fetch refreshes the store.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -230,9 +231,10 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
     Schema: ``refs`` is a ``{name: sha}`` mapping per ``validate_refs``;
     each ref lands at ``<project-root>/upstream-refs/<name>`` holding
     ``sha`` plus a newline with mode 0o444. The model-visible virtual
-    path stays ``refs/remotes/upstream/<name>``. Stale files under the
-    store are removed so a fetch refreshes the view; stale empty
-    directories are left in place.
+    path stays ``refs/remotes/upstream/<name>``. Before writing, stale
+    files and unneeded empty directories are removed bottom-up so a
+    fetch can refresh refs across file/directory namespace changes.
+    The store root is preserved.
     Bounds: at most 4096 refs. Trust: host side only (the daemon/operator fetch path), never
     model-invoked; content stays external-untrusted. Retry/cancellation:
     single pass, no retry. Evidence: returned receipt names the prefix
@@ -245,6 +247,7 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
     base = _store_base(project_root)
     _ensure_host_dir(base)
     wanted = set(validated)
+    _prune_stale(base, wanted)
     for name in sorted(wanted):
         parent = base
         for part in name.split("/")[:-1]:
@@ -262,7 +265,6 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
         if existed is not None:
             _clear_readonly_for_windows(target)
         atomic_write(target, (validated[name] + "\n").encode(), mode=0o444)
-    _prune_stale(base, wanted)
     try:
         have = set(list_refs(project_root))
     except OSError as exc:
@@ -274,10 +276,13 @@ def inject_refs(project_root: Path, refs: dict) -> dict:
 
 
 def _prune_stale(base: Path, wanted: set[str]) -> None:
-    """Remove injected files no longer present, refusing symlink games."""
-    for directory, dirs, files in os.walk(base, followlinks=False):
+    """Remove stale files and empty unneeded directories without following links."""
+    needed_dirs = set()
+    for name in wanted:
+        parts = name.split("/")
+        needed_dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    for directory, _, files in os.walk(base, topdown=False, followlinks=False):
         here = Path(directory)
-        dirs[:] = sorted(d for d in dirs if not (here / d).is_symlink())
         for entry in sorted(files):
             target = here / entry
             try:
@@ -291,6 +296,13 @@ def _prune_stale(base: Path, wanted: set[str]) -> None:
                     _clear_readonly_for_windows(target)
                     target.unlink()
                 except OSError as exc:
+                    raise Denied(f"Cannot prune upstream refs: {exc}") from exc
+
+        if here != base and here.relative_to(base).as_posix() not in needed_dirs:
+            try:
+                here.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
                     raise Denied(f"Cannot prune upstream refs: {exc}") from exc
 
 

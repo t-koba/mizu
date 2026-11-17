@@ -63,6 +63,32 @@ class VcsRefInjectionTests(Fixture):
         self.assertEqual(vcs.list_refs(self.project.root), ["main"])
         self.assertFalse((self.project.root / "upstream-refs/old").exists())
 
+    def test_flat_ref_replaced_by_nested_ref(self):
+        vcs.inject_refs(self.project.root, {"topic": SHA_A})
+        desired = {"topic/sub": SHA_B}
+        vcs.inject_refs(self.project.root, desired)
+        self.assertEqual(vcs.list_refs(self.project.root), sorted(desired))
+        self.assertEqual(vcs.read_ref(self.project.root, "topic/sub"), SHA_B)
+
+    def test_nested_ref_replaced_by_flat_ref(self):
+        vcs.inject_refs(self.project.root, {"topic/sub": SHA_A})
+        desired = {"topic": SHA_B}
+        vcs.inject_refs(self.project.root, desired)
+        self.assertEqual(vcs.list_refs(self.project.root), sorted(desired))
+        self.assertEqual(vcs.read_ref(self.project.root, "topic"), SHA_B)
+
+    def test_nested_refs_pruned_to_empty_then_flat(self):
+        vcs.inject_refs(self.project.root, {"topic/sub/leaf": SHA_A})
+        vcs.inject_refs(self.project.root, {})
+        base = self.project.root / "upstream-refs"
+        self.assertTrue(base.is_dir())
+        self.assertEqual(list(base.iterdir()), [])
+        self.assertEqual(vcs.list_refs(self.project.root), [])
+        desired = {"topic": SHA_B}
+        vcs.inject_refs(self.project.root, desired)
+        self.assertEqual(vcs.list_refs(self.project.root), sorted(desired))
+        self.assertEqual(vcs.read_ref(self.project.root, "topic"), SHA_B)
+
     def test_invalid_ref_names_refused(self):
         bad_names = ["", "../escape", "/absolute", "a//b", ".", "..", "a/./b",
                      "with\nnewline", "with:colon", "back\\slash", "x" * 513,
