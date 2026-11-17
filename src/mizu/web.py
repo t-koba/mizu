@@ -77,6 +77,7 @@ def decode_fetch(raw: bytes, media: str) -> str:
     if media == "text/html":
         parser = Text()
         parser.feed(text)
+        parser.close()
         text = "".join(parser.parts)
     return text
 

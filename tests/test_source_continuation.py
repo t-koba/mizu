@@ -65,6 +65,22 @@ class SourceContinuationTests(Fixture):
         self.assertEqual(self.web.raw_source(identity)[1],
                          {'receipt_id': identity, **record['body']})
 
+    def test_incomplete_html_entity_flushes_at_eof_on_fetch_and_replay(self):
+        raw = b'<p>Important text &'
+        expected = '\nImportant text &'
+        with self.subTest('decode'):
+            self.assertEqual(decode_fetch(raw, 'text/html'), expected)
+        response = FakeResponse(200, [('Content-Type', 'text/html')], raw)
+        with patch('test_source_continuation.FakeResponse', return_value=response):
+            fresh = self.web.fetch(URL)
+        with self.subTest('fetch'):
+            self.assertEqual(fresh['text'], expected)
+        identity = fresh['receipt_id']
+        self.assertEqual((self.web.receipts / identity / 'payload' / 'body').read_bytes(), raw)
+        with self.subTest('replay'):
+            self.assertEqual(self.web.replay(identity, 'fetch')['text'], expected)
+        self.assertEqual(len(self.requests), 1)
+
     def test_plain_bytes_decode_same_on_replay(self):
         record = self.web.retain('fetch', {'text': RAW.decode('utf-8', 'replace'),
                                  'content_type': 'text/plain', 'sha256': digest(RAW)}, RAW)
