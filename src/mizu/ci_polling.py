@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from . import vcs as _vcs
 from .ci_observation import (ci_cache_limits, _clean_ci_failures,
-                             _clean_ci_successes, _valid_ci_run)
+                             _clean_ci_successes, _clean_ci_check_summaries, _valid_ci_run)
 from .config import MAX_CI_CACHE_ROWS
 from .ci_wake import effective_ci_wake_branches
 from .errors import Denied
@@ -145,6 +145,7 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         return _vcs.read_via(capped_vcs_settings(settings, vcs_poll_status_timeout(config)),
                              op, params)
     do_read = reader if reader is not None else _default_reader
+    targets = []
     try:
         if branches is not None and len(list(branches)) > max_branches:
             raise Denied("Too many CI branches per poll")
@@ -170,15 +171,17 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
         failures = 0
         check_rows_dropped = False
         success_tick: dict = {}
+        summary_tick: dict = {}
         failure_branches_pruned = (
             isinstance(state.get("failures"), dict)
             and len(state["failures"]) > cache_branches)
         tick: dict = {}
         for branch in targets:
             data = do_read(config.vcs, "status", {"branch": branch})
-            checks = data.get("checks")
-            if not isinstance(checks, list):
-                raise Denied("VCS status must carry a checks array")
+            # Validate injected readers too: malformed entries never contribute
+            # to a count, and the parser bounds the complete observation.
+            checks = _vcs.parse_status_checks(data)
+            non_passing = {}
             rows = []
             passed_rows = []
             for entry in checks:
@@ -187,6 +190,11 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                     # run IDs add no evidence and are not retained for passes.
                     passed_rows.append({"sha": entry["sha"], "check": entry["check"]})
                     continue
+                # Status states are an open adapter vocabulary. Only explicit
+                # success is passing; pending/cancelled/skipped/neutral etc.
+                # contribute to the count but do not create failure rows.
+                sha = entry["sha"]
+                non_passing[sha] = non_passing.get(sha, 0) + 1
                 if entry.get("state") != "failure":
                     continue
                 failures += 1
@@ -199,6 +207,13 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                 check_rows_dropped = True
             tick[branch] = rows[:max_checks]
             success_tick[branch] = passed_rows[:max_checks]
+            # Facts remain anchored to retained red revisions; other states
+            # contribute to their counts but do not change wake eligibility.
+            red_shas = sorted({row["sha"] for row in tick[branch]})
+            summary_tick[branch] = [
+                {"sha": sha, "non_passing_checks": non_passing[sha],
+                 "may_be_incomplete": len(rows) > max_checks}
+                for sha in red_shas]
         live = None
         if branches is None:
             try:
@@ -224,6 +239,25 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
             _prune_ci_branch_map(failures_map, wake_branches, config)
             or failure_branches_pruned)
         state["failures"] = failures_map
+        summaries_map = _clean_ci_check_summaries(
+            state.get("ci_check_summaries"), config, live_branches=live)
+        for branch, rows in summary_tick.items():
+            if live is None or branch in live:
+                if rows:
+                    summaries_map[branch] = rows
+                else:
+                    summaries_map.pop(branch, None)
+        # Summary lifetime is exactly its source failure observation: no
+        # history, and nothing retained for evicted/deleted/green branches.
+        for branch in list(summaries_map):
+            if branch not in failures_map:
+                summaries_map.pop(branch, None)
+        _prune_ci_branch_map(summaries_map, wake_branches, config)
+        if check_rows_dropped or failure_branches_pruned:
+            for rows in summaries_map.values():
+                for row in rows:
+                    row["may_be_incomplete"] = True
+        state["ci_check_summaries"] = summaries_map
         successes_map = _merge_ci_success_maps(
             state.get("successes"), {}, config, live_branches=live)
         for branch, rows in success_tick.items():
@@ -246,6 +280,12 @@ def poll_ci(config, project, state: dict, *, now: float, interval: float,
                     check_rows_dropped or failure_branches_pruned),
                 "trust": "external-untrusted", "time": now_iso()}
     except (Denied, OSError, ValueError) as exc:
+        # A failed/partial tick keeps existing red rows, but cannot claim its
+        # old summary is an exact description of the attempted refresh.
+        summaries = _clean_ci_check_summaries(state.get("ci_check_summaries"), config)
+        for branch in targets:
+            summaries.pop(branch, None)
+        state["ci_check_summaries"] = summaries
         state["last_error"] = str(exc)
         return {"event": "ci_poll", "ok": False,
                 "error": str(exc), "ci_failures_may_be_truncated": False,

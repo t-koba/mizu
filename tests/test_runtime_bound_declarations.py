@@ -2090,6 +2090,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_observation.py', '_valid_ci_run', 1, 0): (
         '128', 'safety',
         'CI observation / bound the opaque cached run identity before persistence and projection'),
+    ('ci_observation.py', '_clean_ci_check_summaries', 0, 0): (
+        '1', 'format',
+        'CI wake facts / a persisted non-passing check summary counts at least one check'),
     ('claude.py', 'model_delta', 3, 0): (
         '2 ** 63 - 1', 'format',
         'Claude cumulative token usage / cap each counter at the signed 64-bit usage-field maximum'),

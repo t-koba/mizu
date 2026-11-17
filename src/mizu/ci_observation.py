@@ -141,6 +141,50 @@ def _clean_ci_successes(value, config=None, *, live_branches=None, defer_branch_
         value, config, live_branches=live_branches, defer_branch_cap=defer_branch_cap)
 
 
+def _clean_ci_check_summaries(value, config=None, *, live_branches=None) -> dict:
+    """Validate current-observation summaries; never treat malformed counts as exact.
+
+    Schema: branch -> [{sha, non_passing_checks, may_be_incomplete}]. Counts
+    are positive integers bounded by the status parser's row cap. Duplicate
+    revisions or malformed rows invalidate a branch's summaries, not its red
+    evidence. Retention uses the same branch/check envelope and wake priority
+    as failures; this mapping contains no history or check/run identities.
+    """
+    from .vcs import MAX_CHECKS, _SHA, check_branch
+    if not isinstance(value, dict):
+        return {}
+    max_branches, max_checks = ci_cache_limits(config)
+    protected = effective_ci_wake_branches(config)
+    names = list(dict.fromkeys([b for b in protected if b in value] + list(value)))
+    if live_branches is not None:
+        names = [branch for branch in names if branch in live_branches]
+    out = {}
+    for branch in names[:max_branches]:
+        try:
+            check_branch(branch)
+            rows = value[branch]
+            if not isinstance(rows, list):
+                continue
+            kept = {}
+            for row in rows[:max_checks]:
+                if not isinstance(row, dict):
+                    raise ValueError("Invalid CI check summary")
+                sha = row.get("sha")
+                count = row.get("non_passing_checks")
+                incomplete = row.get("may_be_incomplete")
+                if (not isinstance(sha, str) or not _SHA.fullmatch(sha)
+                        or type(count) is not int or not 1 <= count <= MAX_CHECKS
+                        or type(incomplete) is not bool or sha in kept):
+                    raise ValueError("Invalid CI check summary")
+                kept[sha] = {"sha": sha, "non_passing_checks": count,
+                             "may_be_incomplete": incomplete or len(rows) > max_checks}
+            if kept:
+                out[branch] = [kept[sha] for sha in sorted(kept)]
+        except Exception:
+            continue
+    return out
+
+
 def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
                            branches: tuple[str, ...] | None = None, config=None) -> tuple[list, bool | None]:
     """Return bounded cached CI rows and whether a retention/projection bound may have sliced them.
@@ -161,8 +205,15 @@ def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
     """
     try:
         raw = read_json(project.root / POLL_STATE_FILE, {})
+        if config is None:
+            config = getattr(project, "config", None)
     except Exception:
         return [], None
+    return _ci_failures_projection(raw, limit=limit, branches=branches, config=config)
+
+
+def _ci_failures_projection(raw, *, limit=MAX_CI_FAILURES, branches=None, config=None):
+    """Project an already-read cache, so wake rows and facts share one observation."""
     try:
         if not isinstance(raw, dict):
             return [], None
@@ -181,8 +232,6 @@ def ci_failures_projection(project, *, limit: int = MAX_CI_FAILURES,
             # the branch or flattened-row bounds for wake selection.
             stored = ({name: stored[name] for name in wanted if name in stored}
                       if isinstance(stored, dict) else {})
-        if config is None:
-            config = getattr(project, "config", None)
         max_branches, max_checks = ci_cache_limits(config)
         may_be_truncated = False
         if isinstance(stored, dict):
@@ -306,21 +355,61 @@ def effective_ci_wake_branches(project_config) -> tuple[str, ...]:
         return ()
 
 
-def wake_ci_failures(project, config=None) -> list:
-    """Cached failures on configured wake branches (never raises).
+def wake_ci_observation(project, config=None) -> tuple[list, list]:
+    """Read one coherent cache snapshot into selected wake rows and frozen facts.
 
-    The deduplicated ``ci_branch`` plus up to 64 explicit extra branches are
-    filtered from raw cache keys before row caps. Other branches remain in
-    the unfiltered prompt projection and never wake a role. The projection
-    carries every retained row on the selected set (at most 2048).
+    Facts are sorted by (subject, exact revision), capped by MAX_CI_WAKE_ROWS,
+    and only describe revisions with validated retained failure evidence.
+    A valid observation summary supplies the full non-passing count; missing,
+    inconsistent or malformed summaries fall back to a retained-row lower bound
+    marked incomplete. Missing evidence never establishes success. External
+    adapter facts remain untrusted; unreadable caches yield two empty lists.
     """
     try:
         if config is None:
             config = getattr(project, "config", None)
         branches = effective_ci_wake_branches(config)
         if not branches:
-            return []
-        return ci_failures_projection(
-            project, limit=MAX_CI_WAKE_ROWS, branches=branches, config=config)[0]
+            return [], []
+        raw = read_json(project.root / POLL_STATE_FILE, {})
+        rows, partial = _ci_failures_projection(
+            raw, limit=MAX_CI_WAKE_ROWS, branches=branches, config=config)
+        if not rows:
+            return [], []
+        stored = raw.get("ci_check_summaries")
+        selected = ({branch: stored[branch] for branch in branches if branch in stored}
+                    if isinstance(stored, dict) else {})
+        summaries = _clean_ci_check_summaries(selected, config)
+        exact = {(branch, row["sha"]): row
+                 for branch, entries in summaries.items() for row in entries}
+        counts = {}
+        for row in rows:
+            key = (row["branch"], row["sha"])
+            counts[key] = counts.get(key, 0) + 1
+        facts = []
+        for (branch, sha), lower_bound in sorted(counts.items()):
+            summary = exact.get((branch, sha))
+            if summary is not None and summary["non_passing_checks"] < lower_bound:
+                summary = None
+            facts.append({"subject": branch, "revision": sha, "outcome": "failure",
+                          "non_passing_checks": (summary["non_passing_checks"]
+                                                 if summary else lower_bound),
+                          "may_be_incomplete": bool(partial is not False or not summary
+                              or summary["may_be_incomplete"])})
+        return rows, facts[:MAX_CI_WAKE_ROWS]
     except Exception:
-        return []
+        return [], []
+
+
+def wake_ci_failures(project, config=None) -> list:
+    """Cached failures on configured wake branches (never raises).
+
+    Select raw cache keys before caps; retain every selected row (at most
+    MAX_CI_WAKE_ROWS), including check/run identities for wake suppression.
+    """
+    return wake_ci_observation(project, config)[0]
+
+
+def wake_ci_facts(project, config=None) -> list:
+    """Bounded per-subject/revision external-check wake facts (never raises)."""
+    return wake_ci_observation(project, config)[1]

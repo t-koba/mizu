@@ -15,7 +15,7 @@ import json
 import time
 
 from .ci_observation import (MAX_CI_WAKE_BRANCHES, _valid_ci_run,
-                             effective_ci_wake_branches, wake_ci_failures)
+                             effective_ci_wake_branches, wake_ci_observation)
 from .fs import read_json, write_json
 
 
@@ -205,8 +205,12 @@ def _ci_due(present, record, snapshot_id, now, rewake_seconds, branches) -> bool
         return True
 
 
-def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> list:
-    """Cached CI failures that may admit one role (never raises).
+def _ci_due_for_with_facts(project, project_config, role, snapshot_id=None, now=None) -> tuple[list, list]:
+    """Coherent due rows and frozen external-check facts for one role.
+
+    Reads the poll cache once. Facts are returned only alongside due rows;
+    admission labels and caller-owned event-wake masks do not enter selection.
+    The digest still uses branch/SHA/check/run rows, never aggregate counts.
 
     A red on the configured CI wake set wakes only roles with ``ci_wake``
     (writable roles by default): event-triggered or unchanged-code dispatch
@@ -218,11 +222,12 @@ def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> li
     this falls back to presence (as before) so project-level checks stay
     conservative.
     """
+    observation = None
     try:
         if isinstance(role, str):
             role_name = role
             if not _ci_wake_enabled(project_config, role):
-                return []
+                return [], []
         else:
             try:
                 role_name = getattr(role, "name", None)
@@ -230,22 +235,23 @@ def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> li
                 role_name = None
             try:
                 if not bool(getattr(role, "ci_wake", False)):
-                    return []
+                    return [], []
             except Exception:
-                return []
+                return [], []
         branches = effective_ci_wake_branches(project_config)
         if not branches:
-            return []
+            return [], []
         try:
-            present = wake_ci_failures(project, project_config)
+            observation = wake_ci_observation(project, project_config)
+            present, facts = observation
         except Exception:
-            return []
+            return [], []
         if not present:
-            return []
+            return [], []
         if snapshot_id is None or now is None:
-            return present
+            return present, facts
         if not isinstance(role_name, str) or not role_name:
-            return present
+            return present, facts
         try:
             rewake = _ci_rewake_seconds(project_config)
         except Exception:
@@ -253,18 +259,24 @@ def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> li
         try:
             record = read_ci_wake(project, role_name)
         except Exception:
-            return present
+            return present, facts
         try:
             if _ci_due(present, record, snapshot_id, now, rewake, branches):
-                return present
-            return []
+                return present, facts
+            return [], []
         except Exception:
-            return present
+            return present, facts
     except Exception:
         try:
-            return wake_ci_failures(project, project_config)
+            return (observation if observation is not None
+                    else wake_ci_observation(project, project_config))
         except Exception:
-            return []
+            return [], []
+
+
+def _ci_due_for(project, project_config, role, snapshot_id=None, now=None) -> list:
+    """Compatibility rows-only selection; check/run wake suppression is unchanged."""
+    return _ci_due_for_with_facts(project, project_config, role, snapshot_id, now)[0]
 
 
 def _ci_wake_enabled(project_config, role_name) -> bool:
