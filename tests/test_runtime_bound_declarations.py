@@ -314,6 +314,14 @@ DECLARATIONS = {
             '65536', 'safety',
             'MCP proxy / transient socket-read allocation bound; MAX_FRAME independently caps the full reply'),
     },
+    'completion_evidence.py': {
+        'MAX_EVIDENCE_BYTES': (
+            '65536', 'safety',
+            'completion evidence / bound inline attestation JSON before canonical validation'),
+        'MAX_EVIDENCE_DEPTH': (
+            '32', 'format',
+            'completion evidence / fixed nesting-depth ceiling for replayable inline attestations'),
+    },
     'evidence_records.py': {
         'MAX_STARTED_EVIDENCE_BYTES': (
             '65536', 'safety',
@@ -595,6 +603,9 @@ DECLARATIONS = {
         'MAX_REVISIONS': (
             '256', 'mechanism',
             'work items / revision-chain format bound including the immutable seed'),
+        'MAX_REOPEN_REV': (
+            '252', 'mechanism',
+            'work items / reserves four appends for reopen/claim/bind/close before the 256-revision ceiling'),
         'MAX_OPEN_PAGE_ROWS': (
             '100', 'mechanism', 'work items / public open-page row contract'),
         'MAX_DELIVERED_WAIT_RESOLUTION_TOKENS': (
@@ -2620,6 +2631,12 @@ COMPARISON_BOUND_ARGUMENTS = {
         '2', 'format', 'retained acceptance evidence / schema two carries its publication binding'),
     ('work_items.py', 'WorkItems._validate_transition', 1, 0): (
         '1', 'format', 'work-item transition / revision-one predecessor is the immutable seed'),
+    ('work_items.py', 'WorkItems._validate_transition', 1, 1): (
+        '4000', 'format', 'work-item reopen reason / follows the 4000-character transition-reason field'),
+    ('work_items.py', 'WorkItems.reopen', 1, 0): (
+        '1', 'format', 'work-item reopen CAS / expected revision is positive'),
+    ('work_items.py', 'WorkItems.reopen', 1, 1): (
+        '4000', 'format', 'work-item reopen request reason / follows the 4000-character transition-reason field'),
     ('work_items.py', 'WorkItems.explain', 0, 0): (
         '1', 'mechanism', 'work-item history page / a bounded page must request at least one revision'),
     ('work_items.py', 'WorkItems._prepare_decision_history', 1, 0): (
