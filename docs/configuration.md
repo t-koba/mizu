@@ -3304,9 +3304,10 @@ policy-checked `output` that equals the top-level string `output` in the
 same retained JSON spec exactly; absent, empty, mismatched, or path-unsafe
 outputs fail closed, including cache-only/older receipts with no adapter
 `output`. The spec is otherwise opaque; malformed JSON, duplicate keys,
-non-finite numbers, or a missing/non-string output is `Denied`. Started
-records, receipts and specs all reject duplicate keys and non-finite numbers
-(including numeric overflow). Validation reads
+non-finite numbers, over-deep nesting, or a missing/non-string output is
+`Denied`. Started records, receipts and specs all reject duplicate keys,
+non-finite numbers (including numeric overflow) and over-deep nesting under
+the shared `MAX_JSON_DEPTH` bound. Validation reads
 `runs/<run>/started.json` (capped at 64 KiB) and
 `runs/<run>/materialize/<uuid>.json` (capped at `file_bytes`) with the
 existing safe bounded reads under the current project, requires the same
