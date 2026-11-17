@@ -59,6 +59,18 @@ class DeciderTests(Fixture):
         with self.assertRaises(Denied):
             web.check_url("https://example.com/x", "fetch")
 
+    def test_malformed_decider_json_denies(self):
+        deep = '{"allow":true,"x":' + '[' * 64 + '0' + ']' * 64 + '}'
+        for payload in ('{"allow":true,"x":1e9999}',
+                        '{"allow":true,"x":NaN}', deep):
+            with self.subTest(payload=payload[:40]):
+                emit = [sys.executable, "-c",
+                        "import sys; sys.stdout.write(" + repr(payload) + ")"]
+                web = make_web(self.temporary.name,
+                               {"hosts": [], "destination_command": emit})
+                with self.assertRaises(Denied):
+                    web.check_url("https://example.com/x", "fetch")
+
     def test_fail_closed_on_faults(self):
         for cmd in (MALFORMED, FAIL, ["/nonexistent-decider-argv"]):
             web = make_web(self.temporary.name,

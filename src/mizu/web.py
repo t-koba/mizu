@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .errors import Denied
-from .fs import DIGEST, atomic_write, canonical, digest, now, read_json, safe_read, write_json
+from .fs import DIGEST, atomic_write, canonical, digest, loads_finite, now, read_json, safe_read, write_json
 from .process import (
     ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
 )
@@ -203,7 +203,7 @@ def decider_allows(settings: dict, *, url: str, host: str, role: str,
             raise Denied(f"Destination decider refused: {host}{diagnostic}")
         if result.exit_code != 0 or result.reason != "exited":
             return False
-        data = json.loads(result.stdout)
+        data = loads_finite(result.stdout)
         return isinstance(data, dict) and data.get("allow") is True
     except (OSError, ValueError):
         return False
