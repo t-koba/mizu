@@ -523,9 +523,9 @@ class WorkOrderTests(Fixture):
             self.assertEqual(aged["ready_work"]["total"], 1)
             ready = aged["ready_work"]["items"][0]
             self.assertEqual(ready["id"], item["id"])
-            self.assertEqual((ready["wait_liveness"]["state"],
-                              ready["wait_liveness"]["self_resolvable"]),
-                             ("pending", "sole_writer_code_change"))
+            self.assertEqual(ready["status"], "open")
+            for absent in ("wait", "wait_liveness", "wait_satisfied"):
+                self.assertNotIn(absent, ready)
             self.assertEqual(aged["open_work_items"]["items"][0]["blocked_age_seconds"], 10**9)
             self.assertEqual(plan._frozen_generation(context), generation)
             self.assertEqual(store.get(item["id"]), item)

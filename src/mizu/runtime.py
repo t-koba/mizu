@@ -42,7 +42,7 @@ from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
 from .budget import Budget
 from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
                      MEBIBYTE_BYTES, Config, Role, load,
-                     role_cooldown_seconds, role_daemon_spacing_seconds, role_no_progress_backoff_seconds,
+                     role_cooldown_seconds, role_daemon_spacing_seconds,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
@@ -63,7 +63,7 @@ from .readiness_witness import settled as witness_settled, witness as state_witn
 from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
                        WRITER_HANDOFF_PROGRESS_SIGNALS,
                        missing_finish_recovery_due, missing_finish_streak,
-                       no_progress_recovery_due, progress_disposition, progress_timestamp, validate_next_step,
+                       no_progress_recovery_due, progress_disposition, validate_next_step,
                        validate_progress)
 from .run_health import (_capture_cause, _clear_missing_finish_streak,
                          _record_health_failure, _record_missing_finish_only)
@@ -3040,8 +3040,12 @@ class Engine:
                               and _dispatch_now >= snapshot["wake_at"])
         next_task = _writer_next_task(project, snapshot, role_name) if role.workspace == "write" else None
         if role.workspace == "write":
-            progress_self_admits = _writer_progress_fallback(
-                snapshot, self.config, role, ready_work_present, _dispatch_now, project=project)
+            # Writers never self-admit on bare progress here: a consumed
+            # continue/progress record must not re-dispatch without a new
+            # handoff. The durable handoff arrives via ``has_next_task`` and
+            # holder-only readiness via ``ready_work_changed``; the removed
+            # self-wait backoff timer has no successor.
+            progress_self_admits = False
         else:
             progress_self_admits = _progress_self_admits(cursor, self.config, role_name)
         explicit_wake = operator_woke or (role.workspace == "write" and (
@@ -4432,9 +4436,12 @@ def _live_unanswered_own_question(project, role_name, is_answered=None) -> bool 
         return None
 
 
-def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=False) -> tuple[bool | None, bool, str | None]:
-    """Return external liveness, a self-wait witness, and a held-wait witness.
+def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=False) -> tuple[bool | None, str | None]:
+    """Return external liveness and a held-wait witness.
 
+    Holder-only waits are ordinary ready work through the ready set, never an
+    external source here: the blocked-item status projection already reclassifies
+    them as open, so only genuinely external pending waits can report liveness.
     The held-wait witness comes from the bounded blocked-item status projection
     and is emitted only for a current supported pending wait in a complete scan.
     Exact CI dispatch evidence remains required; a free-standing check/question
@@ -4445,7 +4452,6 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
     try:
         unknown = False
         external = False
-        self_resolvable = False
         held_wait_kind = None
         if "check_job" in role.capabilities:
             from .acceptance import discover
@@ -4454,7 +4460,7 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
                    and job["status"] in ("queued", "running") for job in jobs.values()):
                 external = True
                 if not include_structured_wait:
-                    return True, False, None
+                    return True, None
             unknown = bool(invalid)
         store = project.work_items
         factory = getattr(store, "operator_answer_lookup", None)
@@ -4465,14 +4471,14 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
         elif _question_live:
             external = True
             if not include_structured_wait:
-                return True, False, None
+                return True, None
         writers = wait_writer_roles(project.config, project.roles)
         status = store.open_state_readonly(
             limit=project.config.limits.work_items_prompt, writer_roles=writers,
             operator_answer=operator_answer)
         blocked = status.get("blocked_work") if isinstance(status, dict) else None
         if not isinstance(blocked, dict) or not isinstance(blocked.get("items"), list):
-            return None, False, None
+            return None, None
         page_complete = (blocked.get("coverage_complete") is True
                          and blocked.get("truncated") is False
                          and blocked.get("diagnostic") is None)
@@ -4513,10 +4519,7 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
                     # Missing dispatch evidence is not evidence of remote inactivity.
                     unknown = True
                 if external and not include_structured_wait:
-                    return True, False, None
-                continue
-            if row.get("self_resolvable"):
-                self_resolvable = True
+                    return True, None
                 continue
             if row.get("state") in ("pending", "receipt_bound"):
                 external = True
@@ -4524,41 +4527,16 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
                         and kind in _WRITER_CONVERTIBLE_WAIT_KINDS):
                     held_wait_kind = kind
                 if not include_structured_wait:
-                    return True, False, None
+                    return True, None
         live = True if external else None if unknown else False
-        return live, self_resolvable, held_wait_kind
+        return live, held_wait_kind
     except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        return None, False, None
+        return None, None
 
 
 _WRITER_CONVERTIBLE_WAIT_KINDS = frozenset((
     "deadline", "code_change", "insight_decided", "dependency",
     "ci", "publication_ci", "proposal_merged", "record_closed", "object_resolved"))
-
-
-def _writer_progress_fallback(record, config, role, ready_work_present, current_time=None,
-                              *, project=None) -> bool:
-    """Back off only for a proven self-resolvable wait with no ready work.
-
-    Ready-set changes and progress-backed next-step handoffs use their event paths;
-    historical conversion markers remain readable but authorize no timer.
-    """
-    if (role.workspace != "write" or record.get("outcome") != "wait"
-            or ready_work_present is not False):
-        return False
-    progress = record.get("progress")
-    try:
-        validate_progress(progress)
-        timestamp = progress_timestamp(progress)
-        backoff = role_no_progress_backoff_seconds(config, role)
-        current_time = time.time() if current_time is None else current_time
-        if (progress["role"] != role.name or timestamp is None or backoff <= 0
-                or current_time < timestamp + backoff or project is None):
-            return False
-        live, self_resolvable, _ = _writer_wait_sources(project, role)
-        return live is False and self_resolvable
-    except (Denied, AttributeError, TypeError, ValueError):
-        return False
 
 
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
@@ -5021,10 +4999,6 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                 value = role_record.get("outcome") in ("continue", "bounded")
             else:
                 value = bool(_writer_next_task(project, snapshot, role_name))
-                if not value and role is not None:
-                    value = _writer_progress_fallback(
-                        snapshot, effective, role,
-                        ready_work_observed and ready_work_present, current_time, project=project)
         else:
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})

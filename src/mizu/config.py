@@ -1003,8 +1003,7 @@ def role_no_progress_backoff_seconds(config: "Config", role: "Role") -> int:
 
     Schema: role override when set; otherwise writable roles inherit
     `[limits].writer_no_progress_backoff_seconds` and read-only roles inherit
-    `[limits].no_progress_backoff_seconds`. Writers use this only for a proven
-    self-resolvable wait with no ready work; read-only on-change roles use it
+    `[limits].no_progress_backoff_seconds`. Read-only on-change roles use it
     for no-progress re-admission. Trust: configuration. Failure:
     never raises; malformed overrides read as the applicable project value
     (load already refuses them fail-closed).

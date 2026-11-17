@@ -309,13 +309,23 @@ class SatisfiedWorkWaitTests(Fixture):
         self.item('future', 'blocked', {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
         self.assertEqual(self.project.work_items.page_ready()['total'], 0)
 
-    def test_code_change_wait_wakes_only_on_published_code_change(self):
+    def test_holder_only_code_wait_is_ready_until_published_change_makes_it_due(self):
         self.parked('done')
-        self.item('code', 'blocked', {'kind': 'code_change'})
-        self.assertEqual(self.project.work_items.page_ready()['total'], 0)
+        item = self.item('code', 'blocked', {'kind': 'code_change'})
+        # A holder-only code wait has no external wake: it reads as ordinary
+        # held-open ready work from the start, while the ledger stays blocked.
+        page = self.project.work_items.page_ready()
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['items'][0]['status'], 'open')
+        self.assertEqual(self.project.work_items.get(item['id'])['status'], 'blocked')
         (self.project.workspace / 'changed.txt').write_text('changed\n')
         self.parked('done')
-        self.assertEqual(self.project.work_items.page_ready()['total'], 1)
+        # A published code change satisfies the registered wait: the item is
+        # now genuinely due-blocked work awaiting its holder's transition.
+        page = self.project.work_items.page_ready()
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['items'][0]['status'], 'blocked')
+        self.assertEqual(page['items'][0]['wait_liveness']['state'], 'due')
 
 
 class ReadyProjectionTests(Fixture):

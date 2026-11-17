@@ -28,7 +28,7 @@ from pathlib import Path
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
 from . import insight_archive, work_item_retirement
-from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, normalize_record_wait
+from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, holder_only, normalize_record_wait
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      CompletionEvidence, PublicationEvidence)
@@ -2024,8 +2024,9 @@ class WorkItems:
         ownership is also enforced at the transition boundary; other grant
         authorization is checked by the caller. Satisfied generic waits re-enter
         this page for reassessment, as do absent or confidently impossible
-        releasers; they never imply completion. Proven holder-resolvable waits also
-        enter the holder's page for prerequisite work, without satisfying the wait.
+        releasers; they never imply completion. Holder-only waits (whose holder is
+        the sole possible resolver) appear in the holder's page as ordinary
+        held-open work, without satisfying the registered wait.
         Writer authority comes from writer_roles or the optional configured lookup.
         CI/proposal waits become ready only
         from their validated local terminal route, independent of event ack.
@@ -2274,6 +2275,7 @@ class WorkItems:
                     item, since = transformed, None
                 if item["status"] not in ("open", "doing", "blocked"):
                     continue
+            state = None
             if (wait_resolution_role is not None and item["status"] == "open"
                     and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
                 wait_resolution_pending = True
@@ -2293,6 +2295,25 @@ class WorkItems:
                 elif item.get("holder") != role_name and not (
                         item["status"] == "blocked" and item.get("holder") is None):
                     continue
+            # Operational effective status only: the raw ledger record stays
+            # blocked with its wait, but holder-only waits have no external
+            # resolver, so read projections treat the item as ordinary
+            # held-open work (no wait diagnostics, open order). This runs
+            # after role filtering because holder-only items are always held:
+            # the holder passes both the blocked and the open eligibility
+            # check while any other named role fails both, so no liveness
+            # work is observable for items the role cannot see.
+            if item["status"] == "blocked" and writer_roles is not None:
+                wait_probe = item.get("wait")
+                if (isinstance(wait_probe, dict) and wait_probe.get("kind") == "code_change"
+                        and published_snapshot is None):
+                    published_snapshot = self.snapshots.get()
+                if holder_only(self, item, published_snapshot, writer_roles=writer_roles,
+                               operator_answer=operator_answer,
+                               record_question=record_question) is not None:
+                    item = {key: value for key, value in item.items()
+                            if key not in ("wait", "blocked_since")}
+                    item["status"] = "open"
             if (ready_only or blocked_only) and item["status"] == "blocked":
                 wait = item.get("wait")
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
@@ -2304,9 +2325,7 @@ class WorkItems:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
                         continue
-                    if (state["state"] not in ("due", "impossible", "absent", "terminal")
-                            and not (role_name is not None and item["holder"] == role_name
-                                     and state.get("self_resolvable"))):
+                    if state["state"] not in ("due", "impossible", "absent", "terminal"):
                         continue
                 if blocked_only:
                     counts[state["state"]] += 1
@@ -2513,8 +2532,9 @@ class WorkItems:
 
         The caller gets the same fail-closed diagnostic shape as
         :meth:`blocked_liveness_readonly` and an ``open_count`` derived from the
-        same validated projections. Optional configured writer names annotate
-        self-resolvable causes without changing liveness states or ordering.
+        same validated projections. Optional configured writer names reclassify
+        holder-only waits as open work and annotate self-resolvable causes on the
+        remaining blocked rows without changing their liveness states or ordering.
         A read error reports both as unavailable;
         it never falls back to a zero or an unvalidated cache.
         """

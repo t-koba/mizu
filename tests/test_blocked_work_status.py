@@ -86,7 +86,9 @@ class BlockedWorkStatusTests(Fixture):
         after = {p.relative_to(self.project.root): p.read_bytes()
                  for p in self.project.root.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
-        self.assertEqual(self.project.work_items.page_ready()["total"], 2)
+        # The holder-only code wait reads as ordinary open work in the
+        # unscoped ready set alongside the impossible and due waits.
+        self.assertEqual(self.project.work_items.page_ready()["total"], 3)
 
     def test_projection_rows_bytes_and_unseeded_coverage(self):
         for key in range(3):

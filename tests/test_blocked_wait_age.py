@@ -46,18 +46,21 @@ class BlockedWaitAgeTests(Fixture):
         with clock(7):
             item = self.change(item, "blocked", wait=CODE)
             self.assertEqual(item["blocked_since"], start)
-            self.assertEqual(self.store.page_ready()["total"], 0)
+            # Holder-only work reads as ordinary held-open work, including
+            # in the unscoped ready read.
+            self.assertEqual(self.store.page_ready()["total"], 1)
         with clock(10**9):
             live = self.store.blocked_liveness_readonly()["items"][0]
             self.assertEqual((live["state"], live["reason"]), ("pending", "condition_pending"))
             self.assertEqual(live["blocked_age_seconds"], 10**9)
-            # An ancient wait stays pending, but the sole writer can resolve a
-            # code_change wait itself, so the item is ready work for that role.
+            # An ancient wait stays pending, but a holder-only code_change
+            # wait has no external resolver, so the item reads as ordinary
+            # held-open ready work for its holder.
             ready = self.store.page_ready(role_name="worker")
             self.assertEqual(ready["total"], 1)
-            live_ready = ready["items"][0]["wait_liveness"]
-            self.assertEqual((live_ready["state"], live_ready["self_resolvable"]),
-                             ("pending", "sole_writer_code_change"))
+            self.assertEqual(ready["items"][0]["status"], "open")
+            for absent in ("wait", "wait_liveness", "blocked_since", "blocked_age_seconds"):
+                self.assertNotIn(absent, ready["items"][0])
             self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
             self.assertEqual(self.store.get(item["id"]), item)
             item = self.change(item, "doing")
@@ -68,7 +71,7 @@ class BlockedWaitAgeTests(Fixture):
         with clock(10**9 + 1) as reopened:
             item = self.change(item, "blocked", wait=CODE)
             self.assertEqual(item["blocked_since"], reopened)
-            self.assertEqual(self.store.page_ready()["total"], 0)
+            self.assertEqual(self.store.page_ready()["total"], 1)
 
     def test_exact_code_change_releases_even_an_ancient_wait(self):
         baseline = self.project.snapshots.get()["code_digest"]
@@ -132,9 +135,8 @@ class BlockedWaitAgeTests(Fixture):
             row = self.store.page_open_readonly()["items"][0]
             self.assertEqual(row["blocked_age_seconds"], 10**9)
             diagnostic = self.project.status()["blocked_work"]
-            self.assertEqual(diagnostic["counts"]["pending"], 1)
-            self.assertEqual(diagnostic["items"][0]["reason"], "condition_pending")
-            self.assertEqual(diagnostic["items"][0]["blocked_age_seconds"], 10**9)
+            self.assertEqual(diagnostic["counts"]["pending"], 0)
+            self.assertEqual(diagnostic["items"], [])
         after = {p.relative_to(self.project.root): p.read_bytes()
                  for p in self.project.root.rglob("*") if p.is_file()}
         self.assertEqual(after, before)
@@ -144,10 +146,9 @@ class BlockedWaitAgeTests(Fixture):
             delta = json.loads(prompt_delta_for(context, []))
             for prompt in (full, delta):
                 self.assertEqual(prompt["ready_work"]["total"], 1)
-                self.assertEqual(prompt["ready_work"]["items"][0]["status"], "blocked")
-                self.assertEqual(prompt["ready_work"]["items"][0]["wait_liveness"]["state"], "pending")
-                self.assertEqual(prompt["ready_work"]["items"][0]["wait_liveness"]["self_resolvable"],
-                                 "sole_writer_code_change")
+                self.assertEqual(prompt["ready_work"]["items"][0]["status"], "open")
+                self.assertNotIn("wait_liveness", prompt["ready_work"]["items"][0])
+                self.assertNotIn("wait_satisfied", prompt["ready_work"]["items"][0])
             self.assertEqual(self.store.get(item["id"]), item)
 
     def test_legacy_history_derives_first_block_and_rejects_reset_claim(self):
