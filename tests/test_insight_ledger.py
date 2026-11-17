@@ -40,6 +40,22 @@ class InsightLedgerTests(Fixture):
         self.store.unresolved_counts([])
         return expected, rows(self.project.root)
 
+    def test_rebuild_rejects_revisions_outside_sqlite_integer_range(self):
+        invalid = self.submit("Out-of-range revision")
+        boundary = self.submit("Largest stored revision")
+        for item, rev in ((invalid, 2**63), (boundary, 2**63 - 1)):
+            path = self.project.root / "inbox" / f"{item['id']}.json"
+            record = json.loads(path.read_text())
+            record["rev"] = rev
+            write_json(path, record)
+        forget_ledger(self.project.root)
+        self.store.list_page()  # Persist the rebuild, skipping malformed inbox rows.
+        indexed = {row[0]: row for row in rows(self.project.root)[0]}
+        self.assertEqual(indexed[invalid["id"]][2], 0)
+        self.assertIsNone(indexed[invalid["id"]][3])
+        self.assertEqual(indexed[boundary["id"]][2], 1)
+        self.assertEqual(indexed[boundary["id"]][3], 2**63 - 1)
+
     def test_rebuild_equals_incremental_index_on_random_history(self):
         rng = random.Random(20261113)
         ids = []

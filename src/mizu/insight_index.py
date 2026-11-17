@@ -42,6 +42,11 @@ _ACTIONS = ("accept", "modify", "reject", "defer", "withdraw")
 _ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, Denied, LimitExceeded)
 
 
+def _valid_revision(rev):
+    # Revisions must fit SQLite's signed 64-bit INTEGER storage.
+    return type(rev) is int and 1 <= rev <= 2**63 - 1
+
+
 def _signature(row):
     return row[8] if row[1] and row[2] else None
 
@@ -116,7 +121,7 @@ class InsightSource:
             rev = item.get("rev", 1)
             created = item.get("created_at")
             metadata = insight_metadata(item)
-            if type(rev) is not int or rev < 1 or not isinstance(created, str):
+            if not _valid_revision(rev) or not isinstance(created, str):
                 return bad
             sig = f"{stem}:{rev}:{_content_sha(item)}:{_evidence_sha(item.get('evidence'))}"
             return (stem, 1, 1, rev, item["source"], metadata.get("kind"),
@@ -131,10 +136,10 @@ class InsightSource:
             return (insight_id, 0, 0, None, None, None, None, None, None, None)
         if record.get("body_unavailable") is True:
             rev = record.get("rev")
-            rev = rev if type(rev) is int and rev >= 1 else None
+            rev = rev if _valid_revision(rev) else None
         else:
             rev = record.get("rev", 1)
-            if record.get("id") != insight_id or type(rev) is not int or rev < 1:
+            if record.get("id") != insight_id or not _valid_revision(rev):
                 return (insight_id, 0, 0, None, None, None, None, None, None, None)
         source = record.get("source")
         return (insight_id, 0, 1, rev, source if isinstance(source, str) else None,
@@ -152,7 +157,7 @@ class InsightSource:
                                             MAX_DECISION_EVENT_BYTES))
             rev = decision.get("rev", 1)
             if (type(decision) is not dict or decision.get("id") != stem
-                    or decision.get("action") not in _ACTIONS or type(rev) is not int or rev < 1):
+                    or decision.get("action") not in _ACTIONS or not _valid_revision(rev)):
                 return bad
         except _ERRORS:
             return bad
