@@ -1,8 +1,10 @@
 """Policy-bounded protocol observation. Offline only (mocked transport)."""
+import http.client
+import io
 import socket
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from support import Fixture
 from mizu.errors import Denied
 from mizu.web import Web
@@ -18,6 +20,7 @@ class FakeResponse:
         self.status = status
         self._headers = list(headers)
         self._body = body
+        self.length = 0  # Complete body supplied by this transport fixture.
 
     def getheaders(self):
         return list(self._headers)
@@ -60,6 +63,46 @@ def make_web(fixture_tmp: Path):
 
 
 class ProbeTests(Fixture):
+    def test_probe_requires_complete_bounded_http_body(self):
+        cases = (
+            ("short", "GET", 200, b"Content-Length: 10\r\n", b"abc", "incomplete"),
+            ("fixed", "GET", 200, b"Content-Length: 3\r\n", b"abc", None),
+            ("chunked", "GET", 200, b"Transfer-Encoding: chunked\r\nContent-Length: 10\r\n",
+             b"3\r\nabc\r\n0\r\n\r\n", None),
+            ("close", "GET", 200, b"", b"abc", None),
+            ("head", "HEAD", 200, b"Content-Length: 10\r\n", b"", None),
+            ("informational", "GET", 103, b"Content-Length: 10\r\n", b"", None),
+            ("no-content", "GET", 204, b"Content-Length: 10\r\n", b"", None),
+            ("not-modified", "GET", 304, b"Content-Length: 10\r\n", b"", None),
+            ("missing-last-chunk", "GET", 200, b"Transfer-Encoding: chunked\r\n",
+             b"3\r\nabc\r\n", "incomplete"),
+            ("short-chunk", "GET", 200, b"Transfer-Encoding: chunked\r\n", b"5\r\nabc", "incomplete"),
+            ("oversize", "GET", 200, b"Content-Length: 4\r\n", b"abcd", "exceeds byte limit"),
+        )
+        for name, method, status, headers, body, error in cases:
+            with self.subTest(name=name):
+                wire = (f"HTTP/1.1 {status} Test\r\n".encode()
+                        + headers + b"\r\n" + body)
+                response = http.client.HTTPResponse(Mock(makefile=lambda *args: io.BytesIO(wire)), method=method)
+                response.begin()
+                web = make_web(self.root / name)
+                web.settings.update(max_bytes=3, probe_methods=["GET", "HEAD"])
+                with response, patch("mizu.web.public_addresses", return_value=[]), \
+                     patch("mizu.web.PinnedHTTPS") as connection:
+                    connection.return_value.getresponse.return_value = response
+                    request = {"url": "https://probe.example/body", "method": method}
+                    if error:
+                        with self.assertRaisesRegex(Denied, error):
+                            web.probe(request)
+                    else:
+                        record = web.probe(request)
+                        self.assertEqual(record["text"], "abc" if status == 200 and method == "GET" else "")
+                        self.assertEqual(record["status"], status)
+                        self.assertEqual(web.replay(record["receipt_id"], "probe"), record)
+                self.assertEqual(list(web.cache.glob("*.json")), [])
+                self.assertEqual(len(list(web.receipts.glob("*/receipt.json"))), 0 if error else 1)
+                connection.return_value.close.assert_called_once()
+
     def test_disabled_without_hosts(self):
         web = make_web(Path(self.temporary.name))
         web.settings = {**SETTINGS, "probe_hosts": []}

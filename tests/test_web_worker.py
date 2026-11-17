@@ -3,6 +3,8 @@
 The separate fetch-media test mocks only HTTPS transport, not worker IPC.
 """
 import dataclasses
+import http.client
+import io
 import subprocess
 import sys
 import time
@@ -170,6 +172,39 @@ class WebWorkerLimitTests(unittest.TestCase):
 
 
 class FetchMediaTests(Fixture):
+    def test_fetch_requires_complete_bounded_http_body(self):
+        cases = (
+            ("short", b"Content-Length: 10\r\n", b"abc", "incomplete"),
+            ("fixed", b"Content-Length: 3\r\n", b"abc", None),
+            # The parser ignores Content-Length when chunked framing is present.
+            ("chunked", b"Transfer-Encoding: chunked\r\nContent-Length: 10\r\n",
+             b"3\r\nabc\r\n0\r\n\r\n", None),
+            ("close", b"", b"abc", None),
+            ("missing-last-chunk", b"Transfer-Encoding: chunked\r\n", b"3\r\nabc\r\n", "incomplete"),
+            ("short-chunk", b"Transfer-Encoding: chunked\r\n", b"5\r\nabc", "incomplete"),
+            ("oversize", b"Content-Length: 4\r\n", b"abcd", "exceeds byte limit"),
+        )
+        for name, headers, body, error in cases:
+            with self.subTest(name=name):
+                wire = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" + headers + b"\r\n" + body
+                response = http.client.HTTPResponse(Mock(makefile=lambda *args: io.BytesIO(wire)))
+                response.begin()
+                web = Web({**self.config.web, "hosts": ["example.org"], "max_bytes": 3},
+                          self.root / name / "cache", self.root / name / "receipts")
+                with response, patch("mizu.web.public_addresses", return_value=[]), \
+                     patch("mizu.web.PinnedHTTPS") as connection:
+                    connection.return_value.getresponse.return_value = response
+                    if error:
+                        with self.assertRaisesRegex(Denied, error):
+                            web.fetch("https://example.org/body")
+                    else:
+                        record = web.fetch("https://example.org/body")
+                        self.assertEqual(record["text"], "abc")
+                        self.assertEqual(web.replay(record["receipt_id"], "fetch"), record)
+                self.assertEqual(len(list(web.cache.glob("*.json"))), 0 if error else 1)
+                self.assertEqual(len(list(web.receipts.glob("*/receipt.json"))), 0 if error else 1)
+                connection.return_value.close.assert_called_once()
+
     def test_fetch_raw_response_limit_is_unchanged(self):
         config = dataclasses.replace(self.config, web={**self.config.web,
                                     "hosts": ["example.org"], "max_bytes": 3})
@@ -193,7 +228,7 @@ class FetchMediaTests(Fixture):
         # Not exactly text/html: preserve the original decision not to parse HTML.
         media = "text/html" + "é" * 512
         raw = b"<p>keep markup</p>"
-        response = Mock(status=200)
+        response = Mock(status=200, length=0)
         response.getheader.side_effect = lambda name, default=None: {
             "Content-Type": media + "; charset=utf-8"}.get(name, default)
         response.read.return_value = raw

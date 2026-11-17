@@ -41,7 +41,7 @@ PROBE_RESPONSE_VALUE_MAX = 8192
 #: Media metadata bound shared by fetch and probe (characters).
 RESPONSE_MEDIA_MAX = 256
 #: Cache receipt schema bound into static-cache policy fingerprints.
-FETCH_CACHE_SCHEMA_VERSION = 2
+FETCH_CACHE_SCHEMA_VERSION = 3
 #: Credential/framing headers never sent from role input (fixed mechanism).
 PROBE_REFUSED_HEADERS = frozenset({
     "authorization", "proxy-authorization", "cookie", "cookie2",
@@ -79,6 +79,24 @@ def decode_fetch(raw: bytes, media: str) -> str:
         parser.feed(text)
         text = "".join(parser.parts)
     return text
+
+
+def _read_body(response: http.client.HTTPResponse, limit: int, *, method: str,
+               label: str) -> bytes:
+    """Bound allocation and require complete framing before retaining a body."""
+    try:
+        raw = response.read(limit + 1)
+    except (http.client.IncompleteRead, EOFError, ssl.SSLEOFError) as exc:
+        raise Denied(f"{label} response body is incomplete") from exc
+    if len(raw) > limit:
+        raise Denied(f"{label} response exceeds byte limit")
+    # The parser accounts for framing (including chunked precedence over
+    # Content-Length). None means no expected length, not an incomplete body.
+    bodyless = method == "HEAD" or 100 <= response.status < 200 or response.status in (204, 304)
+    remaining = getattr(response, "length", None)
+    if not bodyless and type(remaining) is int and remaining > 0:
+        raise Denied(f"{label} response body is incomplete")
+    return raw
 
 
 def match_host(host: str, entries: list[str]) -> str | None:
@@ -396,9 +414,7 @@ class Web:
                     raise Denied(f"HTTP status {response.status}")
                 if response.getheader("Content-Encoding", "identity") != "identity":
                     raise Denied("Compressed web responses are not accepted")
-                raw = response.read(self.settings["max_bytes"] + 1)
-                if len(raw) > self.settings["max_bytes"]:
-                    raise Denied("Web response exceeds byte limit")
+                raw = _read_body(response, self.settings["max_bytes"], method="GET", label="Web")
                 media = response.getheader("Content-Type", "").split(";")[0]
                 if media and not (media.startswith("text/") or media in (
                         "application/xml", "application/json", "application/atom+xml", "application/rss+xml")):
@@ -504,9 +520,7 @@ class Web:
                 if not name or len(name) > PROBE_RESPONSE_NAME_MAX:
                     continue
                 raw_headers.append((name, value[:PROBE_RESPONSE_VALUE_MAX]))
-            raw = response.read(self.settings["max_bytes"] + 1)
-            if len(raw) > self.settings["max_bytes"]:
-                raise Denied("Probe response exceeds byte limit")
+            raw = _read_body(response, self.settings["max_bytes"], method=method, label="Probe")
             text = raw.decode("utf-8", "replace")
             media = response.getheader("Content-Type", "").split(";")[0].strip()[:RESPONSE_MEDIA_MAX]
             receipt = {"id": digest((url + "\n" + method + "\n" + digest(raw) + "\n" + str(time.time_ns())).encode()),
