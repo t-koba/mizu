@@ -824,8 +824,11 @@ before closure and superseded bindings, because replay validates them.
 A dropped item may be corrected only forward to done, with an already-existing
 delivery and the stronger independently retained acceptance proof; embedded
 verification alone cannot correct it. The dropped revision remains unchanged.
-Done cannot reopen, and dropped cannot return to open/doing/blocked. This is an
-append-only correction mechanism, not a reset or rewriting of terminal history.
+Done cannot reopen through an ordinary work-item transition, and dropped cannot
+return to open/doing/blocked. A later opt-in audited `work_items_reopen`
+capability may append a done-to-open challenge revision when explicitly enabled;
+this remains an append-only correction mechanism, not a reset or rewriting of
+terminal history.
 
 ## ADR-051 — Shared smoke retention has one data-dir owner and typed pins
 

@@ -1149,7 +1149,10 @@ workspace changes and subsequent history-index eviction do not invalidate a
 binding. Scope changes require another explicit binding before closure; bindings
 are never silently cleared. A dropped-to-done correction requires an already
 recorded binding and independently retained acceptance, leaving the earlier
-dropped revision untouched. No other terminal reopening is available.
+dropped revision untouched. Ordinary transitions offer no other terminal
+reopening; the default-disabled `work_items_reopen` capability, together with
+`completion_evidence.reopen_roles` membership, instead appends an audited
+done-to-open challenge revision.
 
 On stale CAS, re-read; on missing/corrupt evidence, stop and repair through
 operator evidence recovery rather than editing the ledger or snapshot. Retry
