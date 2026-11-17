@@ -1239,6 +1239,8 @@ CONFIGURED = {
     'PublicationPolicy': {
         'source_commit_timeout_seconds': ('5', 'configured policy', 'publication / local Git HEAD command wall-time budget'),
         'reviewer_role': ("''", 'configured policy', 'publication / explicitly authorized reviewer role (empty denies all)'),
+        'reviewers': ('()', 'configured policy', 'publication / explicitly granted reviewers whose exact approvals count (empty denies all)'),
+        'required_approvals': ('0', 'configured policy', 'publication / minimum distinct reviewer approvals required before publishing'),
     },
     'PublicationEvidence': {
         'name_processing_limit': ('10000', 'configured policy', 'publication / name-processing budget after os.listdir materializes all names'),
