@@ -3850,11 +3850,16 @@ def no_defaults(limit, /, count, *, size):
         self.assertEqual(len(directory_count_guards), 1)
         logs = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == 'logs')
-        evidence_bound = next(node for node in ast.walk(logs)
-                              if isinstance(node, ast.Compare)
-                              and ast.unparse(node.left) == 'path.stat().st_size')
-        self.assertEqual(ast.unparse(evidence_bound.comparators[0]),
+        evidence_maximum = next(node for node in ast.walk(logs)
+                                if isinstance(node, ast.Assign)
+                                and any(isinstance(target, ast.Name) and target.id == 'maximum'
+                                        for target in node.targets))
+        self.assertEqual(ast.unparse(evidence_maximum.value),
                          'context.config.limits.output_bytes * COMMAND_EVIDENCE_OUTPUT_MULTIPLIER + COMMAND_EVIDENCE_ENVELOPE_BYTES')
+        evidence_reads = [node for node in ast.walk(logs)
+                          if isinstance(node, ast.Call) and ast.unparse(node.func) == 'safe_read']
+        self.assertEqual(len(evidence_reads), 1)
+        self.assertEqual(ast.unparse(evidence_reads[0].args[2]), 'maximum')
         for name in ('CHECK_INPUT_HASH_CHUNK_BYTES', 'COMMAND_EVIDENCE_OUTPUT_MULTIPLIER',
                      'COMMAND_EVIDENCE_ENVELOPE_BYTES'):
             self.assertEqual(DECLARATIONS['check_jobs.py'][name][1], 'safety')
