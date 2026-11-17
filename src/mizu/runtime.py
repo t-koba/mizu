@@ -2018,10 +2018,12 @@ class Context:
             wait_resolution_high_water=getattr(self, "wait_resolution_high_water", _READY_WORK_UNSET))
 
     def _check_writer_parking(self, finished):
-        """Refuse an undisposed or unprovable ready set before sealing or acking.
+        """Validate finish-time ready evidence; the host decides parking.
 
         A host-imposed bounded seal is an automatic yield and may retain ready
-        work. A validated new next_step handoff is also not parking. Other parking
+        work. A validated next_step handoff is not parking. A wait or blocked
+        finish with ready work is accepted: no empty-set signature is anchored,
+        so the existing ready-work observation re-admits this role. Other
         finishes require a complete empty role-scoped inventory under the page
         API maximum. Unknown waits and overflow are evidence gaps, never
         dispositions.
@@ -2037,10 +2039,6 @@ class Context:
                          "progress": self._finish_progress(captured, finished)}
             if _writer_next_task(self.project, candidate, self.role.name):
                 return
-        message = ("Writer parking requires a complete empty role-scoped ready inventory. "
-                   "Finish each ready item, block it on a supported named observable wait, "
-                   "drop it with a reason, or make an immediate progress-backed new next_step handoff. "
-                   "A held doing item is still ready. ")
         try:
             page = self.project.work_items.page_ready(
                 role_name=self.role.name, limit=MAX_OPEN_PAGE_ROWS)
@@ -2053,11 +2051,15 @@ class Context:
                 raise Denied("Ready inventory is incomplete, unknown, or exceeds the bounded page")
         except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError,
                 AttributeError, RecursionError) as exc:
-            raise Denied(message + "Ready evidence unavailable or incomplete; inspect work_items_read and ready_work input "
-                         "and resolve evidence gaps before retrying.") from exc
+            raise Denied("Ready evidence unavailable or incomplete at finish.") from exc
         if page["total"]:
+            if finished["outcome"] in ("wait", "blocked"):
+                # The opening prompt anchored a signature; clear it so the next
+                # observation sees present ready work and re-admits this role.
+                self.ready_work_signature = None
+                return
             ids = ", ".join(str(row.get("id", "unknown"))[:64] for row in page["items"][:3])
-            raise Denied(message + f"{page['total']} ready item(s), including {ids}.")
+            raise Denied(f"{page['total']} ready item(s), including {ids}.")
         # Anchor the next event probe to the validated finish-time empty set,
         # not the opening set whose removals were already handled by this run.
         self.ready_work_signature = page["signature"]

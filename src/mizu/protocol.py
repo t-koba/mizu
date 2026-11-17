@@ -17,22 +17,16 @@ WRITER_CONTINUATION_CONTRACT = (
     "The typed step is a 1–4096-character printable value without surrounding whitespace "
     "or a none/nothing/n/a placeholder, and differ from the typed parent step. "
     "Legacy prose state never supplies a typed step. "
-    "A malformed writer continue is refused before sealing or acknowledgements; "
-    "correct next_step and retry finish. "
+    "A malformed writer continue is refused before sealing or acknowledgements. "
     "next_step alone does not admit: the host requires a parent snapshot and a "
     "role-matching validated progress record with at least one selected true `tool`, `code`, "
-    "`decision`, or `insight` signal. The field alone does not admit and may "
-    "leave the writer parked; do not rely on next_step as a wake signal. Use "
-    "outcome=wait for external results or work not yet actionable. An admitted "
-    "continuation shows that step in the published snapshot as the previous unit's "
-    "proposal, not as an assignment. Before a writable writer parks "
-    "(wait, blocked, or continue/bounded without a validated immediate next_step), "
-    "finish requires a complete empty role-scoped ready inventory. Finish each "
-    "ready item, block it on a supported named observable wait, or drop it with "
-    "a reason; held doing work is still ready. Unknown or truncated evidence "
-    "refuses finish before sealing or acknowledgements. Ready work alone never "
-    "creates a timed re-admission; use an immediate progress-backed next_step or the "
-    "existing independent event/deadline paths.")
+    "`decision`, or `insight` signal. An admitted continuation shows that step "
+    "in the published snapshot as the previous unit's proposal, not as an assignment. "
+    "With role-eligible ready work, a wait or blocked finish is accepted and the host "
+    "re-admits from that work; a continue or bounded finish is accepted only with a "
+    "validated next_step handoff or a host-sealed run bound. "
+    "Unknown or truncated evidence refuses finish before sealing or acknowledgements. "
+    "Ready work alone does not create a timed re-admission.")
 
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
@@ -333,7 +327,7 @@ DEFINITIONS = {
     "result_read": ("Read the next page of an oversized tool result, as the truncated response's continue field directs.",
                     obj({"cursor": text(32), "offset": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}},
                         ("cursor", "offset"))),
-    "finish": (WRITER_CONTINUATION_CONTRACT + " End this work unit and release its model slot and workspace lock. Call after all other tools. For a timed external wait on a writable role, use outcome=wait and wait_seconds=N; the host persists the wake deadline instead of keeping a command running. Independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. Use outcome=wait and wait_for_check=<id> when no independent work remains; release the unit and resume on completion or new input. 'done' on writable roles requires successful verification. "
+    "finish": (WRITER_CONTINUATION_CONTRACT + " Ends this work unit and releases its model slot and workspace lock; later tool calls are refused. outcome=wait with wait_seconds=N persists a wake deadline instead of keeping a command running; independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. outcome=wait with wait_for_check=<id> releases the unit and resumes on check completion or new input. 'done' on writable roles requires successful verification. "
                "ack_events optionally selects unique delivered operator record, decision or pending-insight event, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. Proposal merge waits share wait_events and require explicit identity-bound ack_events selections. CI wait rows share wait_events and always use explicit, identity-bound ack_tokens under the same successful-finish receipt boundary. CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
                "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent. Optional review_verdict (approve/changes_requested) is accepted only from the operator-configured independent reviewer. The host binds it to this run and its input snapshot; callers cannot supply review identity or snapshot. Findings remain separate insights; summaries never approve.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},

@@ -582,23 +582,43 @@ class WriterParkingTests(Fixture):
         self.assertIsNone(ctx.finished)
         self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
 
-    def test_writer_selected_parking_outcomes_refuse_open_and_held_doing(self):
+    def test_wait_and_blocked_accept_ready_work_while_continue_refuses(self):
         item = self.ready("ready")
-        ctx = self.context()
         for status in ("open", "doing"):
             if status == "doing":
                 item = self.project.work_items.transition(
                     item["id"], expected_rev=item["rev"], actor="worker", status=status)
-            for outcome in ("wait", "blocked", "continue"):
+            for outcome in ("wait", "blocked"):
                 with self.subTest(status=status, outcome=outcome):
-                    ctx.bound_hit = None
-                    ctx.wrap_up_attempted = False
-                    with self.assertRaisesRegex(Denied, "held doing item is still ready"):
-                        self.finish(ctx, outcome)
-                    self.assert_unsealed(ctx)
-        self.assertEqual(self.project.work_items.get(item["id"]), item)
+                    ctx = self.context()
+                    self.assertTrue(self.finish(ctx, outcome)["sealed"])
+            ctx = self.context()
+            with self.subTest(status=status, outcome="continue"):
+                with self.assertRaisesRegex(Denied, "ready item"):
+                    self.finish(ctx, "continue")
+                self.assert_unsealed(ctx)
+        self.assertEqual(self.project.work_items.get(item["id"])["status"], "doing")
 
-    def test_every_ready_item_needs_a_durable_disposition(self):
+    def test_wait_with_ready_work_reopens_without_item_transition(self):
+        item = self.ready("pending work")
+        runs = []
+        def finish_wait(ctx, *_):
+            runs.append(ctx.run_dir.name)
+            self.finish(ctx, "wait")
+        engine = Engine(self.config, driver=ScriptDriver(finish_wait))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        snapshot = self.project.snapshots.get()
+        self.assertIs(snapshot["progress"]["ready_work"], True)
+        # No empty-set signature is anchored, so the ready-work observation
+        # re-admits this role without a procedural disposition requirement.
+        self.assertIsNone(snapshot["progress"]["ready_work_signature"])
+        self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
+        self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
+
+    def test_wait_accepts_a_remaining_ready_item_without_disposition(self):
         from support import bind_delivery
         store = self.project.work_items
         captured = self.project.snapshots.capture_files(self.project.workspace)
@@ -610,17 +630,21 @@ class WriterParkingTests(Fixture):
         ctx = self.context()
         items = [self.ready(str(index)) for index in range(3)]
         binding = bind_delivery(self.project, items[0]["id"], snapshot["id"])
-        # One completion, one named observable blocker and one reasoned drop.
+        # One completion and one named observable blocker leave a ready item.
         store.transition(items[0]["id"], expected_rev=binding["rev"], actor="worker", status="done",
                          snapshot_id=snapshot["id"])
         store.transition(items[1]["id"], expected_rev=1, actor="worker", status="blocked",
                          wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        self.assertTrue(self.finish(ctx)["sealed"])
+        self.assertEqual(store.get(items[2]["id"])["status"], "open")
+        # A handoff-free continue still names the failed ready-set condition.
+        ctx = self.context()
         with self.assertRaisesRegex(Denied, "1 ready item"):
-            self.finish(ctx)
+            self.finish(ctx, "continue")
         self.assert_unsealed(ctx)
         store.transition(items[2]["id"], expected_rev=1, actor="worker", status="dropped",
                          reason="No longer needed")
-        self.assertTrue(self.finish(ctx)["sealed"])
+        self.assertTrue(self.finish(self.context(), "continue")["sealed"])
 
     def test_finish_empty_signature_does_not_rewake_for_own_dispositions(self):
         item = self.ready("owned disposition")
@@ -644,7 +668,7 @@ class WriterParkingTests(Fixture):
         self.ready("first ready")
         self.ready("second ready")
         with self.assertRaisesRegex(Denied, r"2 ready item\(s\)"):
-            self.finish(self.context())
+            self.finish(self.context(), "continue")
 
     def test_other_role_held_work_does_not_block_writer(self):
         item = self.ready("other holder")

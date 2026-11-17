@@ -67,12 +67,21 @@ class UnitPromptSeamTests(Fixture):
                                "parent snapshot", "role-matching validated progress record",
                                "at least one selected true",
                                "`tool`, `code`, `decision`, or `insight` signal",
-                               "The field alone does not admit and may leave the writer parked",
-                               "do not rely on next_step as a wake signal",
-                               "outcome=wait for external results",
-                               "work not yet actionable",
-                               "continuation shows that step in the published snapshot as the previous unit's"):
+                               "continuation shows that step in the published snapshot as the previous unit's",
+                               "a wait or blocked finish is accepted and the host",
+                               "re-admits from that work",
+                               "Unknown or truncated evidence refuses finish"):
                     self.assertIn(phrase, text)
+                # Product strings describe the interface; behaviour stays in
+                # configurable role policy, never in an unconfigurable prompt.
+                for behaviour in ("Use outcome=wait for external results",
+                                  "work not yet actionable", "Finish each ready item",
+                                  "held doing item is still ready",
+                                  "do not rely on next_step as a wake signal",
+                                  "correct next_step and retry finish",
+                                  "Call after all other tools",
+                                  "when no independent work remains"):
+                    self.assertNotIn(behaviour, text)
         schema = finish["inputSchema"]
         self.assertEqual(schema["properties"]["next_step"],
                          {"type": "string", "minLength": 1, "maxLength": 4096})
