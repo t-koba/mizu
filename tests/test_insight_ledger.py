@@ -56,6 +56,28 @@ class InsightLedgerTests(Fixture):
         self.assertEqual(indexed[boundary["id"]][2], 1)
         self.assertEqual(indexed[boundary["id"]][3], 2**63 - 1)
 
+    def test_rebuild_marks_nonfinite_decision_invalid_without_hiding_valid_rows(self):
+        # A retained decision pointer carrying a non-finite JSON number (1e9999
+        # -> inf) must be rejected as an invalid row during rebuild, not abort
+        # the whole index build when canonicalization refuses the float.
+        corrupt = self.submit("Corrupt decision")
+        healthy = self.submit("Healthy insight")
+        self.store.decide(corrupt["id"], "reject", "Reviewed", "", "run", expected_rev=1)
+        path = self.project.root / "decisions" / f"{corrupt['id']}.json"
+        record = json.loads(path.read_text())
+        record["reason"] = "OVERFLOW_SENTINEL"
+        path.write_text(json.dumps(record).replace('"OVERFLOW_SENTINEL"', "1e9999"),
+                        encoding="utf-8")
+        forget_ledger(self.project.root)
+        self.store.list_page()  # Before fix: unhandled ValueError aborts rebuild.
+        indexed_insights, indexed_decisions, _ = rows(self.project.root)
+        decisions = {row[0]: row for row in indexed_decisions}
+        # Row shape: (insight_id, valid, linked, rev, action, record).
+        self.assertEqual(decisions[corrupt["id"]][:5],
+                         (corrupt["id"], 0, 0, None, None))
+        insights = {row[0]: row for row in indexed_insights}
+        self.assertEqual(insights[healthy["id"]][2], 1)
+
     def test_rebuild_equals_incremental_index_on_random_history(self):
         rng = random.Random(20261113)
         ids = []

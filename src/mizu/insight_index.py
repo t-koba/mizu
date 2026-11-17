@@ -24,7 +24,7 @@ import os
 
 from . import insight_archive
 from .errors import Denied, LimitExceeded
-from .fs import canonical, digest, identifier, safe_read
+from .fs import canonical, digest, identifier, loads_finite, safe_read
 from .ledger import Domain
 
 _TABLES = """
@@ -153,8 +153,8 @@ class InsightSource:
         try:
             if (root / "decisions" / f"{stem}.json").is_symlink():
                 return bad
-            decision = json.loads(safe_read(root, f"decisions/{stem}.json",
-                                            MAX_DECISION_EVENT_BYTES))
+            decision = loads_finite(safe_read(root, f"decisions/{stem}.json",
+                                              MAX_DECISION_EVENT_BYTES))
             rev = decision.get("rev", 1)
             if (type(decision) is not dict or decision.get("id") != stem
                     or decision.get("action") not in _ACTIONS or not _valid_revision(rev)):
