@@ -20,7 +20,7 @@ from pathlib import Path
 from .admission import check_slot_exclusion
 from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
-from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, DIGEST, SCRIPT_MAX
+from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, loads_finite, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, _digest, write_job
 
@@ -125,7 +125,7 @@ def read_retained_json(project, relative):
     except (Denied, LimitExceeded, OSError) as exc:
         raise Denied('Retained check state unavailable') from exc
     try:
-        return json.loads(data)
+        return loads_finite(data)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise Denied('Retained check state unavailable') from exc
 

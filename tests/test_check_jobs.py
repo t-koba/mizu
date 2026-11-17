@@ -11,7 +11,7 @@ from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
 from mizu.errors import Busy, Denied
-from mizu.fs import held, lock, read_json, write_json as write_indexed_json
+from mizu.fs import held, lock, read_json, MAX_JSON_DEPTH, write_json as write_indexed_json
 from support import forget_ledger, history_write_json as write_json
 from mizu.process import Result
 from mizu.sandbox import cleanup
@@ -1051,14 +1051,17 @@ class RetainedReadTests(Fixture):
         ctx, job = self.submit()
         job_path = check_jobs.root(self.project) / job['id'] / 'job.json'
         wait_path = check_jobs.root(self.project) / 'worker.wait.json'
-        for data in (b'not json', b'"\xff"', b'[' * 2000 + b']' * 2000):
+        deep = b'{"x":' + b'[' * (MAX_JSON_DEPTH + 3) + b'0' + b']' * (MAX_JSON_DEPTH + 3) + b'}'
+        for data in (b'not json', b'"\xff"', b'[' * 2000 + b']' * 2000,
+                     b'{"wait_until": NaN}', b'{"wait_until": Infinity}',
+                     b'{"wait_until": 1e9999}', deep):
             with self.subTest(data=data[:20]):
                 job_path.write_bytes(data)
                 wait_path.write_bytes(data)
                 with self.assertRaises(Denied):
                     check_jobs.raw_read(self.project, job['id'])
                 self.assert_no_wait()
-        with patch('mizu.check_jobs.json.loads', side_effect=RecursionError):
+        with patch('mizu.check_jobs.loads_finite', side_effect=RecursionError):
             with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
                 check_jobs.read_retained_json(self.project, f"check-jobs/{job['id']}/job.json")
         job_path.unlink()
