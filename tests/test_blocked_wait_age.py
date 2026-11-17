@@ -51,7 +51,13 @@ class BlockedWaitAgeTests(Fixture):
             live = self.store.blocked_liveness_readonly()["items"][0]
             self.assertEqual((live["state"], live["reason"]), ("pending", "condition_pending"))
             self.assertEqual(live["blocked_age_seconds"], 10**9)
-            self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
+            # An ancient wait stays pending, but the sole writer can resolve a
+            # code_change wait itself, so the item is ready work for that role.
+            ready = self.store.page_ready(role_name="worker")
+            self.assertEqual(ready["total"], 1)
+            live_ready = ready["items"][0]["wait_liveness"]
+            self.assertEqual((live_ready["state"], live_ready["self_resolvable"]),
+                             ("pending", "sole_writer_code_change"))
             self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
             self.assertEqual(self.store.get(item["id"]), item)
             item = self.change(item, "doing")
@@ -137,8 +143,11 @@ class BlockedWaitAgeTests(Fixture):
             full = json.loads(prompt_for(context))
             delta = json.loads(prompt_delta_for(context, []))
             for prompt in (full, delta):
-                self.assertEqual(prompt["ready_work"]["total"], 0)
-                self.assertEqual(prompt["ready_work"]["items"], [])
+                self.assertEqual(prompt["ready_work"]["total"], 1)
+                self.assertEqual(prompt["ready_work"]["items"][0]["status"], "blocked")
+                self.assertEqual(prompt["ready_work"]["items"][0]["wait_liveness"]["state"], "pending")
+                self.assertEqual(prompt["ready_work"]["items"][0]["wait_liveness"]["self_resolvable"],
+                                 "sole_writer_code_change")
             self.assertEqual(self.store.get(item["id"]), item)
 
     def test_legacy_history_derives_first_block_and_rejects_reset_claim(self):
