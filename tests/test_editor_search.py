@@ -209,6 +209,30 @@ class EditorSearchTests(Fixture):
                     self.assertIn(str(setting), tool['description'])
                 self.assertEqual(tool['inputSchema']['properties']['query']['maxLength'], 1000)
 
+    def test_get_changes_bundle_json_refuses_depth_and_nonfinite(self):
+        bundle = self.root / 'bundle'
+        export(self.project, bundle)
+        capsule = Capsule(bundle, self.root / 'outbox')
+        # A valid exported bundle still returns both projections.
+        valid = capsule.call('get_changes', {})
+        self.assertEqual(set(valid), {'changes', 'history'})
+        depth65 = b'[' * 65 + b'0' + b']' * 65
+        depth64 = b'[' * 64 + b'0' + b']' * 64
+        for name in ('changes.json', 'history.json'):
+            for bad in (depth65, b'{"a":NaN}', b'{"a":Infinity}',
+                        b'{"a":-Infinity}', b'{"a":1e9999}', b'{"a":-1e9999}'):
+                with self.subTest(name=name, bad=bad[:16]):
+                    (bundle / 'changes.json').write_bytes(b'[]')
+                    (bundle / 'history.json').write_bytes(b'[]')
+                    (bundle / name).write_bytes(bad)
+                    with self.assertRaises(ValueError):
+                        capsule.call('get_changes', {})
+            # The exact depth bound still parses for either file.
+            (bundle / 'changes.json').write_bytes(b'[]')
+            (bundle / 'history.json').write_bytes(b'[]')
+            (bundle / name).write_bytes(depth64)
+            self.assertEqual(set(capsule.call('get_changes', {})), {'changes', 'history'})
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -6,7 +6,6 @@ separate account with only the exported bundle and outbox mounted.
 from __future__ import annotations
 
 import dataclasses
-import json
 import os
 import shutil
 import tempfile
@@ -110,7 +109,7 @@ class Capsule:
         self.bundle, self.outbox = bundle.resolve(), outbox.resolve()
         if self.bundle == self.outbox or self.bundle in self.outbox.parents or self.outbox in self.bundle.parents:
             raise Denied("Outbox must be separate from the immutable bundle")
-        self.snapshot = json.loads(safe_read(self.bundle, "snapshot.json", BUNDLE_MANIFEST_BYTES))
+        self.snapshot = loads_finite(safe_read(self.bundle, "snapshot.json", BUNDLE_MANIFEST_BYTES))
         body = {k: v for k, v in self.snapshot.items() if k != "id"}
         if digest(canonical(body)) != self.snapshot.get("id"):
             raise Denied("Bundle manifest integrity failure")
@@ -128,7 +127,7 @@ class Capsule:
         self.public_source = None
         if raw is not None:
             try:
-                candidate = json.loads(raw)
+                candidate = loads_finite(raw)
             except ValueError as exc:
                 raise Denied("Bundle public-source integrity failure") from exc
             if (not isinstance(candidate, dict)
@@ -187,8 +186,8 @@ class Capsule:
             raise Denied("Unknown tool")
         validate(arguments, TOOLS[name][1])
         if name == "get_changes":
-            return {"changes": json.loads(safe_read(self.bundle, "changes.json", BUNDLE_CHANGES_BYTES)),
-                    "history": json.loads(safe_read(self.bundle, "history.json", BUNDLE_CHANGES_BYTES))}
+            return {"changes": loads_finite(safe_read(self.bundle, "changes.json", BUNDLE_CHANGES_BYTES)),
+                    "history": loads_finite(safe_read(self.bundle, "history.json", BUNDLE_CHANGES_BYTES))}
         if name == "get_status":
             status = {k: self.snapshot[k] for k in ("id", "created_at", "code_digest", "goal", "state", "outcome", "summary", "verification")}
             # Legacy bundles predate the projection file and report None;
