@@ -58,6 +58,7 @@ def _parts(envelope):
 def _projection(shared, raw, name, *, operator):
     try:
         row = loads_finite(raw)
+        row_raw = canonical(row)
     except (ValueError, TypeError, UnicodeError) as exc:
         raise Denied('Corrupt shared record JSON') from exc
     if (type(row) is not dict or set(row) != _ENVELOPE
@@ -68,7 +69,7 @@ def _projection(shared, raw, name, *, operator):
     _name(row['kind'], kind=True)
     is_operator = _namespace(record_id) == 'operator'
     if (name not in shared._record_names(record_id) or (operator and not is_operator)
-            or canonical(row) != raw):
+            or row_raw != raw):
         raise Denied('Shared record filename or canonical identity mismatch')
     if is_operator:
         if shared._validate(row) != raw:
@@ -125,9 +126,10 @@ def _reference(shared, name, raw, *, operator, readonly=False):
     else:
         try:
             ref = loads_finite(ref_raw)
+            encoded_ref = canonical(ref)
         except (ValueError, TypeError, UnicodeError) as exc:
             raise Denied('Corrupt operator record index') from exc
-        if canonical(ref) != ref_raw:
+        if encoded_ref != ref_raw:
             raise Denied('Noncanonical operator record index')
     return _check(shared, ref, raw, name, operator=operator)
 

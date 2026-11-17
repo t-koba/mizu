@@ -1,5 +1,6 @@
 """Bounded synthetic history: metadata is derived, canonical bytes authoritative."""
 import copy
+import json
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -103,6 +104,35 @@ class OperatorRecordIndexTests(Fixture):
             path.write_bytes(bad)
             with self.assertRaises(Denied):
                 self.pending()
+        path.write_bytes(good)
+        self.assertEqual(self.pending()['pending_count'], 1)
+
+    def test_surrogate_in_existing_ref_is_refused_without_repair(self):
+        row = self.notice()
+        _, ref = self.paths(row)
+        good = ref.read_bytes()
+        bad = b'{"x":"\\ud800"}\n'
+        ref.write_bytes(bad)
+        with self.assertRaises(Denied):
+            self.pending('worker')
+        self.assertEqual(ref.read_bytes(), bad)
+        ref.write_bytes(good)
+        self.assertEqual(self.pending()['pending_count'], 1)
+
+    def test_surrogate_in_cold_record_body_is_refused_without_indexing(self):
+        row = self.notice()
+        path, ref = self.paths(row)
+        good = path.read_bytes()
+        changed = loads_finite(good)
+        changed['payload']['body'] = '\ud800'
+        bad = (json.dumps(changed, ensure_ascii=True, sort_keys=True,
+                          separators=(',', ':')) + '\n').encode('ascii')
+        path.write_bytes(bad)
+        ref.unlink()
+        with self.assertRaises(Denied):
+            self.pending('worker')
+        self.assertEqual(path.read_bytes(), bad)
+        self.assertFalse(ref.exists())
         path.write_bytes(good)
         self.assertEqual(self.pending()['pending_count'], 1)
 
