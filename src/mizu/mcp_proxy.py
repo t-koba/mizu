@@ -75,9 +75,18 @@ def forward(config: dict, operation: str, arguments: dict) -> dict:
         raise Denied("Request exceeds byte limit")
     client = None
     try:
-        client = _bridge_connect(config)
-        client.sendall(wire)
         joining = operation in config.get("joined_operations", [])
+        client = _bridge_connect(config)
+        # The configured deadline is absolute: connect and send must share it
+        # with the reply phase. A socket's own timeout is only an idle guard.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Denied("Bridge deadline exceeded")
+        client.settimeout(remaining)
+        try:
+            client.sendall(wire)
+        except (socket.timeout, TimeoutError) as exc:
+            raise Denied("Bridge deadline exceeded") from exc
         data = bytearray()
         while True:
             remaining = deadline - time.monotonic()

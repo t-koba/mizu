@@ -2,6 +2,7 @@
 import dataclasses
 import errno
 import queue
+import socket
 import sys
 import threading
 import time
@@ -15,7 +16,7 @@ from mizu.config import load, role_run_seconds
 from mizu.drivers import admit_invocation
 from mizu.engine_channel import Channel
 from mizu.errors import AuthorityGrantMismatch, Cancelled, ConfigError, DeadlineWrapUp, Denied, LimitExceeded, RunDeadlineExceeded, ModelFailure, ProtocolError
-from mizu.fs import read_json, write_json
+from mizu.fs import canonical, read_json, write_json
 from mizu.mcp_proxy import forward
 from mizu.pi_durable import PiDurableDriver, interpret_result
 from mizu.process import environment, run
@@ -23,6 +24,48 @@ from mizu.protocol import tool_definitions
 from mizu.runtime import Engine, WRAP_UP_REQUESTS, WRAP_UP_TOOLS
 
 FINISH = {"outcome": "wait", "summary": "Saved result", "state": "Next: review."}
+
+
+class ProxyClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def advance_ms(self, milliseconds):
+        self.now += milliseconds / 1000.0
+
+
+class ProxySocket:
+    """Fake bridge socket whose send respects the deadline set on it."""
+    def __init__(self, clock, *, send_ms, reply=None):
+        self.clock = clock
+        self.send_ms = send_ms
+        self.reply = reply
+        self.timeouts = []
+        self.recv_timeouts = []
+        self.sent = None
+        self.closed = False
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+    def sendall(self, wire):
+        self.sent = wire
+        allowed = self.timeouts[-1] if self.timeouts else None
+        spent = min(self.send_ms, allowed * 1000) if allowed is not None else self.send_ms
+        self.clock.advance_ms(spent)
+        if spent < self.send_ms:
+            raise socket.timeout("send timed out")
+
+    def recv(self, _size):
+        self.recv_timeouts.append(self.timeouts[-1])
+        self.clock.advance_ms(80)
+        return self.reply or b""
+
+    def close(self):
+        self.closed = True
 
 
 class UnsealedDriver(ScriptDriver):
@@ -773,6 +816,35 @@ class DeadlineTests(Fixture):
             self.assertEqual(parent.request_deadlines[(0, 0)], 1010)
             with self.assertRaisesRegex(LimitExceeded, "Logical model request"):
                 parent.check_deadlines()
+
+    def test_proxy_send_uses_remaining_deadline_and_joins_keep_reply_exception(self):
+        reply = canonical({"ok": True, "result": {"answer": "ok"}}) + b"\n"
+        for joining, send_ms in ((False, 80), (True, 20)):
+            with self.subTest(joining=joining):
+                clock = ProxyClock()
+                sock = ProxySocket(clock, send_ms=send_ms, reply=reply)
+
+                def connect(_config):
+                    clock.advance_ms(60)
+                    return sock
+
+                config = {"token": "tok", "timeout_ms": 100}
+                if joining:
+                    config["joined_operations"] = ["delegate"]
+                with patch("mizu.mcp_proxy.time.monotonic", side_effect=clock.monotonic), \
+                     patch("mizu.mcp_proxy._bridge_connect", side_effect=connect):
+                    if joining:
+                        self.assertEqual(forward(config, "delegate", {}), {"answer": "ok"})
+                        self.assertEqual(sock.recv_timeouts, [None])
+                    else:
+                        with self.assertRaisesRegex(Denied, "Bridge deadline exceeded"):
+                            forward(config, "read", {})
+                        self.assertEqual(sock.recv_timeouts, [])
+                        self.assertAlmostEqual(clock.now - 1000.0, 0.1)
+                self.assertIsNotNone(sock.timeouts[0])
+                self.assertAlmostEqual(sock.timeouts[0], 0.04)
+                self.assertIsNotNone(sock.sent)
+                self.assertTrue(sock.closed)
 
     def test_proxy_join_response_is_not_cut_short_by_caller_rpc_timeout(self):
         def respond(*_):
