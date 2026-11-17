@@ -4410,7 +4410,7 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
 
 def _writer_wait_liveness(project, role, *, releases=()) -> bool | None:
     """True for external liveness, False when none remains, None when unknown."""
-    return _writer_wait_sources(project, role, releases=releases)[0]
+    return _writer_wait_sources(project, role, releases=releases)
 
 
 def _live_unanswered_own_question(project, role_name, is_answered=None) -> bool | None:
@@ -4436,31 +4436,25 @@ def _live_unanswered_own_question(project, role_name, is_answered=None) -> bool 
         return None
 
 
-def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=False) -> tuple[bool | None, str | None]:
-    """Return external liveness and a held-wait witness.
+def _writer_wait_sources(project, role, *, releases=()) -> bool | None:
+    """Return external liveness from checks, questions and pending waits.
 
     Holder-only waits are ordinary ready work through the ready set, never an
     external source here: the blocked-item status projection already reclassifies
     them as open, so only genuinely external pending waits can report liveness.
-    The held-wait witness comes from the bounded blocked-item status projection
-    and is emitted only for a current supported pending wait in a complete scan.
-    Exact CI dispatch evidence remains required; a free-standing check/question
-    cannot substitute for an item-held wait. No adapter calls or inferred remote
-    completion. Incomplete inventories can prove positive liveness, never absence
-    or a conversion witness.
+    No adapter calls or inferred remote completion. Incomplete inventories can
+    prove positive liveness, never absence.
     """
     try:
         unknown = False
         external = False
-        held_wait_kind = None
         if "check_job" in role.capabilities:
             from .acceptance import discover
             jobs, invalid = discover(project)
             if any(job["role"] == role.name and job["id"] not in releases
                    and job["status"] in ("queued", "running") for job in jobs.values()):
                 external = True
-                if not include_structured_wait:
-                    return True, None
+                return True
             unknown = bool(invalid)
         store = project.work_items
         factory = getattr(store, "operator_answer_lookup", None)
@@ -4470,15 +4464,14 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
             unknown = True
         elif _question_live:
             external = True
-            if not include_structured_wait:
-                return True, None
+            return True
         writers = wait_writer_roles(project.config, project.roles)
         status = store.open_state_readonly(
             limit=project.config.limits.work_items_prompt, writer_roles=writers,
             operator_answer=operator_answer)
         blocked = status.get("blocked_work") if isinstance(status, dict) else None
         if not isinstance(blocked, dict) or not isinstance(blocked.get("items"), list):
-            return None, None
+            return None
         page_complete = (blocked.get("coverage_complete") is True
                          and blocked.get("truncated") is False
                          and blocked.get("diagnostic") is None)
@@ -4512,31 +4505,19 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
                        and request["state"] != "not_dispatched"
                        for day in requests["days"] for request in day["items"]):
                     external = True
-                    if (include_structured_wait and page_complete and held_wait_kind is None
-                            and kind in _WRITER_CONVERTIBLE_WAIT_KINDS):
-                        held_wait_kind = kind
                 else:
                     # Missing dispatch evidence is not evidence of remote inactivity.
                     unknown = True
-                if external and not include_structured_wait:
-                    return True, None
+                if external:
+                    return True
                 continue
             if row.get("state") in ("pending", "receipt_bound"):
                 external = True
-                if (include_structured_wait and page_complete and held_wait_kind is None
-                        and kind in _WRITER_CONVERTIBLE_WAIT_KINDS):
-                    held_wait_kind = kind
-                if not include_structured_wait:
-                    return True, None
+                return True
         live = True if external else None if unknown else False
-        return live, held_wait_kind
+        return live
     except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        return None, None
-
-
-_WRITER_CONVERTIBLE_WAIT_KINDS = frozenset((
-    "deadline", "code_change", "insight_decided", "dependency",
-    "ci", "publication_ci", "proposal_merged", "record_closed", "object_resolved"))
+        return None
 
 
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:

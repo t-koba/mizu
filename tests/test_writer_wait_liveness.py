@@ -52,7 +52,7 @@ class WriterWaitTests(Fixture):
         item = self.block('self code', {'kind': 'code_change'})
         store = self.project.work_items
         self.assertEqual(item['wait']['digest'], self.project.snapshots.get()['code_digest'])
-        self.assertEqual(_writer_wait_sources(self.project, self.role()), (False, None))
+        self.assertEqual(_writer_wait_sources(self.project, self.role()), False)
         page = store.page_ready(role_name='worker')
         self.assertEqual(page['total'], 1)
         self.assertEqual(page['items'][0]['id'], item['id'])
@@ -174,10 +174,10 @@ class WriterWaitTests(Fixture):
         # The exact answer suppresses the open-question source for this revision;
         # the holder-only wait reads as ordinary open work, without deciding
         # for its writer.
-        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
-                         (False, None))
         self.assertEqual(_writer_wait_sources(self.project, self.role()),
-                         (False, None))
+                         False)
+        self.assertEqual(_writer_wait_sources(self.project, self.role()),
+                         False)
         self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
         self.project.insights.decide(question['id'], 'defer', 'Await answer handling',
                                      'After reading the answer', 'fixture', expected_rev=1)
@@ -195,8 +195,8 @@ class WriterWaitTests(Fixture):
         self.assertEqual(ready['total'], 1)
         self.assertEqual(self.project.work_items.get(item['id']), item)
         self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
-        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
-                         (False, None))
+        self.assertEqual(_writer_wait_sources(self.project, self.role()),
+                         False)
         self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
         engine = Engine(self.config, driver=ScriptDriver())
         result = engine.run(self.project, 'worker')
@@ -212,16 +212,16 @@ class WriterWaitTests(Fixture):
         question = self.question()
         item = self.block('answered holder', {'kind': 'insight_decided', 'insight': question['id']})
         self.answer_record(question)
-        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
-                         (False, None))
+        self.assertEqual(_writer_wait_sources(self.project, self.role()),
+                         False)
         # An unrelated unanswered own question stays an external live source.
         other = self.project.insights.submit(
             source='worker', title='Other fixture question', body='Q: Other question?',
             base_snapshot=None, kind='question', addressee='operator')
-        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
-                         (True, None))
         self.assertEqual(_writer_wait_sources(self.project, self.role()),
-                         (True, None))
+                         True)
+        self.assertEqual(_writer_wait_sources(self.project, self.role()),
+                         True)
         self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
         engine = Engine(self.config, driver=ScriptDriver())
         snapshot = engine.run(self.project, 'worker')['finish']
@@ -248,7 +248,7 @@ class WriterWaitTests(Fixture):
             stored = self.project.snapshots.get() if self.project.snapshots.get() else None
             # Fallback needs a wait snapshot; use a fresh engine run under the failure.
             # The live question alone suppresses the self-wait backoff.
-            self.assertEqual(_writer_wait_sources(self.project, self.role()), (True, None))
+            self.assertEqual(_writer_wait_sources(self.project, self.role()), True)
         self.assert_holder_only_open(item)
         self.assertIs(_writer_wait_liveness(self.project, self.role()), False)
         current = self.project.insights.read(question['id'])
@@ -257,7 +257,7 @@ class WriterWaitTests(Fixture):
         self.assertIsNone(row['self_resolvable'])
         self.assertEqual(row['state'], 'pending')
         self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
-        self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True)[0], True)
+        self.assertEqual(_writer_wait_sources(self.project, self.role()), True)
 
     def test_stale_decision_does_not_settle_current_revision_and_defer_alone_stays_live(self):
         question = self.question()
@@ -796,9 +796,8 @@ class WriterCiWaitTests(CiWaitFixture):
             "request_id": identity, "publication_id": self.receipt["publication_id"],
             "sha": SHA, "workflows": ["ci"], "runs": [], "requested_at": now(),
             "attempt": 1, "outcome": "not_dispatched", "reason_code": "provider_rejected"})
-        self.assertEqual(_writer_wait_sources(
-            self.project, self.config.roles["worker"], include_structured_wait=True),
-            (None, None))
+        self.assertIs(_writer_wait_sources(
+            self.project, self.config.roles["worker"]), None)
 
     def test_unknown_ci_inventory_refuses_parking_only_for_its_holder(self):
         self.block(key="other-unknown", actor="reviewer")
@@ -1045,6 +1044,6 @@ class WriterParkingTests(Fixture):
             due = dt.datetime.fromisoformat(progress["recorded_at"]).timestamp() + 301
             self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
             for live in (True, False, None):
-                with patch("mizu.runtime._writer_wait_sources", return_value=(live, None)):
+                with patch("mizu.runtime._writer_wait_sources", return_value=live):
                     self.assertFalse(_progress_self_admits(snapshot, self.config, "worker", due))
                     self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
