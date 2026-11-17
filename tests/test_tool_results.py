@@ -36,12 +36,26 @@ class ToolResultTests(Fixture):
         for page in pages:
             self.assertLessEqual(len(canonical(page)), 4096)
             self.assertEqual(page["total_bytes"], len(canonical(result)))
+        offset = 0
+        for page in pages:
+            self.assertEqual(page["offset"], offset)
+            offset += len(page["page"].encode("utf-8"))
         joined = "".join(p["page"] for p in pages)
         self.assertEqual(joined.encode(), canonical(result))
         self.assertEqual(json.loads(joined), result)
         self.assertTrue(pages[0]["truncated"] and not pages[-1]["truncated"])
         self.assertIsNone(pages[-1]["next_offset"])
         self.assertEqual([p["offset"] for p in pages[1:]], [p["next_offset"] for p in pages[:-1]])
+
+    def test_surrogate_bearing_retained_result_is_refused(self):
+        ctx = self.ctx()
+        ctx.role = dataclasses.replace(ctx.role, name="writer")
+        cursor = "a" * 32
+        path = ctx.run_dir / "tool-results" / (cursor + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(r'{"operation":"files","role":"writer","text":"\ud800"}', encoding="ascii")
+        with self.assertRaisesRegex(Denied, "Unknown result cursor"):
+            tool_results.read(ctx, {"cursor": cursor, "offset": 0})
 
     def test_invalid_continuations_are_refused(self):
         ctx = self.ctx()

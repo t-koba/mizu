@@ -91,5 +91,9 @@ def read(context, arguments: dict) -> dict:
     if (not isinstance(record, dict) or record.get("role") != context.role.name
             or not isinstance(record.get("text"), str) or not isinstance(record.get("operation"), str)):
         raise Denied("Unknown result cursor")
-    return _page(record["operation"], cursor, record["text"].encode("utf-8"),
+    try:
+        text = record["text"].encode("utf-8")
+    except UnicodeError:
+        raise Denied("Unknown result cursor")
+    return _page(record["operation"], cursor, text,
                  arguments["offset"], context.config.limits.tool_response_bytes)
