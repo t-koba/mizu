@@ -11,6 +11,21 @@ from .insights import insight_metadata
 INSIGHT_RETRIEVAL_LIMIT = 1000
 
 
+def display_for_role(record: dict, role_name: str) -> dict:
+    """Resolve model-facing role aliases in one insight row for its reader.
+
+    ``writer`` is an internal alias for the autonomous writer role. Delivered
+    to a model unchanged, a literal reader can take an insight addressed to
+    itself for another role's and leave its own obligation undecided. This is
+    display only: the stored addressee, event routing and decision identity
+    keep the stored value; readers address their own insights by their own
+    configured role name.
+    """
+    if not isinstance(record, dict) or record.get("addressee") != "writer":
+        return record
+    return {**record, "addressee": role_name}
+
+
 def insights(context, args: dict) -> dict:
     if args.get("id"):
         record = context.project.insights.read(args["id"])
@@ -22,7 +37,7 @@ def insights(context, args: dict) -> dict:
             status = context.project.work_items.submitter_status(record["id"])
             if status is not None:
                 record["work_item_status"] = status
-        return record
+        return display_for_role(record, context.role.name)
     # Prompt selection stays at pending_insights; explicit retrieval pages
     # a stable offset-independent selection capped at INSIGHT_RETRIEVAL_LIMIT,
     # so overflow items remain discoverable and small pages enumerate each
@@ -35,7 +50,8 @@ def insights(context, args: dict) -> dict:
     projection = context.project.insights.projection(
         limit=INSIGHT_RETRIEVAL_LIMIT, pending=action is None, action=action)
     response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
-    response['insights'] = response.pop('items')
+    response['insights'] = [display_for_role(row, context.role.name)
+                            for row in response.pop('items')]
     response['total'] = projection['total']
     response['selection_truncated'] = projection['truncated']
     return response

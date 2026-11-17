@@ -529,8 +529,9 @@ def prompt_for(context: Context) -> str:
     # dispatch label selected by the host. Publication/commit and `should_run`
     # transitions below are the fixed single-writer contract, not policy.
     from . import work_order as _plan
+    from .insight_tools import display_for_role
     opening = _plan._capture_opening(context)
-    pending = opening["pending_insights"]
+    pending = [display_for_role(row, context.role.name) for row in opening["pending_insights"]]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context))
     acceptance = list(context.project.verify) if "verify" in caps else []
@@ -626,6 +627,8 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     caps = set(context.role.capabilities)
     if not isinstance(pending, list):
         raise Denied("Invalid pending insights")
+    from .insight_tools import display_for_role
+    pending = [display_for_role(row, context.role.name) for row in pending]
     from . import work_order as _plan
     opening = _plan._capture_opening(context)
     acceptance = list(context.project.verify) if "verify" in caps else []
