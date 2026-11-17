@@ -66,6 +66,31 @@ class JobTests(Fixture):
                 self.assertIsNone(ctx.verification)
                 self.assertFalse((ctx.run_dir / 'verification.json').exists())
 
+    def test_result_read_refuses_linked_and_oversized_result_files(self):
+        ctx, job = self.submit()
+        self.assertEqual(self.run_job()['status'], 'completed')
+        directory = check_jobs.root(self.project) / job['id']
+        result_file = directory / 'result.json'
+        # A genuinely absent result is still reported as an empty record.
+        result_file.unlink()
+        self.assertEqual(check_jobs.result(ctx, job['id'])['result'], {})
+
+        # A symlink to state outside the evidence directory is refused, not
+        # followed and returned through the public result tool.
+        outside = check_jobs.root(self.project).parent / 'outside-result'
+        write_json(outside, {'marker': 'external-content'})
+        result_file.symlink_to(outside)
+        with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
+            check_jobs.result(ctx, job['id'])
+
+        # A result padded beyond the configured file bound is refused rather
+        # than materialized in full.
+        result_file.unlink()
+        cap = self.project.config.limits.file_bytes
+        result_file.write_bytes(b'{"pad":"' + b'x' * (cap + 10) + b'"}')
+        with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
+            check_jobs.result(ctx, job['id'])
+
     def test_detached_shared_job_cannot_escape_evidence_directory(self):
         ctx, job = self.submit()
         directory = check_jobs.root(self.project) / job['id']

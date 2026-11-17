@@ -1202,7 +1202,15 @@ def result(context, job_id):
     if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
         return output
     owner = _evidence_owner(job, job_id)
-    record = read_json(root(project) / owner / 'result.json', {})
+    result_path = root(project) / owner / 'result.json'
+    try:
+        result_path.lstat()
+    except FileNotFoundError:
+        record = {}
+    else:
+        # A present file still goes through the pinned, bounded reader; links,
+        # oversize and non-finite state are refused there.
+        record = read_retained_json(project, f'check-jobs/{owner}/result.json') or {}
     if isinstance(record, dict) and 'cache_diagnostics' in record:
         from .acceptance import valid_cache_diagnostics
         if not valid_cache_diagnostics(record['cache_diagnostics']):
