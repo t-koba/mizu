@@ -818,26 +818,16 @@ class AcceptanceTests(Fixture):
             'job_schema')
 
     def test_isolate_job_json_parser_recursion_before_scheduler_sort(self):
-        payload = b'[' * 10000 + b'0' + b']' * 10000
-        try:
-            parsed = json.loads(payload)
-        except RecursionError:
-            expected = 'job_json'
-        else:
-            self.assertIsInstance(parsed, list)
-            expected = 'job_schema'
-        self.assert_producer_isolated('job.json', payload, expected)
+        # A payload deeper than the product bound is rejected by loads_finite
+        # with job_json on every Python version, independent of whether the
+        # interpreter's own json.loads happens to raise RecursionError.
+        payload = b'[' * (MAX_JSON_DEPTH + 1) + b'0' + b']' * (MAX_JSON_DEPTH + 1)
+        self.assert_producer_isolated('job.json', payload, 'job_json')
 
     def test_isolate_result_json_parser_recursion_and_run_unrelated_job(self):
-        payload = b'[' * 10000 + b'0' + b']' * 10000
-        try:
-            parsed = json.loads(payload)
-        except RecursionError:
-            expected = 'result_json'
-        else:
-            self.assertIsInstance(parsed, list)
-            expected = 'result_integrity'
-        self.assert_producer_isolated('result.json', payload, expected)
+        # Same version-independent product rule for the result producer.
+        payload = b'[' * (MAX_JSON_DEPTH + 1) + b'0' + b']' * (MAX_JSON_DEPTH + 1)
+        self.assert_producer_isolated('result.json', payload, 'result_json')
 
     def _recursion_shim(self, suspect):
         import types
