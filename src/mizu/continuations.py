@@ -370,24 +370,38 @@ def _result_snapshot(store, result, started, row):
         raise Denied("Continuation output outcome mismatch")
 
 
+def _optional_terminal_record(path):
+    """Read bounded optional evidence; only absence may return no object."""
+    missing = object()
+    try:
+        record = read_json(path, missing, max_bytes=RUN_BYTES)
+    except ValueError as exc:
+        raise Denied("Invalid continuation terminal record: " + path.name) from exc
+    if record is missing:
+        return False, None
+    if not isinstance(record, dict):
+        raise Denied("Invalid continuation terminal record: " + path.name)
+    return True, record
+
+
 def _terminal(store, directory, row, started):
-    result = read_json(directory / "result.json", None, max_bytes=RUN_BYTES)
-    error = read_json(directory / "error.json", None, max_bytes=RUN_BYTES)
-    if result is not None:
-        if (not isinstance(result, dict) or result.get("run") != row["successor"]
+    result_present, result = _optional_terminal_record(directory / "result.json")
+    error_present, error = _optional_terminal_record(directory / "error.json")
+    if result_present:
+        if (result.get("run") != row["successor"]
                 or result.get("role") != row["role"]):
             raise Denied("Continuation result binding mismatch")
         if ("continuation" in result and result["continuation"] != identity(row)):
             raise Denied("Continuation result identity mismatch")
         if result.get("status") == "prepared":
             _result_snapshot(store, result, started, row)
-            if error is not None:
+            if error_present:
                 _validate_lifecycle(row, started, None, error)
             return None
         if result.get("status") not in ("completed", "waiting", "bounded", "interrupted"):
             raise Denied("Invalid continuation result state")
         _result_snapshot(store, result, started, row)
-    if result is None and error is None:
+    if not result_present and not error_present:
         return None
     _validate_lifecycle(row, started, result, error)
     return result
@@ -433,20 +447,20 @@ def recover(store, row):
         return None
     result = _terminal(store, directory, row, started)
     if result is None:
-        previous = read_json(directory / "result.json", None, max_bytes=RUN_BYTES)
-        error = read_json(directory / "error.json", None, max_bytes=RUN_BYTES)
-        if error is not None:
+        _, previous = _optional_terminal_record(directory / "result.json")
+        error_present, error = _optional_terminal_record(directory / "error.json")
+        if error_present:
             # Preserve any runtime error envelope exactly; result.json is the
             # lifecycle index used by readers and must contain every error field.
-            result = {**(previous if isinstance(previous, dict) else {}), **error,
-                      "snapshot": (previous.get("snapshot") if isinstance(previous, dict)
+            result = {**(previous or {}), **error,
+                      "snapshot": (previous.get("snapshot") if previous is not None
                                    and previous.get("snapshot") is not None else started["snapshot"]),
                       "continuation": identity(row)}
         else:
-            result = {**(previous if isinstance(previous, dict) else {}),
+            result = {**(previous or {}),
                       "run": row["successor"], "role": row["role"],
                       "status": "interrupted", "finished_at": now(),
-                      "snapshot": (previous.get("snapshot") if isinstance(previous, dict)
+                      "snapshot": (previous.get("snapshot") if previous is not None
                                    and previous.get("snapshot") is not None else started["snapshot"]),
                       "continuation": identity(row),
                       "error": "Continuation started without a terminal result; execution not replayed"}

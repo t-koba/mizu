@@ -839,6 +839,75 @@ class EngineContinuationTests(ContinuationFixture):
         self.assertTrue(c.settle(self.store, original))
         self.assertEqual(self.engine.driver.calls, [])
 
+    def test_corrupt_terminal_records_are_not_consumed_or_rewritten(self):
+        original, snapshot, directory = self.seeded_start()
+        output = self.store.create(self.store.capture_files(self.project.workspace),
+            goal=snapshot["goal"], state="state", run=original["successor"],
+            outcome="wait", summary="already finished", parent=snapshot["id"])
+        self.store.publish(output)
+        result = {"run": original["successor"], "role": "worker", "status": "completed",
+                  "snapshot": output["id"], "finished_at": now(),
+                  "finish": {"outcome": "wait", "summary": "already finished", "state": "state"}}
+        _, later = self.seal(outcome="wait")
+        self.store.publish(later)
+        active = self.project.root / "active/worker.json"
+        write_json(active, {"run": original["successor"]})
+        pointer = c.pointer_at(self.store.root)
+        for name in ("result.json", "error.json"):
+            for raw in (b"null", b"[]", b'"text"', b"1", b"true", b"{"):
+                with self.subTest(name=name, raw=raw):
+                    for terminal in ("result.json", "error.json"):
+                        (directory / terminal).unlink(missing_ok=True)
+                    if name == "error.json":
+                        write_json(directory / "result.json", result)
+                    (directory / name).write_bytes(raw)
+                    before = {p.name: p.read_bytes() for p in directory.iterdir()}
+                    with self.assertRaises(Denied):
+                        self.engine.run(self.project, "worker")
+                    self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, before)
+                    self.assertEqual(c.pointer_at(self.store.root), pointer)
+                    self.assertEqual(c.pending(self.store, "worker")["successor"], original["successor"])
+                    self.assertEqual(read_json(active), {"run": original["successor"]})
+        self.assertEqual(self.engine.driver.calls, [])
+
+    def test_recovery_rechecks_terminal_record_shapes_before_writing(self):
+        original, _, directory = self.seeded_start()
+        terminal = c._terminal
+        for name in ("result.json", "error.json"):
+            with self.subTest(name=name):
+                path = directory / name
+                def corrupt_after_read(*args):
+                    result = terminal(*args)
+                    path.write_bytes(b"null")
+                    return result
+                with patch.object(c, "_terminal", side_effect=corrupt_after_read):
+                    with self.assertRaises(Denied):
+                        self.engine.run(self.project, "worker")
+                self.assertEqual(path.read_bytes(), b"null")
+                other = "error.json" if name == "result.json" else "result.json"
+                self.assertFalse((directory / other).exists())
+                self.assertEqual(c.pending(self.store, "worker")["successor"], original["successor"])
+                path.unlink()
+        self.assertEqual(self.engine.driver.calls, [])
+
+    def test_valid_error_only_and_paired_terminal_records_are_preserved(self):
+        for paired in (False, True):
+            with self.subTest(paired=paired):
+                original, snapshot, directory = self.seeded_start()
+                error = {"run": original["successor"], "role": "worker", "status": "interrupted",
+                         "finished_at": now(), "error": "execution interrupted",
+                         "durability": "confirmed"}
+                result = {**error, "snapshot": snapshot["id"], "continuation": c.identity(original)}
+                write_json(directory / "error.json", error)
+                if paired:
+                    write_json(directory / "result.json", result)
+                before = {p.name: p.read_bytes() for p in directory.iterdir()}
+                self.assertEqual(self.engine.run(self.project, "worker"), result)
+                for name, raw in before.items():
+                    self.assertEqual((directory / name).read_bytes(), raw)
+                self.assertIsNone(c.pending(self.store, "worker"))
+        self.assertEqual(self.engine.driver.calls, [])
+
     def test_matching_run_terminal_with_wrong_snapshot_is_not_consumed(self):
         original, snapshot, directory = self.seeded_start()
         forged = {"run": original["successor"], "role": "worker", "status": "completed",
