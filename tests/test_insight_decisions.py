@@ -503,5 +503,26 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         self.assertTrue(self.project.work_items.page_open()["coverage_complete"])
 
 
+class NonFiniteDecisionRevTests(Fixture):
+    def test_nonfinite_rev_is_skipped_without_hiding_other_events(self):
+        good = self.project.insights.submit(source="reviewer", title="Good", body="e",
+                                            base_snapshot=self.project.snapshots.get()["id"])
+        bad = self.project.insights.submit(source="reviewer", title="Bad", body="e",
+                                           base_snapshot=self.project.snapshots.get()["id"])
+        for item in (good, bad):
+            self.project.insights.decide(item["id"], "reject", "not material", "", "test",
+                                         expected_rev=1)
+        path = self.project.root / "decisions" / f"{bad['id']}.json"
+        stored = json.loads(path.read_text())
+        stored["rev"] = "NONFINITE"
+        raw = json.dumps(stored).replace('"NONFINITE"', "1e9999").encode()
+        path.write_bytes(raw)
+
+        events = self.project.insights.decision_events("reviewer", ("reject",))
+
+        self.assertEqual([event["insight"] for event in events], [good["id"]])
+        self.assertEqual(path.read_bytes(), raw)
+
+
 if __name__ == "__main__":
     unittest.main()

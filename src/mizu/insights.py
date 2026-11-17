@@ -190,7 +190,7 @@ class CorruptDecisionReceipt(Exception):
 def _rev_of(record: dict) -> int:
     try:
         rev = int(record.get("rev", 1))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 1
     return rev if rev >= 1 else 1
 
@@ -369,7 +369,7 @@ def _effective_decision(item_rev: int, decision) -> dict | None:
         return None
     try:
         decision_rev = int(decision.get("rev", 1))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         decision_rev = 1
     if decision_rev != item_rev:
         return None
