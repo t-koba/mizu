@@ -682,6 +682,7 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
                    capture_choices=capture_choices)
     if not wait and enqueue:
         _reuse_pending_admission(queue)
+    retain_pending = False
     try:
         while True:
             if stop.is_set():
@@ -696,6 +697,7 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
                 raise Busy(str(exc)) from None
             except Busy:
                 if not wait:
+                    retain_pending = True
                     raise
                 if deadline is None and window:
                     deadline = time.monotonic() + window
@@ -726,6 +728,7 @@ def admission(config, resources=(), *, wait=False, enqueue=False, stop=None, che
             key = queue._pending_key()
             entry = _PENDING_ADMISSIONS.get(key)
             keep_queued = (queue.reuse_pending and not wait and bool(enqueue)
+                           and retain_pending
                            and not stop.is_set() and entry is not None
                            and entry.identity == queue.identity
                            and entry.manager is queue.alive and queue.alive is not None)

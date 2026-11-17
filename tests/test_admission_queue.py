@@ -959,6 +959,37 @@ class QueueTests(Fixture):
             pass
         self.assertEqual(self.tickets(synchronized=True), [])
 
+    def test_revoked_fail_fast_retry_retires_pending_ticket(self):
+        self.tune(parallel_runs=1)
+        a = self.resources('worker')
+        try:
+            with self.raw_slots():
+                with self.assertRaises(Busy):
+                    with admission(self.config, a, wait=False, enqueue=True):
+                        pass
+                tickets = self.tickets(synchronized=True)
+                self.assertEqual(len(tickets), 1)
+                owner = tickets[0]['owner']
+                with self.assertRaisesRegex(Denied, 'revoked'):
+                    with admission(self.config, a, wait=False, enqueue=True,
+                                   check=Mock(side_effect=Denied('revoked'))):
+                        pass
+                self.assertEqual(self.tickets(synchronized=True), [])
+                with lock(self.config.data / 'slots' / f'pending-{owner}.lock', blocking=False):
+                    pass
+            b = self.resources('reporter')
+            with admission(self.config, b, wait=False, enqueue=True):
+                pass
+        finally:
+            # Cancel even after an assertion fails, releasing process-local owners.
+            stop = threading.Event()
+            stop.set()
+            for role in ('worker', 'reporter'):
+                with self.assertRaises(Busy):
+                    with admission(self.config, self.resources(role), wait=False,
+                                   enqueue=True, stop=stop):
+                        pass
+
     def test_pending_daemon_tickets_are_scoped_to_their_queue_root(self):
         self.tune(parallel_runs=2)
         other_data = self.config.data.parent / 'other-admission-state'
