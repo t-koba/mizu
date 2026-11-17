@@ -2806,7 +2806,11 @@ selected holder's current cursor, never older receipts.
 Defaults select nobody and grant nobody this capability: `vcs_publish` fails
 closed even with human GO. Deselection does not revoke an explicit capability
 grant. Human GO remains independently required even with sufficient typed
-approvals. For a singular selection:
+approvals. Publication is always explicitly writer-requested: satisfying GO and
+the approval requirement permits a `vcs_publish` call but never initiates one.
+The host provides no automatic publication trigger, timer, polling, cadence
+policy, or predicate selecting which branches or paths may publish; those are
+outside this product's scope. For a singular selection:
 
 ```toml
 [publication]
