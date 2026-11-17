@@ -2780,18 +2780,45 @@ Same `[vcs]` adapter. The `review_verdict` role capability authorizes typed
 review verdicts; it is a modifier of `finish`, not a callable tool. Any role name
 may hold it, provided the role has `workspace = "read"` and `finish`, and lacks
 both `delegate` and `vcs_publish`. Every holder is validated at config load.
-`[publication].reviewer_role` is policy selecting the holder whose exact approval
-publication consumes, with no scan or fallback to other holders. For compatibility,
-config load automatically confers `review_verdict` on the selected role before
-validating holders; existing configurations need no new explicit grant. A nonempty
-selection must name an existing eligible role. Deselection does not revoke an
-explicit capability grant. Defaults select nobody and grant nobody this capability:
-`vcs_publish` fails closed even with human GO. Human GO remains independently
-required even with a valid typed approval. For example:
+Publication policy selects the holders whose exact approvals count, with no
+scan or fallback to unselected holders or older receipts. There are two mutually
+exclusive selections:
+
+- `[publication].reviewer_role` (default `""`) selects one existing eligible role,
+  requiring its approval (1-of-1). Config load automatically confers
+  `review_verdict` on that role before validating holders; existing singular
+  configurations need no new explicit grant.
+- `[publication].reviewers` (default `[]`) is an ordered list of distinct,
+  nonempty role names. Each must already have an explicit `review_verdict`
+  capability and the independent shape above; selection does not grant it.
+  `required_approvals` (default `0`) must be an integer from 1 through the number
+  of selected holders. Booleans, floats and strings are not integers. A nonzero
+  threshold without plural selection is invalid, as is combining a nonempty
+  plural selection with `reviewer_role`.
+
+For plural selection, at least `required_approvals` distinct selected holders
+must approve the exact input snapshot and captured code digest. A missing,
+malformed, stale, unauthorized or non-approve cursor contributes zero, not a
+veto: two approvals and one `changes_requested` satisfy 2-of-3. Copying another
+holder's cursor cannot contribute an approval. The gate evaluates only each
+selected holder's current cursor, never older receipts.
+
+Defaults select nobody and grant nobody this capability: `vcs_publish` fails
+closed even with human GO. Deselection does not revoke an explicit capability
+grant. Human GO remains independently required even with sufficient typed
+approvals. For a singular selection:
 
 ```toml
 [publication]
 reviewer_role = "reviewer"
+```
+
+Alternatively, after explicitly granting each named role `review_verdict`:
+
+```toml
+[publication]
+reviewers = ["reviewer", "auditor", "inspector"]
+required_approvals = 2
 ```
 
 The unit prompt exposes host-supplied `review_authority = {authorized, reviewed_snapshot}`
@@ -2823,18 +2850,21 @@ the separate fields. Review receipt and input snapshots and the run receipt
 remain retained while that cursor references them; replacing it releases those
 roots.
 Interrupted finalization does not
-advance the cursor. Reads are constant-count, receipt/cursor JSON is bounded to
-4096 UTF-8 bytes with no-follow reads, and malformed/missing evidence denies.
-No automatic retry or external call is made by the review gate.
+advance the cursor. Reads are constant-count per selected holder, receipt/cursor
+JSON is bounded to 4096 UTF-8 bytes with no-follow reads, and malformed/missing
+evidence cannot count toward the threshold. No automatic retry or external call
+is made by the review gate.
 
-`vcs_publish` requires both the independent typed approval of its exact
-unit-opening snapshot **and** the unchanged captured code digest, in addition
-to the existing recorded human `GO <branch>`. Another snapshot with identical
-code does not inherit approval. Publish the candidate as a local snapshot,
-let the configured reviewer assess it, then publish externally from a later
-writer unit without changing the tree. Worker-authored Insights/shared records
-are never review evidence. The run-local publication observation includes the
-exact review receipt consumed; this gate does not replace human approval,
+`vcs_publish` requires the configured number of independent typed approvals of
+its exact unit-opening snapshot **and** the unchanged captured code digest, in
+addition to the existing recorded human `GO <branch>`. Another snapshot with
+identical code does not inherit approval. Publish the candidate as a local
+snapshot, let the configured holders assess it, then publish externally from a
+later writer unit without changing the tree. Worker-authored Insights/shared
+records are never review evidence. The run-local publication observation's
+`review` field is a list of all counted exact review receipts in configuration
+order, including for singular selection. It is not part of publication identity
+or the publication receipt. This gate does not replace human approval,
 verification, projection checks or immutable publication dispatch safeguards.
 `vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact`
 and the local `publications` listing of recorded publication receipts, which contacts

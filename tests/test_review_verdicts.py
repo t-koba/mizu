@@ -29,12 +29,12 @@ class ReviewVerdictTests(PublishFixture):
         self.project.config = self.config
         self.human_go = approve(self, "main", current_digest(self))
 
-    def review(self, verdict="approve", summary="No material findings.", **extra):
+    def review(self, verdict="approve", summary="No material findings.", role="reviewer", **extra):
         def work(ctx, *_):
             ctx.handle("finish", {"outcome": "wait", "summary": summary,
                                   **({"review_verdict": verdict} if verdict is not None else {}), **extra})
         result = Engine(self.config, driver=ScriptDriver(work)).run(
-            self.project, "reviewer", event_trigger=False)
+            self.project, role, event_trigger=False)
         self.assertEqual(result.get("status"), "completed", result)
         return result
 
@@ -46,17 +46,78 @@ class ReviewVerdictTests(PublishFixture):
         with self.assertRaisesRegex(Denied, "typed approval"):
             self.publish()
 
-    def test_multiple_holders_seal_independently_and_cannot_substitute_for_selected_holder(self):
+    def add_reviewers(self):
         roles = dict(self.config.roles)
         for name in ("auditor", "inspector"):
             roles[name] = dataclasses.replace(roles["reviewer"], name=name, on_change=True)
-        self.config = dataclasses.replace(self.config, roles=roles,
-            publication=dataclasses.replace(self.config.publication, reviewer_role="auditor"))
+        self.config = dataclasses.replace(self.config, roles=roles)
         self.project.config = self.config
         settings = self.project.root / "project.toml"
         settings.write_text(settings.read_text().replace(json.dumps(self.project.roles),
             json.dumps([*self.project.roles, "auditor", "inspector"])))
         self.project.refresh_settings()
+
+    def select_quorum(self, names, required):
+        self.config = dataclasses.replace(self.config, publication=dataclasses.replace(
+            self.config.publication, reviewer_role="", reviewers=names, required_approvals=required))
+        self.project.config = self.config
+
+    def approvals(self):
+        return reviews.require_approvals(
+            make_context(self, self.config, self.publisher, review=False), current_digest(self))
+
+    def test_one_of_two_counts_only_selected_holders_in_config_order(self):
+        self.add_reviewers()
+        self.select_quorum(("auditor", "reviewer"), 1)
+        self.review(role="inspector")
+        self.denied()  # An authorized but unselected approval contributes zero.
+        self.review()
+        approvals = self.approvals()
+        self.assertIsInstance(approvals, tuple)
+        self.assertEqual([saved["review"]["role"] for saved in approvals], ["reviewer"])
+        self.assertEqual(self.publish()["review"], list(approvals))
+        self.review(role="auditor")
+        self.assertEqual([saved["review"]["role"] for saved in self.approvals()],
+                         ["auditor", "reviewer"])  # Return all counted receipts, not just N.
+
+    def test_two_of_three_missing_invalid_or_rejecting_holder_is_not_a_veto(self):
+        self.add_reviewers()
+        self.select_quorum(("inspector", "auditor", "reviewer"), 2)
+        self.review()
+        self.denied()  # N-1 cannot satisfy the threshold.
+        self.review(role="auditor")
+        third = self.project.root / "observed" / "inspector.json"
+        self.assertFalse(third.exists())
+        expected = self.approvals()
+        self.assertEqual([saved["review"]["role"] for saved in expected], ["auditor", "reviewer"])
+        self.assertEqual(self.publish()["review"], list(expected))  # Missing third.
+        self.review("changes_requested", role="inspector")
+        self.assertEqual(self.publish()["review"], list(expected))  # Rejection is zero, not veto.
+        third.write_text("not json")
+        self.assertEqual(self.publish()["review"], list(expected))
+        write_json(third, read_json(self.project.root / "observed" / "reviewer.json"))
+        self.assertEqual(self.approvals(), expected)  # A copied cursor cannot count twice.
+        self.select_quorum(("inspector", "auditor", "reviewer"), 3)
+        self.denied()
+
+    def test_quorum_does_not_replace_human_go(self):
+        self.add_reviewers()
+        self.select_quorum(("reviewer", "auditor", "inspector"), 2)
+        self.review()
+        self.review(role="auditor")
+        self.assertEqual(len(self.approvals()), 2)
+        record = self.human_go
+        self.project.insights.revise(record["id"], source="operator", title=record["title"],
+            body=f"Await renewed GO.\ndigest: {current_digest(self)}\n",
+            base_snapshot=record["base_snapshot"], run="operator", expected_rev=record["rev"])
+        with self.assertRaisesRegex(Denied, "stale.*revision"):
+            self.publish()
+
+    def test_multiple_holders_seal_independently_and_cannot_substitute_for_selected_holder(self):
+        self.add_reviewers()
+        self.config = dataclasses.replace(self.config,
+            publication=dataclasses.replace(self.config.publication, reviewer_role="auditor"))
+        self.project.config = self.config
         source = self.project.snapshots.get()
 
         def seal(ctx, *_):
@@ -152,7 +213,7 @@ class ReviewVerdictTests(PublishFixture):
         write_json(self.project.root / "observed" / "reviewer.json", legacy)
         publication = self.publish()
         self.assertTrue(publication["published"])
-        self.assertEqual(publication["review"], read_json(saved))
+        self.assertEqual(publication["review"], [read_json(saved)])
 
     def test_exact_snapshot_reviewer_wakes_for_same_code_successor_only(self):
         roles = dict(self.config.roles)
@@ -299,7 +360,9 @@ class ReviewVerdictTests(PublishFixture):
             ctx.handle("finish", {"outcome": "wait", "summary": "review", "review_verdict": "approve"})
         self.review()
         with self.assertRaises(Denied):
-            reviews.require_approval(make_context(self, closed, self.publisher, review=False), current_digest(self))
+            reviews.require_approvals(make_context(self, closed, self.publisher, review=False), current_digest(self))
+        self.config = closed
+        self.denied()  # Valid human GO alone never satisfies an empty review requirement.
         original = self.file.read_text()
         for name in ("worker", "missing", 5):
             self.file.write_text(original + f'\n[publication]\nreviewer_role = {name!r}\n')

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import time
 
+from . import config
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, ID, loads_finite, safe_read, write_json
 
@@ -118,26 +119,31 @@ def cursor_review(project, config, expected_role: str, cursor, source):
     return receipt, review, saved
 
 
-def require_approval(context, code_digest):
-    """Consume only the latest host-sealed exact-snapshot typed fact.
+def require_approvals(context, code_digest) -> tuple[dict, ...]:
+    """Consume selected holders' latest host-sealed exact-snapshot approvals.
 
-    Missing, unsafe, malformed, unauthorized or mismatched evidence denies;
-    no scan/retry/fallback to older approvals. Human GO remains independently
-    required by the caller. Reads are bounded; model arguments select neither
-    identity nor reviewed snapshot.
+    Missing, unsafe, malformed, unauthorized or mismatched evidence contributes
+    nothing; no scan/retry/fallback to older approvals. Human GO remains
+    independently required by the caller. Reads are bounded per selected holder;
+    model arguments select neither identity nor reviewed snapshot.
     """
-    try:
-        name = context.config.publication.reviewer_role
-        if not name:
-            raise Denied("No publication reviewer selected")
-        cursor = loads_finite(safe_read(
-            context.project.root, f"observed/{name}.json", RECORD_BYTES))
-        source = context.snapshot
-        receipt, review, saved = cursor_review(
-            context.project, context.config, name, cursor, source)
-        if (review["verdict"] != "approve" or receipt["code_digest"] != code_digest
-                or source["code_digest"] != code_digest):
-            raise Denied("Review does not approve this exact snapshot")
-        return saved
-    except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded) as exc:
-        raise Denied("Publication requires an authorized typed approval for the exact snapshot") from exc
+    holders, required = config.publication_review_requirement(context.config.publication)
+    denied = "Publication requires an authorized typed approval for the exact snapshot"
+    if not holders or required < 1:
+        raise Denied(denied)
+    approvals = []
+    for holder in holders:
+        try:
+            cursor = loads_finite(safe_read(
+                context.project.root, f"observed/{holder}.json", RECORD_BYTES))
+            source = context.snapshot
+            receipt, review, saved = cursor_review(
+                context.project, context.config, holder, cursor, source)
+            if (review["verdict"] == "approve" and receipt["code_digest"] == code_digest
+                    and source["code_digest"] == code_digest):
+                approvals.append(saved)
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded):
+            continue
+    if len(approvals) < required:
+        raise Denied(denied)
+    return tuple(approvals)

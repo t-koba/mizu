@@ -1240,14 +1240,38 @@ def ci_request_evidence_policy(raw: dict) -> CiRequestEvidence:
 class PublicationPolicy:
     source_commit_timeout_seconds: int = 5
     reviewer_role: str = ""
+    reviewers: tuple[str, ...] = ()
+    required_approvals: int = 0
 
 
 def publication_policy(raw: dict) -> PublicationPolicy:
-    keys(raw, {"source_commit_timeout_seconds", "reviewer_role"}, "publication")
+    keys(raw, {"source_commit_timeout_seconds", "reviewer_role", "reviewers",
+               "required_approvals"}, "publication")
+    reviewers = strings(raw.get("reviewers", []), "publication.reviewers")
+    if any(not name for name in reviewers) or len(set(reviewers)) != len(reviewers):
+        raise ConfigError("publication.reviewers must contain nonempty, distinct role names")
+    reviewer_role = string(raw.get("reviewer_role", ""), "publication.reviewer_role")
+    required = raw.get("required_approvals", 0)
+    if type(required) is not int:
+        raise ConfigError("publication.required_approvals must be an integer")
+    if not reviewers and required != 0:
+        raise ConfigError("publication.required_approvals requires publication.reviewers")
+    if reviewers and reviewer_role:
+        raise ConfigError("publication.reviewers cannot be combined with publication.reviewer_role")
+    if reviewers and not 1 <= required <= len(reviewers):
+        raise ConfigError("publication.required_approvals must be between 1 and the number of reviewers")
     return PublicationPolicy(source_commit_timeout_seconds=number(
         raw.get("source_commit_timeout_seconds", PublicationPolicy.source_commit_timeout_seconds),
         "publication.source_commit_timeout_seconds", 1, TOML_INTEGER_MAX),
-        reviewer_role=string(raw.get("reviewer_role", ""), "publication.reviewer_role"))
+        reviewer_role=reviewer_role, reviewers=reviewers, required_approvals=required)
+
+
+def publication_review_requirement(policy: PublicationPolicy) -> tuple[tuple[str, ...], int]:
+    if policy.reviewers:
+        return policy.reviewers, policy.required_approvals
+    if policy.reviewer_role:
+        return (policy.reviewer_role,), 1
+    return (), 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2075,6 +2099,11 @@ def load(file: Path) -> Config:
             raise ConfigError("publication.reviewer_role must name an existing role eligible for review_verdict")
         roles[name] = dataclasses.replace(
             roles[name], capabilities=tuple(dict.fromkeys((*roles[name].capabilities, "review_verdict"))))
+    for name in review_policy.reviewers:
+        role = roles.get(name)
+        if role is None or "review_verdict" not in role.capabilities:
+            raise ConfigError("publication.reviewers must name existing roles granted review_verdict")
+        _validate_review_capabilities(name, role.workspace, role.capabilities)
     for name, role in roles.items():
         _validate_review_capabilities(name, role.workspace, role.capabilities)
     vcs = data.get("vcs", {})

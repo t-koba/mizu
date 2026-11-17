@@ -1610,7 +1610,7 @@ class Context:
         except ValueError as exc:
             raise Denied(f"Publication requires a projectable snapshot: {exc}") from exc
         approval = _vcs.require_go_approval(self.project, args["branch"], code_digest)
-        review_approval = reviews.require_approval(self, code_digest)
+        review_approvals = reviews.require_approvals(self, code_digest)
         try:
             source = source_commit(
                 self.workspace, timeout=self.config.publication.source_commit_timeout_seconds,
@@ -1652,7 +1652,7 @@ class Context:
                             "trust": "external-untrusted"}
         except OSError as exc:
             raise Denied(f"VCS publication is unavailable: {exc}") from exc
-        record = {**receipt, "published": True, "review": review_approval,
+        record = {**receipt, "published": True, "review": list(review_approvals),
                   "receipt": publication.path("receipt").relative_to(self.project.root).as_posix(),
                   "trust": "external-untrusted", "result": data}
         return observe(record)

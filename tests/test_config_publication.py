@@ -3,13 +3,14 @@ import dataclasses
 import json
 
 from support import Fixture
-from mizu.config import PublicationPolicy, TOML_INTEGER_MAX, load
+from mizu.config import PublicationPolicy, TOML_INTEGER_MAX, load, publication_review_requirement
 from mizu.errors import ConfigError
 
 
 class PublicationConfigTests(Fixture):
     def test_default_and_range(self):
-        expected = {'source_commit_timeout_seconds': 5, 'reviewer_role': ''}
+        expected = {'source_commit_timeout_seconds': 5, 'reviewer_role': '',
+                    'reviewers': (), 'required_approvals': 0}
         self.assertEqual(dataclasses.asdict(self.config.publication), expected)
         self.assertEqual(dataclasses.asdict(PublicationPolicy()), expected)
         original = self.file.read_text()
@@ -30,6 +31,7 @@ class PublicationConfigTests(Fixture):
 
     def test_review_defaults_and_legacy_policy_confer_capability(self):
         self.assertEqual(self.config.publication.reviewer_role, "")
+        self.assertEqual(publication_review_requirement(self.config.publication), ((), 0))
         self.assertFalse(any("review_verdict" in role.capabilities
                              for role in self.config.roles.values()))
         original = self.file.read_text()
@@ -37,6 +39,7 @@ class PublicationConfigTests(Fixture):
             with self.subTest(name=name):
                 self.file.write_text(original + f'\n[publication]\nreviewer_role = "{name}"\n')
                 config = load(self.file)
+                self.assertEqual(publication_review_requirement(config.publication), ((name,), 1))
                 self.assertEqual(config.roles[name].capabilities,
                                  (*self.config.roles[name].capabilities, "review_verdict"))
                 self.assertEqual([role.name for role in config.roles.values()
@@ -44,6 +47,70 @@ class PublicationConfigTests(Fixture):
         self.file.write_text(original + '\n[publication]\nreviewer_role = "absent"\n')
         with self.assertRaisesRegex(ConfigError, 'publication.reviewer_role.*review_verdict'):
             load(self.file)
+
+    def test_plural_reviewers_parse_and_include_without_implicit_grants(self):
+        original = self.file.read_text()
+        holders = """
+[roles.auditor]
+profile = "alternate"
+policy = "policies/shared.md"
+workspace = "read"
+capabilities = ["finish", "review_verdict"]
+[roles.inspector]
+profile = "alternate"
+policy = "policies/shared.md"
+workspace = "read"
+capabilities = ["finish", "review_verdict"]
+"""
+        policy = ('[publication]\nreviewers = ["inspector", "auditor"]\n'
+                  'required_approvals = 2\n')
+        for included in (False, True):
+            with self.subTest(included=included):
+                (self.file.parent / 'publication.toml').write_text(policy)
+                self.file.write_text(('include = ["publication.toml"]\n' if included else '')
+                                     + original + holders + ('' if included else policy))
+                config = load(self.file)
+                self.assertEqual(config.publication, PublicationPolicy(
+                    reviewers=("inspector", "auditor"), required_approvals=2))
+                self.assertEqual(publication_review_requirement(config.publication),
+                                 (("inspector", "auditor"), 2))
+                self.assertEqual([name for name, role in config.roles.items()
+                                  if "review_verdict" in role.capabilities], ["auditor", "inspector"])
+
+    def test_plural_review_requirement_rejects_invalid_selections_and_thresholds(self):
+        original = self.file.read_text()
+        holder = ('\n[roles.auditor]\nprofile = "alternate"\npolicy = "policies/shared.md"\n'
+                  'workspace = "read"\ncapabilities = ["finish", "review_verdict"]\n')
+        invalid = [
+            'reviewers = "auditor"\nrequired_approvals = 1',
+            'reviewers = [1]\nrequired_approvals = 1',
+            'reviewers = [""]\nrequired_approvals = 1',
+            'reviewers = ["auditor", "auditor"]\nrequired_approvals = 1',
+            'reviewers = ["absent"]\nrequired_approvals = 1',
+            'reviewers = ["reviewer"]\nrequired_approvals = 1',  # no implicit grant
+            'reviewers = ["auditor"]\nrequired_approvals = 1\nreviewer_role = "reviewer"',
+            'reviewers = ["auditor"]',  # default zero is not a quorum
+        ]
+        invalid += [f'reviewers = ["auditor"]\nrequired_approvals = {value}'
+                    for value in ('-1', '0', '2', 'true', 'false', '1.0', '"1"', '[]', '{}')]
+        invalid += [f'required_approvals = {value}' for value in ('1', '-1')]
+        for policy in invalid:
+            with self.subTest(policy=policy):
+                self.file.write_text(original + holder + '\n[publication]\n' + policy + '\n')
+                with self.assertRaisesRegex(ConfigError, r'publication\.'):
+                    load(self.file)
+        for workspace, caps in (
+                ("write", ["finish", "review_verdict"]),
+                ("read", ["review_verdict"]),
+                ("read", ["finish", "review_verdict", "delegate"]),
+                ("read", ["finish", "review_verdict", "vcs_publish"])):
+            with self.subTest(workspace=workspace, caps=caps):
+                bad_holder = holder.replace('workspace = "read"', f'workspace = "{workspace}"').replace(
+                    '["finish", "review_verdict"]', json.dumps(caps))
+                self.file.write_text(original + bad_holder + '\n[publication]\n'
+                                     'reviewers = ["auditor"]\nrequired_approvals = 1\n')
+                with self.assertRaisesRegex(ConfigError, r'publication\.'):
+                    load(self.file)
 
     def test_explicit_review_holders_require_independent_shape(self):
         original = self.file.read_text()
