@@ -646,6 +646,30 @@ class HolderOnlyTests(Fixture):
         self.assertIsNone(holder_only(store, fresh_foreign, snapshot, writer_roles={'worker'},
                                        operator_answer=records.answer_lookup(self.project)))
 
+    def test_holder_only_answered_own_question_with_two_independent_writers(self):
+        self.config.roles['searcher'] = dataclasses.replace(
+            self.config.roles['searcher'], workspace='write', event_wakes=('wake',))
+        self.assertEqual(wait_writer_roles(self.config, self.project.roles),
+                         frozenset({'worker', 'searcher'}))
+        question = self.question(source='worker')
+        item = self.block('holder-only shared answer',
+                          {'kind': 'insight_decided', 'insight': question['id']})
+        self.answer_record(question, event='shared-answer')
+        store = self.project.work_items
+        snapshot = self.project.snapshots.get()
+        fresh = store.get(item['id'])
+        self.assertEqual(holder_only(store, fresh, snapshot,
+                                     writer_roles={'worker', 'searcher'},
+                                     operator_answer=records.answer_lookup(self.project)),
+                         'answered_own_question')
+        ready = store.page_ready(role_name='worker', writer_roles={'worker', 'searcher'})
+        self.assertEqual(ready['total'], 1)
+        row = ready['items'][0]
+        self.assertEqual(row['id'], item['id'])
+        self.assertEqual(row['status'], 'open')
+        for absent in ('wait', 'wait_liveness', 'blocked_since', 'blocked_age_seconds'):
+            self.assertNotIn(absent, row)
+
     def test_holder_only_ci_never_holder_only(self):
         store = self.project.work_items
         snapshot = self.project.snapshots.get()

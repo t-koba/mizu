@@ -312,9 +312,11 @@ def holder_only(store, item, snapshot, *, writer_roles, operator_answer=None, re
     """Positive witness that only the holder can end this wait.
 
     Returns the liveness ``self_resolvable`` reason (``sole_writer_code_change``
-    or ``answered_own_question``) when the blocked item is held by the sole
-    independent writer and the wait is still pending on that writer's own
-    action. Returns ``None`` otherwise, failing closed.
+    or ``answered_own_question``) when the blocked item's wait is still pending
+    on its writer holder's own action. Code changes require the sole independent
+    writer; answered own questions are proven by authorship and an exact operator
+    answer, even with other independent writers. Returns ``None`` otherwise,
+    failing closed.
 
     CI and ``publication_ci`` waits are deliberately never holder-only: every
     publication push spends a CI run (ADR-035), so the absence of a ci-request
@@ -336,8 +338,6 @@ def holder_only(store, item, snapshot, *, writer_roles, operator_answer=None, re
             return None
         if holder not in writer_roles:
             return None
-        if set(writer_roles) != {holder}:
-            return None
         observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
                              operator_answer=operator_answer, record_question=record_question)
         if not isinstance(observed, dict):
@@ -346,6 +346,8 @@ def holder_only(store, item, snapshot, *, writer_roles, operator_answer=None, re
             return None
         witness = observed.get("self_resolvable")
         if witness not in _HOLDER_ONLY_REASONS:
+            return None
+        if witness == "sole_writer_code_change" and set(writer_roles) != {holder}:
             return None
         return witness
     except (Denied, KeyError, TypeError, AttributeError, ValueError, OSError):
