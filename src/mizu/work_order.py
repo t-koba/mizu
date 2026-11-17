@@ -197,14 +197,15 @@ def _stable_open_for_hash(open_work_items) -> dict:
 
 def generation_from_captured(*, goal_digest, open_work_items, ready_work,
                              ready_signature, order_inventory, pending_insights, open_backlog,
-                             ci_failures, ci_truncated, decision_events, decision_page,
+                             ci_current_summary, decision_events, decision_page,
                              diagnostics, work_item_events, wait_events,
                              obligations) -> str:
     """Hash the captured prompt projections and full scope/redecision fingerprint.
 
     The prompt projections are captured for this unit (goal pin, bounded
     open page, ready display and inventory signature, pending list and
-    backlog, CI failures, and dispatch-frozen event arrays including
+    backlog, current configured-subject CI aggregates (independent of grants,
+    prompt sections and wake delivery), and dispatch-frozen event arrays including
     structured waits). The separate constant-size scope/redecision
     fingerprint covers the full open inventory, not just the visible page. Volatile ready ages are stripped so wall time alone never
     moves the generation. Any malformed input raises Denied for the
@@ -228,12 +229,12 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
             or not isinstance(open_backlog.get("total"), int)
             or not isinstance(open_backlog.get("truncated"), bool)):
         raise Denied("Invalid open-insight backlog")
-    if ci_failures is None:
-        if ci_truncated is not None:
-            raise Denied("Invalid CI projection")
-    elif (not isinstance(ci_failures, list)
-          or (ci_truncated is not None and not isinstance(ci_truncated, bool))):
-        raise Denied("Invalid CI projection")
+    from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact
+    if ci_current_summary is not None and (
+            not isinstance(ci_current_summary, list)
+            or len(ci_current_summary) > MAX_CI_WAKE_ROWS
+            or any(not _valid_ci_summary_fact(fact) for fact in ci_current_summary)):
+        raise Denied("Invalid CI summary")
     if decision_page is not None and (not isinstance(decision_page, dict) or "events" in decision_page):
         raise Denied("Invalid decision page summary")
     for name, value in (("decision_events", decision_events),
@@ -243,10 +244,10 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
                         ("obligations", obligations)):
         if not isinstance(value, list):
             raise Denied(f"Invalid {name}")
-    return digest(canonical(["work-order-generation-v5", goal_digest,
+    return digest(canonical(["work-order-generation-v6", goal_digest,
                              stable_open, stable_ready, ready_signature, order_inventory,
                              pending_insights, open_backlog,
-                             [ci_failures, ci_truncated],
+                             ci_current_summary,
                              decision_events, decision_page, diagnostics,
                              work_item_events, wait_events, obligations]))
 
@@ -263,6 +264,8 @@ def _capture_opening(context) -> dict:
     the two cannot enter the generation. A delta displays its offered subset,
     but hashes this same full semantic pending inventory. Later calls on the same context
     return the first capture; a prior failure is not retried mid-unit.
+    Current CI aggregates always cover configured wake subjects, regardless of
+    capabilities, section inclusion, or wake suppression/delivery.
     Display-critical store failures propagate (fail-closed prompt);
     generation-hash failures are cached as None for unavailable.
     """
@@ -351,15 +354,8 @@ def _capture_opening(context) -> dict:
         else:
             pending_insights = []
             open_backlog = {"ids": [], "total": 0, "truncated": False}
-        if "vcs_read" in caps:
-            from .ci_observation import ci_failures_projection as _proj
-            rows, truncated = _proj(project)
-            if (not isinstance(rows, list)
-                    or (truncated is not None and not isinstance(truncated, bool))):
-                raise Denied("Invalid CI failure projection")
-            ci_failures, ci_truncated = rows, truncated
-        else:
-            ci_failures, ci_truncated = None, None
+        from .ci_observation import wake_ci_facts
+        ci_current_summary = wake_ci_facts(project, context.config)
         decision_events = list(getattr(context, "decision_events", []) or [])
         decision_page = _decision_page_summary(getattr(context, "decision_page", None))
         diagnostics = list(getattr(context, "decision_receipt_diagnostics", []) or [])
@@ -372,7 +368,7 @@ def _capture_opening(context) -> dict:
                   "_order_inventory": order_inventory,
                   "pending_insights": pending_insights,
                   "open_backlog": open_backlog,
-                  "ci_failures": ci_failures, "ci_truncated": ci_truncated,
+                  "ci_current_summary": ci_current_summary,
                   "decision_events": decision_events, "decision_page": decision_page,
                   "diagnostics": diagnostics,
                   "work_item_events": work_item_events,
@@ -385,7 +381,7 @@ def _capture_opening(context) -> dict:
                 goal_digest=goal_digest, open_work_items=open_work_items,
                 ready_work=ready_work, ready_signature=ready_signature, order_inventory=order_inventory,
                 pending_insights=pending_insights, open_backlog=open_backlog,
-                ci_failures=ci_failures, ci_truncated=ci_truncated,
+                ci_current_summary=ci_current_summary,
                 decision_events=decision_events, decision_page=decision_page, diagnostics=diagnostics,
                 work_item_events=work_item_events, wait_events=wait_events,
                 obligations=obligations)
@@ -447,7 +443,8 @@ def _fresh_generation_for_role(project, role) -> str:
     Does not write or refresh the plan. Source projections use their existing
     locks and recognized recovery/pruning behavior; no scheduling occurs.
     It hashes the next-unit projections and full open-inventory fingerprint,
-    including live dispatch-equivalent event sets.
+    including live dispatch-equivalent event sets and configured-subject CI
+    aggregates independent of wake suppression or delivery.
     """
     try:
         goal = project.goal
@@ -474,15 +471,8 @@ def _fresh_generation_for_role(project, role) -> str:
     else:
         pending_insights = []
         open_backlog = {"ids": [], "total": 0, "truncated": False}
-    if "vcs_read" in caps:
-        from .ci_observation import ci_failures_projection as _proj
-        rows, truncated = _proj(project)
-        if (not isinstance(rows, list)
-                or (truncated is not None and not isinstance(truncated, bool))):
-            raise Denied("Invalid CI failure projection")
-        ci_failures, ci_truncated = rows, truncated
-    else:
-        ci_failures, ci_truncated = None, None
+    from .ci_observation import wake_ci_facts
+    ci_current_summary = wake_ci_facts(project, project.config)
     from . import decision_delivery as _delivery
     from . import work_item_events as _tev
     from . import ci_waits as _ciw
@@ -510,7 +500,7 @@ def _fresh_generation_for_role(project, role) -> str:
         goal_digest=goal_digest, open_work_items=open_work_items,
         ready_work=ready_work, ready_signature=ready_signature, order_inventory=order_inventory,
         pending_insights=pending_insights, open_backlog=open_backlog,
-        ci_failures=ci_failures, ci_truncated=ci_truncated,
+        ci_current_summary=ci_current_summary,
         decision_events=decision_events, decision_page=decision_page, diagnostics=diagnostics,
         work_item_events=work_item_events, wait_events=wait_events,
         obligations=obligations)

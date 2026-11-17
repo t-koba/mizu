@@ -355,6 +355,41 @@ def effective_ci_wake_branches(project_config) -> tuple[str, ...]:
         return ()
 
 
+def _ci_summary_observation(raw, config=None, *, branches=None) -> tuple[list, list]:
+    """Aggregate one already-read cache; None selects all observed subjects.
+
+    A tuple selects configured wake subjects before retention bounds. Both
+    projections share the same counting, lower-bound and incompleteness rules.
+    """
+    rows, partial = _ci_failures_projection(
+        raw, limit=MAX_CI_WAKE_ROWS, branches=branches, config=config)
+    if not rows:
+        return [], []
+    stored = raw.get("ci_check_summaries")
+    selected = {}
+    if isinstance(stored, dict):
+        selected = (stored if branches is None else
+                    {branch: stored[branch] for branch in branches if branch in stored})
+    summaries = _clean_ci_check_summaries(selected, config)
+    exact = {(branch, row["sha"]): row
+             for branch, entries in summaries.items() for row in entries}
+    counts = {}
+    for row in rows:
+        key = (row["branch"], row["sha"])
+        counts[key] = counts.get(key, 0) + 1
+    facts = []
+    for (branch, sha), lower_bound in sorted(counts.items()):
+        summary = exact.get((branch, sha))
+        if summary is not None and summary["non_passing_checks"] < lower_bound:
+            summary = None
+        facts.append({"subject": branch, "revision": sha, "outcome": "failure",
+                      "non_passing_checks": (summary["non_passing_checks"]
+                                             if summary else lower_bound),
+                      "may_be_incomplete": bool(partial is not False or not summary
+                          or summary["may_be_incomplete"])})
+    return rows, facts[:MAX_CI_WAKE_ROWS]
+
+
 def wake_ci_observation(project, config=None) -> tuple[list, list]:
     """Read one coherent cache snapshot into selected wake rows and frozen facts.
 
@@ -372,31 +407,7 @@ def wake_ci_observation(project, config=None) -> tuple[list, list]:
         if not branches:
             return [], []
         raw = read_json(project.root / POLL_STATE_FILE, {})
-        rows, partial = _ci_failures_projection(
-            raw, limit=MAX_CI_WAKE_ROWS, branches=branches, config=config)
-        if not rows:
-            return [], []
-        stored = raw.get("ci_check_summaries")
-        selected = ({branch: stored[branch] for branch in branches if branch in stored}
-                    if isinstance(stored, dict) else {})
-        summaries = _clean_ci_check_summaries(selected, config)
-        exact = {(branch, row["sha"]): row
-                 for branch, entries in summaries.items() for row in entries}
-        counts = {}
-        for row in rows:
-            key = (row["branch"], row["sha"])
-            counts[key] = counts.get(key, 0) + 1
-        facts = []
-        for (branch, sha), lower_bound in sorted(counts.items()):
-            summary = exact.get((branch, sha))
-            if summary is not None and summary["non_passing_checks"] < lower_bound:
-                summary = None
-            facts.append({"subject": branch, "revision": sha, "outcome": "failure",
-                          "non_passing_checks": (summary["non_passing_checks"]
-                                                 if summary else lower_bound),
-                          "may_be_incomplete": bool(partial is not False or not summary
-                              or summary["may_be_incomplete"])})
-        return rows, facts[:MAX_CI_WAKE_ROWS]
+        return _ci_summary_observation(raw, config, branches=branches)
     except Exception:
         return [], []
 
@@ -413,3 +424,30 @@ def wake_ci_failures(project, config=None) -> list:
 def wake_ci_facts(project, config=None) -> list:
     """Bounded per-subject/revision external-check wake facts (never raises)."""
     return wake_ci_observation(project, config)[1]
+
+
+def ci_summary_facts(project, config=None, *, all_subjects=False) -> list:
+    """Bounded aggregate facts for wake subjects, or all observed subjects.
+
+    Reads one poll cache and uses the wake aggregation schema and bounds;
+    unreadable or malformed evidence yields no facts, never inferred success.
+    """
+    if not all_subjects:
+        return wake_ci_facts(project, config)
+    try:
+        if config is None:
+            config = getattr(project, "config", None)
+        raw = read_json(project.root / POLL_STATE_FILE, {})
+        return _ci_summary_observation(raw, config)[1]
+    except Exception:
+        return []
+
+
+def _valid_ci_summary_fact(value) -> bool:
+    """Exact aggregate schema, shared by prompt copies and generation validation."""
+    return (isinstance(value, dict)
+            and set(value) == {"subject", "revision", "outcome",
+                               "non_passing_checks", "may_be_incomplete"}
+            and all(isinstance(value[key], str) for key in ("subject", "revision", "outcome"))
+            and type(value["non_passing_checks"]) is int
+            and type(value["may_be_incomplete"]) is bool)

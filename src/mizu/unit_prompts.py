@@ -21,6 +21,7 @@ import time
 from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs, prompt_sections, reviews
+from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact, ci_summary_facts
 from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
 from .protocol import WRITER_CONTINUATION_CONTRACT, tool_definitions
@@ -515,6 +516,44 @@ def _published_snapshot(context: Context) -> dict:
         "effective_verification": proof, "effective_verification_diagnostic": diagnostic}
 
 
+def _external_check_wake(context: Context) -> dict:
+    """Copy dispatch-frozen aggregates, never rereading the poll cache.
+
+    Malformed entries are dropped within the cache row envelope. The details
+    route is offered once, only with vcs_read; local check jobs are unrelated.
+    """
+    stored = getattr(context, "external_check_wake_facts", [])
+    facts = ([dict(fact) for fact in stored[:MAX_CI_WAKE_ROWS]
+              if _valid_ci_summary_fact(fact)] if isinstance(stored, list) else [])
+    details = ({"tool": "mizu_vcs_read", "operations": ["status", "log"]}
+               if "vcs_read" in context.role.capabilities else None)
+    return {"facts": facts, "details": details}
+
+
+def _validate_opening(payload: dict) -> dict:
+    """Fail closed if nested per-check external observations reach an opening.
+
+    Only external row signatures and passed_on annotations are forbidden;
+    local check-job records, check-name selectors and aggregates remain valid.
+    """
+    def walk(value):
+        if isinstance(value, dict):
+            if ("passed_on" in value or {"branch", "sha", "check"} <= value.keys()
+                    or {"sha", "check", "state"} <= value.keys()):
+                raise Denied("Per-check external observation in unit opening")
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    try:
+        walk(payload)
+    except RecursionError as exc:
+        raise Denied("Invalid nested unit opening") from exc
+    return payload
+
+
 def prompt_for(context: Context) -> str:
     # The charter body belongs to stable engine system context on every
     # dispatch (including resume); full and delta unit prompts carry its pin.
@@ -535,13 +574,9 @@ def prompt_for(context: Context) -> str:
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context))
     acceptance = list(context.project.verify) if "verify" in caps else []
-    ci_branch = context.config.vcs.get("ci_branch") or None
-    if "vcs_read" not in caps:
-        ci_branch = None
-    ci_failures = opening["ci_failures"]
-    ci_failures_may_be_truncated = opening["ci_truncated"]
-    return json.dumps(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
+                       "external_check_wake": _external_check_wake(context),
                        "goal_digest": context.goal_digest,
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
@@ -569,14 +604,14 @@ def prompt_for(context: Context) -> str:
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
-                       "ci_branch": ci_branch,
-                       "ci_failures": ci_failures,
-                       "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
+                       "ci_branch": context.config.vcs.get("ci_branch") or None,
+                       "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
+                                      if "ci" in prompt_sections.included(context.role) else []),
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
-                       **_prompt_clock(context)}),
+                       **_prompt_clock(context)})),
                       ensure_ascii=False)
 
 
@@ -585,7 +620,8 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     """Append-only delta for a resumed persistent session.
 
     Schema: the constant ``unit`` opening, then the names-only
-    ``unit_tool_surface``, the ``goal_digest`` pin, the
+    ``unit_tool_surface``, fixed ``external_check_wake`` aggregates and details
+    route, the ``goal_digest`` pin, the
     pinned ``published_snapshot`` and a small ``snapshot_delta``
     (previous/current ids), plus the normalized dispatch ``admission`` label
     and an optional ``grant_transition`` when bounded same-session evidence
@@ -595,7 +631,9 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     reads as done), the always-present bounded ``open_work_items`` page,
     workspace markers, capability-gated acceptance commands, and a
     capability-gated ``previous_report`` preview for roles holding
-    ``report``. The independent bounded ``ready_work`` projection follows
+    ``report``. The opt-in ``ci`` section contains only branch and aggregate
+    summaries for all observed subjects, never per-check rows.
+    The independent bounded ``ready_work`` projection follows
     this stable context in the volatile suffix, before run identity and clock.
     The charter body is supplied separately in stable system instructions;
     ``recent_snapshots`` history is not repeated in deltas. Key order is fixed (stable context
@@ -631,13 +669,12 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     from . import work_order as _plan
     opening = _plan._capture_opening(context)
     acceptance = list(context.project.verify) if "verify" in caps else []
-    ci_failures = opening["ci_failures"]
-    ci_failures_may_be_truncated = opening["ci_truncated"]
     open_backlog = opening["open_backlog"]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
-    return json.dumps(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
+                       "external_check_wake": _external_check_wake(context),
                        "goal_digest": context.goal_digest,
                        **(grant_transition or {}),
                        "admission": context.admission,
@@ -665,13 +702,12 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
-                       "ci_branch": ((context.config.vcs.get("ci_branch") or None)
-                                     if "vcs_read" in caps else None),
-                       "ci_failures": ci_failures,
-                       "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
+                       "ci_branch": context.config.vcs.get("ci_branch") or None,
+                       "ci_summary": (ci_summary_facts(context.project, context.config, all_subjects=True)
+                                      if "ci" in prompt_sections.included(context.role) else []),
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
                        "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
-                       **_prompt_clock(context)}),
+                       **_prompt_clock(context)})),
                       ensure_ascii=False)

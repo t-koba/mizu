@@ -36,7 +36,7 @@ from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
                              effective_ci_wake_branches, selected_ci_failures_present,
                              wake_ci_failures)
 from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
-                      _ci_due, _ci_due_for, _ci_rewake_seconds,
+                      _ci_due, _ci_due_for, _ci_due_for_with_facts, _ci_rewake_seconds,
                       _ci_wake_enabled, _ci_wake_fact_digest, _ci_wake_path,
                       _normalize_ci_wake_branches, read_ci_wake, write_ci_wake)
 from .budget import Budget
@@ -465,6 +465,7 @@ class Context:
         self.goal_digest = digest(self.goal.encode())
         # Normalized cause selected by dispatch; exposed to the unit prompt only.
         self.admission: str | None = None
+        self.external_check_wake_facts = []
         # Capture the inputs actually offered to this run, not arrivals at publication.
         self.inbox_seen = project.insights.generation()
         self.wake_generation = _normalized_wake_generation(
@@ -2968,9 +2969,10 @@ class Engine:
                 ci_unavailable = True
         try:
             _ci_snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
-            ci_failures = _ci_due_for(project, self.config, role, _ci_snapshot_id, time.time())
+            ci_failures, external_check_wake_facts = _ci_due_for_with_facts(
+                project, self.config, role, _ci_snapshot_id, time.time())
         except Exception:
-            ci_failures = []
+            ci_failures, external_check_wake_facts = [], []
             ci_unavailable = True
         # A check-result subscription is not a request to start unrelated
         # project work. Explicit-only roles may resume their owned checks,
@@ -3078,6 +3080,7 @@ class Engine:
             or ready_work_present or explicit_wake
             or progress_self_admits or next_task or (role.on_change and not code_unchanged))
         return {'next_task': next_task, 'proposal_manifest': proposal_manifest, 'ci_manifest': ci_manifest, 'record_state': record_state, 'decision_state': decision_state, 'snapshot': snapshot, 'sources': sources, 'terminal_events': terminal_events, 'terminal_page': terminal_page, 'wait_events': wait_events, 'obligations': obligations, 'ci_present': ci_present, 'ci_failures': ci_failures, 'prior_wait_expired': prior_wait_expired, 'decision_events': decision_events, 'decision_receipt_diagnostics': receipt_diagnostics, '_resolved_wait': resolved_wait,
+                'external_check_wake_facts': external_check_wake_facts,
                 '_pending_wait_resolution': pending_resolution,
                 '_waits_reconciled': waits_reconciled, '_dispatch': _dispatch,
                 '_has_other_scheduled_input': other_scheduled_input}
@@ -3472,6 +3475,8 @@ class Engine:
                         project.snapshots.materialize(snapshot, workspace)
                 context = Context(self.config, project, role, run_dir, snapshot, workspace,
                                   stop=self.stop, consult=self.consult, delegate=self.delegate)
+                context.external_check_wake_facts = [
+                    dict(fact) for fact in dispatch_state["external_check_wake_facts"]]
                 if role.workspace == "write":
                     context._workspace_lease = _WorkspaceLease(self, context, stack)
                 context.admission = admission
