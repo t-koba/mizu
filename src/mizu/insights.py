@@ -417,6 +417,13 @@ def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str | None:
     """
     if not isinstance(stored, dict):
         return None
+    # A registration whose retained bytes cannot be canonically encoded (e.g.
+    # a non-finite number from a corrupt file) must be skipped by every caller
+    # before it reaches unguarded canonicalization in a delivery payload.
+    try:
+        encoded = canonical(stored)
+    except (ValueError, TypeError):
+        return None
     if "registration_id" in stored:
         rid = stored["registration_id"]
         return rid if isinstance(rid, str) and re.fullmatch(r"[0-9a-f]{32}", rid) else None
@@ -425,7 +432,7 @@ def _wait_registration_id(stored: dict, fallback_owner: str = "") -> str | None:
         identifier(owner)
     except Denied:
         return None
-    return f"legacy:{owner}:{digest(canonical(stored))}"
+    return f"legacy:{owner}:{digest(encoded)}"
 
 
 #: Evidence-entry bounds (fixed mechanism, not knobs): at most this many

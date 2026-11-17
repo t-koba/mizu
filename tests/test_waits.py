@@ -266,6 +266,23 @@ class WaitRegistrationIdTests(Fixture):
         self.assertEqual([row["registration_id"] for row in two],
                          sorted(by_path.values())[:2])
 
+    def test_nonfinite_registration_is_skipped_without_losing_other_waits(self):
+        good = _defer(self.project, "reviewer",
+                      {"kind": "deadline", "at": _past()}, title="Good")
+        bad = _defer(self.project, "reviewer",
+                     {"kind": "deadline", "at": _past()}, title="Bad")
+        path = self.project.root / "waits" / f"{bad['id']}.json"
+        stored = read_json(path)
+        stored["registered_at"] = "NONFINITE_FIXTURE"
+        raw = json.dumps(stored).replace('"NONFINITE_FIXTURE"', "1e9999").encode()
+        path.write_bytes(raw)
+
+        due = self.project.insights.due_waits(
+            "reviewer", self.project.snapshots.get())
+
+        self.assertEqual([row["insight"] for row in due], [good["id"]])
+        self.assertEqual(path.read_bytes(), raw)
+
     def test_reregistration_gets_new_identity(self):
         from mizu.fs import read_json
         item = _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()})
