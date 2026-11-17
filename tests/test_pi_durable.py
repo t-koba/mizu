@@ -1301,9 +1301,16 @@ class SessionIsolationTests(Fixture):
         self._succeed(driver)
         driver.execute(self.context(), "one", profile=profile)
         session_dir = next((self.project.root / "sessions" / role.name).rglob("session.json")).parent
-        (session_dir / "generation.json").write_text("{corrupt")
-        with self.assertRaises(ConfigError):
-            driver.execute(self.context(), "two", profile=profile)
+        from unittest.mock import patch
+        marker = session_dir / "generation.json"
+        for content in (b"{corrupt", b"null"):
+            with self.subTest(content=content):
+                marker.write_bytes(content)
+                with patch.object(pi_durable, "open_store") as store:
+                    with self.assertRaises(ConfigError):
+                        driver.execute(self.context(), "two", profile=profile)
+                    store.assert_not_called()
+                self.assertEqual(marker.read_bytes(), content)
 
 
 class StoreTests(unittest.TestCase):

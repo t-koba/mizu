@@ -408,12 +408,13 @@ def session_generation(session_dir) -> int:
     alongside ``session.json``. Failure: malformed records raise
     ``ConfigError`` rather than silently resuming an older generation.
     """
+    _missing = object()
     try:
-        record = read_json(Path(session_dir) / "generation.json", None)
+        record = read_json(Path(session_dir) / "generation.json", _missing)
     except (OSError, ValueError) as exc:
         raise ConfigError("Invalid session generation; "
                           "resume cannot be replaced with a new conversation") from exc
-    if record is None:
+    if record is _missing:
         return 0
     if (not isinstance(record, dict) or set(record) != {"generation"}
             or type(record.get("generation")) is not int

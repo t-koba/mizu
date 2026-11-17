@@ -1,13 +1,15 @@
 import dataclasses
 import json
 import os
+from pathlib import Path
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver
-from mizu.errors import Denied
-from mizu.engine_config import effective, session_record, save_session
+from mizu.errors import ConfigError, Denied
+from mizu.engine_config import effective, session_generation, session_record, save_session
 from mizu.fs import now, read_json
 from mizu.project import Project
 from mizu.runtime import Engine, _progress_obligations_digest
@@ -34,6 +36,39 @@ def save_worker_session(fixture, usage):
 
 def projection(fixture, run_id):
     return read_json(fixture.project.root / "runs" / run_id / "prompt_projection.json")
+
+
+class SessionGenerationTests(unittest.TestCase):
+    def test_missing_marker_is_generation_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(session_generation(directory), 0)
+            self.assertFalse((Path(directory) / "generation.json").exists())
+
+    def test_valid_markers_preserve_generation_and_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "generation.json"
+            for generation in (0, 7, 2 ** 31):
+                with self.subTest(generation=generation):
+                    content = json.dumps({"generation": generation}).encode()
+                    marker.write_bytes(content)
+                    self.assertEqual(session_generation(directory), generation)
+                    self.assertEqual(marker.read_bytes(), content)
+
+    def test_malformed_markers_are_refused_without_rewriting(self):
+        records = (b"null", b"[]", b'"text"', b"0", b"true", b"{}",
+                   b'{"generation": 1, "extra": 0}', b'{"generation": null}',
+                   b'{"generation": true}', b'{"generation": false}',
+                   b'{"generation": 1.0}', b'{"generation": "1"}',
+                   b'{"generation": -1}', b'{"generation": 2147483649}',
+                   b"{corrupt")
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "generation.json"
+            for content in records:
+                with self.subTest(content=content):
+                    marker.write_bytes(content)
+                    with self.assertRaisesRegex(ConfigError, "Invalid session generation"):
+                        session_generation(directory)
+                    self.assertEqual(marker.read_bytes(), content)
 
 
 class SessionDeltaTests(Fixture):
