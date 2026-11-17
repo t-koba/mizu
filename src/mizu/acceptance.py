@@ -16,7 +16,7 @@ from . import platform as _platform
 from .config import MAX_CHECK_INPUT_BOUND
 from .errors import Denied, LimitExceeded
 from .check_job_index import entry_key
-from .fs import DIGEST, atomic_write, canonical, digest, lock, safe_read
+from .fs import DIGEST, atomic_write, canonical, digest, loads_finite, lock, safe_read
 
 MAX_BYTES = 1048576
 #: Request sequences fit SQLite's signed 64-bit integer storage domain.
@@ -65,7 +65,7 @@ def _producer_read(project, job_id, name):
     # Denied here: it includes unsafe links, changing files and shared paths.
     raw = safe_read(project.root, f'check-jobs/{job_id}/{name}.json', project.config.limits.file_bytes)
     try:
-        return json.loads(raw)
+        return loads_finite(raw)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise InvalidProducer(job_id, name + '_json') from exc
 
@@ -275,7 +275,7 @@ def _present(root, relative):
 
 def _read(root, relative, maximum=MAX_BYTES):
     try:
-        return json.loads(safe_read(root, relative, maximum))
+        return loads_finite(safe_read(root, relative, maximum))
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise Denied('Malformed acceptance evidence') from exc
 

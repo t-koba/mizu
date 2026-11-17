@@ -10,7 +10,7 @@ from support import Fixture, bind_delivery
 from test_check_jobs import FakeSandbox
 from mizu import acceptance, check_jobs, storage
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.fs import canonical, digest, held, lock
+from mizu.fs import MAX_JSON_DEPTH, canonical, digest, held, lock
 from support import forget_ledger, history_write_json as write_json
 from mizu.project import Project
 from mizu.runtime import prompt_for, prompt_delta_for
@@ -380,6 +380,26 @@ class AcceptanceTests(Fixture):
         (self.root / name).write_bytes(b'[' * 10000 + b'0' + b']' * 10000)
         with self.assertRaises(Denied):
             acceptance._read(self.root, name)
+
+    def test_boundary_json_depth_is_a_product_rule_on_every_version(self):
+        # Depth 65 is accepted by plain json.loads on CPython <=3.13 and was
+        # previously refused only by that interpreter's RecursionError, which
+        # 3.14 no longer raises. The product bound must refuse it on every
+        # version, at both safe_read file boundaries.
+        deep = b'[' * (MAX_JSON_DEPTH + 1) + b'0' + b']' * (MAX_JSON_DEPTH + 1)
+        boundary = b'[' * MAX_JSON_DEPTH + b'0' + b']' * MAX_JSON_DEPTH
+        name = 'bounded.json'
+        (self.root / name).write_bytes(deep)
+        with self.assertRaises(Denied):
+            acceptance._read(self.root, name)
+        (self.root / name).write_bytes(boundary)
+        self.assertIsInstance(acceptance._read(self.root, name), list)
+
+        directory = self.project.root / 'check-jobs' / ('a' * 64)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'job.json').write_bytes(deep)
+        with self.assertRaises(acceptance.InvalidProducer):
+            acceptance._producer_read(self.project, 'a' * 64, 'job')
 
     def test_receipt_with_nan_scope_fails_closed(self):
         value = {'schema': 1, 'code_digest': 'a' * 64, 'scope': {'x': float('nan')},
