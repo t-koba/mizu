@@ -959,6 +959,142 @@ class JobTests(Fixture):
             check_jobs.logs(ctx, job['id'], evidence_id=evidence_id)
 
 
+class RetainedReadTests(Fixture):
+    def submit(self):
+        role = self.config.roles['worker']
+        self.config = dataclasses.replace(self.config, roles={
+            **self.config.roles, 'worker': dataclasses.replace(
+                role, capabilities=(*role.capabilities, 'check_job'), check_result_wake=False)})
+        self.project.config = self.config
+        ctx = self.context()
+        return ctx, check_jobs.submit(ctx)
+
+    def assert_no_wait(self):
+        self.assertIsNone(check_jobs.deferral(self.project, 'worker'))
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertIsNone(check_jobs.continuation(self.project, 'worker', {}))
+
+    def test_raw_read_refuses_symlink_to_regular_job(self):
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        target = self.root / 'outside-job.json'
+        path.rename(target)
+        try:
+            os.symlink(target, path)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Symlinks unavailable: ' + str(exc))
+        with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
+            check_jobs.raw_read(self.project, job['id'])
+
+    def test_raw_read_refuses_hardlinked_job(self):
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        try:
+            os.link(path, self.root / 'job-alias.json')
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Hardlinks unavailable: ' + str(exc))
+        with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
+            check_jobs.raw_read(self.project, job['id'])
+
+    def test_raw_read_refuses_oversized_job(self):
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        self.project.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, file_bytes=4096))
+        write_json(path, {'id': job['id'], 'padding': 'x' * 4096})
+        with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
+            check_jobs.raw_read(self.project, job['id'])
+
+    def test_raw_read_refuses_fifo_without_blocking(self):
+        if not hasattr(os, 'mkfifo'):
+            self.skipTest('FIFOs unavailable')
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        path.unlink()
+        try:
+            os.mkfifo(path)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('FIFOs unavailable: ' + str(exc))
+        errors = []
+        def read_fifo():
+            try:
+                check_jobs.raw_read(self.project, job['id'])
+            except Exception as exc:
+                errors.append(exc)
+        reader = threading.Thread(target=read_fifo, daemon=True)
+        reader.start()
+        reader.join(timeout=1)
+        self.assertFalse(reader.is_alive(), 'Reading job FIFO blocked')
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], Denied)
+
+    def test_wait_readers_refuse_symlink_to_regular_wait(self):
+        ctx, job = self.submit()
+        check_jobs.set_wait(self.project, 'worker', job['id'], continuation={
+            'run': ctx.run_dir.name, 'summary': 'Prior report'})
+        self.assertIsNotNone(check_jobs.deferral(self.project, 'worker'))
+        self.assertIsNotNone(check_jobs.continuation(self.project, 'worker', {}))
+        path = check_jobs.root(self.project) / 'worker.wait.json'
+        target = self.root / 'outside-wait.json'
+        path.rename(target)
+        try:
+            os.symlink(target, path)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Symlinks unavailable: ' + str(exc))
+        # A terminal discovery would wake an explicit wait if the link were followed.
+        terminal = {**job, 'status': 'completed', 'acknowledged': False}
+        self.assertFalse(check_jobs.wake_ready(
+            self.project, 'worker', discovery=({job['id']: terminal},)))
+        self.assert_no_wait()
+
+    def test_malformed_and_missing_retained_state_fails_closed(self):
+        ctx, job = self.submit()
+        job_path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        wait_path = check_jobs.root(self.project) / 'worker.wait.json'
+        for data in (b'not json', b'"\xff"', b'[' * 2000 + b']' * 2000):
+            with self.subTest(data=data[:20]):
+                job_path.write_bytes(data)
+                wait_path.write_bytes(data)
+                with self.assertRaises(Denied):
+                    check_jobs.raw_read(self.project, job['id'])
+                self.assert_no_wait()
+        with patch('mizu.check_jobs.json.loads', side_effect=RecursionError):
+            with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
+                check_jobs.read_retained_json(self.project, f"check-jobs/{job['id']}/job.json")
+        job_path.unlink()
+        wait_path.unlink()
+        with self.assertRaises(Denied):
+            check_jobs.raw_read(self.project, job['id'])
+        self.assert_no_wait()
+
+    def test_wait_readers_refuse_oversized_wait(self):
+        ctx, job = self.submit()
+        record = check_jobs.set_wait(self.project, 'worker', job['id'])
+        self.project.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, file_bytes=4096))
+        write_json(check_jobs.root(self.project) / 'worker.wait.json',
+                   {**record, 'padding': 'x' * 4096})
+        self.assert_no_wait()
+
+    def test_atomic_retained_job_and_wait_flow(self):
+        ctx, job = self.submit()
+        self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'queued')
+        check_jobs.set_wait(self.project, 'worker', job['id'], continuation={
+            'run': ctx.run_dir.name, 'summary': 'Prior report'})
+        self.assertEqual(check_jobs.deferral(self.project, 'worker')['id'], job['id'])
+        self.assertFalse(check_jobs.wake_ready(self.project, 'worker'))
+        self.assertEqual(check_jobs.continuation(self.project, 'worker', {})['summary'],
+                         'Prior report')
+        completed = check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+        self.assertEqual(completed['status'], 'completed')
+        self.assertEqual(check_jobs.raw_read(self.project, job['id'])['status'], 'completed')
+        self.assertIsNone(check_jobs.deferral(self.project, 'worker'))
+        self.assertTrue(check_jobs.wake_ready(self.project, 'worker'))
+        result = check_jobs.result(ctx, job['id'])
+        self.assertTrue(result['accepted_for_current_source'])
+        self.assertTrue(result['result']['passed'])
+
+
 class PurposeTests(JobTests):
     """A purpose names the caller's own demand, so a later request replaces it."""
 

@@ -116,10 +116,24 @@ def purpose_label(purpose):
     return purpose
 
 
+def read_retained_json(project, relative):
+    """Read bounded, pinned retained state without following links."""
+    try:
+        data = safe_read(project.root, relative, project.config.limits.file_bytes)
+    except FileNotFoundError:
+        return None
+    except (Denied, LimitExceeded, OSError) as exc:
+        raise Denied('Retained check state unavailable') from exc
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise Denied('Retained check state unavailable') from exc
+
+
 def raw_read(project, job_id):
     if not isinstance(job_id, str) or not DIGEST.fullmatch(job_id):
         raise Denied('Invalid check job ID')
-    value = read_json(root(project) / job_id / 'job.json')
+    value = read_retained_json(project, f'check-jobs/{job_id}/job.json')
     if not isinstance(value, dict) or value.get('id') != job_id:
         raise Denied('Check job unavailable')
     return value
@@ -1867,7 +1881,7 @@ def deferral(project, role):
     try:
         if role not in project.config.roles or "check_job" not in project.config.roles[role].capabilities:
             return None
-        record = read_json(root(project) / (role + '.wait.json'), {})
+        record = read_retained_json(project, f'check-jobs/{role}.wait.json') or {}
         if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
             return None
         deadline = _positive_finite_deadline(record.get('wait_until'))
@@ -1914,7 +1928,10 @@ def continuation(project, role, snapshot, *, discovery=None):
     """
     if role not in project.config.roles or 'check_job' not in project.config.roles[role].capabilities:
         return None
-    record = read_json(root(project) / (role + '.wait.json'), {})
+    try:
+        record = read_retained_json(project, f'check-jobs/{role}.wait.json') or {}
+    except Denied:
+        return None
     if not isinstance(record, dict):
         return None
     report = record.get('continuation')
@@ -2018,7 +2035,7 @@ def wake_ready(project, role, *, discovery=None):
                         f"'cancelled' WHEN o.id IS NOT NULL THEN o.status ELSE j.status END) IN ({marks}) "
                         "LIMIT 1", (role, *sorted(TERMINAL_WAKE_STATUSES))).fetchone():
                     return True
-        record = read_json(root(project) / (role + '.wait.json'), {})
+        record = read_retained_json(project, f'check-jobs/{role}.wait.json') or {}
         if not isinstance(record, dict) or record.get('inputs') != wait_signature(project):
             return False
         deadline = _positive_finite_deadline(record.get('wait_until'))
