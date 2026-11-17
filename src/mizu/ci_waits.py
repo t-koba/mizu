@@ -90,8 +90,8 @@ def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_d
         if snapshot["code_digest"] != observed_snapshot["code_digest"]:
             raise Denied("Observed CI snapshot digest mismatch")
         target = {**wait, **observed_snapshot}
-    # Only reconciliation's advisory scan supplies a call-local cache. Locked
-    # transitions and ordinary CI polling always list afresh by default.
+    # Reconciliation and polling may supply call-local caches. Other callers,
+    # including evidence validation and transitions, list afresh by default.
     key = (wait["branch"], target["code_digest"])
     if receipt_cache is not None and key in receipt_cache:
         publication_id = receipt_cache[key]
@@ -640,12 +640,13 @@ def _candidates(store, item, descendants, *, newest_first=False, wait_distance=N
             yield sid, sid
 
 
-def _candidate_wait(store, wait, candidate):
+def _candidate_wait(store, wait, candidate, *, receipt_cache=None, wait_distance=None):
     observed = None
     if candidate is not None:
         snapshot = store.snapshots.get(candidate)
         observed = {"snapshot_id": snapshot["id"], "code_digest": snapshot["code_digest"]}
-    return _resolved(store, wait, observed)
+    return _resolved(store, wait, observed, receipt_cache=receipt_cache,
+                     wait_distance=wait_distance)
 
 
 def _poll_error_code(exc):
@@ -659,7 +660,7 @@ def _poll_error_code(exc):
     return "invalid"
 
 
-def _poll_candidates(store, descendants, errors, limit):
+def _poll_candidates(store, descendants, errors, limit, *, receipt_cache=None, distances=None):
     """Stream eligible receipt-resolved candidates, retaining no waiter list."""
     for item in _items(store):
         try:
@@ -672,7 +673,16 @@ def _poll_candidates(store, descendants, errors, limit):
             continue
         for _, candidate in _candidates(store, item, descendants):
             try:
-                wait = _candidate_wait(store, item["wait"], candidate)
+                wait_distance = None
+                if candidate is not None and distances is not None:
+                    sid = item["wait"]["snapshot_id"]
+                    # Bind resolution to this wait, across candidates and both
+                    # passes. Discovery above keeps its ordinary skip policy.
+                    if sid not in distances:
+                        distances[sid] = store.snapshots._descendant_distance_from(sid)
+                    wait_distance = distances[sid]
+                wait = _candidate_wait(store, item["wait"], candidate,
+                                       receipt_cache=receipt_cache, wait_distance=wait_distance)
                 if wait is not None:
                     yield item, candidate, wait
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
@@ -849,6 +859,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
     after, before = set(), set()
     errors = []
     store = project.work_items
+    receipt_cache, distances = {}, {}  # Never retain resolutions across poll ticks.
     descendants = config.vcs.get("ci_wait_descendants", True)
     try:
         enrollment = None
@@ -876,7 +887,9 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
         tail = False
         enroll_after, enroll_before = set(), set()
         scan_errors = []
-        for item, candidate, wait in _poll_candidates(store, descendants, scan_errors, limit):
+        for item, candidate, wait in _poll_candidates(
+                store, descendants, scan_errors, limit,
+                receipt_cache=receipt_cache, distances=distances):
             target = (wait["branch"], wait["sha"])
             invalidated = (page is not None and wait["branch"] in page["branches"]
                            and target > page_after)
@@ -929,7 +942,8 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
         # targets` for every candidate: full enumeration and receipt resolution
         # for no effect. Its only other contribution, scan_errors, is already
         # collected by the first pass over the same unchanged store.
-        candidates = (_poll_candidates(store, descendants, scan_errors, limit)
+        candidates = (_poll_candidates(store, descendants, scan_errors, limit,
+                                       receipt_cache=receipt_cache, distances=distances)
                       if targets else ())
         for item, candidate, wait in candidates:
             target = (wait["branch"], wait["sha"])
@@ -960,6 +974,8 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                     current = project.work_items.current(item["id"])
                     if current != item or _evidence(project.work_items, current) is not None:
                         continue
+                    # The adapter call may have raced a new publication;
+                    # revalidate uncached before writing authoritative evidence.
                     if _candidate_wait(project.work_items, current["wait"], candidate) != wait:
                         continue
                     if rows is None:

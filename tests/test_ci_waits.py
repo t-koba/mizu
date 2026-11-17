@@ -3,6 +3,7 @@ import dataclasses
 import json
 import uuid
 import weakref
+from collections import Counter
 from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver, without_blocked_age, forget_ledger
@@ -1323,6 +1324,63 @@ class PublicationCiWaitTests(CiWaitFixture):
             'kind', 'trust', 'work_item', 'rev', 'holder', 'publication_id', 'branch', 'sha',
             'snapshot_id', 'code_digest', 'snapshot_relation', 'wait_digest', 'checks',
             'conclusion', 'observed_at'})
+
+    def test_poll_shares_publication_resolution_only_within_one_tick(self):
+        items = [self.block(str(index)) for index in range(3)]
+        children = [self.descendant("shared") for _ in range(2)]
+        future = self.descendant("new receipt next tick")
+        self.assertEqual(children[0]["code_digest"], children[1]["code_digest"])
+        self.publish_descendant(children[0])
+        new_sha = "e" * 40
+        snapshots = self.store.snapshots
+        expected_lists = {(self.snapshot["code_digest"], "published"): 1,
+                          (children[0]["code_digest"], "published"): 1,
+                          (future["code_digest"], "published"): 1}
+
+        for tick in range(2):
+            if tick:
+                receipt = self.publish_descendant(future, sha=new_sha)
+            adapter = Mock(side_effect=lambda settings, op, params: {
+                "checks": self.rows("pending", sha=params["sha"])})
+            with (patch.object(Publication, "list_receipts",
+                               wraps=Publication.list_receipts) as listings,
+                  patch.object(snapshots, "_descendant_distance_from",
+                               wraps=snapshots._descendant_distance_from) as distances,
+                  patch.object(ci_waits, "_candidates", wraps=ci_waits._candidates) as discovery):
+                result, _ = self.poll(reader=adapter)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["observed"], 0)
+            self.assertEqual(adapter.call_count, 2 if tick else 1)
+            self.assertEqual({call.args[2]["sha"] for call in adapter.call_args_list},
+                             {SHA, new_sha} if tick else {SHA})
+            # Discovery deliberately keeps its own skip-policy checker per item
+            # and pass. Only resolution shares one checker per wait snapshot.
+            self.assertEqual(discovery.call_count, 2 * len(items))
+            self.assertTrue(all(call.args == (self.snapshot["id"],)
+                                for call in distances.call_args_list))
+            counts = {"receipt_lists": dict(Counter(
+                (call.kwargs["code_digest"], call.kwargs["branch"])
+                for call in listings.call_args_list)),
+                      "resolution_closures": distances.call_count - discovery.call_count}
+            with self.subTest(tick=tick):
+                self.assertEqual(counts, {"receipt_lists": expected_lists,
+                                          "resolution_closures": 1})
+            self.assertTrue(all(ci_waits._read(self.store, item) is None for item in items))
+
+        # Terminal evidence still uses the late, uncached safety revalidation.
+        result, _ = self.poll(reader=Mock(side_effect=lambda settings, op, params: {
+            "checks": self.rows("success" if params["sha"] == new_sha else "pending",
+                                sha=params["sha"])}))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["observed"], len(items))
+        events, _ = ci_waits.delivery(self.store, "worker")
+        self.assertEqual({event["work_item"] for event in events}, {item["id"] for item in items})
+        for event in events:
+            self.assertEqual(event["publication_id"], receipt["publication_id"])
+            self.assertEqual(event["observed_snapshot"], {
+                "snapshot_id": future["id"], "code_digest": future["code_digest"]})
+            self.assertEqual(event["snapshot_relation"], "strict_descendant")
+            self.assertEqual(event["conclusion"], "success")
 
     def test_descendant_ancestry_is_strict_complete_and_edge_bounded(self):
         item = self.block()
