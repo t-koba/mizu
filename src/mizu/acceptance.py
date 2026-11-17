@@ -276,7 +276,7 @@ def _present(root, relative):
 def _read(root, relative, maximum=MAX_BYTES):
     try:
         return json.loads(safe_read(root, relative, maximum))
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise Denied('Malformed acceptance evidence') from exc
 
 
@@ -389,9 +389,13 @@ def _validate(value, receipt_id):
         return value
     if (not isinstance(value, dict) or set(value) != {'schema', 'code_digest', 'scope', 'producer', 'passed', 'commands'}
             or type(value['schema']) is not int or value['schema'] != 1
-            or not isinstance(value['scope'], dict) or not isinstance(value['producer'], dict)
-            or len(canonical(value)) > MAX_BYTES
-            or digest(canonical(value)) != receipt_id):
+            or not isinstance(value['scope'], dict) or not isinstance(value['producer'], dict)):
+        raise Denied('Invalid acceptance receipt identity')
+    try:
+        raw = canonical(value)
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise Denied('Invalid acceptance receipt identity') from exc
+    if len(raw) > MAX_BYTES or digest(raw) != receipt_id:
         raise Denied('Invalid acceptance receipt identity')
     record = {**value, 'snapshot_representable': True, 'unchanged_during_verification': True,
               'dependencies_unchanged': True, 'image': value['scope'].get('image'),

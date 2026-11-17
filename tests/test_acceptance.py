@@ -375,6 +375,24 @@ class AcceptanceTests(Fixture):
         self.assertEqual(acceptance.audit(restored.root), 1)
         storage.audit(restored)
 
+    def test_deeply_nested_json_fails_closed(self):
+        name = 'nested.json'
+        (self.root / name).write_bytes(b'[' * 10000 + b'0' + b']' * 10000)
+        with self.assertRaises(Denied):
+            acceptance._read(self.root, name)
+
+    def test_receipt_with_nan_scope_fails_closed(self):
+        value = {'schema': 1, 'code_digest': 'a' * 64, 'scope': {'x': float('nan')},
+                 'producer': {}, 'passed': True, 'commands': []}
+        with self.assertRaises(Denied):
+            acceptance._validate(value, 'b' * 64)
+
+    def test_receipt_with_surrogate_scope_fails_closed(self):
+        value = {'schema': 1, 'code_digest': 'a' * 64, 'scope': {'x': '\ud800'},
+                 'producer': {}, 'passed': True, 'commands': []}
+        with self.assertRaises(Denied):
+            acceptance._validate(value, 'b' * 64)
+
     def test_invalid_objects_indexes_and_dangling_references_fail_closed(self):
         ctx, job, proof = self.produce()
         path = self.object_path(proof['receipt_id'])
