@@ -11,19 +11,41 @@ from .insights import insight_metadata
 INSIGHT_RETRIEVAL_LIMIT = 1000
 
 
-def display_for_role(record: dict, role_name: str) -> dict:
-    """Resolve model-facing role aliases in one insight row for its reader.
+def display_addressee(record: dict) -> dict:
+    """Resolve the model-facing ``writer`` alias in one insight row.
 
-    ``writer`` is an internal alias for the autonomous writer role. Delivered
-    to a model unchanged, a literal reader can take an insight addressed to
-    itself for another role's and leave its own obligation undecided. This is
-    display only: the stored addressee, event routing and decision identity
-    keep the stored value; readers address their own insights by their own
-    configured role name.
+    ``writer`` means the submitting role: pending routing selects a row only
+    when ``addressee = 'writer' AND source = role_name``. Resolving it to the
+    reader instead claims another role's insight is self-addressed in the
+    project-wide pending inventory. Display only: stored data, routing and
+    event identity keep the alias.
     """
     if not isinstance(record, dict) or record.get("addressee") != "writer":
         return record
-    return {**record, "addressee": role_name}
+    source = record.get("source")
+    if not isinstance(source, str) or not source:
+        return record
+    return {**record, "addressee": source}
+
+
+def display_decision_events(events) -> list:
+    """Project the same display alias onto delivered insight.pending events.
+
+    Only the payload's displayed addressee changes; event ids, subjects, ack
+    tokens and digest-bound identity stay byte-identical. Non-insight events
+    and explicit addressees pass through untouched.
+    """
+    projected = []
+    for event in events:
+        payload = event.get("payload") if isinstance(event, dict) else None
+        if (not isinstance(payload, dict) or event.get("kind") != "insight.pending"
+                or payload.get("addressee") != "writer"):
+            projected.append(event)
+            continue
+        source = payload.get("source")
+        projected.append({**event, "payload": {**payload, "addressee": source}}
+                         if isinstance(source, str) and source else event)
+    return projected
 
 
 def insights(context, args: dict) -> dict:
@@ -37,7 +59,7 @@ def insights(context, args: dict) -> dict:
             status = context.project.work_items.submitter_status(record["id"])
             if status is not None:
                 record["work_item_status"] = status
-        return display_for_role(record, context.role.name)
+        return display_addressee(record)
     # Prompt selection stays at pending_insights; explicit retrieval pages
     # a stable offset-independent selection capped at INSIGHT_RETRIEVAL_LIMIT,
     # so overflow items remain discoverable and small pages enumerate each
@@ -50,7 +72,7 @@ def insights(context, args: dict) -> dict:
     projection = context.project.insights.projection(
         limit=INSIGHT_RETRIEVAL_LIMIT, pending=action is None, action=action)
     response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
-    response['insights'] = [display_for_role(row, context.role.name)
+    response['insights'] = [display_addressee(row)
                             for row in response.pop('items')]
     response['total'] = projection['total']
     response['selection_truncated'] = projection['truncated']
