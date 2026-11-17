@@ -776,13 +776,13 @@ current indexes or configuration. Snapshots are never mutated. Storage audit
 and reclamation retain all historical delivery manifests, including bindings
 on still-doing or dropped items and superseded bindings needed for replay.
 
-Only a forward `dropped` -> `done` correction is possible. Under
+Ordinary transitions permit only a forward `dropped` -> `done` terminal correction. Under
 `verified_snapshot_v1` it requires a previously recorded valid delivery and
 independently retained acceptance,
 even if the snapshot already embeds passing verification. It appends a new
-revision and leaves the dropped event intact. No other terminal reopening is
-allowed. The binding is an attributed writer declaration of delivery for the
-accepted scope, not a semantic proof of arbitrary source changes. Missing,
+revision and leaves the dropped event intact. Done-to-open instead requires
+the separately authorized audited reopening operation described below. The
+binding is an attributed writer declaration of delivery for the accepted scope, not a semantic proof of arbitrary source changes. Missing,
 unsafe, corrupt or mismatched evidence refuses; lock/I/O errors propagate.
 Cancellation/process death releases kernel locks; stale CAS writes nothing and
 requires a fresh read, never an automatic retry.
@@ -808,9 +808,35 @@ Attestation replay checks finite JSON, string keys, depth 32, a fixed durable
 snapshot fields. Writes additionally enforce the configured attachment budget
 (default 8192 bytes). Lowering that budget cannot invalidate accepted history.
 Unknown contracts and malformed evidence fail closed, with contract/condition
-errors that do not echo payloads. This adds no done-to-reopen path: that audited
-operation remains outside this change, with evidence retained for checks and
-future reopening. Seals, acknowledgements, admission and parking are unchanged.
+errors that do not echo payloads.
+
+`work_items_reopen` is a separate default-disabled capability/tool. The runtime
+requires both that explicit role capability and the authenticated actor in
+`completion_evidence.reopen_roles` (default empty); actor/policy cannot be
+supplied by the caller. The store's `reopen(id, *, expected_rev, reason, actor)`
+uses the existing lock/CAS/index append path. It accepts only current done at
+revision <= 253 and a nonblank 1–4000-character reason. Above that cutoff it
+refuses for revision headroom. The fixed revision ceiling remains 256: at
+revision 253 the four strict reopen/claim/bind/close appends cannot all fit;
+this boundary limitation is not bypassed by reopening.
+
+The immutable full-state open revision preserves identity/title/origin/
+description/creation time/scope and delivery schema, but clears holder, wait,
+blocked start, active delivery and all snapshot/completion proof fields.
+Its bounded `reopen` marker binds `challenged_rev`, `challenger`, and the digest
+of the canonical event reason. Replay permits only done-to-open with this exact
+marker and cleared state, never consults mutable policy, and rejects markers
+on other transitions. Later transitions do not inherit the marker. Historical
+strict and attested closures retain their recorded contracts and delivery
+manifests remain auditable; old evidence is historical only, not new proof.
+Open/role-ready projections carry the challenge reason. Unresolved object
+waits follow the new pending head; recorded resolution proofs continue to
+validate against the historical revision. Terminal receipts bind item/revision,
+so the old acknowledgement cannot cover a later completion, which is delivered
+anew. No verification is synthesized and attestation is not marked verified.
+This is not same-ID generation rollover: revision/history are never reset.
+Writer finish(done) verification, seals, acknowledgements, admission and parking
+are unchanged.
 
 The separately granted `work_items_create` operation calls
 `Project.work_items.create(*, idempotency_key, title, actor, origin=None)` for
@@ -887,7 +913,7 @@ transition actor. Exact receipts still identify each terminal item/revision.
 
 Statuses are `open`, `doing`, `blocked`, `done`, `dropped`. Same-status changes
 require a scope change or an explicit doing-to-doing delivery binding. Done
-never reopens; dropped permits only the forward done correction
+reopens only through the separate opt-in audited operation; dropped permits only the forward done correction
 described above. Other statuses can move to any different status, subject to
 completion evidence and the ordinary constraints. Title/origin/description/creation time stay fixed; every event
 records its revision, update time, caller-supplied actor, from/to transition,

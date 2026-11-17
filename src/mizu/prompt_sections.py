@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 
-WORK_CAPABILITIES = frozenset({"work_items_read", "work_items_create", "work_items_transition",
+WORK_CAPABILITIES = frozenset({"work_items_read", "work_items_create", "work_items_transition", "work_items_reopen",
                                "work_items_legacy_read", "work_items_reconcile", "work_order"})
 
 

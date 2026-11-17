@@ -333,6 +333,7 @@ root policy, not the item's origin or a caller-supplied policy:
 
 ```toml
 [completion_evidence]
+reopen_roles = []
 default = "verified_snapshot_v1"
 maximum_evidence_bytes = 8192
 [completion_evidence.by_role]
@@ -376,8 +377,39 @@ fields keep their original strict snapshot contract.
 
 This changes **work-item completion only**, not the separate writer
 `mizu_finish(outcome="done")` passing-verification gate, seals, acknowledgements,
-admission, or parking. An audited done-to-reopen path remains outside this
-change; evidence is retained so checks and future reopening are possible.
+admission, or parking.
+
+### Audited completion reopening
+
+`work_items_reopen` is a distinct, default-disabled tool, not a transition
+option. Enable it only by explicitly granting the authenticated role the
+`work_items_reopen` capability **and** listing that role in
+`completion_evidence.reopen_roles` (default `[]`). The allowlist accepts unique
+configured role names; unknown keys, unknown roles and malformed lists fail
+configuration loading. Neither setting grants the other, and a missing grant
+or allowlist membership produces a specific refusal. No role in the example
+configuration has the capability.
+
+Arguments are `id` (35 characters), `expected_rev` (integer >= 1), and `reason`
+(nonblank, 1–4000 characters); unknown fields, including actor and policy, are
+refused. Only the exact current `done` revision may reopen. Revisions above
+253 refuse for headroom; the existing revision-256 ceiling is unchanged.
+**Boundary limitation:** at revision 253, reopen/claim/bind/close would require
+revision 257 under the strict contract. The numeric cutoff does not guarantee
+that full strict cycle at that boundary; no gate or revision limit is bypassed.
+Stale CAS requires a fresh read, not an automatic retry.
+
+The append preserves identity, scope and immutable history, clears the holder,
+wait, active delivery and all completion/snapshot evidence, and records the
+challenged revision, authenticated challenger and canonical reason digest.
+Old evidence is historical only, never inherited proof. Reopened work appears
+in open/role-ready pages with its reason; unresolved object waits become
+pending again, while existing historical resolution proofs remain readable.
+An old terminal acknowledgement cannot acknowledge a later completion, which
+must be delivered anew. Ordinary completion contracts still apply: strict done
+needs a new delivery binding and passing verification; attestation is not
+verification. This is not same-ID generation rollover: the revision counter
+continues and history is never reset.
 
 ## Root keys
 
@@ -389,7 +421,7 @@ change; evidence is retained so checks and future reopening are possible.
 | `consult_role` | Default answering role for consultation when the caller names none; unset fails closed (explicit roles required) |
 | `exclude` | Snapshot/import exclusion patterns; not a secret detection system. The product's reserved private evidence tree (`private-validation/`) is always left out of a capture, whatever this list holds. The product's own host state (the per-engine adapter start-up record `adapter-startup.json` and its lock) is left out for the same reason: it holds one host's measurements, not the product's source |
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
-| `completion_evidence` | Versioned work-item done contract and inline evidence budget; strict snapshot default (see above) |
+| `completion_evidence` | Versioned work-item done contract, inline evidence budget and default-empty reopening role allowlist (see above) |
 | `editor` | Operator-owned search policy captured in each immutable Editor export (see [Editor search](#editor-search)) |
 
 The private evidence tree `private-validation/` holds receipts the product regenerates on demand and never commits (see [VALIDATION.md](VALIDATION.md)). A capture leaves that tree out, so a regenerated receipt never enters a published snapshot and never moves a tree's `code_digest`. The rule belongs to the product, so `exclude` cannot reintroduce it; a snapshot that already holds such a path stays readable.
@@ -1877,7 +1909,8 @@ same-status doing transition with unchanged scope (the binding event stores
 must equal that prior binding; it does not compare the live workspace. Valid
 embedded verification or late independently retained acceptance may close an
 ordinary item. Only independently retained acceptance plus an existing delivery
-can correct dropped to done; no other terminal reopening is allowed. The full
+can correct dropped to done; done-to-open instead requires the separate
+explicitly enabled `work_items_reopen` tool. The full
 history pins receipt ID and acceptance-scope digest for configuration-independent
 replay (ADR-050). No new configuration knob or grant is added.
 

@@ -10,7 +10,8 @@ index is built from the files, and in :meth:`WorkItems.audit`. Origin
 staleness, hold ages and wait liveness are computed from current records on
 every read. Retrying a committed CAS requires a re-read. Same-status events
 require a scope/reference change, held-open release, or delivery binding; only
-a proven forward dropped-to-done correction may follow a terminal event.
+a proven forward dropped-to-done correction or explicit audited completion
+reopening may follow a terminal event.
 """
 from __future__ import annotations
 
@@ -46,6 +47,7 @@ from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELD
                              validate_tasks)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
+MAX_REOPEN_REV = 253  # Audited reopen source ceiling; does not reset revision history.
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
 #: Records written before the delivery claim existed keep the older field
 #: set. They stay readable history; a closure written now always carries the
@@ -1180,7 +1182,9 @@ class WorkItems:
         if type(record["delivery_schema"]) is not int or record["delivery_schema"] != 1:
             raise Denied("Invalid work-item delivery schema")
         delivery = record["delivery"]
-        binding = delivery != previous.get("delivery")
+        # Only the validated reopen event may discard an active binding.
+        clearing = "reopen" in record and delivery is None
+        binding = delivery != previous.get("delivery") and not clearing
         if binding:
             if (previous["status"] != "doing" or record["status"] != "doing"
                     or previous.get("scope") != record.get("scope")):
@@ -1229,7 +1233,7 @@ class WorkItems:
     def _validate_transition(self, previous: dict, record: dict, *, verify_snapshots: bool = True) -> None:
         """Validate transitions, always checking current completion evidence."""
         fields = set(record) - {"smoke_refs", "blocked_since", "wait_resolution",
-                                "completion_policy", "completion_evidence"}
+                                "completion_policy", "completion_evidence", "reopen"}
         policy = recorded_policy(record)
         if ("completion_policy" in record) != ("completion_evidence" in record):
             raise Denied(f"{policy}: completion policy and evidence fields must appear together")
@@ -1262,6 +1266,24 @@ class WorkItems:
         if frozenset(fields) not in allowed:
             raise Denied("Invalid work-item transition fields")
         actor = identifier(record["actor"])
+        reopening = "reopen" in record
+        if reopening:
+            marker, reason = record["reopen"], record["reason"]
+            if (previous["status"] != "done" or record["status"] != "open"
+                    or previous["rev"] > MAX_REOPEN_REV
+                    or not isinstance(marker, dict)
+                    or set(marker) != {"challenged_rev", "challenger", "reason_digest"}
+                    or type(marker["challenged_rev"]) is not int
+                    or marker["challenged_rev"] != previous["rev"]
+                    or marker["challenger"] != actor
+                    or not isinstance(reason, str) or not reason.strip() or len(reason) > 4000
+                    or marker["reason_digest"] != digest(canonical(reason))
+                    or record.get("scope") != previous.get("scope")
+                    or any(key in record for key in ("completion_policy", "completion_evidence", "wait_resolution"))
+                    or any(record.get(key) is not None for key in
+                           ("holder", "wait", "snapshot_id", "verification", "delivered_tree",
+                            "verification_scope", "delivery", "blocked_since"))):
+                raise Denied("Invalid audited completion reopen marker or state")
         validate_origin(record["origin"])
         status = record["status"]
         previous_scope = previous.get("scope")
@@ -1278,7 +1300,7 @@ class WorkItems:
             previous, record, verify_snapshots=verify_snapshots or status == "done")
         release = (status == previous["status"] == "open" and previous["holder"] is not None
                    and record["holder"] is None and "wait_resolution" not in record)
-        if (status not in STATUSES or previous["status"] == "done"
+        if (status not in STATUSES or (previous["status"] == "done" and not reopening)
                 or (previous["status"] == "dropped" and status != "done")
                 or (status == previous["status"] and not scope_changed and not refs_changed and not binding and not release)):
             raise Denied("Invalid work-item status transition")
@@ -2532,6 +2554,48 @@ class WorkItems:
         """
         return self._page_closed_impl(limit=limit, readonly=True)
 
+    def reopen(self, item_id: str, *, expected_rev, reason, actor) -> dict:
+        """Append an audited completion challenge; caller authenticates/authorizes actor.
+
+        Replays recorded contracts, not current policy. Old proof remains only
+        in history. The marker binds this event's actor, reason and source CAS.
+        The separate runtime capability and operator allowlist gate access.
+        """
+        identifier(actor)
+        if type(expected_rev) is not int or expected_rev < 1:
+            raise Denied("Expected revision must be a positive integer")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
+            raise Denied("Completion reopen reason must be nonblank text of 1-4000 characters")
+        with record_lock(self.root):
+            revisions = self._recover_temporary_writes(item_id)
+            current = self._get(item_id, history_revisions=revisions)
+            if current["rev"] != expected_rev:
+                raise Denied("Work item changed; re-read before reopening")
+            if current["status"] != "done":
+                raise Denied("Completion reopening requires a done work item")
+            if current["rev"] > MAX_REOPEN_REV:
+                raise Denied("Completion reopening requires revision headroom: current rev must be <= 253")
+            record = {**current, "rev": current["rev"] + 1, "status": "open",
+                      "updated_at": now(), "actor": actor,
+                      "transition": {"from": "done", "to": "open"},
+                      "holder": None, "wait": None, "blocked_since": None,
+                      "snapshot_id": None, "verification": None, "delivered_tree": None,
+                      "verification_scope": None, "scope": current.get("scope"),
+                      "delivery_schema": current.get("delivery_schema", 1), "delivery": None,
+                      "reason": reason,
+                      "reopen": {"challenged_rev": current["rev"], "challenger": actor,
+                                 "reason_digest": digest(canonical(reason))}}
+            for key in ("completion_policy", "completion_evidence", "wait_resolution"):
+                record.pop(key, None)
+            self._validate_transition(current, record)
+            if len(canonical(record)) > PREVIEW_BYTES:
+                raise LimitExceeded("Work-item event exceeds byte bound")
+            with self.committing([item_id]):
+                write_json(self.root / "work-items" / item_id / f"{record['rev']}.json",
+                           record, exclusive=True)
+            self._wake_terminal()
+            return record
+
     def transition(self, item_id: str, *, expected_rev, status, actor, reason=None,
                    wait=None, snapshot_id=None, scope=None, smoke_refs=None, evidence=None, _resolve_wait=False) -> dict:
         """Append one immutable full-state CAS event; terminal metadata wakes subscribers.
@@ -2738,6 +2802,7 @@ class WorkItems:
             if status == "done":
                 record["completion_policy"] = policy
                 record["completion_evidence"] = evidence
+            record.pop("reopen", None)
             record.pop("wait_resolution", None)
             if resolution is not None:
                 record["holder"] = current["holder"]

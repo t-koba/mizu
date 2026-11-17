@@ -42,6 +42,7 @@ parent_exact_job_wait = ["finish"]
 # Deny the rest of Context._DISPATCH while the parent is reserved. Unknown
 # operations and unsupported parameter values fail closed as well.
 parent_denied = [
+  "work_items_reopen",
   "files", "read", "command_evidence_read", "experiment_evidence_read",
   "exec", "experiment", "verify", "check_job", "sync", "vcs_publish",
   "vcs_request", "vcs_retire", "vcs_dispose", "materialize", "delegate",

@@ -41,3 +41,13 @@ def transition(context, args: dict) -> dict:
         args["id"], expected_rev=args["expected_rev"], status=args["status"],
         actor=context.role.name, reason=args.get("reason"), wait=args.get("wait"),
         evidence=args.get("evidence"), snapshot_id=args.get("snapshot_id"), scope=args.get("scope"), smoke_refs=args.get("smoke_refs"))
+
+
+def reopen(context, args: dict) -> dict:
+    # Also guard direct handler use; identity comes only from the runtime role.
+    if "work_items_reopen" not in context.role.capabilities:
+        raise Denied("Role has no capability: work_items_reopen")
+    if context.role.name not in context.project.config.completion_evidence.reopen_roles:
+        raise Denied("Role is not allowed by completion_evidence.reopen_roles")
+    return context.project.work_items.reopen(
+        args["id"], expected_rev=args["expected_rev"], reason=args["reason"], actor=context.role.name)

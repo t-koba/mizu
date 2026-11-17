@@ -367,7 +367,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reconcile",
+                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen", "work_items_reconcile",
                                "work_order", "record_write"})
 
 
@@ -381,7 +381,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                                "work_items_create", "work_items_transition", "work_items_reconcile",
+                                "work_items_create", "work_items_transition", "work_items_reopen", "work_items_reconcile",
                                 "work_order", "record_write"})
 
 
@@ -1352,6 +1352,9 @@ class Context:
     def _op_work_items_transition(self, args: dict) -> dict:
         return work_item_operations.transition(self, args)
 
+    def _op_work_items_reopen(self, args: dict) -> dict:
+        return work_item_operations.reopen(self, args)
+
     def _op_work_order(self, args: dict) -> dict:
         return work_order_ops.record(self, args)
 
@@ -2198,6 +2201,7 @@ class Context:
         "work_items_reconcile": _op_work_items_reconcile,
         "work_items_create": _op_work_items_create,
         "work_items_transition": _op_work_items_transition,
+        "work_items_reopen": _op_work_items_reopen,
         "work_order": _op_work_order,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,

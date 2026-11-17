@@ -23,7 +23,7 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "report", "finish", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
-                          "work_items_read", "work_items_create", "work_items_transition", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read", "result_read"})
+                          "work_items_read", "work_items_create", "work_items_transition", "work_items_reopen", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read", "result_read"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Role names that collide with insight sources owned by the host/operator
 #: channel (operator CLI, vcs CI helper, editor outbox). Model
@@ -1407,6 +1407,7 @@ class CompletionEvidence:
     default: str = "verified_snapshot_v1"
     maximum_evidence_bytes: int = 8192
     by_role: dict[str, str] = dataclasses.field(default_factory=dict)
+    reopen_roles: tuple[str, ...] = ()
 
     def for_actor(self, actor: str) -> str:
         return self.by_role.get(actor, self.default)
@@ -1414,7 +1415,7 @@ class CompletionEvidence:
 
 def completion_evidence_policy(raw, roles) -> CompletionEvidence:
     from .completion_evidence import POLICIES, MAX_EVIDENCE_BYTES
-    keys(raw, {"default", "maximum_evidence_bytes", "by_role"}, "completion_evidence")
+    keys(raw, {"default", "maximum_evidence_bytes", "by_role", "reopen_roles"}, "completion_evidence")
     values = {"default": "verified_snapshot_v1", "maximum_evidence_bytes": 8192,
               "by_role": {}, **raw}
     overrides = values["by_role"]
@@ -1425,7 +1426,12 @@ def completion_evidence_policy(raw, roles) -> CompletionEvidence:
             raise ConfigError("completion_evidence requires a supported versioned policy name")
     number(values["maximum_evidence_bytes"], "completion_evidence.maximum_evidence_bytes",
            1, MAX_EVIDENCE_BYTES)
-    return CompletionEvidence(**values)
+    reopen_roles = values.pop("reopen_roles", [])
+    if (not isinstance(reopen_roles, list)
+            or any(not isinstance(role, str) or role not in roles for role in reopen_roles)
+            or len(set(reopen_roles)) != len(reopen_roles)):
+        raise ConfigError("completion_evidence.reopen_roles must list unique configured roles")
+    return CompletionEvidence(**values, reopen_roles=tuple(reopen_roles))
 
 
 @dataclasses.dataclass(frozen=True)

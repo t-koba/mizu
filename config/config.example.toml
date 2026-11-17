@@ -91,6 +91,7 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 
 # Work-item done contract, independent of the writer finish(done) verification gate.
 [completion_evidence]
+reopen_roles = [] # Audited completion reopening is disabled unless explicitly allowed and granted.
 default = "verified_snapshot_v1"
 maximum_evidence_bytes = 8192  # Canonical JSON bytes, 1..65536; replay uses the format ceiling.
 [completion_evidence.by_role]
