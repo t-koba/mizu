@@ -199,6 +199,8 @@ def _mount_fingerprint(project, bounds):
     with lock(project.root / 'locks/check-inputs.lock'):
         cache_path = project.root / 'check-inputs.json'
         cached = read_json(cache_path, {})
+        if not isinstance(cached, dict):
+            cached = {}
         entries = {}
         total_bytes = 0
         try:
@@ -227,7 +229,9 @@ def _mount_fingerprint(project, bounds):
                         total_bytes += st.st_size
                         if total_bytes > bounds['bytes']:
                             return None
-                        old = cached.get(key, {})
+                        old = cached.get(key)
+                        if not isinstance(old, dict):
+                            old = {}
                         if os.name == 'posix' and old.get('stat') == identity and old.get('digest'):
                             content = old['digest']
                         else:
@@ -1235,7 +1239,10 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
     identity = digest(data)
     if content_id is not None and content_id != identity:
         raise Denied('Command evidence changed')
-    text = data.decode('utf-8')
+    try:
+        text = data.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise Denied('Command evidence unavailable') from exc
     end = min(len(text), offset + limit)
     return {'trust': 'recorded-local-untrusted', 'text': text[offset:end],
             'content_id': identity, 'offset': offset,
@@ -1882,6 +1889,8 @@ def continuation(project, role, snapshot, *, discovery=None):
     if role not in project.config.roles or 'check_job' not in project.config.roles[role].capabilities:
         return None
     record = read_json(root(project) / (role + '.wait.json'), {})
+    if not isinstance(record, dict):
+        return None
     report = record.get('continuation')
     if not isinstance(report, dict) or not isinstance(report.get('run'), str):
         return None

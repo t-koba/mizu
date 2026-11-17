@@ -818,6 +818,42 @@ class JobTests(Fixture):
         self.assertEqual(observed, [False, True])
         self.assertFalse((ctx.workspace / 'target').exists())
 
+    def test_mount_fingerprint_ignores_malformed_cache_shapes(self):
+        source = self.root / 'single-byte-input'
+        source.write_bytes(b'x')
+        sandbox = dataclasses.replace(
+            self.config.sandbox, mounts=({'source': str(source), 'target': '/input'},))
+        self.project.config = dataclasses.replace(self.config, sandbox=sandbox)
+        bounds = {'files': 2, 'bytes': 2}
+        expected = check_jobs._mount_fingerprint(self.project, bounds)
+        self.assertIsNotNone(expected)
+        cache_path = self.project.root / 'check-inputs.json'
+        for cached in ([], {str(source): []}):
+            with self.subTest(cached=cached):
+                write_json(cache_path, cached)
+                self.assertEqual(check_jobs._mount_fingerprint(self.project, bounds), expected)
+                self.assertIsInstance(read_json(cache_path)[str(source)], dict)
+                # A missing later mount must still leave the result unbound.
+                missing = {'source': str(self.root / 'missing-input'), 'target': '/missing'}
+                self.project.config = dataclasses.replace(
+                    self.config, sandbox=dataclasses.replace(sandbox, mounts=(*sandbox.mounts, missing)))
+                write_json(cache_path, cached)
+                self.assertIsNone(check_jobs._mount_fingerprint(self.project, bounds))
+                self.project.config = dataclasses.replace(self.config, sandbox=sandbox)
+
+    def test_continuation_refuses_non_mapping_wait_record(self):
+        write_json(check_jobs.root(self.project) / 'worker.wait.json', [])
+        self.assertIsNone(check_jobs.continuation(self.project, 'worker', None))
+
+    def test_command_logs_refuse_invalid_utf8(self):
+        ctx, job = self.submit()
+        evidence_id = 'a' * 32
+        path = check_jobs.root(self.project) / job['id'] / 'commands' / (evidence_id + '.json')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'\xff')
+        with self.assertRaisesRegex(Denied, 'Command evidence unavailable'):
+            check_jobs.logs(ctx, job['id'], evidence_id, offset=0, limit=100)
+
     def test_command_logs_are_paged_and_owner_bound(self):
         ctx, job = self.submit()
         path = check_jobs.root(self.project) / job['id'] / 'commands' / ('a'*32 + '.json')
