@@ -195,7 +195,9 @@ class InsightMetadataTests(Fixture):
                 with self.assertRaises(Denied):
                     validate({**valid, field: None}, DEFINITIONS[tool][1])
         self.assertEqual(ctx.handle("insights", {"id": item["id"]})["kind"], "question")
-        self.assertEqual(ctx.handle("insights", {"limit": 1})["insights"][0]["addressee"], "reviewer")
+        listed = ctx.handle("insights", {"limit": 1})["insights"][0]
+        self.assertEqual(listed["attention"], "reviewer")
+        self.assertNotIn("addressee", listed)
         legacy = self.legacy()
         no_op = ctx.handle("revise_insight", {"id": legacy["id"], "rev": 1,
                                               "title": legacy["title"], "body": legacy["body"]})

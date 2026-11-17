@@ -1,4 +1,5 @@
-"""Display-only resolution of the internal writer alias in model-facing rows."""
+"""Display-only routing attention and capability-based decision responsibility."""
+from copy import deepcopy
 import json
 
 from support import Fixture
@@ -27,75 +28,127 @@ def _pending_event(source="operator", addressee="writer"):
 
 
 class InsightAddresseeDisplayTests(Fixture):
-    def _submit(self, source="operator", **metadata):
+    def _submit(self, source="operator", *, title="Editorial", **metadata):
         return self.project.insights.submit(
-            source=source, title="Editorial", body="Body",
+            source=source, title=title, body="Body",
             base_snapshot=self.project.snapshots.get()["id"], **metadata)
 
-    def test_full_prompt_resolves_writer_alias_to_submitter(self):
-        item = self._submit()
-        ctx = self.context("worker")
-        decoded = json.loads(prompt_for(ctx))
-        row = next(r for r in decoded["pending_insights"] if r["id"] == item["id"])
-        self.assertEqual(row["addressee"], "operator")
-        # Storage keeps the alias; only the displayed row is resolved.
-        stored = self.project.insights.read(item["id"])
-        self.assertEqual(insight_metadata(stored)["addressee"], "writer")
-        self.assertEqual(stored["source"], "operator")
-
-    def test_delta_prompt_resolves_writer_alias_to_submitter(self):
-        item = self._submit()
-        ctx = self.context("worker")
+    def _reader_rows(self, ctx, items):
         pending = self.project.insights.list(limit=30)
-        decoded = json.loads(prompt_delta_for(ctx, pending))
-        row = next(r for r in decoded["pending_insights"] if r["id"] == item["id"])
-        self.assertEqual(row["addressee"], "operator")
+        return {
+            "full": json.loads(prompt_for(ctx))["pending_insights"],
+            "delta": json.loads(prompt_delta_for(ctx, pending))["pending_insights"],
+            "list": ctx.handle("insights", {"limit": 1000})["insights"],
+            "by-id": [ctx.handle("insights", {"id": item["id"]}) for item in items],
+        }
 
-    def test_tool_by_id_and_list_resolve_alias(self):
-        item = self._submit()
-        ctx = self.context("worker")
-        self.assertEqual(ctx.handle("insights", {"id": item["id"]})["addressee"], "operator")
-        listed = ctx.handle("insights", {"limit": 1000})["insights"]
-        self.assertEqual(next(r["addressee"] for r in listed if r["id"] == item["id"]), "operator")
-        self.assertEqual(insight_metadata(self.project.insights.read(item["id"]))["addressee"], "writer")
+    def _assert_display(self, row, attention, *, can_decide):
+        self.assertNotIn("addressee", row)
+        self.assertEqual(row["attention"], attention)
+        if can_decide:
+            self.assertEqual(row["decide"], "you")
+        else:
+            self.assertNotIn("decide", row)
 
-    def test_explicit_addressee_is_left_untouched(self):
+    def _assert_reader(self, role, *, can_decide):
+        items = [self._submit(source) for source in ("operator", "searcher", "worker")]
+        stored = [self.project.insights.read(item["id"]) for item in items]
+        ctx = self.context(role)
+        self.assertEqual("decide" in ctx.role.capabilities, can_decide)
+        for surface, rows in self._reader_rows(ctx, items).items():
+            with self.subTest(role=role, surface=surface):
+                self.assertEqual({row["id"] for row in rows}, {item["id"] for item in items})
+                for row in rows:
+                    self._assert_display(row, row["source"], can_decide=can_decide)
+        for item, original in zip(items, stored):
+            record = self.project.insights.read(item["id"])
+            self.assertEqual(record, original)
+            self.assertEqual(insight_metadata(record)["addressee"], "writer")
+            self.assertEqual(record["source"], item["source"])
+            self.assertNotIn("attention", record)
+            self.assertNotIn("decide", record)
+
+    def test_worker_can_decide_all_submitters_on_every_surface(self):
+        self._assert_reader("worker", can_decide=True)
+
+    def test_reporter_sees_attention_without_decision_mark_on_every_surface(self):
+        self._assert_reader("reporter", can_decide=False)
+
+    def test_explicit_addressee_value_is_preserved_as_attention(self):
         item = self._submit(addressee="operator")
-        ctx = self.context("worker")
-        self.assertEqual(ctx.handle("insights", {"id": item["id"]})["addressee"], "operator")
-        row = next(r for r in json.loads(prompt_for(ctx))["pending_insights"] if r["id"] == item["id"])
-        self.assertEqual(row["addressee"], "operator")
+        for role in ("worker", "reporter"):
+            for surface, rows in self._reader_rows(self.context(role), [item]).items():
+                with self.subTest(role=role, surface=surface):
+                    self.assertEqual(len(rows), 1)
+                    self._assert_display(rows[0], "operator", can_decide=role == "worker")
+        self.assertEqual(self.project.insights.read(item["id"])["addressee"], "operator")
 
-    def test_alias_is_the_submitter_for_every_reader(self):
+    def test_decided_rows_have_no_decision_mark(self):
+        ctx = self.context("worker")
+        for action in ("accept", "modify", "defer", "reject"):
+            with self.subTest(action=action):
+                item = self._submit(title=action)
+                self.project.insights.decide(
+                    item["id"], action, "Reviewed", "New evidence", ctx.run_dir.name,
+                    expected_rev=item["rev"])
+                rows = ctx.handle("insights", {"action": action})["insights"]
+                self.assertEqual(len(rows), 1)
+                by_id = ctx.handle("insights", {"id": item["id"]})
+                for row in (rows[0], by_id):
+                    self._assert_display(row, "operator", can_decide=False)
+                    self.assertEqual(row["decision"]["action"], action)
+        # Deferred insights remain in the pending inventory but are decided.
+        for surface, rows in self._reader_rows(ctx, []).items():
+            if surface == "by-id":
+                continue
+            with self.subTest(surface=surface):
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["decision"]["action"], "defer")
+                self._assert_display(rows[0], "operator", can_decide=False)
+
+    def test_revision_reopens_decision_mark_on_every_surface(self):
         item = self._submit()
+        self.project.insights.decide(
+            item["id"], "reject", "Reviewed", "", "test", expected_rev=item["rev"])
+        revised = self.project.insights.revise(
+            item["id"], source="operator", title="New evidence", body="Revised body",
+            base_snapshot=item["base_snapshot"], run="test", expected_rev=item["rev"])
+        for surface, rows in self._reader_rows(self.context("worker"), [revised]).items():
+            with self.subTest(surface=surface):
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["rev"], 2)
+                self.assertIsNone(rows[0]["decision"])
+                self._assert_display(rows[0], "operator", can_decide=True)
+
+    def _assert_event_projection(self, event):
+        original = deepcopy(event)
         for role in ("worker", "reporter"):
             ctx = self.context(role)
-            by_id = ctx.handle("insights", {"id": item["id"]})
-            self.assertEqual(by_id["addressee"], "operator")
-            row = next(r for r in json.loads(prompt_for(ctx))["pending_insights"]
-                       if r["id"] == item["id"])
-            self.assertEqual(row["addressee"], "operator")
+            ctx.decision_events = [event]
+            for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+                row = json.loads(prompt)["decision_events"][0]
+                target = event["payload"]["target"]
+                self._assert_display(row["payload"], target, can_decide=role == "worker")
+                # Only the displayed routing/decision fields change; all other
+                # payload content and event identity/ack binding stay exact.
+                expected_payload = {k: v for k, v in event["payload"].items() if k != "addressee"}
+                expected_payload["attention"] = target
+                if role == "worker":
+                    expected_payload["decide"] = "you"
+                self.assertEqual(row, {**event, "payload": expected_payload})
+                self.assertEqual(row["id"], event["id"])
+                self.assertEqual(row["subject"], event["subject"])
+                self.assertEqual(row["ack_token"], event["ack_token"])
+            self.assertEqual(ctx.decision_events[0], original)
+        self.assertEqual(event, original)
 
     def test_decision_event_alias_resolves_in_full_and_delta_prompts(self):
-        ctx = self.context("worker")
-        event = _pending_event()
-        ctx.decision_events = [event]
-        for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
-            row = json.loads(prompt)["decision_events"][0]
-            self.assertEqual(row["payload"]["addressee"], "operator")
-            self.assertEqual(row["payload"]["source"], "operator")
-            # Identity and acknowledgement binding are byte-identical.
-            self.assertEqual(row["id"], event["id"])
-            self.assertEqual(row["subject"], event["subject"])
-            self.assertEqual(row["ack_token"], event["ack_token"])
-        self.assertEqual(ctx.decision_events[0]["payload"]["addressee"], "writer")
+        for source in ("operator", "searcher", "worker"):
+            with self.subTest(source=source):
+                self._assert_event_projection(_pending_event(source=source))
 
-    def test_decision_event_with_explicit_addressee_is_untouched(self):
-        ctx = self.context("worker")
-        event = _pending_event(addressee="reviewer")
-        ctx.decision_events = [event]
-        for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
-            self.assertEqual(json.loads(prompt)["decision_events"][0], event)
+    def test_decision_event_explicit_addressee_becomes_attention(self):
+        self._assert_event_projection(_pending_event(addressee="reviewer"))
 
     def test_non_insight_decision_event_passes_through(self):
         ctx = self.context("worker")

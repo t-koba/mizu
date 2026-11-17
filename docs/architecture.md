@@ -441,7 +441,16 @@ subscription/admission behavior rather than gaining a duplicate attention wake;
 a new insight revision reopens attention. Urgency stays display-only, with no
 admission bypass, priority ordering or response deadline enabled.
 
-Attention rows contain `event`, `insight`, `rev`, `source`, `target`, `addressee`,
+Model-facing prompt rows, insight tool reads/lists, and `insight.pending`
+event payloads display stored routing `addressee` as `attention`, resolving
+`writer` to the submitting `source`; explicit targets remain unchanged. They
+omit `addressee`. Undecided rows additionally show `decide: "you"` exactly when
+the reader has the `decide` tool capability, irrespective of routing or source.
+Readers without that capability and already-decided rows get no `decide` mark.
+This is a display-only projection: stored records, routing, event identity and
+acknowledgement tokens remain unchanged.
+
+Stored attention rows contain `event`, `insight`, `rev`, `source`, `target`, `addressee`,
 `title`, `body`, `created_at`, `kind=insight.pending`, and the explicitly stored
 `insight_kind` and `urgency` when present. Evidence notes remain on the source
 insight, not in a new mutable delivery identity. Events are revision/content/

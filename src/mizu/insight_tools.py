@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from .errors import Denied
-from .fs import PREVIEW_BYTES, page, write_json
-from .insights import insight_metadata
+from .fs import PREVIEW_BYTES, page, read_json, write_json
+from .insights import MAX_DECISION_EVENT_BYTES, _effective_decision, insight_metadata
+from .protocol import operation_allowed
 
 #: Explicit paged insight retrieval may walk the whole pending set (tool
 #: page limit, same bound as `mizu insight list`); prompt
@@ -11,46 +12,52 @@ from .insights import insight_metadata
 INSIGHT_RETRIEVAL_LIMIT = 1000
 
 
-def display_addressee(record: dict) -> dict:
-    """Resolve the model-facing ``writer`` alias in one insight row.
+def display_insight(record: dict, capabilities) -> dict:
+    """Separate routing attention from the reader's decision capability.
 
-    ``writer`` means the submitting role: pending routing selects a row only
-    when ``addressee = 'writer' AND source = role_name``. Resolving it to the
-    reader instead claims another role's insight is self-addressed in the
-    project-wide pending inventory. Display only: stored data, routing and
-    event identity keep the alias.
+    Stored ``writer`` routes to the submitting source, never the reader.
+    Decision authority depends only on the tool grant, not that destination.
+    This projection never mutates storage or digest-bound event payloads.
     """
-    if not isinstance(record, dict) or record.get("addressee") != "writer":
-        return record
-    source = record.get("source")
-    if not isinstance(source, str) or not source:
-        return record
-    return {**record, "addressee": source}
+    projected = dict(record)
+    if "addressee" in projected:
+        target = projected.pop("addressee")
+        source = record.get("source")
+        if target == "writer" and isinstance(source, str) and source:
+            target = source
+        projected["attention"] = target
+    if record.get("decision") is None and operation_allowed("decide", capabilities):
+        projected["decide"] = "you"
+    return projected
 
 
-def display_decision_events(events) -> list:
-    """Project the same display alias onto delivered insight.pending events.
+def display_decision_events(events, capabilities) -> list:
+    """Project pending insight payloads without changing event identity.
 
-    Only the payload's displayed addressee changes; event ids, subjects, ack
-    tokens and digest-bound identity stay byte-identical. Non-insight events
-    and explicit addressees pass through untouched.
+    Event ids, subjects, ack tokens and digest-bound identity stay byte-identical.
+    Non-insight events pass through untouched.
     """
     projected = []
     for event in events:
         payload = event.get("payload") if isinstance(event, dict) else None
-        if (not isinstance(payload, dict) or event.get("kind") != "insight.pending"
-                or payload.get("addressee") != "writer"):
+        if not isinstance(payload, dict) or event.get("kind") != "insight.pending":
             projected.append(event)
             continue
-        source = payload.get("source")
-        projected.append({**event, "payload": {**payload, "addressee": source}}
-                         if isinstance(source, str) and source else event)
+        projected.append({**event, "payload": display_insight(payload, capabilities)})
     return projected
 
 
 def insights(context, args: dict) -> dict:
     if args.get("id"):
         record = context.project.insights.read(args["id"])
+        # Live reads contain content only; unlike list/archive rows they do
+        # not include the separate, revision-bound current decision.
+        if "decision" not in record:
+            path = context.project.insights.root / "decisions" / f"{record['id']}.json"
+            if path.is_symlink():
+                raise Denied("Unsafe insight decision path")
+            record["decision"] = _effective_decision(
+                record["rev"], read_json(path, max_bytes=MAX_DECISION_EVENT_BYTES))
         # The original submitter may follow an accepted proposal into its
         # current item without receiving a separate work-item capability.
         # This is a read-only projection; all item validation remains in
@@ -59,7 +66,7 @@ def insights(context, args: dict) -> dict:
             status = context.project.work_items.submitter_status(record["id"])
             if status is not None:
                 record["work_item_status"] = status
-        return display_addressee(record)
+        return display_insight(record, context.role.capabilities)
     # Prompt selection stays at pending_insights; explicit retrieval pages
     # a stable offset-independent selection capped at INSIGHT_RETRIEVAL_LIMIT,
     # so overflow items remain discoverable and small pages enumerate each
@@ -72,7 +79,7 @@ def insights(context, args: dict) -> dict:
     projection = context.project.insights.projection(
         limit=INSIGHT_RETRIEVAL_LIMIT, pending=action is None, action=action)
     response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
-    response['insights'] = [display_addressee(row)
+    response['insights'] = [display_insight(row, context.role.capabilities)
                             for row in response.pop('items')]
     response['total'] = projection['total']
     response['selection_truncated'] = projection['truncated']
