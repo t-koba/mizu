@@ -244,10 +244,13 @@ class RetainedEvidenceTests(Fixture):
 
     def test_missing_corrupt_mismatched_started_metadata(self):
         invalid_nonfinite = (f'{{"run":"{self.run}","role":"worker","extra":NaN}}').encode()
+        overflow = [(f'{{"run":"{self.run}","role":"worker","extra":{token}}}').encode()
+                    for token in ("1e9999", "-1e9999")]
+        deep = (f'{{"run":"{self.run}","role":"worker","extra":').encode() + b"[" * 70 + b"0" + b"]" * 70 + b"}"
         self.started.unlink()
         with self.assertRaises(Denied):
             self.read()
-        for raw in (b"broken", b"\xff", b"[]", b"null", b"{}", invalid_nonfinite,
+        for raw in (b"broken", b"\xff", b"[]", b"null", b"{}", invalid_nonfinite, *overflow, deep,
                     canonical({"run": "a" * 32, "role": "worker"}),
                     canonical({"run": self.run, "role": "reviewer"}), canonical({"run": self.run, "role": 3})):
             with self.subTest(raw=raw):
@@ -289,7 +292,11 @@ class RetainedEvidenceTests(Fixture):
     def test_corrupt_and_mismatched_records_denied(self):
         invalid_nonfinite = (f'{{"id":"{self.evidence_id}","kind":"command",'
                              f'"role":"worker","stdout":NaN}}').encode()
-        for raw in (b"broken", b"\xff", b"[]", b"null", invalid_nonfinite,
+        overflow = [(f'{{"id":"{self.evidence_id}","kind":"command",'
+                     f'"role":"worker","stdout":{token}}}').encode()
+                    for token in ("1e9999", "-1e9999")]
+        deep = (f'{{"id":"{self.evidence_id}","kind":"command","role":"worker","stdout":').encode() + b"[" * 70 + b"0" + b"]" * 70 + b"}"
+        for raw in (b"broken", b"\xff", b"[]", b"null", invalid_nonfinite, *overflow, deep,
                     canonical({**self.command, "id": "a" * 32}),
                     canonical({**self.command, "role": "reviewer"}),
                     b"[" * 2000 + b"]" * 2000):

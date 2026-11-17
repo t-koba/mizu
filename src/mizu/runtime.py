@@ -153,7 +153,6 @@ MAX_COVERED_BYTES = 2048
 #: Re-exported for compatibility; evidence_records owns the exact bounds.
 EVIDENCE_UUID = evidence_records.EVIDENCE_UUID
 MAX_STARTED_EVIDENCE_BYTES = evidence_records.MAX_STARTED_EVIDENCE_BYTES
-_reject_nonfinite_json = evidence_records._reject_nonfinite_json
 
 
 def _bound_started_evidence(record, queue, maximum=MAX_STARTED_EVIDENCE_BYTES):

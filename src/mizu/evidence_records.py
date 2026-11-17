@@ -1,21 +1,16 @@
 """Exact retained evidence reads and durable per-invocation evidence records."""
 from __future__ import annotations
 
-import json
 import re
 import uuid
 
 from .errors import Denied
-from .fs import (DIGEST, READ_PAGE_CHARS, digest, safe_read, sync_dir,
-                write_json)
+from .fs import (DIGEST, READ_PAGE_CHARS, digest, loads_finite, safe_read,
+                sync_dir, write_json)
 
 #: Exact retained-evidence locators, never prefixes or filesystem paths.
 EVIDENCE_UUID = re.compile(r"[0-9a-f]{32}\Z")
 MAX_STARTED_EVIDENCE_BYTES = 65536
-
-
-def _reject_nonfinite_json(value: str):
-    raise ValueError("Non-finite JSON value")
 
 
 def read_retained(context, kind: str, args: dict) -> dict:
@@ -49,8 +44,8 @@ def read_retained(context, kind: str, args: dict) -> dict:
     maximum = context.config.limits.file_bytes
     started_maximum = min(maximum, MAX_STARTED_EVIDENCE_BYTES)
     try:
-        started = json.loads(safe_read(context.project.root, prefix + "started.json", started_maximum)
-                             .decode("utf-8"), parse_constant=_reject_nonfinite_json)
+        started = loads_finite(safe_read(context.project.root, prefix + "started.json", started_maximum)
+                               .decode("utf-8"))
         if not isinstance(started, dict) or started.get("run") != run:
             raise Denied("Evidence run identity or role mismatch")
         source_role = started.get("role")
@@ -60,7 +55,7 @@ def read_retained(context, kind: str, args: dict) -> dict:
             raise Denied("Evidence source role mismatch or not authorized")
         data = safe_read(context.project.root, prefix + evidence, maximum)
         text = data.decode("utf-8")
-        record = json.loads(text, parse_constant=_reject_nonfinite_json)
+        record = loads_finite(text)
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise Denied("Corrupt retained evidence or run metadata") from exc
     command = record.get("command") if kind == "experiments" and isinstance(record, dict) else record
