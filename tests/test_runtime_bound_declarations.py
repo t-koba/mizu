@@ -1918,6 +1918,9 @@ RANGE_ARGUMENTS = {
     ('snapshot_manifest.py', '_goal', 0, 0): (
         '3', 'format',
         'snapshot manifest / maximum UTF-8 continuation bytes after a leading byte'),
+    ('vcs.py', '_prune_stale', 0, 0): (
+        '1', 'mechanism',
+        'VCS ref pruning / start at the first path component so the ref store root itself is never pruned'),
     ('web.py', 'Web.fetch', 0, 0): (
         '4', 'safety',
         'web fetch / fixed redirect-hop ceiling; every hop revalidates the destination'),
@@ -1989,6 +1992,9 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('storage.py', '_snapshot_ancestry', 0, 0): (
         'history_index', 'configured policy',
         'storage retention / merge ancestry protection uses limits.history_index edges'),
+    ('vcs.py', '_prune_stale', 1, 0): (
+        'len(parts)', 'mechanism',
+        'VCS ref pruning / walk each validated ref-name component when collecting needed directories'),
     ('work_item_seed.py', 'task_seeds', 0, 0): (
         'len(tasks)', 'mechanism',
         'work-item task manifest / visit every validated member within the 16-task contract'),
