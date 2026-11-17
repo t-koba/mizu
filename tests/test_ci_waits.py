@@ -185,8 +185,18 @@ class CiWaitTests(CiWaitFixture):
         self.assertGreaterEqual(projected_live["blocked_age_seconds"], 0)
         self.assertFalse(projected["wait_satisfied"])  # Terminal input is not completion.
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
-        for _ in range(2):
-            self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
+        # The typed next step is an immediate progress-backed continuation, not
+        # a repeated CI event. Acked terminal evidence must not re-enter.
+        def continued(ctx, *_):
+            self.assertEqual(ctx.wait_events, [])
+            (ctx.workspace / "repair.py").write_text("VALUE = 2\n")
+            ctx.handle("finish", {"outcome": "continue", "summary": "Continue repair",
+                                  "next_step": "Inspect the repaired check",
+                                  "state": "Now: CI terminal.\nNext: Inspect the repaired check"})
+        engine.driver = ScriptDriver(continued)
+        self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["status"], "completed")
+        self.assertEqual(engine.driver.calls[-1][0].wait_events, [])
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
         self.assertEqual(self.store.get(blocked["id"]), blocked)
         # Status uses the same exact terminal route without writing history/evidence.
         before = {p.relative_to(self.project.root): p.read_bytes()
