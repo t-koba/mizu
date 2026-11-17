@@ -198,6 +198,8 @@ def _ci_due(present, record, snapshot_id, now, rewake_seconds, branches) -> bool
                 return True
         except Exception:
             return True
+        if at_value > now_value:
+            return True
         return (now_value - at_value) >= rewake_value
     except Exception:
         return True
