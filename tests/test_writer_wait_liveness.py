@@ -1,17 +1,19 @@
 """Offline writer wait fallback: bounded local evidence, no provider calls."""
 import dataclasses
 import datetime as dt
+import json
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, forget_ledger
 from test_ci_waits import CiWaitFixture, SHA
 from mizu import operator_records as records
 from mizu.ci_requests import CiRequests, request_id
+from mizu.config import wait_writer_roles
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import canonical, now, read_json
 from support import history_write_json as write_json
 from mizu.runtime import (Engine, _writer_progress_fallback, _writer_wait_liveness,
-                           _writer_wait_sources, should_run)
+                           _writer_wait_sources, prompt_for, should_run)
 
 
 class WriterWaitTests(Fixture):
@@ -33,28 +35,89 @@ class WriterWaitTests(Fixture):
         return (dt.datetime.fromisoformat(snapshot['progress']['recorded_at']).timestamp()
                 + self.config.limits.writer_no_progress_backoff_seconds)
 
-    def test_solo_code_wait_backoff_without_ready_work_is_not_an_event(self):
+    def delegated_writers(self):
+        for name in ('searcher', 'reviewer', 'consult'):
+            self.config.roles[name] = dataclasses.replace(
+                self.config.roles[name], workspace='write', event_wakes=(),
+                daemon=False, interval_seconds=0, calendar=())
+
+    def test_delegated_code_wait_is_holder_ready_without_satisfying_wait(self):
+        self.delegated_writers()
         self.config.roles['worker'] = dataclasses.replace(self.role(), on_change=True)
+        self.assertEqual(wait_writer_roles(self.config, self.project.roles), frozenset({'worker'}))
+        # A configured scheduled writer not assigned to this project is not its authority.
+        self.assertEqual(self.config.roles['maintainer'].workspace, 'write')
+        self.assertNotIn('maintainer', self.project.roles)
         item = self.block('self code', {'kind': 'code_change'})
-        engine = Engine(self.config, driver=ScriptDriver())
-        result = engine.run(self.project, 'worker')
-        self.assertIs(result['finish']['wait_liveness'], False)
-        snapshot = self.project.snapshots.get()
-        due = self.backoff_time(snapshot)
-        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
-        self.assertFalse(should_run(self.project, snapshot, role_name='worker', current_time=due - 1))
-        self.assertTrue(should_run(self.project, snapshot, role_name='worker', current_time=due))
-        with patch('mizu.runtime.time.time', return_value=due):
-            self.assertEqual(engine.run(self.project, 'worker', event_trigger=True)['skipped'], 'no-event')
-            self.assertEqual(engine.run(self.project, 'worker')['status'], 'completed')
-        current = self.project.work_items.get(item['id'])
-        self.assertEqual((current['status'], current['rev']), ('blocked', item['rev']))
-        # Configuration, not the current run/holder count, determines sole-writer authority.
-        self.config.roles['reviewer'] = dataclasses.replace(
-            self.config.roles['reviewer'], workspace='write')
-        self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
-        self.assertFalse(_writer_progress_fallback(
-            snapshot, self.config, self.role(), False, due, project=self.project))
+        store = self.project.work_items
+        self.assertEqual(item['wait']['digest'], self.project.snapshots.get()['code_digest'])
+        row = self.blocked_row(item)
+        self.assertEqual((row['state'], row['self_resolvable']),
+                         ('pending', 'sole_writer_code_change'))
+        self.assertEqual(_writer_wait_sources(self.project, self.role()), (False, True, None))
+        page = store.page_ready(role_name='worker')
+        self.assertEqual(page['total'], 1)
+        self.assertEqual(page['items'][0]['id'], item['id'])
+        self.assertEqual(page['items'][0]['status'], 'blocked')
+        self.assertEqual(page['items'][0]['wait_liveness']['state'], 'pending')
+        projected = json.loads(prompt_for(self.context()))['ready_work']['items'][0]
+        self.assertIs(projected['wait_satisfied'], False)
+        # Actionability is scoped to the holder, not an unscoped ready read.
+        self.assertEqual(store.page_ready()['total'], 0)
+        self.assertEqual(store.page_ready(role_name='reviewer')['total'], 0)
+        # Bare stores retain their old behavior unless authority is supplied.
+        from mizu.work_items import WorkItems
+        bare = WorkItems(store.root, self.project.snapshots, self.project.insights)
+        self.assertEqual(bare.page_ready(role_name='worker')['total'], 0)
+        self.assertEqual(bare.page_ready(role_name='worker', writer_roles={'worker'})['total'], 1)
+
+        for outcome in ('wait', 'blocked'):
+            with self.subTest(outcome=outcome):
+                def finish(ctx, *_):
+                    result = ctx.handle('finish', {'outcome': outcome, 'summary': 'Replan code work',
+                                                   'state': 'Now: prerequisite work remains'})
+                    self.assertTrue(result['sealed'])
+                result = Engine(self.config, driver=ScriptDriver(finish)).run(self.project, 'worker')
+                self.assertEqual(result['status'], 'completed')
+                if outcome == 'wait':
+                    self.assertIs(result['finish']['wait_liveness'], False)
+                snapshot = self.project.snapshots.get()
+                self.assertIs(snapshot['progress']['ready_work'], True)
+                self.assertIsNone(snapshot['progress']['ready_work_signature'])
+                self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+                self.assertFalse(_writer_progress_fallback(
+                    snapshot, self.config, self.role(), snapshot['progress']['ready_work'],
+                    self.backoff_time(snapshot), project=self.project))
+                self.assertEqual(store.get(item['id']), item)
+                self.assertEqual(self.blocked_row(item)['state'], 'pending')
+
+        # Editing alone does not satisfy the wait; only a published digest does.
+        (self.project.workspace / 'changed.txt').write_text('changed\n')
+        self.assertEqual(self.blocked_row(item)['state'], 'pending')
+        self.assertEqual(store.page_ready(role_name='worker')['items'][0]['wait_liveness']['state'], 'pending')
+        snapshot = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+            state='Changed code', run=None, outcome='wait', summary='Publish prerequisite work',
+            parent=snapshot['id'])
+        self.project.snapshots.publish(snapshot)
+        self.assertEqual(self.blocked_row(item)['state'], 'due')
+        self.assertEqual(store.page_ready(role_name='worker')['items'][0]['wait_liveness']['state'], 'due')
+        self.assertEqual(store.get(item['id']), item)
+
+    def test_independent_writer_prevents_holder_actionability(self):
+        self.delegated_writers()
+        item = self.block('external code', {'kind': 'code_change'})
+        child = self.config.roles['reviewer']
+        for route in ({'event_wakes': self.role().event_wakes}, {'daemon': True},
+                      {'interval_seconds': 60}, {'calendar': ('09:00',)}):
+            with self.subTest(route=route):
+                self.config.roles['reviewer'] = dataclasses.replace(child, **route)
+                self.assertEqual(wait_writer_roles(self.config, self.project.roles), frozenset({'worker', 'reviewer'}))
+                self.assertIsNone(self.blocked_row(item)['self_resolvable'])
+                self.assertEqual(self.blocked_row(item)['state'], 'pending')
+                self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
+                self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+                self.assertEqual(self.project.work_items.get(item['id']), item)
 
     def test_own_answered_current_question_remains_holder_ready(self):
         question = self.question()
@@ -97,7 +160,9 @@ class WriterWaitTests(Fixture):
         row = self.blocked_row(item)
         self.assertEqual((row['state'], row['reason'], row['self_resolvable']),
                          ('pending', 'undecided', 'answered_own_question'))
-        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+        ready = self.project.work_items.page_ready(role_name='worker')
+        self.assertEqual(ready['total'], 1)
+        self.assertEqual(ready['items'][0]['wait_liveness']['state'], 'pending')
         self.assertEqual(self.project.work_items.get(item['id']), item)
         self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
         # The exact answer suppresses the open-question source for this revision;
@@ -115,7 +180,7 @@ class WriterWaitTests(Fixture):
         self.project.insights.decide(question['id'], 'reject', 'Handled answer', '', 'fixture', expected_rev=1)
         self.assertEqual(self.blocked_row(item)['state'], 'due')
 
-    def test_answered_own_question_suppresses_live_source_and_backoff_resumes(self):
+    def test_answered_own_question_suppresses_live_source_and_is_holder_actionable(self):
         question = self.question()
         item = self.block('answered backoff', {'kind': 'insight_decided', 'insight': question['id']})
         self.assertIs(_writer_wait_liveness(self.project, self.role()), True)
@@ -123,7 +188,9 @@ class WriterWaitTests(Fixture):
         row = self.blocked_row(item)
         self.assertEqual((row['state'], row['reason'], row['self_resolvable']),
                          ('pending', 'undecided', 'answered_own_question'))
-        self.assertEqual(self.project.work_items.page_ready(role_name='worker')['total'], 0)
+        ready = self.project.work_items.page_ready(role_name='worker')
+        self.assertEqual(ready['total'], 1)
+        self.assertEqual(ready['items'][0]['wait_liveness']['state'], 'pending')
         self.assertEqual(self.project.work_items.get(item['id']), item)
         self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
         self.assertEqual(_writer_wait_sources(self.project, self.role(), include_structured_wait=True),
@@ -135,9 +202,9 @@ class WriterWaitTests(Fixture):
         snapshot = self.project.snapshots.get()
         due = self.backoff_time(snapshot)
         self.assertFalse(_writer_progress_fallback(
-            snapshot, self.config, self.role(), False, due - 1, project=self.project))
-        self.assertTrue(_writer_progress_fallback(
-            snapshot, self.config, self.role(), False, due, project=self.project))
+            snapshot, self.config, self.role(), snapshot['progress']['ready_work'], due - 1, project=self.project))
+        self.assertFalse(_writer_progress_fallback(
+            snapshot, self.config, self.role(), snapshot['progress']['ready_work'], due, project=self.project))
         self.assertTrue(should_run(self.project, snapshot, role_name='worker', current_time=due))
         self.assertEqual(self.blocked_row(item)['state'], 'pending')
         self.assertIsNone(read_json(self.project.root / 'decisions' / f"{question['id']}.json"))
@@ -544,6 +611,8 @@ class WriterCiWaitTests(CiWaitFixture):
             self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
 
     def test_exact_held_ci_request_and_terminal_evidence(self):
+        # Keep code waits self-resolvable so they do not mask unknown CI evidence.
+        self.config.roles.pop('maintainer')
         role = self.config.roles['worker']
         item = self.block()
         code = self.store.create(actor='worker', idempotency_key='self-code',

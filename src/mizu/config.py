@@ -161,6 +161,21 @@ EVENT_POLL_SECONDS_MIN = 60
 EVENT_POLL_SECONDS_MAX = 31 * 86400
 
 
+def wait_writer_roles(config: Config, names=None) -> frozenset[str]:
+    """Writers with independent dispatch routes for wait-liveness authority.
+
+    Delegated-only writers run under their holder, not as external releasers.
+    An empty event subscription alone does not exclude scheduled writers.
+    ``names`` scopes authority to the roles assigned to one project; a role
+    configured but never assigned there cannot release its waits.
+    """
+    items = (config.roles.items() if names is None
+             else ((name, config.roles[name]) for name in names if name in config.roles))
+    return frozenset(name for name, role in items
+                     if role.workspace == "write" and (
+                         role.event_wakes or role.daemon or role.interval_seconds or role.calendar))
+
+
 def artifact_page_bytes(settings: dict) -> int:
     """Configured page budget, defaulting below the adapter JSON envelope cap."""
     return settings.get("artifact_page_bytes",

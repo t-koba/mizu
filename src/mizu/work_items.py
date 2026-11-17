@@ -201,12 +201,13 @@ def _directory(path: Path) -> bool:
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
-                 effective_verification_projection=None, operator_answer_lookup=None,
+                 effective_verification_projection=None, operator_answer_lookup=None, writer_roles_lookup=None,
                  record_question_lookup=None, register_question_wait=None, record_answer_evidence=None,
                  publication_evidence: PublicationEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.operator_answer_lookup = operator_answer_lookup
+        self.writer_roles_lookup = writer_roles_lookup
         self.record_question_lookup = record_question_lookup
         self.register_question_wait = register_question_wait
         self.record_answer_evidence = record_answer_evidence
@@ -1945,7 +1946,7 @@ class WorkItems:
             return self._page_open_impl(cursor=None, limit=limit, readonly=False,
                                         order_fingerprint=True)
 
-    def page_ready(self, *, limit=25, role_name=None,
+    def page_ready(self, *, limit=25, role_name=None, writer_roles=None,
                    _delivered_wait_resolution_tokens=None,
                    _wait_resolution_high_water=None) -> dict:
         """Return open/doing work and blocked work needing replanning.
@@ -1974,7 +1975,10 @@ class WorkItems:
         ownership is also enforced at the transition boundary; other grant
         authorization is checked by the caller. Satisfied generic waits re-enter
         this page for reassessment, as do absent or confidently impossible
-        releasers; they never imply completion. CI/proposal waits become ready only
+        releasers; they never imply completion. Proven holder-resolvable waits also
+        enter the holder's page for prerequisite work, without satisfying the wait.
+        Writer authority comes from writer_roles or the optional configured lookup.
+        CI/proposal waits become ready only
         from their validated local terminal route, independent of event ack.
         Legacy unseeded decisions remain explicit coverage gaps, never inferred ready work. Unreadable
         liveness (``unknown``) excludes only that blocked item and never
@@ -1991,8 +1995,10 @@ class WorkItems:
                 validate_wait_resolution_high_water(_wait_resolution_high_water)
                 if _delivered_wait_resolution_tokens is None or role_name is None:
                     raise Denied("Wait-resolution high water requires scoped delivery tokens")
+            if writer_roles is None and self.writer_roles_lookup is not None:
+                writer_roles = self.writer_roles_lookup()
             args = dict(cursor=None, limit=limit, readonly=False, ready_only=True,
-                        role_name=role_name,
+                        role_name=role_name, writer_roles=writer_roles,
                         delivered_wait_resolution_tokens=_delivered_wait_resolution_tokens)
             result = self._page_open_impl(
                 **args, wait_resolution_high_water=_wait_resolution_high_water)
@@ -2247,7 +2253,9 @@ class WorkItems:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
                         continue
-                    if state["state"] not in ("due", "impossible", "absent", "terminal"):
+                    if (state["state"] not in ("due", "impossible", "absent", "terminal")
+                            and not (role_name is not None and item["holder"] == role_name
+                                     and state.get("self_resolvable"))):
                         continue
                 if blocked_only:
                     counts[state["state"]] += 1

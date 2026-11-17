@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from .budget import Budget
-from .config import Config, ProjectImport, _lineage_target, keys, strings
+from .config import Config, ProjectImport, _lineage_target, keys, strings, wait_writer_roles
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .check_job_index import CHECK_JOBS, CheckJobSource
@@ -148,6 +148,7 @@ class Project:
         from .operator_records import answer_lookup, record_question_lookup, register_question_wait, record_answer_evidence
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
                                     operator_answer_lookup=lambda: answer_lookup(self),
+                                    writer_roles_lookup=lambda: wait_writer_roles(self.config, self.roles),
                                     record_question_lookup=lambda: record_question_lookup(self),
                                     record_answer_evidence=lambda subject, holder, proof: record_answer_evidence(self, subject, holder, proof),
                                     register_question_wait=lambda subject, holder: register_question_wait(self, subject, holder),
@@ -440,7 +441,7 @@ class Project:
         # when this snapshot was created.
         idle_diagnostic = idle_with_open_work(snapshot)
         open_state = self.work_items.open_state_readonly(
-            writer_roles={name for name in self.roles if self.config.roles[name].workspace == "write"})
+            writer_roles=wait_writer_roles(self.config, self.roles))
         backpressure = self.backpressure(open_count=open_state["open_count"])
         blocked_work = open_state["blocked_work"]
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],

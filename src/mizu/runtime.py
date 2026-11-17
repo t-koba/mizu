@@ -46,7 +46,7 @@ from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
-                     role_wrap_up_tools)
+                     role_wrap_up_tools, wait_writer_roles)
 from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
 from .errors import RequestYieldExceeded, ToolYieldExceeded
@@ -4463,8 +4463,7 @@ def _writer_wait_sources(project, role, *, releases=(), include_structured_wait=
             external = True
             if not include_structured_wait:
                 return True, False, None
-        writers = {name for name in project.roles
-                   if project.config.roles[name].workspace == "write"}
+        writers = wait_writer_roles(project.config, project.roles)
         status = store.open_state_readonly(
             limit=project.config.limits.work_items_prompt, writer_roles=writers,
             operator_answer=operator_answer)
