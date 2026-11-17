@@ -36,7 +36,10 @@ def _record_health_failure(project, role_name, run_id, exc, maximum, cause=None,
         health = read_json(project.root / "health" / f"{role_name}.json", {})
         if not isinstance(health, dict):
             health = {}
-        failures = health.get("consecutive_failures", 0) + 1
+        failures = health.get("consecutive_failures", 0)
+        if type(failures) is not int or failures < 0:
+            failures = 0
+        failures += 1
         if isinstance(exc, MissingFinish):
             streak = missing_finish_streak(health) + 1
             streak = min(streak, MAX_MISSING_FINISH_STREAK)

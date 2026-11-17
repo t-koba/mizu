@@ -5,6 +5,7 @@ additive machine-readable cause stored alongside the human-readable reason.
 """
 from support import Fixture
 from mizu.errors import ProtocolError
+from mizu.fs import read_json, write_json
 from mizu.runtime import _record_health_failure
 
 
@@ -21,6 +22,21 @@ class FailureBrakePauseCauseTests(Fixture):
         # Bounded: no error message or unbounded payload leaks into control.
         self.assertNotIn("failure detail", repr(cause))
         self.assertEqual(set(cause), {"kind", "error_class", "roles"})
+
+    def test_corrupt_counter_still_applies_brake(self):
+        path = self.project.root / "health" / "worker.json"
+        for counter in ("bad", -3):
+            with self.subTest(counter=counter):
+                self.project.set_control(paused=False)
+                write_json(path, {"consecutive_failures": counter})
+                _record_health_failure(self.project, "worker", "run-1",
+                                       ProtocolError("failure"), 1)
+                self.assertEqual(read_json(path)["consecutive_failures"], 1)
+                control = self.project.control()
+                self.assertTrue(control["paused"])
+                self.assertEqual(control.get("pause_cause"),
+                                 {"kind": "failure_brake", "error_class": "ProtocolError",
+                                  "roles": ["worker"]})
 
     def test_below_threshold_writes_no_cause(self):
         _record_health_failure(self.project, "worker", "run-1",
