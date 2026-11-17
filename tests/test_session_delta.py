@@ -48,7 +48,7 @@ class SessionDeltaTests(Fixture):
         self.assertEqual(record["prompt_mode"], "full")
         self.assertTrue(record["session_key"])
 
-    def test_new_writer_next_admits_and_opens_as_first_task_without_rotating(self):
+    def test_new_writer_next_admits_continuation_without_rotating(self):
         from mizu.runtime import should_run
         step = 'Add the deterministic regression for the parser.'
         state = 'Now: implemented the parser.\nNext: Ignored prose.\nNext: Also ignored.'
@@ -81,11 +81,15 @@ class SessionDeltaTests(Fixture):
                     path.unlink()
                 def followup(ctx, prompt, _):
                     decoded = json.loads(prompt)
-                    # The task follows the stable opening keys so the shared prefix stays long.
-                    self.assertEqual(list(decoded)[:4], ['unit', 'unit_tool_surface', 'goal_digest', 'task'])
-                    self.assertEqual(decoded['task'], step)
+                    # The previous proposal stays in the snapshot pin, not a top-level task.
+                    keys = list(decoded)
+                    self.assertEqual(keys[:4], ['unit', 'unit_tool_surface', 'goal_digest', 'admission'])
+                    self.assertNotIn('task', decoded)
                     self.assertEqual(decoded['published_snapshot']['id'], snapshot['id'])
                     self.assertEqual(decoded['published_snapshot']['next_step'], step)
+                    self.assertEqual(decoded['published_snapshot']['summary'], 'Parser implemented')
+                    self.assertEqual(decoded['published_snapshot']['state'], state)
+                    self.assertLess(keys.index('ready_work'), keys.index('check_jobs'))
                     # Even real work cannot redeclare the identical typed step to loop.
                     (ctx.workspace / 'app.py').write_text('VALUE = completed\n')
                     ctx.handle('finish', {'outcome': 'continue', 'summary': 'Regression added',

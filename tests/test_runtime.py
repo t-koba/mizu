@@ -1729,14 +1729,14 @@ class PromptOrderTests(Fixture):
                           "workspace", "workspace_mode", "review_authority", "pending_insights",
                           "open_insights", "open_work_items", "operator_records",
                           "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
-                          "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "research_state", "capture_limit",
+                          "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "research_state", "capture_limit",
                           "ci_branch", "ci_failures", "ci_failures_may_be_truncated",
-                          "previous_report", "ready_work", "work_order", "run", "now", "timezone"])
+                          "previous_report", "work_order", "run", "now", "timezone"])
         self.assertEqual(
             list(json.loads(prompt_delta_for(ctx, [])).keys()),
             ["unit", "unit_tool_surface", "goal_digest", "admission", "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "operator_records", "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
              "research_state", "capture_limit", "workspace", "workspace_mode", "review_authority",
-             "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "ci_branch", "ci_failures",
+             "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "ci_branch", "ci_failures",
              "ci_failures_may_be_truncated", "previous_report",
-             "ready_work", "work_order", "run", "now", "timezone"])
+             "work_order", "run", "now", "timezone"])

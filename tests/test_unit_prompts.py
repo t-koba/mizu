@@ -71,7 +71,7 @@ class UnitPromptSeamTests(Fixture):
                                "do not rely on next_step as a wake signal",
                                "outcome=wait for external results",
                                "work not yet actionable",
-                               "An admitted continuation opens with that step as its task"):
+                               "continuation shows that step in the published snapshot as the previous unit's"):
                     self.assertIn(phrase, text)
         schema = finish["inputSchema"]
         self.assertEqual(schema["properties"]["next_step"],

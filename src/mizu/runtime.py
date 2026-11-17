@@ -3467,8 +3467,6 @@ class Engine:
                 if role.workspace == "write":
                     context._workspace_lease = _WorkspaceLease(self, context, stack)
                 context.admission = admission
-                context.opening_task = (dispatch_state["next_task"]
-                                        if _dispatch.admission == "next_task" else None)
                 context._slot_lease = True
                 context._admission_id = admission_identity
                 context._admission_observation_sink = record_admission

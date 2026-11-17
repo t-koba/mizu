@@ -543,7 +543,6 @@ def prompt_for(context: Context) -> str:
     return json.dumps(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       **({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
                        "recent_snapshots": [{k: s[k] for k in ("id", "created_at", "outcome", "summary", "code_digest")}
@@ -565,6 +564,7 @@ def prompt_for(context: Context) -> str:
                        "wait_events": opening["wait_events"],
                        **_ci_wait_contract(context),
                        "obligations": opening["obligations"],
+                       "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
                        "research_state": _prompt_research_state(context),
@@ -574,7 +574,6 @@ def prompt_for(context: Context) -> str:
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
-                       "ready_work": opening["ready_work"],
                        "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)}),
@@ -640,7 +639,6 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     return json.dumps(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
-                       **({"task": context.opening_task} if getattr(context, "opening_task", None) else {}),
                        **(grant_transition or {}),
                        "admission": context.admission,
                        "published_snapshot": _published_snapshot(context),
@@ -664,6 +662,7 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        **reviews.prompt(context),
+                       "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
                        "ci_branch": ((context.config.vcs.get("ci_branch") or None)
@@ -672,7 +671,6 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "ci_failures_may_be_truncated": ci_failures_may_be_truncated,
                        "previous_report": (_previous_report(context.project)
                                           if "report" in caps else None),
-                       "ready_work": opening["ready_work"],
                        "work_order": _work_order_projection(context),
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)}),
