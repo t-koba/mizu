@@ -388,8 +388,8 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         self.receipt_for()
         original = ci_waits._candidate_wait
         changed = False
-        def candidate(*args):
-            return None if changed else original(*args)
+        def candidate(*args, **kwargs):
+            return None if changed else original(*args, **kwargs)
         def reader(*args):
             nonlocal changed
             changed = True
