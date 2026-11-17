@@ -36,6 +36,60 @@ class JobTests(Fixture):
         return ctx, check_jobs.submit(ctx)
     def run_job(self):
         return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+    def test_completed_verification_import_requires_job_bound_proof(self):
+        ctx, job = self.submit()
+        self.assertEqual(self.run_job()['status'], 'completed')
+        original = check_jobs.result(ctx, job['id'])
+        self.assertTrue(original['accepted_for_current_source'])
+        proof = original['result']
+        invalid = [{'passed': True}]
+        invalid.extend({**proof, key: value} for key, value in (
+            ('passed', 1), ('snapshot_representable', 1),
+            ('unchanged_during_verification', 1), ('dependencies_unchanged', 1),
+            ('code_digest', 'f' * 64), ('code_digest', 123),
+            ('image', 'another-image'), ('job', 'f' * 64),
+            ('run', 'invalid'), ('run', None), ('commands', None),
+            ('commands', [None]),
+            ('commands', [{'id': 'a' * 32, 'reason': 'exited', 'exit_code': False}]),
+            ('commands', [{'id': 'a' * 32, 'reason': 'exited', 'exit_code': 1}]),
+            ('commands', [{'id': 'a' * 32, 'reason': 'timeout', 'exit_code': 0}]),
+            ('commands', [{'id': 'invalid', 'reason': 'exited', 'exit_code': 0}]),
+        ))
+        for record in invalid:
+            with self.subTest(record=record):
+                ctx.verification = None
+                (ctx.run_dir / 'verification.json').unlink(missing_ok=True)
+                write_json(check_jobs.root(self.project) / job['id'] / 'result.json', record)
+                result = check_jobs.result(ctx, job['id'])
+                self.assertEqual(result['result'], record)
+                self.assertFalse(result['accepted_for_current_source'])
+                self.assertIsNone(ctx.verification)
+                self.assertFalse((ctx.run_dir / 'verification.json').exists())
+
+    def test_detached_shared_job_cannot_escape_evidence_directory(self):
+        ctx, job = self.submit()
+        directory = check_jobs.root(self.project) / job['id']
+        raw = read_json(directory / 'job.json')
+        write_json(directory / 'job.json', {**raw, 'detached': True,
+                                           'shared_job': '../other-evidence'})
+        outside = check_jobs.root(self.project).parent / 'other-evidence'
+        write_json(outside / 'result.json', {'marker': 'outside'})
+        write_json(outside / 'commands' / ('a' * 32 + '.json'), {'marker': 'outside'})
+        result = check_jobs.result(ctx, job['id'])
+        self.assertNotIn('marker', result.get('result', {}))
+        self.assertEqual(check_jobs.logs(ctx, job['id'])['commands'], [])
+        with self.assertRaisesRegex(Denied, 'Command evidence unavailable'):
+            check_jobs.logs(ctx, job['id'], 'a' * 32)
+
+    def test_deferral_cannot_hold_role_for_another_roles_job(self):
+        job = check_jobs.submit(self.context('reviewer'), commands=['true'])
+        self.assertEqual(job['status'], 'queued')
+        self.assertEqual(job['role'], 'reviewer')
+        write_json(check_jobs.root(self.project) / 'worker.wait.json',
+                   {'id': job['id'], 'inputs': check_jobs.wait_signature(self.project),
+                    'wait_until': time.time() + 60})
+        self.assertIsNone(check_jobs.deferral(self.project, 'worker'))
+
     def test_submission_does_not_execute_and_freezes_source(self):
         ctx, job = self.submit()
         self.assertEqual(job['status'], 'queued')

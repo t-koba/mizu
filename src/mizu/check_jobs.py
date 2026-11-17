@@ -22,7 +22,7 @@ from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
-from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, write_job
+from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, _digest, write_job
 
 
 class _SharedCheckCaptureRefused(Exception):
@@ -1158,6 +1158,26 @@ def prompt_projection(context):
     return result
 
 
+def _evidence_owner(job, job_id):
+    shared = job.get('shared_job')
+    return shared if isinstance(shared, str) and DIGEST.fullmatch(shared) else job_id
+
+
+def _valid_result_proof(record, job, owner, image):
+    # Legacy jobs need not carry the newer retained-acceptance scope/cache echo.
+    return (isinstance(record, dict)
+            and all(record.get(k) is True for k in
+                    ('passed', 'snapshot_representable', 'unchanged_during_verification', 'dependencies_unchanged'))
+            and _digest(record.get('code_digest')) and record['code_digest'] == job['code_digest']
+            and record.get('image') == image and record.get('job') == owner
+            and isinstance(record.get('run'), str) and re.fullmatch('[a-f0-9]{32}', record['run']) is not None
+            and isinstance(record.get('commands'), list)
+            and all(isinstance(c, dict) and c.get('reason') == 'exited'
+                    and type(c.get('exit_code')) is int and c['exit_code'] == 0
+                    and isinstance(c.get('id'), str) and _COMMAND_EVIDENCE_ID.fullmatch(c['id']) is not None
+                    for c in record['commands']))
+
+
 def result(context, job_id):
     project = context.project
     with lock(project.root / 'locks/check-jobs.lock'):
@@ -1167,7 +1187,8 @@ def result(context, job_id):
     output = summary(job)
     if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
         return output
-    record = read_json(root(project) / job.get('shared_job', job_id) / 'result.json', {})
+    owner = _evidence_owner(job, job_id)
+    record = read_json(root(project) / owner / 'result.json', {})
     if isinstance(record, dict) and 'cache_diagnostics' in record:
         from .acceptance import valid_cache_diagnostics
         if not valid_cache_diagnostics(record['cache_diagnostics']):
@@ -1197,8 +1218,9 @@ def result(context, job_id):
         with lock(project.root / 'locks/check-jobs.lock'):
             # A subscriber may have detached while inputs were inspected.
             matches = matches and read(project, job_id)['status'] == 'completed'
-            output['accepted_for_current_source'] = matches
-            if matches:
+            accepted = matches and _valid_result_proof(record, job, owner, context.config.sandbox.image)
+            output['accepted_for_current_source'] = accepted
+            if accepted:
                 context.verification = record
                 write_json(context.run_dir / 'verification.json', record)
     consumed = getattr(context, 'check_results_read', set())
@@ -1212,8 +1234,9 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
     job = read(context.project, job_id)
     if context.role.name not in (job['role'], job.get('producer_role')):
         raise Denied('Check job belongs to another role')
+    owner = _evidence_owner(job, job_id)
     if evidence_id is None:
-        directory = root(context.project) / job.get('shared_job', job_id) / 'commands'
+        directory = root(context.project) / owner / 'commands'
         if directory.is_symlink():
             raise Denied('Command evidence unavailable')
         candidates = sorted(
@@ -1232,7 +1255,7 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
     maximum = (context.config.limits.output_bytes * COMMAND_EVIDENCE_OUTPUT_MULTIPLIER
                + COMMAND_EVIDENCE_ENVELOPE_BYTES)
     try:
-        data = safe_read(root(context.project) / job.get('shared_job', job_id),
+        data = safe_read(root(context.project) / owner,
                          f'commands/{evidence_id}.json', maximum)
     except (Denied, LimitExceeded, OSError) as exc:
         raise Denied('Command evidence unavailable') from exc
@@ -1852,7 +1875,10 @@ def deferral(project, role):
             # The bound that ended the unit's wait ended this deferral too.
             return None
         job_id = record.get('id')
-        status = read(project, job_id)['status']
+        job = read(project, job_id)
+        if job.get('role') != role:
+            return None
+        status = job['status']
     except (Denied, OSError, ValueError, KeyError, TypeError):
         # Consumed evidence may be reaped; its stale wait is no longer pending.
         return None
