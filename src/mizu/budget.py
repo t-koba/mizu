@@ -144,8 +144,7 @@ class Budget:
                 raise InfraExceeded(f"{self.timezone} daily model-request shared budget exhausted")
             entries = [*entries, request_id]
             projects[project] = entries
-            if request_id not in requests:
-                requests = [*requests, request_id]
+            requests = [*requests, request_id]
             record["requests"] = requests
             record["projects"] = projects
             body = canonical(record)

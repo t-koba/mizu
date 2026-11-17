@@ -101,6 +101,23 @@ class PerProjectBudgetTests(unittest.TestCase):
             strict.take("s2", project="strict-proj")
         self.assertEqual(roomy.take("r1", project="roomy-proj"), 1)
 
+    def test_shared_total_counts_same_request_id_in_each_project(self):
+        budget = Budget(self.root, 10, shared_daily=2)
+        self.assertEqual(budget.take("request-1", project="alpha"), 1)
+        self.assertEqual(budget.take("request-1", project="beta"), 1)
+        self.assertEqual(budget.usage()["shared_used"], 2)
+        self.assertEqual(budget.usage("alpha")["used"], 1)
+        self.assertEqual(budget.usage("beta")["used"], 1)
+        path = self.root / f"{budget._today()}.json"
+        body = path.read_bytes()
+        self.assertEqual(budget.take("request-1", project="alpha"), 1)
+        self.assertEqual(path.read_bytes(), body)
+        self.assertEqual(budget.take("request-1", project="beta"), 1)
+        self.assertEqual(path.read_bytes(), body)
+        with self.assertRaisesRegex(InfraExceeded, "shared budget exhausted"):
+            budget.take("request-2", project="gamma")
+        self.assertEqual(path.read_bytes(), body)
+
     def test_optional_shared_total_binds_both(self):
         budget = Budget(self.root, 10, shared_daily=2)
         budget.take("a1", project="alpha")
