@@ -443,8 +443,7 @@ class WorkOrderTests(Fixture):
                            order_inventory=opening["_order_inventory"],
                            pending_insights=opening["pending_insights"],
                            open_backlog=opening["open_backlog"],
-                           ci_failures=opening["ci_failures"],
-                           ci_truncated=opening["ci_truncated"],
+                           ci_current_summary=opening["ci_current_summary"],
                            decision_events=opening["decision_events"],
                            decision_page=opening["decision_page"],
                            diagnostics=opening["diagnostics"],
@@ -453,6 +452,14 @@ class WorkOrderTests(Fixture):
                            obligations=opening["obligations"])
         base = plan.generation_from_captured(**base_kwargs)
         self.assertEqual(plan.generation_from_captured(**base_kwargs), base)
+        from unittest.mock import patch
+        from mizu.fs import canonical
+        with patch.object(plan, "canonical", wraps=canonical) as encode:
+            self.assertEqual(plan.generation_from_captured(**base_kwargs), base)
+        hash_input = encode.call_args.args[0]
+        self.assertEqual(hash_input[0], "work-order-generation-v6")
+        self.assertEqual(digest(canonical(hash_input)), base)
+        self.assertNotEqual(digest(canonical(["work-order-generation-v5", *hash_input[1:]])), base)
         # Beyond-page same-count ID substitution moves only the signature.
         swapped = dict(base_kwargs, ready_signature="22" * 32 if base_kwargs["ready_signature"] != "22" * 32 else "11" * 32)
         self.assertNotEqual(plan.generation_from_captured(**swapped), base)
@@ -689,49 +696,72 @@ class WorkOrderTests(Fixture):
         self.assertNotEqual(plan._frozen_generation(ctx3), frozen)
         self.assertEqual(json.loads(prompt_for(ctx3))["work_order"]["status"], "review_due")
 
-    def test_new_ci_failure_moves_generation_for_vcs_read_role(self):
-        # CI failures are prompt-visible only for vcs_read roles; a new cache
-        # entry must move a vcs_read holder to review_due while the writer
-        # without the grant stays stable. The poll cache is untouched by CI-
-        # wait acknowledgement, so the input is already ack-stable.
-        import dataclasses
+    def test_configured_ci_aggregate_moves_generation_independently_of_grants_and_sections(self):
+        from mizu.ci_observation import wake_ci_failures
+        from mizu.ci_wake import _ci_due_for, write_ci_wake
         from mizu.unit_prompts import prompt_for
-        from mizu.fs import write_json as _wj
-        a = self.project.work_items.create(idempotency_key="a1", title="A", actor="worker")["record"]["work_item"]
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
+            "ci_branch": "main", "ci_wake_extra_branches": ("release",)})
+        self.project.config = self.config
+        item = self.project.work_items.create(
+            idempotency_key="ci-generation", title="A", actor="worker")["record"]["work_item"]
         ctx = self.context("worker")
-        frozen = plan._frozen_generation(ctx)
-        ctx.handle("work_order", {"items": [a["id"]], "rationale": "solo",
-                                  "expected_rev": 0, "expected_generation": frozen})
-        # Writer without vcs_read: CI cache changes do not move them.
-        _wj(self.project.root / "vcs-poll.json",
-            {"failures": {"mizu": [{"sha": "a" * 40, "check": "core"}]}, "successes": {}})
-        ctx_plain = self.context("worker")
-        self.assertEqual(plan._frozen_generation(ctx_plain), plan._frozen_generation(self.context("worker")))
-        # Holder with both grants sees the same stored plan as review_due.
-        both = dataclasses.replace(self.config.roles["worker"],
-                                   capabilities=tuple(list(self.config.roles["worker"].capabilities) + ["vcs_read"]))
-        ctx_both_before = self.context("worker")
-        ctx_both_before.role = both
-        # Recompute frozen with the grant: must differ from the no-grant
-        # frozen only by the CI marker, and the new cache entry moves it.
-        # First clear the cache to get the empty-marker baseline for the grant.
-        import os as _os
-        try:
-            _os.unlink(self.project.root / "vcs-poll.json")
-        except FileNotFoundError:
-            pass
-        base_both = self.context("worker")
-        base_both.role = both
-        empty_marker = plan._frozen_generation(base_both)
-        _wj(self.project.root / "vcs-poll.json",
-            {"failures": {"mizu": [{"sha": "b" * 40, "check": "core"}]}, "successes": {}})
-        moved_both = self.context("worker")
-        moved_both.role = both
-        self.assertNotEqual(plan._frozen_generation(moved_both), empty_marker)
+        empty = plan._frozen_generation(ctx)
+        ctx.handle("work_order", {"items": [item["id"]], "rationale": "solo",
+                                  "expected_rev": 0, "expected_generation": empty})
+        state = {"failures": {name: [{"sha": "a" * 40, "check": "core"}]
+                              for name in ("main", "release", "off-wake")},
+                 "ci_check_summaries": {name: [{"sha": "a" * 40,
+                     "non_passing_checks": 1, "may_be_incomplete": False}]
+                     for name in ("main", "release", "off-wake")}}
+        cache = self.project.root / "vcs-poll.json"
+        write_json(cache, state)
 
-    def test_unreadable_ci_marker_is_hashed_as_unknown_in_status(self):
+        def generations():
+            values = []
+            for vcs_read in (False, True):
+                for include_ci in (False, True):
+                    fresh = self.context("worker")
+                    caps = tuple(c for c in fresh.role.capabilities if c != "vcs_read")
+                    fresh.role = dataclasses.replace(fresh.role,
+                        capabilities=caps + (("vcs_read",) if vcs_read else ()),
+                        context_include=("ci",) if include_ci else (),
+                        context_exclude=() if include_ci else ("ci",))
+                    values.append(plan._frozen_generation(fresh))
+                    self.assertEqual(json.loads(prompt_for(fresh))["work_order"]["status"], "review_due")
+            self.assertEqual(len(set(values)), 1, "grants and sections must not change generation")
+            return values[0]
+
+        current = generations()
+        self.assertNotEqual(current, empty)
+        # A delivery receipt changes neither an existing unit nor the next one.
+        frozen_ctx = self.context("worker")
+        self.assertEqual(plan._frozen_generation(frozen_ctx), current)
+        due = wake_ci_failures(self.project, self.config)
+        self.assertEqual({row["branch"] for row in due}, {"main", "release"})
+        self.assertEqual(_ci_due_for(self.project, self.config, "worker", "head", 1000), due)
+        write_ci_wake(self.project, "worker", ("main", "release"), due, "head", 1000)
+        self.assertEqual(_ci_due_for(self.project, self.config, "worker", "head", 1001), [])
+        self.assertEqual(plan._frozen_generation(frozen_ctx), current)
+        self.assertEqual(generations(), current)
+        # Only the aggregate changes, not the retained check identity.
+        state["ci_check_summaries"]["off-wake"][0]["non_passing_checks"] = 2
+        write_json(cache, state)
+        self.assertEqual(generations(), current)
+        for subject in ("main", "release"):
+            state["ci_check_summaries"][subject][0]["non_passing_checks"] = 2
+            write_json(cache, state)
+            moved = generations()
+            self.assertNotEqual(moved, current, subject)
+            current = moved
+        # Captured units remain frozen despite later real aggregate changes.
+        self.assertNotEqual(current, plan._frozen_generation(frozen_ctx))
+
+    def test_unreadable_ci_cache_does_not_create_false_review_due(self):
         from unittest.mock import patch
         from mizu.unit_prompts import prompt_for
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs, "ci_branch": "main"})
+        self.project.config = self.config
         worker = self.config.roles["worker"]
         role = dataclasses.replace(worker, capabilities=tuple((*worker.capabilities, "vcs_read")))
         config_roles = dict(self.project.config.roles)
@@ -745,10 +775,18 @@ class WorkOrderTests(Fixture):
         ctx.handle("work_order", {"items": [item["id"]], "rationale": "reviewed",
                                   "expected_rev": shown["rev"],
                                   "expected_generation": shown["opening_generation"]})
-        with patch("mizu.ci_observation.read_json", side_effect=OSError("unreadable cache")):
+        with patch("mizu.ci_observation.read_json", side_effect=OSError("unreadable cache")) as read:
             status = self.project.work_order_status()
-        self.assertEqual(status["status"], "review_due")
-        self.assertIsNotNone(status["current_generation"])
+            self.assertTrue(read.called, "configured wake subjects must attempt the unreadable cache")
+            self.assertEqual(status["status"], "current")
+            self.assertEqual(status["generation"], shown["opening_generation"])
+            self.assertEqual(plan._frozen_generation(self.context("worker")), shown["opening_generation"])
+            # Cache unreadability must not mask a real inventory change.
+            self.project.work_items.create(idempotency_key="real-change", title="B", actor="worker")
+            changed = self.project.work_order_status()
+            self.assertEqual(changed["status"], "review_due")
+            self.assertNotEqual(changed["current_generation"], shown["opening_generation"])
+            self.assertEqual(plan._frozen_generation(self.context("worker")), changed["current_generation"])
 
     def test_exact_prompt_open_snapshot_and_mid_unit_arrivals(self):
         # The frozen generation binds the exact bounded prompt projections at

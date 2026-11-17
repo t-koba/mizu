@@ -54,6 +54,10 @@ class PromptSectionTests(Fixture):
 
     def test_every_key_belongs_to_one_section_or_is_fixed(self):
         self.assertNotIn("task", prompt_sections.FIXED_KEYS)
+        self.assertIn("external_check_wake", prompt_sections.FIXED_KEYS)
+        self.assertEqual(prompt_sections.SECTIONS["ci"].keys, ("ci_branch", "ci_summary"))
+        self.assertEqual(prompt_sections.SECTIONS["ci"].capabilities, frozenset())
+        self.assertFalse(prompt_sections.SECTIONS["ci"].kept_without_capability)
         seen = [k for s in prompt_sections.SECTIONS.values() for k in s.keys]
         self.assertEqual(len(seen), len(set(seen)))
         self.assertFalse(set(seen) & prompt_sections.FIXED_KEYS)
@@ -74,11 +78,30 @@ class PromptSectionTests(Fixture):
     def test_writer_prompt_is_byte_identical_to_the_unfiltered_projection(self):
         for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
             ctx = self.context("worker")
+            default = json.loads(builder(ctx, *args))
+            self.assertNotIn("ci_summary", default)
+            self.assertIn("external_check_wake", default)
+            ctx.role = dataclasses.replace(ctx.role, context_include=("ci",))
             clock = {"now": "2026-01-01T00:00:00+00:00", "timezone": "UTC"}
             with patch("mizu.unit_prompts._prompt_clock", return_value=clock):
                 with patch.object(prompt_sections, "shape", lambda c, p: p):
                     old = builder(ctx, *args)
                 self.assertEqual(builder(ctx, *args), old)
+
+    def test_ci_is_opt_in_for_every_role_and_both_builders(self):
+        for role in self.config.roles:
+            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+                with self.subTest(role=role, builder=builder.__name__):
+                    ctx = self.context(role)
+                    default = json.loads(builder(ctx, *args))
+                    self.assertNotIn("ci_branch", default)
+                    self.assertNotIn("ci_summary", default)
+                    self.assertIn("external_check_wake", default)
+                    ctx.role = dataclasses.replace(ctx.role, context_include=("ci",))
+                    included = json.loads(builder(ctx, *args))
+                    self.assertIn("ci_branch", included)
+                    self.assertIn("ci_summary", included)
+                    self.assertEqual(included["external_check_wake"], default["external_check_wake"])
 
     def test_excluded_rows_do_not_count_as_shown(self):
         ctx = self.judge()
@@ -86,7 +109,8 @@ class PromptSectionTests(Fixture):
         self.assertEqual(ctx.prompt_row_fingerprints["open_work_items"], {})
 
     def test_config_validation(self):
-        for bad in ({"include": ["nope"]}, {"include": ["run"]}, {"exclude": ["decision_events"]},
+        for bad in ({"include": ["nope"]}, {"include": ["ci_failures"]},
+                    {"exclude": ["external_check_wake"]}, {"include": ["run"]}, {"exclude": ["decision_events"]},
                     {"include": ["ci"], "exclude": ["ci"]}, {"include": ["ci", "ci"]}, {"x": []},
                     {"include": "ci"}, []):
             with self.assertRaises(ConfigError):

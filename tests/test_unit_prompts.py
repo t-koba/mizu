@@ -268,5 +268,154 @@ class UnitPromptSeamTests(Fixture):
         self.assertEqual((opening, checks), originals)
 
 
+class ExternalCheckWakePromptTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        import dataclasses
+        from mizu.ci_observation import wake_ci_facts
+        from mizu.ci_polling import poll_ci
+        from mizu.fs import write_json
+        self.config = dataclasses.replace(self.config, vcs={**self.config.vcs,
+            "command": ["true"], "ci_branch": "main",
+            "ci_wake_extra_branches": ("release",)})
+        self.project.config = self.config
+        self.facts = [{"subject": subject, "revision": "a" * 40, "outcome": "failure",
+                       "non_passing_checks": 1, "may_be_incomplete": False}
+                      for subject in ("main", "release")]
+        state = {}
+        event = poll_ci(self.config, self.project, state, now=1000, interval=15,
+                        branches=["main", "release", "off-wake"],
+                        reader=lambda *args: {"checks": [
+                            {"sha": "a" * 40, "check": "unit", "state": "failure"}]})
+        self.assertTrue(event["ok"])
+        write_json(self.project.root / "vcs-poll.json", state)
+        self.assertEqual(wake_ci_facts(self.project, self.config), self.facts)
+
+    def frozen_context(self, capabilities, *, include_ci=False):
+        import copy
+        import dataclasses
+        from mizu import prompt_sections
+        ctx = self.context("worker")
+        ctx.role = dataclasses.replace(ctx.role, capabilities=capabilities,
+            context_include=("ci",) if include_ci else (),
+            context_exclude=tuple(name for name in prompt_sections.SECTIONS
+                                  if name != "ci" or not include_ci))
+        # Engine's dispatch capture is authoritative, not a prompt-time read.
+        ctx.external_check_wake_facts = copy.deepcopy(self.facts)
+        return ctx
+
+    def builders(self):
+        from mizu.unit_prompts import prompt_for, prompt_delta_for
+        return ((prompt_for, ()), (prompt_delta_for, ([],)))
+
+    def objects(self, value):
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from self.objects(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from self.objects(nested)
+
+    def test_capability_matrix_keeps_fixed_facts_and_only_one_vcs_details_route(self):
+        from mizu import prompt_sections
+        optional_keys = {key for section in prompt_sections.SECTIONS.values() for key in section.keys}
+        for caps in (("vcs_read",), ("check_job",), (), ("vcs_read", "check_job")):
+            rendered = []
+            for builder, args in self.builders():
+                with self.subTest(capabilities=caps, builder=builder.__name__):
+                    ctx = self.frozen_context(caps)
+                    payload = json.loads(builder(ctx, *args))
+                    self.assertFalse(optional_keys & payload.keys())
+                    route = ({"tool": "mizu_vcs_read", "operations": ["status", "log"]}
+                             if "vcs_read" in caps else None)
+                    expected = {"facts": self.facts, "details": route}
+                    self.assertEqual(payload["external_check_wake"], expected)
+                    routes = [obj for obj in self.objects(payload) if obj.get("tool") == "mizu_vcs_read"]
+                    self.assertEqual(routes, [route] if route else [])
+                    self.assertNotIn("mizu_check_job", json.dumps(payload["external_check_wake"]))
+                    rendered.append(payload["external_check_wake"])
+            self.assertEqual(*rendered)
+
+    def test_off_wake_subject_is_only_in_explicit_ci_summary(self):
+        for caps in ((), ("vcs_read",)):
+            for builder, args in self.builders():
+                for include in (False, True):
+                    with self.subTest(capabilities=caps, builder=builder.__name__, include=include):
+                        ctx = self.frozen_context(caps, include_ci=include)
+                        payload = json.loads(builder(ctx, *args))
+                        self.assertEqual(payload["external_check_wake"]["facts"], self.facts)
+                        if include:
+                            self.assertEqual(payload.pop("ci_summary"), [
+                                self.facts[0], dict(self.facts[0], subject="off-wake"), self.facts[1]])
+                        else:
+                            self.assertNotIn("ci_summary", payload)
+                        self.assertNotIn("off-wake", json.dumps(payload))
+
+    def test_cache_mutation_does_not_change_dispatch_frozen_wake(self):
+        from mizu.fs import write_json
+        for builder, args in self.builders():
+            with self.subTest(builder=builder.__name__):
+                ctx = self.frozen_context(("vcs_read",), include_ci=True)
+                before = json.loads(builder(ctx, *args))
+                write_json(self.project.root / "vcs-poll.json", {"failures": {
+                    "main": [{"sha": "b" * 40, "check": "different"}]}})
+                after = json.loads(builder(ctx, *args))
+                self.assertEqual(after["external_check_wake"], before["external_check_wake"])
+                self.assertEqual(after["external_check_wake"]["facts"], self.facts)
+                self.assertNotEqual(after["ci_summary"], before["ci_summary"])
+                self.assertEqual(after["ci_summary"], [{
+                    "subject": "main", "revision": "b" * 40, "outcome": "failure",
+                    "non_passing_checks": 1, "may_be_incomplete": True}])
+                # Distinct mutation for the second builder as well.
+                (self.project.root / "vcs-poll.json").unlink()
+
+    def test_simultaneous_decision_and_ci_wake_are_both_delivered(self):
+        import dataclasses
+        from mizu import decision_delivery
+        submitted = self.project.insights.submit(source="worker", title="Review", body="Scope",
+                                                base_snapshot=None, run="test")
+        self.project.insights.decide(submitted["id"], "reject", "not yet", "", "test", expected_rev=1)
+        for builder, args in self.builders():
+            ctx = self.frozen_context(())
+            ctx.role = dataclasses.replace(ctx.role, decision_events=("reject",))
+            ctx.decision_events = decision_delivery.pending(self.project, ctx.role)["events"]
+            self.assertTrue(ctx.decision_events)
+            payload = json.loads(builder(ctx, *args))
+            self.assertEqual(payload["decision_events"], ctx.decision_events)
+            self.assertEqual(payload["external_check_wake"], {"facts": self.facts, "details": None})
+
+    def test_recursive_external_check_rows_are_denied(self):
+        from mizu.errors import Denied
+        forbidden = ({"passed_on": {"revision": "a" * 40}},
+                     {"branch": "main", "sha": "a" * 40, "check": "unit"},
+                     {"sha": "a" * 40, "check": "unit", "state": "failure"})
+        for builder, args in self.builders():
+            for row in forbidden:
+                with self.subTest(builder=builder.__name__, row=row):
+                    ctx = self.frozen_context(())
+                    ctx.operator_record_page = {"events": [{"payload": {"nested": [row]}}]}
+                    with self.assertRaisesRegex(Denied, "Per-check external observation"):
+                        builder(ctx, *args)
+
+    def test_local_check_jobs_and_check_name_selectors_are_accepted(self):
+        import dataclasses
+        from mizu import check_jobs
+        local = {"id": "c" * 32, "status": "completed", "passed": False,
+                 "kind": "experiment", "command_count": 1}
+        selector = {"checks": ["unit"]}
+        for builder, args in self.builders():
+            ctx = self.frozen_context(("check_job",))
+            ctx.role = dataclasses.replace(ctx.role, context_exclude=tuple(
+                name for name in ctx.role.context_exclude if name != "check_jobs"))
+            ctx.operator_record_page = {"events": [{"payload": {"nested": [selector]}}]}
+            with patch.object(check_jobs, "prompt_projection", return_value={
+                    "check_jobs": [local], "shared_checks": [], "check_continuation": None}):
+                payload = json.loads(builder(ctx, *args))
+            self.assertEqual(payload["check_jobs"], [local])
+            self.assertEqual(payload["operator_records"], ctx.operator_record_page)
+            self.assertEqual(payload["external_check_wake"], {"facts": self.facts, "details": None})
+
+
 if __name__ == "__main__":
     unittest.main()
