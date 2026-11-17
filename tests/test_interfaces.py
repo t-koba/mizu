@@ -671,18 +671,23 @@ class InsightRevisionTests(Fixture):
         # Unrelated histories and noncanonical names must never be discovered.
         write_json(revision_dir / "other.r1.json", {"id": "other", "rev": 1})
         write_json(revision_dir / f"{insight_id}.r01.json", records[0])
-        for current in (None, {"id": insight_id}):
+        # Give the current record an explicit rev above the 13 archived
+        # revisions so the page end is bound by the caller's limit, not by the
+        # current revision. A legacy no-rev current is covered separately in
+        # test_insight_pages; a known current rev makes a partial page not complete.
+        for current in (None, {"id": insight_id, "rev": 14}):
             for after_rev, limit, end in ((0, None, 12), (0, 99, 12), (2, 3, 5)):
                 with self.subTest(current=current, after_rev=after_rev, limit=limit):
                     if current is not None:
                         write_json(self.project.root / "inbox" / f"{insight_id}.json", current)
+                    expected_complete = None if current is None else False
                     with patch("mizu.insights.Path.glob", side_effect=AssertionError("glob")), \
                          patch("mizu.insights.Path.iterdir", side_effect=AssertionError("list")), \
                          patch("mizu.insights.os.scandir", side_effect=AssertionError("scan")), \
                          patch("mizu.insights.safe_read", wraps=safe_read) as reads:
                         self.assertEqual(store.history(insight_id, after_rev=after_rev, limit=limit),
                                          {"records": records[after_rev:end], "cursor": after_rev,
-                                          "next_cursor": end, "complete": None})
+                                          "next_cursor": end, "complete": expected_complete})
                     self.assertEqual([call.args[1] for call in reads.call_args_list],
                                      ([f"inbox/{insight_id}.json"] if current else []) +
                                      [f"insight-revisions/{insight_id}.r{rev}.json"
@@ -702,24 +707,27 @@ class InsightRevisionTests(Fixture):
                             (6, {"id": key, "rev": 6}),
                             (7, {"id": key, "rev": 7})):
             write_json(directory / f"{key}.r{rev}.json", record)
-        # A legacy archived tombstone has no current rev to limit the fallback.
+        # An archived tombstone above the archived revisions bounds the page by
+        # its rev, so missing/invalid records still consume the read bound. A
+        # no-rev legacy current is covered separately in test_insight_pages.
+        tombstone = {"id": key, "body_unavailable": True, "rev": 14}
         with patch("mizu.insights.insight_archive.read",
-                   return_value={"id": key, "body_unavailable": True}) as archive, \
+                   return_value=tombstone) as archive, \
              patch("mizu.insights.safe_read", wraps=safe_read) as reads:
             first = store.history(key)
             self.assertEqual(first, {"records": [{"id": key, "rev": 6}], "cursor": 0,
-                                     "next_cursor": 6, "complete": None})
+                                     "next_cursor": 6, "complete": False})
         archive.assert_called_once_with(self.project.root, key, include_unavailable=True)
         self.assertEqual([call.args[1] for call in reads.call_args_list],
                          [f"insight-revisions/{key}.r{rev}.json" for rev in range(1, 7)])
         with patch("mizu.insights.insight_archive.read",
-                   return_value={"id": key, "body_unavailable": True}), \
+                   return_value=tombstone), \
              patch("mizu.insights.safe_read", wraps=safe_read) as reads:
             self.assertEqual(store.history(key, after_rev=first["next_cursor"], limit=1),
                              {"records": [{"id": key, "rev": 7}], "cursor": 6,
-                              "next_cursor": 7, "complete": None})
+                              "next_cursor": 7, "complete": False})
             self.assertEqual(store.history(key, after_rev=7, limit=1),
-                             {"records": [], "cursor": 7, "next_cursor": 8, "complete": None})
+                             {"records": [], "cursor": 7, "next_cursor": 8, "complete": False})
         self.assertEqual([call.args[1] for call in reads.call_args_list],
                          [f"insight-revisions/{key}.r{rev}.json" for rev in (7, 8)])
         with patch.object(store, "read_revision") as revision:
