@@ -107,7 +107,11 @@ export function typeSchema(schema) {
     if (schema.uniqueItems === true) result.uniqueItems = true;
     return result;
   }
-  const properties = schema.properties;
+  if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== "boolean") {
+    throw unsupportedSchema(schema);
+  }
+  const properties = schema.properties === undefined && schema.additionalProperties === true
+    ? {} : schema.properties;
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) throw unsupportedSchema(schema);
   const result = { type: "object", properties: Object.fromEntries(Object.entries(properties).map(
     ([name, child]) => [name, typeSchema(child)])) };
@@ -121,6 +125,6 @@ export function typeSchema(schema) {
   for (const key of ["minProperties", "maxProperties"]) {
     if (schema[key] !== undefined) result[key] = schema[key];
   }
-  result.additionalProperties = false;
+  result.additionalProperties = schema.additionalProperties === true;
   return result;
 }

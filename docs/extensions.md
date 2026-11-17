@@ -121,6 +121,14 @@ config validation, its tool definition, a dispatch branch in `Context.handle`,
 and tests proving unauthorized and post-finish calls are denied. Add a fake-RPC
 contract test and a real integration test where the new boundary needs one.
 
+Both Pi adapters deliberately preserve an object that explicitly declares
+`additionalProperties: true`: it translates with an empty `properties` map and
+an open flag, so versioned inline completion evidence can keep undeclared
+fields. Omitted or false stays closed; non-boolean values are refused. A
+derived offline check feeds every `DEFINITIONS` schema through both adapters,
+naming the tool and schema path on failure; providers that rewrite open
+objects need their own adapter test before relying on this capability.
+
 Model-facing `exec` strings are shell commands **inside** an already constrained
 container. Host executables always use argv arrays. Never connect an arbitrary
 model command to `subprocess(..., shell=True)` or a host shell.

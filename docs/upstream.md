@@ -38,8 +38,9 @@ Pi 1.5.0 はツール引数の検証を `@earendil-works/pi-schema` へ移し、
 （`Type.Refine()`、`Type.BigInt()`、`Type.Undefined()`、codecs、`Format.Set()`）を
 ツール引数に適用しない。両 adapter は `Type` を組み立てず、bridge が渡す JSON Schema を
 そのまま Pi に渡す。pi-schema の coerce により数値文字列の変換や単一値の配列化が起きるが、
-Python の `protocol.validate` は従来どおり厳密に再検証する。`additionalProperties:false` と
-`required` は維持し、未知の型は adapter で fail-closed に拒否する。
+Python の `protocol.validate` は従来どおり厳密に再検証する。明示的な
+`additionalProperties:true` のみ意図的に開いたオブジェクトとして保持し、それ以外の
+`additionalProperties:false` と `required` は維持し、未知の型は adapter で fail-closed に拒否する。
 
 Pi Durable 1.4.0 の [変更履歴](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/CHANGELOG.md)では、
 SQLite open 時に schema v2 へ自動移行し、移行後の DB は 1.3.0 以前から開けないとされる。

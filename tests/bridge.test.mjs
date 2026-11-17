@@ -115,6 +115,34 @@ test('unix-socket endpoint still connects where the platform serves one', async 
   });
   assert.deepEqual(await request({ transport: "unix", socket, token: 'unit-test-token', timeout_ms: 5000 }, 'read', {}), {text:'unix-ok'});
 });
+
+test('object schema conversion preserves explicit openness and rejects non-boolean additionalProperties', () => {
+  assert.deepEqual(typeSchema({ type: 'object', additionalProperties: true }),
+    { type: 'object', properties: {}, additionalProperties: true });
+  const declared = { type: 'object', properties: { x: { type: 'string' } },
+    required: ['x'], minProperties: 1, maxProperties: 3 };
+  for (const additionalProperties of [true, false, undefined]) {
+    const schema = additionalProperties === undefined ? declared : { ...declared, additionalProperties };
+    assert.deepEqual(typeSchema(schema), { ...declared, additionalProperties: additionalProperties === true });
+  }
+  for (const additionalProperties of [{ type: 'string' }, null, 'true', 1, []]) {
+    assert.throws(() => typeSchema({ type: 'object', properties: {}, additionalProperties }),
+      /Unsupported tool schema: object/);
+  }
+  for (const properties of [null, [], 'invalid']) {
+    assert.throws(() => typeSchema({ type: 'object', properties, additionalProperties: true }),
+      /Unsupported tool schema: object/);
+  }
+  for (const additionalProperties of [false, undefined]) {
+    assert.throws(() => typeSchema({ type: 'object', additionalProperties }),
+      /Unsupported tool schema: object/);
+  }
+  assert.throws(() => typeSchema({ type: 'object', additionalProperties: true, required: ['x'] }),
+    /Unsupported tool schema: object/);
+  assert.throws(() => typeSchema({ type: 'object', properties: { x: { type: 'unknown' } },
+    additionalProperties: true }), /Unsupported tool schema: unknown/);
+});
+
 test('plain schema conversion preserves constraints and denies extra properties', () => {
   const schema = typeSchema({ type: 'object', properties: {
     x: { type: 'string', minLength: 1, maxLength: 4, pattern: '^[a-z]+$' },

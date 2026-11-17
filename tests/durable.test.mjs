@@ -10,19 +10,48 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { typeSchema } from '../adapters/pi-durable/bridge-client.mjs';
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
-import { agentChanges, assertProviderAuth, boundStatusFor, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
+import { agentChanges, assertProviderAuth, boundStatusFor, buildBridgeTools, meterModels, resolveConfiguredModel, settlementFields, submitWithCurrentAgent, usageDelta }
   from '../adapters/pi-durable/launcher.mjs';
 import { ModelRuntime as PiModelRuntime }
   from '../adapters/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 import { AssistantEntry, BACKGROUND_CONTEXT, Harness, createModels, createRegistry,
   defineExtension, defineTool, fauxAssistantMessage, fauxProvider, fauxToolCall,
   openNodeSqliteStorage, openaiProvider } from '../adapters/pi-durable/test-support.mjs';
+
+
+test('object schema conversion preserves explicit openness and rejects non-boolean additionalProperties', () => {
+  assert.deepEqual(typeSchema({ type: 'object', additionalProperties: true }),
+    { type: 'object', properties: {}, additionalProperties: true });
+  const declared = { type: 'object', properties: { x: { type: 'string' } },
+    required: ['x'], minProperties: 1, maxProperties: 3 };
+  for (const additionalProperties of [true, false, undefined]) {
+    const schema = additionalProperties === undefined ? declared : { ...declared, additionalProperties };
+    assert.deepEqual(typeSchema(schema), { ...declared, additionalProperties: additionalProperties === true });
+  }
+  for (const additionalProperties of [{ type: 'string' }, null, 'true', 1, []]) {
+    assert.throws(() => typeSchema({ type: 'object', properties: {}, additionalProperties }),
+      /Unsupported tool schema: object/);
+  }
+  for (const properties of [null, [], 'invalid']) {
+    assert.throws(() => typeSchema({ type: 'object', properties, additionalProperties: true }),
+      /Unsupported tool schema: object/);
+  }
+  for (const additionalProperties of [false, undefined]) {
+    assert.throws(() => typeSchema({ type: 'object', additionalProperties }),
+      /Unsupported tool schema: object/);
+  }
+  assert.throws(() => typeSchema({ type: 'object', additionalProperties: true, required: ['x'] }),
+    /Unsupported tool schema: object/);
+  assert.throws(() => typeSchema({ type: 'object', properties: { x: { type: 'unknown' } },
+    additionalProperties: true }), /Unsupported tool schema: unknown/);
+});
 
 const context = BACKGROUND_CONTEXT;
 
@@ -150,6 +179,77 @@ function backend(directory) {
   // exactly as the launcher passes them — never bare names or undefined.
   return { models, faux, registry, tools, calls: () => calls, seen };
 }
+
+test('Python writer tool catalog registers and dispatches nested evidence offline', { timeout: 30000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-catalog-'));
+  let storage;
+  let harness;
+  try {
+    const repository = fileURLToPath(new URL('../', import.meta.url));
+    // All known capabilities cover the full writer surface, including optional
+    // grants, without a second list that could drift from Python's definitions.
+    const child = spawnSync('python3', ['-c', [
+      'import json, sys',
+      'sys.path.insert(0, "src")',
+      'from mizu.protocol import DEFINITIONS, tool_definitions',
+      'print(json.dumps(tool_definitions(tuple(DEFINITIONS))))',
+    ].join('\n')], { cwd: repository, encoding: 'utf8', timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
+    assert.ifError(child.error);
+    assert.equal(child.status, 0, child.stderr);
+    const manifest = JSON.parse(child.stdout);
+    assert.ok(manifest.some(tool => tool.name === 'mizu_work_items_transition'));
+    assert.ok(manifest.some(tool => tool.name === 'mizu_finish'));
+    const bridge = { offline: true };
+    const seen = [];
+    const finishResult = { sealed: true };
+    const finished = [];
+    const tools = buildBridgeTools({ tools: manifest }, bridge, {
+      request: async (target, operation, args) => {
+        assert.equal(target, bridge);
+        seen.push({ operation, args: structuredClone(args) });
+        return operation === 'finish' ? finishResult : { updated: true };
+      },
+      onFinish: result => finished.push(result),
+    });
+    const registry = createRegistry();
+    registry.install(defineExtension({ name: 'writer-catalog', tools }));
+    assert.deepEqual(registry.snapshot().tools().map(({ tool }) => tool.name),
+      manifest.map(tool => tool.name));
+    const models = createModels();
+    // The sole provider is the in-process faux stream, not a live model.
+    const faux = fauxProvider({ provider: 'test-only', models: [{ id: 'model', contextWindow: 131072, maxTokens: 1024 }] });
+    models.setProvider(faux.provider);
+    storage = await openNodeSqliteStorage(join(directory, 's.sqlite'));
+    harness = await Harness.open(storage, { models, registry }, context);
+    const root = await harness.root(context, { agent: { model: { provider: 'test-only', modelId: 'model' },
+      tools, instructions: 'Record evidence then finish.' } });
+    const transition = { id: 'wi-' + 'a'.repeat(32), expected_rev: 1, status: 'done', evidence: {
+      statement: 'Offline dispatch proof', checks: [{ name: 'schema', passed: true,
+        detail: { counts: [1, 2], nullable: null, fraction: 1.5 } }], metadata: { arbitrary: 'preserved' },
+    } };
+    const finish = { outcome: 'done', summary: 'Offline dispatch verified', state: 'Complete' };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('mizu_work_items_transition', transition)], { stopReason: 'toolUse' }),
+      fauxAssistantMessage([fauxToolCall('mizu_finish', finish)], { stopReason: 'toolUse' }),
+    ]);
+    const submission = await root.submit({ type: 'input', content: 'go', requestId: 'writer-catalog' }, context);
+    assert.equal((await submission.wait(context)).status, 'done');
+    assert.deepEqual(seen, [{ operation: 'work_items_transition', args: transition },
+      { operation: 'finish', args: finish }]);
+    assert.deepEqual(finished, [finishResult]);
+    assert.equal(faux.state.callCount, 2); // Exactly the two canned, local responses.
+  } finally {
+    try {
+      if (harness) await harness.close(context);
+    } finally {
+      try {
+        if (storage) await storage.close(context);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  }
+});
 
 test('requestId submit is idempotent and settles with usage', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mizu-durable-'));
