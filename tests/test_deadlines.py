@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, ROOT, host_child_cost
@@ -19,7 +20,7 @@ from mizu.errors import AuthorityGrantMismatch, Cancelled, ConfigError, Deadline
 from mizu.fs import canonical, read_json, write_json
 from mizu.mcp_proxy import forward
 from mizu.pi_durable import PiDurableDriver, interpret_result
-from mizu.process import environment, run
+from mizu.process import environment, run, send_bounded
 from mizu.protocol import tool_definitions
 from mizu.runtime import Engine, WRAP_UP_REQUESTS, WRAP_UP_TOOLS
 
@@ -87,6 +88,30 @@ class DeadlineTests(Fixture):
         self.config = dataclasses.replace(self.config,
             limits=dataclasses.replace(self.config.limits, model_request_seconds=request),
             roles={**self.config.roles, role: dataclasses.replace(self.config.roles[role], run_seconds=seconds)})
+
+    def test_send_rechecks_deadline_after_writer_finishes(self):
+        class FinishedThread:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        process = SimpleNamespace(stdin=None)
+        for completed_at in (9, 10, 11):
+            with self.subTest(completed_at=completed_at), \
+                    patch("mizu.process.time.monotonic", side_effect=[9, completed_at]), \
+                    patch("mizu.process._input_thread", return_value=FinishedThread()), \
+                    patch("mizu.process.terminate") as terminate, \
+                    patch("mizu.process._stop_io", return_value=[]):
+                if completed_at >= 10:
+                    with self.assertRaisesRegex(LimitExceeded, "RPC input deadline exceeded"):
+                        send_bounded(process, b"frame", deadline=10, cancel=lambda: False)
+                    terminate.assert_called_once_with(process, grace=0)
+                else:
+                    self.assertIsNone(send_bounded(
+                        process, b"frame", deadline=10, cancel=lambda: False))
+                    terminate.assert_not_called()
 
     def test_defaults_inheritance_zero_and_positive(self):
         self.assertEqual(self.config.limits.run_seconds, 1200)

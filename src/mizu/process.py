@@ -201,6 +201,8 @@ def send_bounded(process, data: bytes, *, deadline: float, cancel: Callable[[], 
             thread.join(timeout=min(.01, max(0, deadline-time.monotonic())))
         if cancel():
             raise Cancelled("RPC send cancelled")
+        if time.monotonic() >= deadline:
+            raise LimitExceeded("RPC input deadline exceeded")
         if errors:
             raise ProtocolError("RPC input closed; delivery unknown") from errors[0]
     except Exception:
