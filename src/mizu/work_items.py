@@ -47,7 +47,7 @@ from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELD
                              validate_tasks)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
-MAX_REOPEN_REV = 253  # Audited reopen source ceiling; does not reset revision history.
+MAX_REOPEN_REV = 252  # Leaves four appends for reopen/claim/bind/close before 256.
 STATUSES = ("open", "doing", "blocked", "done", "dropped")
 #: Records written before the delivery claim existed keep the older field
 #: set. They stay readable history; a closure written now always carries the
@@ -2574,7 +2574,7 @@ class WorkItems:
             if current["status"] != "done":
                 raise Denied("Completion reopening requires a done work item")
             if current["rev"] > MAX_REOPEN_REV:
-                raise Denied("Completion reopening requires revision headroom: current rev must be <= 253")
+                raise Denied("Completion reopening requires revision headroom: current rev must be <= 252")
             record = {**current, "rev": current["rev"] + 1, "status": "open",
                       "updated_at": now(), "actor": actor,
                       "transition": {"from": "done", "to": "open"},

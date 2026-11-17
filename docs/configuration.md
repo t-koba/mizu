@@ -393,11 +393,9 @@ configuration has the capability.
 Arguments are `id` (35 characters), `expected_rev` (integer >= 1), and `reason`
 (nonblank, 1–4000 characters); unknown fields, including actor and policy, are
 refused. Only the exact current `done` revision may reopen. Revisions above
-253 refuse for headroom; the existing revision-256 ceiling is unchanged.
-**Boundary limitation:** at revision 253, reopen/claim/bind/close would require
-revision 257 under the strict contract. The numeric cutoff does not guarantee
-that full strict cycle at that boundary; no gate or revision limit is bypassed.
-Stale CAS requires a fresh read, not an automatic retry.
+252 refuse for headroom: the four strict reopen/claim/bind/close revisions
+must fit under the unchanged revision-256 ceiling. Stale CAS requires a fresh
+read, not an automatic retry.
 
 The append preserves identity, scope and immutable history, clears the holder,
 wait, active delivery and all completion/snapshot evidence, and records the

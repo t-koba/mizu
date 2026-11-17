@@ -175,7 +175,7 @@ class CompletionReopenTests(Fixture):
                     stream.write(canonical(previous))
             forget_ledger(self.store.root)
             done = self.change(previous, 'done', snapshot_id=snapshot['id'])
-            if source_rev > 253:
+            if source_rev > 252:
                 files = {p.name: p.read_bytes() for p in directory.iterdir()}
                 with self.assertRaisesRegex(Denied, 'headroom'):
                     self.reopen(done)
@@ -184,18 +184,7 @@ class CompletionReopenTests(Fixture):
                 continue
             opened = self.reopen(done)
             bound = self.change(self.change(opened, 'doing'), 'doing', snapshot_id=snapshot['id'])
-            if source_rev == 252:
-                self.assertEqual(self.change(bound, 'done', snapshot_id=snapshot['id'])['rev'], 256)
-            else:
-                # The requested <=253 cutoff cannot promise four strict appends
-                # below the unchanged 256 ceiling. Never weaken that gate.
-                files = {p.name: p.read_bytes() for p in directory.iterdir()}
-                with self.assertRaises(Denied):
-                    self.change(bound, 'done', snapshot_id=snapshot['id'])
-                self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, files)
-                self.assertEqual(self.store.current(seed['id']), bound)
-                # Release the held slot through the existing exhausted retirement.
-                self.change(bound, 'dropped', reason='Retire exhausted tracking')
+            self.assertEqual(self.change(bound, 'done', snapshot_id=snapshot['id'])['rev'], 256)
 
     def test_replay_rejects_tampered_marker_and_uncleared_state(self):
         self.configure(HOLDER_ATTESTATION)

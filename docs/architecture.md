@@ -815,10 +815,9 @@ requires both that explicit role capability and the authenticated actor in
 `completion_evidence.reopen_roles` (default empty); actor/policy cannot be
 supplied by the caller. The store's `reopen(id, *, expected_rev, reason, actor)`
 uses the existing lock/CAS/index append path. It accepts only current done at
-revision <= 253 and a nonblank 1–4000-character reason. Above that cutoff it
-refuses for revision headroom. The fixed revision ceiling remains 256: at
-revision 253 the four strict reopen/claim/bind/close appends cannot all fit;
-this boundary limitation is not bypassed by reopening.
+revision <= 252 and a nonblank 1–4000-character reason. Above that cutoff it
+refuses for revision headroom: the four strict reopen/claim/bind/close appends
+must fit under the unchanged revision-256 ceiling.
 
 The immutable full-state open revision preserves identity/title/origin/
 description/creation time/scope and delivery schema, but clears holder, wait,
