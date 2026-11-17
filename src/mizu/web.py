@@ -499,11 +499,12 @@ class Web:
                         "Accept-Encoding": "identity",
                         "Accept": "*/*",
                         "Connection": "close"}
-            for name, value in seen:
-                outgoing[name] = value
+            outgoing = {name: value for name, value in outgoing.items() if name.lower() not in names}
+            outgoing.update(seen)
             payload: bytes | None = None
             if body_bytes:
-                outgoing.setdefault("Content-Type", "application/json")
+                if "content-type" not in names:
+                    outgoing["Content-Type"] = "application/json"
                 outgoing["Content-Length"] = str(len(body_bytes))
                 payload = body_bytes
             connection.request(method, path, body=payload, headers=outgoing)

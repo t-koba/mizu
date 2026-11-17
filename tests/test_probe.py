@@ -158,6 +158,38 @@ class ProbeTests(Fixture):
                 web.probe({"url": "https://probe.example/x", "method": "GET",
                            "headers": headers})
 
+    def test_caller_content_type_preserves_spelling_and_value(self):
+        web = make_web(Path(self.temporary.name))
+        with patch("mizu.web.public_addresses", return_value=[]), \
+             patch("mizu.web.PinnedHTTPS", FakeConnection):
+            for name in ("content-type", "Content-Type", "cOnTeNt-TyPe"):
+                with self.subTest(name=name):
+                    web.probe({"url": "https://probe.example/rpc", "method": "POST",
+                               "headers": [{"name": name, "value": "text/plain"}],
+                               "body": "hello"})
+                    method, path, body, headers = FakeConnection.last.sent
+                    self.assertEqual((method, path, body), ("POST", "/rpc", b"hello"))
+                    self.assertEqual([(key, value) for key, value in headers.items()
+                                      if key.lower() == "content-type"], [(name, "text/plain")])
+                    self.assertEqual(headers["Content-Length"], "5")
+
+    def test_caller_headers_override_case_insensitive_defaults(self):
+        web = make_web(Path(self.temporary.name))
+        with patch("mizu.web.public_addresses", return_value=[]), \
+             patch("mizu.web.PinnedHTTPS", FakeConnection):
+            web.probe({"url": "https://probe.example/rpc", "method": "POST",
+                       "headers": [{"name": "accept", "value": "text/plain"},
+                                   {"name": "uSeR-aGeNt", "value": "ProbeTest/1"}],
+                       "body": "{}"})
+        headers = FakeConnection.last.sent[3]
+        self.assertEqual([(key, value) for key, value in headers.items()
+                          if key.lower() == "accept"], [("accept", "text/plain")])
+        self.assertEqual([(key, value) for key, value in headers.items()
+                          if key.lower() == "user-agent"], [("uSeR-aGeNt", "ProbeTest/1")])
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Accept-Encoding"], "identity")
+        self.assertEqual(headers["Connection"], "close")
+
     def test_non_2xx_returns_as_observation(self):
         web = make_web(Path(self.temporary.name))
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
