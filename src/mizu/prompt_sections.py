@@ -51,7 +51,7 @@ SECTIONS: dict[str, Section] = {
 
 #: Keys of the opening that are never optional.
 FIXED_KEYS = frozenset({
-    "unit", "unit_tool_surface", "goal_digest", "task", "admission", "grant_transition",
+    "unit", "unit_tool_surface", "goal_digest", "admission", "grant_transition",
     "published_snapshot", "recent_snapshots", "snapshot_delta", "workspace", "workspace_mode",
     "operator_records", "decision_events", "decision_page", "decision_receipt_diagnostics",
     "decision_task", "work_item_events", "wait_events", "ci_wait_delivery", "obligations",

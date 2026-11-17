@@ -53,6 +53,7 @@ class PromptSectionTests(Fixture):
             self.assertEqual((len(page["items"]), page["total"]), (1, 2))
 
     def test_every_key_belongs_to_one_section_or_is_fixed(self):
+        self.assertNotIn("task", prompt_sections.FIXED_KEYS)
         seen = [k for s in prompt_sections.SECTIONS.values() for k in s.keys]
         self.assertEqual(len(seen), len(set(seen)))
         self.assertFalse(set(seen) & prompt_sections.FIXED_KEYS)
