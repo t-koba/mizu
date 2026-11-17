@@ -20,7 +20,7 @@ from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_
 from .vcs_poll_policy import DEFAULT_VCS_POLL_INTERVAL_SECONDS
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
                           "search", "feed_updates", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
-                          "report", "finish", "sync", "vcs_read", "vcs_publish",
+                          "report", "finish", "review_verdict", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
                           "work_items_read", "work_items_create", "work_items_transition", "work_items_reopen", "work_items_legacy_read", "work_items_reconcile", "work_order", "record_write", "record_read", "result_read"})
@@ -1540,6 +1540,15 @@ class Config:
         return self._raw_profile(profile)["options"]
 
 
+def _validate_review_capabilities(name, workspace, capabilities):
+    if "review_verdict" in capabilities and (
+            workspace != "read" or "finish" not in capabilities
+            or "delegate" in capabilities or "vcs_publish" in capabilities):
+        raise ConfigError(
+            f"Role {name}: review_verdict requires an independent read-only role "
+            "with finish and without delegate or vcs_publish (publication.reviewer_role)")
+
+
 def load(file: Path) -> Config:
     file = file.expanduser().resolve()
     data = _load_merged(file)
@@ -1810,6 +1819,7 @@ def load(file: Path) -> Config:
             raise ConfigError("engine_tools must contain at most 128 unique bounded names")
         if set(engine_tools) & {"bash", "powershell", "edit", "write", "read", "Bash", "Read", "Edit", "Write", "NotebookEdit", "Computer", "Glob", "Grep"}:
             raise ConfigError("Native host tools bypass the OCI bridge; grant mizu operations instead")
+        _validate_review_capabilities(name, workspace, caps)
         if "finish" not in caps:
             raise ConfigError(f"Role {name} requires the finish capability")
         if "verify" in caps and workspace != "write":
@@ -2061,10 +2071,13 @@ def load(file: Path) -> Config:
     web["intranet"] = boolean(web["intranet"], "web.intranet")
     review_policy = publication_policy(data.get("publication", {}))
     if review_policy.reviewer_role:
-        reviewer = roles.get(review_policy.reviewer_role)
-        if (reviewer is None or reviewer.workspace != "read"
-                or "finish" not in reviewer.capabilities or "delegate" in reviewer.capabilities):
-            raise ConfigError("publication.reviewer_role must name an independent read-only role with finish and without delegate")
+        name = review_policy.reviewer_role
+        if name not in roles:
+            raise ConfigError("publication.reviewer_role must name an existing role eligible for review_verdict")
+        roles[name] = dataclasses.replace(
+            roles[name], capabilities=tuple(dict.fromkeys((*roles[name].capabilities, "review_verdict"))))
+    for name, role in roles.items():
+        _validate_review_capabilities(name, role.workspace, role.capabilities)
     vcs = data.get("vcs", {})
     keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
                "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",

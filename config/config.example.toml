@@ -70,9 +70,11 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # evidence. Integer seconds 1..9223372036854775807 (TOML representation ceiling,
 # not a runtime-performance guarantee); defaults shown.
 # [publication]
-# Independent read-only reviewer allowed to seal typed finish verdicts.
-# Its on_change wake checks exact snapshot identity, not just code digest.
-# Empty (default) authorizes nobody and blocks vcs_publish, even with human GO.
+# Policy selects the review_verdict capability holder publication consumes.
+# Selection automatically confers the capability for existing configurations.
+# Any holder must be read-only with finish, without delegate or vcs_publish.
+# Each holder checks exact snapshot identity on_change, not just code digest.
+# Defaults grant/select nobody and block vcs_publish, even with human GO.
 # reviewer_role = ""
 # source_commit_timeout_seconds = 5
 
@@ -533,7 +535,7 @@ policy = ["policies/shared.md", "policies/reviewer.md"]
 workspace = "read"
 capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
 # on_change combines with interval_seconds. Ordinary roles compare code;
-# the configured publication reviewer compares exact snapshot IDs so each
+# every review_verdict capability holder compares exact snapshot IDs so each
 # publication receives its own approval, including state-only snapshots.
 on_change = true
 interval_seconds = 900

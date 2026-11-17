@@ -12,7 +12,7 @@ from mizu import reviews, storage, storage_runs
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.fs import read_json, write_json
-from mizu.runtime import Engine
+from mizu.runtime import Engine, _on_change_observed
 from mizu.unit_prompts import prompt_for, prompt_delta_for
 
 
@@ -27,7 +27,7 @@ class ReviewVerdictTests(PublishFixture):
         roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=False)
         self.config = dataclasses.replace(self.config, roles=roles)
         self.project.config = self.config
-        approve(self, "main", current_digest(self))
+        self.human_go = approve(self, "main", current_digest(self))
 
     def review(self, verdict="approve", summary="No material findings.", **extra):
         def work(ctx, *_):
@@ -44,6 +44,85 @@ class ReviewVerdictTests(PublishFixture):
 
     def denied(self):
         with self.assertRaisesRegex(Denied, "typed approval"):
+            self.publish()
+
+    def test_multiple_holders_seal_independently_and_cannot_substitute_for_selected_holder(self):
+        roles = dict(self.config.roles)
+        for name in ("auditor", "inspector"):
+            roles[name] = dataclasses.replace(roles["reviewer"], name=name, on_change=True)
+        self.config = dataclasses.replace(self.config, roles=roles,
+            publication=dataclasses.replace(self.config.publication, reviewer_role="auditor"))
+        self.project.config = self.config
+        settings = self.project.root / "project.toml"
+        settings.write_text(settings.read_text().replace(json.dumps(self.project.roles),
+            json.dumps([*self.project.roles, "auditor", "inspector"])))
+        self.project.refresh_settings()
+        source = self.project.snapshots.get()
+
+        def seal(ctx, *_):
+            self.assertTrue(reviews.prompt(ctx)["review_authority"]["authorized"])
+            ctx.handle("finish", {"outcome": "wait", "summary": "Independent review",
+                                  "review_verdict": "approve"})
+        engine = Engine(self.config, driver=ScriptDriver(seal))
+        for name in ("inspector", "auditor"):
+            result = engine.run(self.project, name, scheduled_invocation=True)
+            self.assertEqual(result.get("status"), "completed", result)
+            review = result["finish"]["review"]
+            self.assertEqual(review, {"verdict": "approve", "role": name,
+                "run": result["run"], "reviewed_snapshot": source["id"]})
+            cursor = read_json(self.project.root / "observed" / f"{name}.json")
+            self.assertEqual(reviews.cursor_review(
+                self.project, self.config, name, cursor, source)[1], review)
+            self.assertEqual(engine.run(self.project, name,
+                scheduled_invocation=True).get("skipped"), "unchanged")
+            if name == "inspector":
+                self.denied()  # No scan/fallback to the other authorized holder.
+                with self.assertRaises(Denied):
+                    reviews.cursor_review(self.project, self.config, "auditor", cursor, source)
+                write_json(self.project.root / "observed" / "auditor.json", cursor)
+                self.denied()  # Even a copied cursor cannot impersonate A.
+                self.assertFalse(_on_change_observed(cursor, source, exact_snapshot=True,
+                    project=self.project, config=self.config, role_name="auditor"))
+                for kwargs in ({}, {"project": self.project},
+                               {"project": self.project, "config": self.config}):
+                    self.assertFalse(_on_change_observed(cursor, source,
+                        exact_snapshot=True, **kwargs))
+        self.assertTrue(self.publish()["published"])
+        successor = self.project.snapshots.create(
+            {key: source[key] for key in ("files", "code_digest", "skipped", "bytes")},
+            goal=source["goal"], state="Same code, new review input", run=None,
+            outcome="wait", summary="Successor", parent=source["id"])
+        self.project.snapshots.publish(successor)
+        result = engine.run(self.project, "inspector", scheduled_invocation=True)
+        self.assertEqual(result.get("status"), "completed", result)
+        self.assertEqual(result["finish"]["review"]["reviewed_snapshot"], successor["id"])
+
+    def test_ungranted_reader_and_reviewer_name_cannot_seal(self):
+        for name in ("searcher", "reviewer"):
+            ctx = self.context(name)
+            ctx.role = dataclasses.replace(ctx.role,
+                capabilities=tuple(cap for cap in ctx.role.capabilities if cap != "review_verdict"))
+            self.assertFalse(reviews.authorized(ctx.config, ctx.role))
+            with self.assertRaises(Denied):
+                ctx.handle("finish", {"outcome": "wait", "summary": "Not authorized",
+                                      "review_verdict": "approve"})
+            self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
+
+    def test_selected_holder_revocation_denies_existing_approval(self):
+        self.review()
+        roles = dict(self.config.roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"],
+            capabilities=tuple(cap for cap in roles["reviewer"].capabilities if cap != "review_verdict"))
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.denied()
+
+    def test_approval_does_not_replace_human_go(self):
+        self.review()
+        record = self.human_go
+        self.project.insights.revise(record["id"], source="operator", title=record["title"],
+            body=f"Await renewed GO.\ndigest: {current_digest(self)}\n",
+            base_snapshot=record["base_snapshot"], run="operator", expected_rev=record["rev"])
+        with self.assertRaisesRegex(Denied, "stale.*revision"):
             self.publish()
 
     def test_typed_approval_seals_immutable_run_and_snapshot_then_publishes(self):
@@ -211,10 +290,11 @@ class ReviewVerdictTests(PublishFixture):
 
     def test_default_closed_and_policy_rejects_writer_or_unknown_identity(self):
         self.assertEqual(load(self.file).publication.reviewer_role, "")
-        closed = dataclasses.replace(self.config, publication=dataclasses.replace(
-            self.config.publication, reviewer_role=""))
+        closed = dataclasses.replace(self.config, roles=load(self.file).roles,
+            publication=dataclasses.replace(self.config.publication, reviewer_role=""))
         ctx = self.context("reviewer")
         ctx.config = closed
+        ctx.role = closed.roles["reviewer"]
         with self.assertRaises(Denied):
             ctx.handle("finish", {"outcome": "wait", "summary": "review", "review_verdict": "approve"})
         self.review()
@@ -246,7 +326,12 @@ class ReviewVerdictTests(PublishFixture):
         self.denied()
 
     def test_reviewer_identity_is_operator_policy_not_a_role_name_convention(self):
-        self.config = dataclasses.replace(self.config, publication=dataclasses.replace(
+        # Transfer the grant as well as the publication selection. Merely
+        # deselecting a holder no longer revokes its review capability.
+        roles = dict(load(self.file).roles)
+        roles["searcher"] = dataclasses.replace(roles["searcher"],
+            capabilities=(*roles["searcher"].capabilities, "review_verdict"))
+        self.config = dataclasses.replace(self.config, roles=roles, publication=dataclasses.replace(
             self.config.publication, reviewer_role="searcher"))
         ctx = self.context("reviewer")
         with self.assertRaises(Denied):

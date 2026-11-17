@@ -1253,7 +1253,7 @@ detected bound without declaring it:
 
 `on_change` is orthogonal to scheduling. Ordinary roles skip execution when the
 published `code_digest` is unchanged, so state-only republications do not
-reschedule them. The configured `publication.reviewer_role` is the exact-snapshot
+reschedule them. Every `review_verdict` capability holder is an exact-snapshot
 exception: it compares snapshot IDs because each published input needs its own
 typed review, even when code is unchanged. Only a cursor validated against the
 exact typed review snapshot and its run receipt counts as reviewed; an observed
@@ -2776,11 +2776,18 @@ bad adapter cannot busy-loop.
 
 ## VCS publish (M2 step 1: `vcs_read`/`vcs_publish` behind `GO <branch>` approval)
 
-Same `[vcs]` adapter. `[publication].reviewer_role` explicitly authorizes the
-independent read-only role whose typed verdicts can approve publication. The
-default `""` authorizes nobody: `vcs_publish` fails closed even with human GO.
-A configured name must exist, have `workspace = "read"` and `finish`, and lack
-`delegate`; writable roles cannot approve their own work. For example:
+Same `[vcs]` adapter. The `review_verdict` role capability authorizes typed
+review verdicts; it is a modifier of `finish`, not a callable tool. Any role name
+may hold it, provided the role has `workspace = "read"` and `finish`, and lacks
+both `delegate` and `vcs_publish`. Every holder is validated at config load.
+`[publication].reviewer_role` is policy selecting the holder whose exact approval
+publication consumes, with no scan or fallback to other holders. For compatibility,
+config load automatically confers `review_verdict` on the selected role before
+validating holders; existing configurations need no new explicit grant. A nonempty
+selection must name an existing eligible role. Deselection does not revoke an
+explicit capability grant. Defaults select nobody and grant nobody this capability:
+`vcs_publish` fails closed even with human GO. Human GO remains independently
+required even with a valid typed approval. For example:
 
 ```toml
 [publication]

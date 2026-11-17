@@ -13,10 +13,25 @@ from support import history_write_json as write_json
 from mizu.project import Project, initialize
 from mizu.protocol import tool_definitions
 from mizu.smoke_refs import shared_lock
-from mizu.runtime import Engine, should_run
+from mizu.runtime import (CONSULT_FORBIDDEN, DELEGATE_FORBIDDEN, Engine, should_run,
+                          check_consult_role, check_delegate_role)
 
 
 class SnapshotTests(Fixture):
+    def test_review_authority_is_not_a_tool_or_child_grant(self):
+        from mizu.protocol import operation_allowed
+        self.assertIn("review_verdict", CONSULT_FORBIDDEN)
+        self.assertIn("review_verdict", DELEGATE_FORBIDDEN)
+        role = dataclasses.replace(self.config.roles["consult"],
+                                  capabilities=("finish", "review_verdict"))
+        self.assertEqual([tool["name"] for tool in tool_definitions(role.capabilities)],
+                         ["mizu_finish"])
+        self.assertFalse(operation_allowed("review_verdict", role.capabilities))
+        with self.assertRaises(ConfigError):
+            check_consult_role(role.name, role)
+        with self.assertRaises(ConfigError):
+            check_delegate_role(role.name, role)
+
     def test_published_snapshot_survives_worktree_edit(self):
         snap = self.project.snapshots.get()
         (self.project.workspace / "app.py").write_text("VALUE = 3\n")

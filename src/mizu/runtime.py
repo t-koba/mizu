@@ -368,7 +368,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen", "work_items_reconcile",
-                               "work_order", "record_write"})
+                               "work_order", "record_write", "review_verdict"})
 
 
 #: Capabilities a delegation child must never hold. The child works in the
@@ -382,7 +382,7 @@ DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                 "work_items_create", "work_items_transition", "work_items_reopen", "work_items_reconcile",
-                                "work_order", "record_write"})
+                                "work_order", "record_write", "review_verdict"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -2896,12 +2896,11 @@ class Engine:
         """
         snapshot = project.snapshots.get()
         cursor = _role_cursor(project, role_name)
-        reviewer_role = getattr(self.config.publication, "reviewer_role", "")
-        exact_snapshot_review = bool(reviewer_role and role_name == reviewer_role)
+        exact_snapshot_review = "review_verdict" in getattr(role, "capabilities", ())
         code_unchanged = role.on_change and _on_change_observed(
             cursor, snapshot, exact_snapshot=exact_snapshot_review,
             project=project if exact_snapshot_review else None,
-            config=self.config if exact_snapshot_review else None)
+            config=self.config if exact_snapshot_review else None, role_name=role_name)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
         record_state = operator_records.pending(project, role)
@@ -4578,10 +4577,10 @@ def _progress_self_admits(record, config, role_name, current_time=None) -> bool:
 
 
 def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
-                        project=None, config=None) -> bool:
+                        project=None, config=None, role_name="") -> bool:
     """True when an ``on_change`` role completed its relevant observation.
 
-    The configured publication reviewer is bound to the exact input snapshot.
+    Every review_verdict capability holder is bound to the exact input snapshot.
     Its observation is complete only when the cursor resolves to a valid typed
     review snapshot and create-only run receipt for that source. A verdict-less
     attempt is not review completion; subsequent scheduled/event dispatches may
@@ -4597,9 +4596,9 @@ def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
         if not isinstance(cursor, dict):
             return False
         if exact_snapshot:
-            if project is None or config is None:
+            if project is None or config is None or not role_name:
                 return False
-            reviews.cursor_review(project, config, cursor, snapshot)
+            reviews.cursor_review(project, config, role_name, cursor, snapshot)
             return True
         current = snapshot.get("code_digest")
         if not isinstance(current, str) or not current:

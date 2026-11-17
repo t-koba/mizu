@@ -1071,6 +1071,21 @@ decision. The role capability and the operator's
 `request_grant` are both required, so the path exists without anything
 triggering it until the operator grants them.
 
+### Capability-based publication review
+
+Review authority comes from the fixed `review_verdict` role capability, not a
+role-name convention. Holders are read-only roles with `finish`, without
+`delegate` or `vcs_publish`; consultants and delegates cannot seal verdicts.
+Every holder's `on_change` completion validates a typed receipt for its own exact
+input snapshot and host-bound role/run identity, even when code is unchanged.
+`publication.reviewer_role` is policy selecting which holder's observed cursor
+publication consumes; it neither scans other holders nor falls back to older
+approvals. Config load automatically confers the capability on that selected
+role for compatibility, then validates every holder. Defaults grant/select
+nobody and refuse publication. A selected holder's typed `approve` receipt,
+exact snapshot/code bindings, and the independent human `GO <branch>` bound to
+the code digest are all required; findings and prose never authorize publication.
+
 ### Externally recorded publication receipts
 
 The product's own publish path records a schema-3 receipt in

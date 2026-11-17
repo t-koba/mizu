@@ -336,7 +336,7 @@ DEFINITIONS = {
                         ("cursor", "offset"))),
     "finish": (WRITER_CONTINUATION_CONTRACT + " Ends this work unit and releases its model slot and workspace lock; later tool calls are refused. outcome=wait with wait_seconds=N persists a wake deadline instead of keeping a command running; independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. outcome=wait with wait_for_check=<id> releases the unit and resumes on check completion or new input. 'done' on writable roles requires successful verification. "
                "ack_events optionally selects unique delivered operator record, decision or pending-insight event, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. Proposal merge waits share wait_events and require explicit identity-bound ack_events selections. CI wait rows share wait_events and always use explicit, identity-bound ack_tokens under the same successful-finish receipt boundary. CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
-               "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent. Optional review_verdict (approve/changes_requested) is accepted only from the operator-configured independent reviewer. The host binds it to this run and its input snapshot; callers cannot supply review identity or snapshot. Findings remain separate insights; summaries never approve.",
+               "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent. Optional review_verdict (approve/changes_requested) is accepted only from a role holding the review_verdict capability selected by publication policy. The host binds it to this run and its input snapshot; callers cannot supply review identity or snapshot. Findings remain separate insights; summaries never approve.",
                obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},
                     "summary": text(12000), "state": text(32000),
                     "review_verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
@@ -351,7 +351,7 @@ DEFINITIONS = {
 
 
 # Modifier grants alter another operation but are never callable tools.
-MODIFIER_CAPABILITIES = frozenset({"withdraw_decided"})
+MODIFIER_CAPABILITIES = frozenset({"withdraw_decided", "review_verdict"})
 
 
 # Read tools inherit only these existing grants; they are not configurable

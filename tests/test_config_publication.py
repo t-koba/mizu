@@ -1,5 +1,6 @@
 """Publication-owned local Git HEAD timeout policy and fragment loading."""
 import dataclasses
+import json
 
 from support import Fixture
 from mizu.config import PublicationPolicy, TOML_INTEGER_MAX, load
@@ -26,6 +27,46 @@ class PublicationConfigTests(Fixture):
                         load(self.file)
         self.file.write_text(original + '\n[publication]\n')
         self.assertEqual(load(self.file).publication, PublicationPolicy())
+
+    def test_review_defaults_and_legacy_policy_confer_capability(self):
+        self.assertEqual(self.config.publication.reviewer_role, "")
+        self.assertFalse(any("review_verdict" in role.capabilities
+                             for role in self.config.roles.values()))
+        original = self.file.read_text()
+        for name in ("reviewer", "searcher"):
+            with self.subTest(name=name):
+                self.file.write_text(original + f'\n[publication]\nreviewer_role = "{name}"\n')
+                config = load(self.file)
+                self.assertEqual(config.roles[name].capabilities,
+                                 (*self.config.roles[name].capabilities, "review_verdict"))
+                self.assertEqual([role.name for role in config.roles.values()
+                                  if "review_verdict" in role.capabilities], [name])
+        self.file.write_text(original + '\n[publication]\nreviewer_role = "absent"\n')
+        with self.assertRaisesRegex(ConfigError, 'publication.reviewer_role.*review_verdict'):
+            load(self.file)
+
+    def test_explicit_review_holders_require_independent_shape(self):
+        original = self.file.read_text()
+        for workspace, caps in (
+                ("read", ["finish", "review_verdict"]),
+                ("write", ["finish", "review_verdict"]),
+                ("read", ["review_verdict"]),
+                ("read", ["finish", "review_verdict", "delegate"]),
+                ("read", ["finish", "review_verdict", "vcs_publish"])):
+            with self.subTest(workspace=workspace, capabilities=caps):
+                self.file.write_text(original + '\n[roles.auditor]\nprofile = "alternate"\npolicy = "policies/shared.md"\n'
+                    + f'workspace = "{workspace}"\ncapabilities = {json.dumps(caps)}\n')
+                if workspace == "read" and caps == ["finish", "review_verdict"]:
+                    config = load(self.file)
+                    self.assertIn("review_verdict", config.roles["auditor"].capabilities)
+                    self.assertEqual(config.publication.reviewer_role, "")
+                    # Explicitly selecting an existing holder is idempotent.
+                    self.file.write_text(self.file.read_text() +
+                        '\n[publication]\nreviewer_role = "auditor"\n')
+                    self.assertEqual(load(self.file).roles["auditor"], config.roles["auditor"])
+                else:
+                    with self.assertRaisesRegex(ConfigError, 'review_verdict'):
+                        load(self.file)
 
     def test_unknown_keys_non_table_and_include(self):
         original = self.file.read_text()

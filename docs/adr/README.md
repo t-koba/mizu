@@ -149,7 +149,7 @@ so one project's usage no longer stops another under a smaller limit.
 ## ADR-023 — Change-gated observers
 Ordinary `on_change` observers compare `code_digest`, so state-only
 republications do not reschedule them and a no-action wake cannot loop model
-calls. The configured publication reviewer is the exact-snapshot exception:
+calls. Every `review_verdict` capability holder is an exact-snapshot exception:
 its observed cursor tracks the reviewed input separately from the immutable
 receipt and compares snapshot IDs, because approval cannot transfer to a
 same-code successor.

@@ -54,8 +54,9 @@ class PublishFixture(Fixture):
     def setUp(self):
         super().setUp()
         self.source_commit = init_publish_git(self)
-        self.config = dataclasses.replace(self.config, publication=dataclasses.replace(
-            self.config.publication, reviewer_role="reviewer"))
+        config, _ = with_caps(self, "reviewer", ["review_verdict"])
+        self.config = dataclasses.replace(config, publication=dataclasses.replace(
+            config.publication, reviewer_role="reviewer"))
 
 
 def with_caps(fixture, name, extra):
@@ -75,7 +76,8 @@ def review_for_publication(fixture, config):
             run=None, outcome="wait", summary="Publication candidate", parent=snap["id"])
         fixture.project.snapshots.publish(snap)
     roles = dict(config.roles)
-    roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=False)
+    roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=False,
+        capabilities=tuple(dict.fromkeys((*roles["reviewer"].capabilities, "review_verdict"))))
     review_config = dataclasses.replace(config, roles=roles, publication=dataclasses.replace(
         config.publication, reviewer_role="reviewer"))
     def review(ctx, *_):
