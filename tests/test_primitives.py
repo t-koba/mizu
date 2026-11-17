@@ -251,6 +251,18 @@ class FileTests(unittest.TestCase):
         path.write_bytes(b'{"exponent":1e2,"integer":42}')
         self.assertEqual(read_json(path), {"exponent": 100.0, "integer": 42})
 
+    def test_read_json_rejects_deep_documents(self):
+        from mizu.fs import JSON_DEPTH_REFUSED, MAX_JSON_DEPTH
+        path = self.root / "state.json"
+        path.write_bytes(b"[" * (MAX_JSON_DEPTH + 1) + b"0" + b"]" * (MAX_JSON_DEPTH + 1))
+        with self.assertRaisesRegex(ValueError, JSON_DEPTH_REFUSED):
+            read_json(path)
+        path.write_bytes(b"[" * MAX_JSON_DEPTH + b"0" + b"]" * MAX_JSON_DEPTH)
+        value = read_json(path)
+        for _ in range(MAX_JSON_DEPTH - 1):
+            value = value[0]
+        self.assertEqual(value, [0])
+
     def test_read_json_missing_and_permission_failure(self):
         path = self.root / "state.json"
         self.assertEqual(read_json(path, {"missing": True}), {"missing": True})
