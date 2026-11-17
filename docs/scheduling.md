@@ -181,11 +181,11 @@ wake-generation also admits it.
 For other outcomes, it checks inbox generation; role-routed decision/terminal
 events and due structured waits (`_role_events_due`); due CI reds for opted-in
 roles (`_ci_due_for`); expired `wait` `wake_at`; and finally the
-writer handoff for `continue`/`bounded` units. A writer's configured fallback
-applies only to a `wait` with no role-eligible ready work and a current
-self-resolvable wait after bounded local evidence proves no live external
-source. It never admits ready work on a timer. Mere progress still requires a
-new actionable `next_step` with a selected work signal for immediate writer handoff.
+writer handoff for `continue`/`bounded` units. Writers no longer self-admit on a
+no-progress timer: holder-only waits surface as open role-eligible ready work,
+and a progress-backed continuation needs a new actionable `next_step` with a
+selected work signal for immediate writer handoff. Mere progress alone does not
+qualify.
 
 ### Writer next-step handoff
 
@@ -238,27 +238,24 @@ run-level wait expiry and scheduled dispatch remain independent. Historical `wai
 remain valid snapshot evidence and status fields, but are no longer emitted or
 timer authority. No FIFO, affinity, CI-red or check-job policy changes here.
 
-A writable writer's `wait` retains a backoff only when no eligible work is ready,
-bounded local reads prove no live external source remains, and a held
-self-resolvable wait exists.
-Two held waits are self-resolvable, not external sources: `code_change` when
+A held wait whose sole resolver is its own holder is open role-eligible ready
+work, not an external liveness source; it is admitted through the normal ready
+set rather than a timer. Two waits are holder-only. One is `code_change` when
 the holder is the only project-assigned `workspace = "write"` role with an
 independent dispatch route (`event_wakes`, `daemon`, `interval_seconds` or
-`calendar`); a delegated-only second write role does not make the wait external.
+`calendar`); a delegated-only second write role makes the wait external.
 The other is
 `object_resolved` on an Insight (historically `insight_decided`) with a current, substantively answered (`accept`, `modify` or
 `reject`) `kind = "question"` authored by that holder. Exactly one enabled,
 authenticated operator `answer` to that same current question revision, routed
-back to its author, also annotates the held wait as self-resolvable and
+back to its author, also annotates the held wait as holder-only and
 suppresses that same answered revision as an independent open-question source.
 This leaves the question and the wait pending without deciding for the writer;
-only an actual substantive current-revision decision makes it due and holder-ready. A proven
-self-resolvable wait permits the backoff only when no ledger item is currently ready;
-this does not reopen, unblock or transition work.
+only an actual substantive current-revision decision settles it. Holder-only
+classification is projection-only: it does not reopen, unblock or transition work,
+and it grants no timer re-admission.
 
-This path always waits for `writer_no_progress_backoff_seconds` from the
-snapshot's progress timestamp, even if the unit made progress; no immediate
-allowance applies. The host records `finish.wait_liveness` in the existing
+The host records `finish.wait_liveness` in the existing
 finish intent/result: `true` for a live owned queued/running check, an own
 unresolved operator-addressed question without an exact authenticated answer for
 its current revision, a pending external ledger wait, or a
@@ -340,9 +337,9 @@ substantive decision, a terminal event, a due wait, or a due CI red.
 The snapshot-publishing role additionally bypasses that skip for changed goal,
 inbox generation or prior-wait expiry. Operator wake-generation, pending eligible
 operator records and changed role-eligible ready work bypass it independently
-of workspace mode. A writer next-step handoff, a writer self-resolvable-wait
-fallback with no current role-eligible ready work, or a read-only role-specific
-progress continuation can also bypass the unchanged-code gate. Read-only roles
+of workspace mode. A writer next-step handoff or a read-only role-specific
+progress continuation can also bypass the unchanged-code gate. Writers have no
+self-resolvable-wait timer fallback to bypass it. Read-only roles
 never inherit goal/inbox/run-wait generations or the
 publisher's progress. Event probes still exclude generic goal/inbox/run-wait
 changes, next-step handoffs and progress-only continuation; writer probes retain their existing
@@ -548,8 +545,9 @@ readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
 exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change` (the holder
 is the only project writer with independent dispatch), `answered_own_question`,
-or `null`. This annotation uses the same bounded
-read-only projection and does not change the wait's state or readiness. Operator
+or `null`. This internal liveness witness is consumed by the holder-only
+classifier to surface such waits as open ready work; it is not a timer or
+readiness grant and does not change the stored wait's state. Operator
 answer evidence uses at most one read-only catalog scan per projection, only
 when an eligible own-question wait needs it; the writer wait-source check reuses
 the same lazy lookup once per projection, only when an unresolved own question
@@ -557,7 +555,7 @@ remains; missing, stale, ambiguous or
 unreadable answers leave the annotation unset and keep the question live. The existing
 `coverage_complete` reports inventory/observation completeness; `truncated` and
 `overflow_count` separately identify omitted diagnostic rows. An incomplete
-view is not proof that no self-resolvable or external cause exists.
+view is not proof that no holder-only or external cause exists.
 Missing legacy bodies, orphan identity/decision records, unsafe
 paths, inconsistent revisions, incomplete archives and malformed evidence cannot
 prove an impossible releaser or terminal outcome.

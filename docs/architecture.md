@@ -366,12 +366,12 @@ continuations require a validated progress-backed `next_step` or an independent 
 For read-only roles, `no_progress_backoff_seconds = 0` disables the timer wake;
 a positive value permits a parked on-change cursor to wake after that delay
 measured from its recorded progress timestamp. Writers inherit
-`writer_no_progress_backoff_seconds = 300` unless a per-role
-`no_progress_backoff_seconds` overrides it; this backoff applies only to a
-`wait` with no role-eligible ready work after bounded evidence proves there is
-no live external source and a held self-resolvable wait exists. It never admits
-ready work on a timer. This bounded fallback does not change the daemon poll
-cadence or bypass other gates. `no_progress_recovery_after = 2`
+`writer_no_progress_backoff_seconds = 300` as their `no_progress_backoff_seconds`
+default unless a per-role override applies, but the writer self-resolvable-wait
+timer fallback was removed: a parked writer is not re-admitted by a timer.
+Holder-only waits surface as open ready work and progress-backed continuations
+require a validated `next_step` handoff; neither changes the daemon poll cadence
+or bypasses other gates. `no_progress_recovery_after = 2`
 rotates a persistent writer conversation to a fresh generation on the next
 independently admitted dispatch after two empty writer snapshots; it does not
 admit or schedule a run. `mizu status` exposes whether that recovery threshold

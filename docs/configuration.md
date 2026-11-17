@@ -267,8 +267,8 @@ removals/replacements and wait satisfaction wake. The signature is captured
 with the full/delta prompt, not at finish, so new work during a run remains
 pending. Legacy missing signatures admit nonempty sets for reassessment;
 empty sets do not manufacture an event. Independent control/input/CI/wait
-signals remain unchanged; read-only no-progress backoff and the separate
-writer-ready fallback are described in
+signals remain unchanged; read-only no-progress backoff and writer
+next-step/ready-work admission are described in
 [scheduling](scheduling.md#wake-sources-versus-delivered-inputs) and
 [writer handoff](scheduling.md#writer-next-step-handoff). This adds no grant,
 actor/assignee input, condition vocabulary or FIFO change.
@@ -546,7 +546,7 @@ See [check jobs](check-jobs.md) for the exact lifecycle, safety and backup limit
 | `no_progress_continuations` | Number of consecutive no-progress `continue`/`bounded` completions allowed to self-admit immediately (0–100; default 0 parks after its first no-progress finish). Only read-only `on_change` roles use this admission allowance; writers need a validated immediate `next_step` or independent wake. Selected progress, role change, or signal-policy change resets the streak. |
 | `no_progress_recovery_after` | Consecutive no-progress writer snapshots before a persistent session is rotated to a fresh conversation on its next already-admitted dispatch (1–100; default 2). It never schedules a run; `mizu status` separates a due no-progress threshold (`pending_work: true`) from actionable rotation (`due` only for persistent profiles, `not_applicable` for ephemeral ones, and `conditional` for mixed selector choices). |
 | `no_progress_backoff_seconds` | Read-only `on_change` no-progress timer default (0–86,400; default 0 disables that timer). `roles.<name>.no_progress_backoff_seconds` overrides the timer for that role; when unset, read-only roles inherit this value and writers inherit `writer_no_progress_backoff_seconds`. A read-only role may self-admit on a later scheduled invocation after its timer without changing its cadence. |
-| `writer_no_progress_backoff_seconds` | Writer fallback for a `wait` with proven no live external source, a held self-resolvable wait, and no role-eligible ready work (0–86,400; default 300 seconds; 0 disables the timer fallback). The backoff starts from the persisted progress timestamp; it never bypasses `done`, pause/drain, producer holds, role filtering, or independent event/readiness gates. A role-specific `no_progress_backoff_seconds` overrides this project default. It also defines no-progress recovery rotation on an independently admitted run, but never admits ready work on a timer or changes daemon cadence. See [writer handoff](scheduling.md#writer-next-step-handoff). |
+| `writer_no_progress_backoff_seconds` | Retained writable-role default for `no_progress_backoff_seconds` (0–86,400; default 300 seconds; 0 is accepted). The writer self-resolvable-wait timer fallback that consumed it was removed: a parked writer is no longer re-admitted when this timer elapses. Holder-only waits now surface as open ready work, and progress-backed continuations require a validated `next_step` handoff. No-progress recovery rotation is governed by the separate `no_progress_recovery_after` key, not this value. A role-specific `no_progress_backoff_seconds` overrides this project default. See [writer handoff](scheduling.md#writer-next-step-handoff). |
 | `max_failures` | Consecutive role failures before auto-pause (0 disables auto-pause; `Busy`/`InfraExceeded` infra waits (daily budget, disk reserve) defer without counting, plain `LimitExceeded` bound faults still count, `mizu resume` resets to 0 — ADR-016, ADR-017; matched selector error rules do not count unless their `counts_as_failure` is explicitly true; an automatic pause keeps the human-readable `reason` and adds bounded machine-readable `pause_cause` (`kind: failure_brake`, `error_class` class name only, `roles` role names only, no error message) to `control.json`; any explicit `paused` update without a new `pause_cause` clears it, so manual pause/resume never retain a stale cause while unrelated updates preserve it) |
 | `parallel_runs`, `parallel_consults` | Independently bounded global caller execution slots and per-consultation role fan-out; admitted callers lend their slot to children, so `parallel_runs = 1` permits consultation/delegation |
 | `parallel_checks` | Shared compute slots for asynchronous sandbox checks, independent of the model admission slots (1-64; default 2). The check runner takes one slot per running job, and a job that cannot take one waits without holding a slot. See [check jobs](check-jobs.md) |
@@ -1983,8 +1983,8 @@ independent `command_evidence_sources` / `experiment_evidence_sources`
 not capability grants),
 optional per-role no-progress backoff override `no_progress_backoff_seconds`
 (0–86,400; unset inherits `[limits].writer_no_progress_backoff_seconds` for
-writable roles and `[limits].no_progress_backoff_seconds` otherwise; 0 disables
-the timer wake), optional per-role writer-daemon cooldown override `cooldown_seconds`
+writable roles and `[limits].no_progress_backoff_seconds` otherwise; the timer
+wake applies to read-only on-change roles only, not writers), optional per-role writer-daemon cooldown override `cooldown_seconds`
 (1–1,073,741,824; unset inherits the project `[limits]` value; writable daemon
 spacing and deferred re-evaluation only, read-only cadence stays on
 `idle_seconds` and read-only deferrals stay on the project cooldown),
