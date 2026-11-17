@@ -20,7 +20,7 @@ from pathlib import Path
 from .admission import check_slot_exclusion
 from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
-from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, write_json, DIGEST, SCRIPT_MAX
+from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, write_job
 
@@ -1207,6 +1207,8 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
         raise Denied('Check job belongs to another role')
     if evidence_id is None:
         directory = root(context.project) / job.get('shared_job', job_id) / 'commands'
+        if directory.is_symlink():
+            raise Denied('Command evidence unavailable')
         candidates = sorted(
             p.stem for p in directory.glob('*.json')
             if (_COMMAND_EVIDENCE_ID.fullmatch(p.stem)
@@ -1220,12 +1222,13 @@ def logs(context, job_id, evidence_id=None, *, offset=0, limit=8192, content_id=
         raise Denied('Invalid command evidence ID')
     if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 8192:
         raise Denied('Invalid evidence page')
-    path = root(context.project) / job.get('shared_job', job_id) / 'commands' / (evidence_id + '.json')
-    if (not path.is_file() or path.is_symlink()
-            or path.stat().st_size > (context.config.limits.output_bytes * COMMAND_EVIDENCE_OUTPUT_MULTIPLIER
-                                      + COMMAND_EVIDENCE_ENVELOPE_BYTES)):
-        raise Denied('Command evidence unavailable')
-    data = path.read_bytes()
+    maximum = (context.config.limits.output_bytes * COMMAND_EVIDENCE_OUTPUT_MULTIPLIER
+               + COMMAND_EVIDENCE_ENVELOPE_BYTES)
+    try:
+        data = safe_read(root(context.project) / job.get('shared_job', job_id),
+                         f'commands/{evidence_id}.json', maximum)
+    except (Denied, LimitExceeded, OSError) as exc:
+        raise Denied('Command evidence unavailable') from exc
     identity = digest(data)
     if content_id is not None and content_id != identity:
         raise Denied('Command evidence changed')

@@ -2,6 +2,7 @@ import dataclasses
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -817,6 +818,36 @@ class JobTests(Fixture):
         write_json(path, {'stdout': 'changed'})
         with self.assertRaises(Denied):
             check_jobs.logs(ctx, job['id'], 'a'*32, content_id=first['content_id'])
+
+
+    def test_command_logs_refuse_symlinked_commands_directory(self):
+        ctx, job = self.submit()
+        directory = check_jobs.root(self.project) / job['id'] / 'commands'
+        evidence_id = 'a' * 32
+        with tempfile.TemporaryDirectory(prefix='mizu-test-evidence-') as outside:
+            (Path(outside) / (evidence_id + '.json')).write_text('{"stdout": "outside sentinel"}')
+            if directory.exists():
+                shutil.rmtree(directory)
+            try:
+                directory.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('Symlinks unavailable: ' + str(exc))
+            for requested_id in (evidence_id, None):
+                with self.subTest(evidence_id=requested_id):
+                    with self.assertRaisesRegex(Denied, 'Command evidence unavailable'):
+                        check_jobs.logs(ctx, job['id'], evidence_id=requested_id)
+
+    def test_command_logs_refuse_hardlinked_evidence(self):
+        ctx, job = self.submit()
+        evidence_id = 'a' * 32
+        path = check_jobs.root(self.project) / job['id'] / 'commands' / (evidence_id + '.json')
+        write_json(path, {'stdout': 'hardlink sentinel'})
+        try:
+            os.link(path, self.root / 'evidence-alias.json')
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('Hardlinks unavailable: ' + str(exc))
+        with self.assertRaisesRegex(Denied, 'Command evidence unavailable'):
+            check_jobs.logs(ctx, job['id'], evidence_id=evidence_id)
 
 
 class PurposeTests(JobTests):
