@@ -780,7 +780,7 @@ replacement insight without implying rejected substance.
         if current is not None:
             if not isinstance(current, dict) or current.get("id") != insight_id:
                 raise Denied("Corrupt current insight history identity")
-            current_rev = current.get("rev")
+            current_rev = current.get("rev", 1)
             if "rev" in current and (type(current_rev) is not int or current_rev < 1):
                 raise Denied("Corrupt current insight history revision")
         else:

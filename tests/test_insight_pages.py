@@ -325,6 +325,25 @@ class InsightPageTests(Fixture):
             self.assertEqual(output, '')
             self.assertIn('error', json.loads(error))
 
+    def test_history_legacy_revision_defaults_only_when_absent(self):
+        record = self.record(0)
+        del record['rev']
+        insight_id = record['id']
+        path = self.project.root / 'inbox' / f'{insight_id}.json'
+        write_json(path, record)
+        self.assertEqual(path.read_bytes(), canonical(record))
+        self.assertEqual(list((self.project.root / 'insight-revisions').glob(
+            f'{insight_id}.r*.json')), [])
+        self.assertEqual(self.project.insights.history(insight_id, after_rev=0, limit=1),
+                         {"records": [], "cursor": 0, "next_cursor": None, "complete": True})
+        for rev in (None, 0, True, "1"):
+            with self.subTest(rev=rev):
+                write_json(path, {**record, 'rev': rev})
+                with self.assertRaises(Denied):
+                    self.project.insights.history(insight_id, after_rev=0, limit=1)
+        self.assertEqual(self.project.insights.history(self.record(1)['id'], after_rev=0, limit=1),
+                         {"records": [], "cursor": 0, "next_cursor": 1, "complete": None})
+
     def test_cli_history_continuation_and_action_flags(self):
         key = "history"
         self.file.write_text(self.file.read_text().replace(
