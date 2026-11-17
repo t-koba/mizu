@@ -339,9 +339,12 @@ class MaterializeApplyTests(Fixture):
         target = ctx.workspace / "keep.txt"
         target.write_bytes(b"original")
         # Valid bindings/content plus malformed extra fields must still fail.
+        # A 64-deep extra array under the top-level object exceeds the product
+        # JSON nesting bound; 64 is the exact refusal threshold (63 parses).
+        over_depth = '"extra":' + '[' * 64 + '0' + ']' * 64
         bad_fields = ['"extra":1,"extra":2', '"extra":NaN',
                       '"extra":Infinity', '"extra":-Infinity',
-                      '"extra":1e9999', '"extra":-1e9999']
+                      '"extra":1e9999', '"extra":-1e9999', over_depth]
         for source in ("started", "receipt", "spec"):
             for fields in bad_fields:
                 with self.subTest(source=source, fields=fields):
@@ -379,6 +382,27 @@ class MaterializeApplyTests(Fixture):
                 with self.assertRaises(Denied):
                     ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
                 self.assertEqual(target.read_bytes(), b"original")
+
+    def test_apply_json_depth_boundary_parses_but_deeper_refused(self):
+        ctx = self._grant(self.context("worker"))
+        target = ctx.workspace / "keep.txt"
+        # At the bound (top-level object + 63 nested arrays) the product parser
+        # accepts the spec; one more nested array is refused.
+        spec = '{"output":"keep.txt","extra":' + '[' * 63 + '0' + ']' * 63 + '}'
+        self.assertEqual(materialize.parse_output(spec), "keep.txt")
+        with self.assertRaises(Denied):
+            materialize.parse_output(
+                '{"output":"keep.txt","extra":' + '[' * 64 + '0' + ']' * 64 + '}')
+        # Apply refuses the over-depth spec and leaves the destination intact.
+        target.write_bytes(b"original")
+        run, eid, _, _ = self._seed(ctx, spec, "replacement")
+        path = ctx.run_dir / f"materialize/{eid}.json"
+        record = json.loads(path.read_text())
+        record["spec"] = '{"output":"keep.txt","extra":' + '[' * 64 + '0' + ']' * 64 + '}'
+        path.write_text(json.dumps(record))
+        with self.assertRaises(Denied):
+            ctx.handle("materialize", {"apply": {"run": run, "evidence_id": eid}})
+        self.assertEqual(target.read_bytes(), b"original")
 
     def test_apply_cache_controls_refused(self):
         ctx = self._grant(self.context("worker"))

@@ -39,13 +39,11 @@ lives in the operator adapter and its policy, never here.
 """
 from __future__ import annotations
 
-import json
-import math
 import re
 from pathlib import Path
 
 from .errors import Denied
-from .fs import DIGEST, canonical, digest, relative_parts, safe_read, safe_write, write_json
+from .fs import DIGEST, canonical, digest, loads_finite, relative_parts, safe_read, safe_write, write_json
 from .process import (
     ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, adapter_failure_diagnostic, run,
 )
@@ -148,21 +146,8 @@ def _no_duplicates(pairs: list) -> dict:
     return seen
 
 
-def _reject_nonfinite_constant(value: str):
-    raise ValueError("Non-finite JSON value")
-
-
-def _finite_float(text: str) -> float:
-    value = float(text)
-    if not math.isfinite(value):
-        raise ValueError("Non-finite JSON number")
-    return value
-
-
 def _loads(raw: str | bytes):
-    return json.loads(raw, object_pairs_hook=_no_duplicates,
-                      parse_constant=_reject_nonfinite_constant,
-                      parse_float=_finite_float)
+    return loads_finite(raw, object_pairs_hook=_no_duplicates)
 
 
 def _utf8_size(text: str) -> int:
