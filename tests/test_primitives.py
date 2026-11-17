@@ -241,6 +241,16 @@ class FileTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b"old")
         self.assertFalse(list(self.root.glob(".new-*")))
 
+    def test_read_json_rejects_nonfinite_numbers(self):
+        path = self.root / "state.json"
+        for number in (b"1e9999", b"-1e9999", b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(number=number):
+                path.write_bytes(b'{"a":' + number + b'}')
+                with self.assertRaises(ValueError):
+                    read_json(path)
+        path.write_bytes(b'{"exponent":1e2,"integer":42}')
+        self.assertEqual(read_json(path), {"exponent": 100.0, "integer": 42})
+
     def test_read_json_missing_and_permission_failure(self):
         path = self.root / "state.json"
         self.assertEqual(read_json(path, {"missing": True}), {"missing": True})

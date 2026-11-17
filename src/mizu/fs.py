@@ -404,7 +404,8 @@ def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) 
                             and before.st_ctime_ns != after.st_ctime_ns)
                         or len(raw) != before.st_size):
                     raise Denied("File changed while reading")
-        return json.loads(raw, parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Non-finite JSON value")))
+        return json.loads(raw, parse_constant=_reject_nonfinite_constant,
+                          parse_float=_reject_nonfinite_number)
     except FileNotFoundError:
         return default
 
