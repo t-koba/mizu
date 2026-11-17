@@ -1125,6 +1125,27 @@ class CiRequestTests(Fixture):
         self.assertEqual(listing["total"], 0)
         self.assertEqual(listing["days"], [])
 
+    def test_an_undatable_dispatch_marker_does_not_hide_valid_requests(self):
+        # A timezone-aware instant at the edge of the representable range can
+        # parse yet have no representable UTC date. Such a marker is invalid
+        # and is skipped, without denying the valid requests beside it and
+        # without aborting either listing path.
+        store = CiRequests(self.project.root)
+        publication = "b" * 64
+        for sha, timestamp in (
+                ("a" * 40, "0001-01-01T00:00:00+01:00"),
+                ("c" * 40, "2026-10-20T00:00:00+00:00")):
+            identity = request_id(publication, sha, ["ci"])
+            store.mark_dispatch(identity, {
+                "request_id": identity, "publication_id": publication,
+                "sha": sha, "workflows": ["ci"], "dispatched_at": timestamp})
+        undatable = request_id(publication, "a" * 40, ["ci"])
+        self.assertIsNone(_unresolved_summary(store.dispatched(undatable), undatable))
+        daily = store.daily()
+        self.assertEqual(daily["total"], 1)
+        self.assertEqual(daily["days"][0]["date"], "2026-10-20")
+        self.assertEqual(store.page()["total"], 1)
+
     def test_the_run_record_file_names_the_requests_it_made(self):
         config = dataclasses.replace(self.config, vcs=adapter_settings(runs()))
         role = dataclasses.replace(

@@ -427,6 +427,13 @@ def _unresolved_summary(record: dict, identity: str) -> dict | None:
         return None
     if moment.tzinfo is None:
         return None
+    try:
+        date = moment.astimezone(dt.timezone.utc).date().isoformat()
+    except OverflowError:
+        # A timezone-aware instant at the edge of the representable range can
+        # parse yet have no representable UTC date; an undatable marker is
+        # invalid and must not deny the valid records beside it.
+        return None
     if (not isinstance(record["publication_id"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", record["publication_id"])):
         return None
@@ -450,7 +457,7 @@ def _unresolved_summary(record: dict, identity: str) -> dict | None:
                 or type(entry.get("rev")) is not int or entry["rev"] < 1):
             return None
         items.append({"id": entry["id"], "rev": entry["rev"]})
-    return {"date": moment.astimezone(dt.timezone.utc).date().isoformat(),
+    return {"date": date,
             "request_id": identity, "publication_id": record["publication_id"],
             "sha": record["sha"], "workflows": list(workflows), "runs": [],
             "covered": items, "attempt": attempt, "state": "unresolved",
