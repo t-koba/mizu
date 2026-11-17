@@ -200,6 +200,47 @@ class LedgerTests(Fixture):
         self.assertEqual(replayed, [other["id"]])
         self.assertEqual(self.store.get(item["id"])["id"], item["id"])
 
+    def test_read_recomputes_usability_from_backed_up_generation(self):
+        item = self.item()
+        self.item("Other")
+        path = self.project.root / ledger_module.NAME
+        with contextlib.closing(sqlite3.connect(path)) as db, db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM items").fetchone()[0], 2)
+            db.execute("INSERT INTO intents(domain, key) VALUES ('items', ?)", (item["id"],))
+
+        connect = sqlite3.connect
+        backups = []
+
+        class RacingConnection(sqlite3.Connection):
+            def backup(self, target, *args, **kwargs):
+                # Commit a writer's incomplete generation after the reader's
+                # usability transaction, immediately before copying it.
+                if not backups:
+                    with contextlib.closing(connect(path)) as writer, writer:
+                        writer.execute("UPDATE meta SET value=0 WHERE key='items.complete'")
+                        writer.execute("DELETE FROM items")
+                backups.append(True)
+                return super().backup(target, *args, **kwargs)
+
+        with patch.object(ledger_module.sqlite3, "connect",
+                          side_effect=lambda *a, **kw: connect(*a, factory=RacingConnection, **kw)):
+            with self.store._ledger.read("items", locked=False) as db:
+                count = db.execute(
+                    "SELECT COUNT(*) FROM items WHERE status IN ('open', 'doing', 'blocked')"
+                ).fetchone()[0]
+                copied_rows = db.execute(
+                    f"SELECT {', '.join(COLUMNS)} FROM items ORDER BY id").fetchall()
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(count, 2)
+        # Private recovery must not complete the on-disk generation.
+        with contextlib.closing(connect(path)) as db:
+            self.assertEqual(db.execute(
+                "SELECT value FROM meta WHERE key='items.complete'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM items").fetchone()[0], 0)
+        forget_ledger(self.project.root)
+        self.assertEqual(self.store.count_open(), 2)
+        self.assertEqual(copied_rows, index_rows(self.project.root)[0])
+
     def crash_after_commit(self, item_id, rev):
         """Kill a real process after its revision file is durable, before the index commit."""
         script = f"""

@@ -269,7 +269,8 @@ class Ledger:
                 if db is not None:
                     db.backup(memory)
                 for name in names:
-                    if name not in usable:
+                    # A writer may have committed a different generation before backup.
+                    if not self._usable(memory, self.domains[name][0]):
                         self._build(memory, name, recover=False)
                 self._repair(memory, names, recover=False)
                 memory.execute("BEGIN")
