@@ -399,8 +399,11 @@ class SharedRecords:
                                 raise Denied("Shared record filename identity mismatch")
                             if _namespace(record_id) != namespace:
                                 continue
-                        elif (_namespace(record_id) != namespace or name != canonical):
-                            raise Denied("Shared record filename identity mismatch")
+                        else:
+                            if name != canonical:
+                                raise Denied("Shared record filename identity mismatch")
+                            if _namespace(record_id) != namespace:
+                                continue
                         previous = seen.get(record_id)
                         if previous is not None:
                             if previous != raw:

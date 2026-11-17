@@ -72,6 +72,30 @@ class SharedRecordsTests(unittest.TestCase):
             self.store.put(conflict, writer="host.test")
         self.assertEqual(path.read_bytes(), canonical(record))
 
+    def test_namespace_scans_share_partition_without_mixing_records(self):
+        long_ns = "a" * 65
+        short_ns = "n-" + digest(long_ns.encode())[:32]
+        a = dict(envelope("one"), id=f"{long_ns}/one", subject={"event": "one"})
+        b = dict(envelope("two"), id=f"{short_ns}/two", subject={"event": "two"})
+        for record in (a, b):
+            computed = self.store.put(record, writer="host.test")
+            self.assertEqual(self.store.get(record["id"]), (record, computed))
+        self.assertEqual(self.record_path(a["id"]).parent, self.record_path(b["id"]).parent)
+        for namespace, record in ((long_ns, a), (short_ns, b)):
+            with self.subTest(namespace=namespace):
+                self.assertEqual(
+                    {row[0]["id"] for row in self.store.records(namespace=namespace)},
+                    {record["id"]})
+
+        path = self.record_path(a["id"])
+        misplaced = path.with_name("wrong.json")
+        path.rename(misplaced)
+        try:
+            with self.assertRaisesRegex(Denied, "^Shared record filename identity mismatch$"):
+                list(self.store.records(namespace=long_ns))
+        finally:
+            misplaced.rename(path)
+
     def test_default_deny_unknown_kind_and_authenticated_writer(self):
         for store, record, writer in [
             (SharedRecords(self.root), envelope(), "host.test"),
