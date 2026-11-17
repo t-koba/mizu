@@ -2,6 +2,7 @@ import concurrent.futures
 import ctypes
 import dataclasses
 import errno
+import io
 import json
 import os
 import stat
@@ -24,6 +25,55 @@ from mizu.fs import (_open_read, _rename_exclusive_posix, _replace_windows, atom
 from mizu.pi import credentials
 from mizu.process import environment, run
 from mizu import platform as fs_platform
+
+
+class JsonTests(unittest.TestCase):
+    @staticmethod
+    def _ping_document(list_depth):
+        # The trailing key exposes a byte scanner that ends the pad string at
+        # its UTF-16BE escaped quote, then mistakes the arrays for string text.
+        return ('{"jsonrpc":"2.0","id":1,"method":"ping","pad":"\\\"",'
+                '"nested":' + '[' * list_depth + '0' + ']' * list_depth +
+                ',"tail":0}\n')
+
+    def test_depth_refusal_across_encodings(self):
+        from mizu.fs import JSON_DEPTH_REFUSED, MAX_JSON_DEPTH, loads_finite
+
+        document = self._ping_document(MAX_JSON_DEPTH + 1)
+        with self.assertRaisesRegex(ValueError, JSON_DEPTH_REFUSED):
+            loads_finite(document)
+        for encoding, bom in (("utf-8", b""), ("utf-8-sig", b""),
+                              ("utf-16-be", b""), ("utf-16-le", b""),
+                              ("utf-32-be", b""), ("utf-32-le", b""),
+                              ("utf-16-be", b"\xfe\xff"),
+                              ("utf-16-le", b"\xff\xfe"),
+                              ("utf-32-be", b"\x00\x00\xfe\xff"),
+                              ("utf-32-le", b"\xff\xfe\x00\x00")):
+            for container in (bytes, bytearray):
+                with self.subTest(encoding=encoding, bom=bom, container=container):
+                    with self.assertRaisesRegex(ValueError, JSON_DEPTH_REFUSED):
+                        loads_finite(container(bom + document.encode(encoding)))
+
+    def test_utf16_document_at_depth_bound(self):
+        from mizu.fs import MAX_JSON_DEPTH, loads_finite
+
+        # The outer object contributes one level in addition to the lists.
+        document = self._ping_document(MAX_JSON_DEPTH - 1)
+        self.assertEqual(loads_finite(document.encode("utf-16-be")), json.loads(document))
+
+    def test_mcp_rejects_utf16_over_depth_ping(self):
+        from mizu.fs import MAX_JSON_DEPTH
+        from mizu.mcp_loop import serve_stdio
+
+        frame = self._ping_document(MAX_JSON_DEPTH + 1).encode("utf-16-be")
+        self.assertTrue(frame.endswith(b"\n"))
+        output = io.BytesIO()
+        serve_stdio(input_stream=io.BytesIO(frame), output_stream=output,
+                    server_name="test", list_tools=lambda: [], call_tool=Mock())
+        self.assertEqual(json.loads(output.getvalue()), {
+            "jsonrpc": "2.0", "id": None,
+            "error": {"code": -32700, "message": "Parse error"},
+        })
 
 
 class WindowsReplaceTests(unittest.TestCase):

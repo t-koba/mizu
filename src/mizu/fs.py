@@ -50,9 +50,9 @@ MAX_JSON_DEPTH = 64
 JSON_DEPTH_REFUSED = "JSON exceeds the nesting depth bound"
 #: One JSON string or structural bracket. A string matches whole, so a bracket
 #: inside a string never counts as nesting.
-_JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"')
-_NOT_BRACKET = re.compile(rb'[^\[\]{}]')
-_DEPTH_STEP = {0x5b: 1, 0x7b: 1, 0x5d: -1, 0x7d: -1}
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_NOT_BRACKET = re.compile(r'[^\[\]{}]')
+_DEPTH_STEP = {"[": 1, "{": 1, "]": -1, "}": -1}
 
 
 def _reject_nonfinite_constant(value: str) -> object:
@@ -66,7 +66,7 @@ def _reject_nonfinite_number(text: str) -> float:
     return value
 
 
-def _too_deep(raw: bytes) -> bool:
+def _too_deep(raw: str) -> bool:
     """True when one JSON text nests deeper than the fixed bound.
 
     The nesting depth can never exceed the number of opening brackets, so a
@@ -74,13 +74,13 @@ def _too_deep(raw: bytes) -> bool:
     so a bracket inside a string is text, not nesting. A refused document is
     never parsed, so a hostile frame costs no allocation.
     """
-    if raw.count(b"{") + raw.count(b"[") <= MAX_JSON_DEPTH:
+    if raw.count("{") + raw.count("[") <= MAX_JSON_DEPTH:
         return False
-    brackets = _NOT_BRACKET.sub(b"", _JSON_STRING.sub(b"", raw))
+    brackets = _NOT_BRACKET.sub("", _JSON_STRING.sub("", raw))
     return max(itertools.accumulate(map(_DEPTH_STEP.__getitem__, brackets)), default=0) > MAX_JSON_DEPTH
 
 
-def loads_finite(raw: bytes | str, *, object_pairs_hook=None) -> Any:
+def loads_finite(raw: bytes | bytearray | str, *, object_pairs_hook=None) -> Any:
     """Parse one JSON document, refusing non-finite numbers and deep nesting.
 
     ``parse_constant`` rejects NaN/Infinity literals; ``parse_float``
@@ -91,9 +91,14 @@ def loads_finite(raw: bytes | str, *, object_pairs_hook=None) -> Any:
     A document nested deeper than ``MAX_JSON_DEPTH`` is refused before it is
     parsed, so the refusal is the product's own rule on every supported
     Python version instead of following that runtime's recursion limit.
+    Byte frames are decoded with the same encoding detection and surrogate
+    policy as ``json.loads`` before the scan, so an encoded document cannot
+    hide its structure from the depth bound.
     """
-    data = raw.encode("utf-8", "surrogatepass") if isinstance(raw, str) else raw
-    if _too_deep(data):
+    # Match json.loads byte decoding so the scan and parser see the same text.
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode(json.detect_encoding(raw), "surrogatepass")
+    if _too_deep(raw):
         raise ValueError(JSON_DEPTH_REFUSED)
     return json.loads(raw, parse_constant=_reject_nonfinite_constant,
                       parse_float=_reject_nonfinite_number,
