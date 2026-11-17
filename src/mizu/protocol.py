@@ -350,6 +350,10 @@ DEFINITIONS = {
 }
 
 
+# Modifier grants alter another operation but are never callable tools.
+MODIFIER_CAPABILITIES = frozenset({"withdraw_decided"})
+
+
 # Read tools inherit only these existing grants; they are not configurable
 # capabilities. Prompt inclusion/exclusion never participates in authorization.
 STATE_READ_CAPABILITIES = {
@@ -360,13 +364,16 @@ STATE_READ_CAPABILITIES = {
 
 
 def operation_allowed(operation: str, capabilities) -> bool:
+    if operation in MODIFIER_CAPABILITIES:
+        return False
     gates = STATE_READ_CAPABILITIES.get(operation)
     return bool(gates & set(capabilities)) if gates is not None else operation in capabilities
 
 
 def tool_definitions(capabilities: tuple[str, ...]) -> list[dict]:
-    operations = list(capabilities) + [name for name in STATE_READ_CAPABILITIES
-                                     if name not in capabilities and operation_allowed(name, capabilities)]
+    operations = [name for name in capabilities if name not in MODIFIER_CAPABILITIES]
+    operations += [name for name in STATE_READ_CAPABILITIES
+                   if name not in capabilities and operation_allowed(name, capabilities)]
     return [{"name": "mizu_" + name, "operation": name,
              "description": DEFINITIONS[name][0], "inputSchema": DEFINITIONS[name][1]}
             for name in operations]

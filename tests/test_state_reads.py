@@ -9,7 +9,7 @@ from mizu import report, work_item_resolution
 from mizu.errors import Denied
 from mizu.fs import canonical
 from mizu.prompt_sections import WORK_CAPABILITIES
-from mizu.protocol import STATE_READ_CAPABILITIES, tool_definitions
+from mizu.protocol import DEFINITIONS, STATE_READ_CAPABILITIES, operation_allowed, tool_definitions
 from mizu.unit_prompts import prompt_for, prompt_delta_for
 
 
@@ -30,6 +30,23 @@ class StateReadTests(Fixture):
         return {str(p.relative_to(self.project.root)): p.read_bytes()
                 for directory in ("insights", "work-items", "work-order", "artifacts", "snapshots")
                 for p in (self.project.root / directory).rglob("*") if p.is_file()}
+
+    def test_modifier_grants_are_not_callable_tools(self):
+        for ordinary, operations in (
+                (("finish", "withdraw_insight"), ("finish", "withdraw_insight")),
+                (("finish", "withdraw_insight", "report"),
+                 ("finish", "withdraw_insight", "report", "report_read"))):
+            caps = ordinary + ("withdraw_decided",)
+            with self.subTest(capabilities=caps):
+                expected = [{"name": "mizu_" + name, "operation": name,
+                             "description": DEFINITIONS[name][0],
+                             "inputSchema": DEFINITIONS[name][1]} for name in operations]
+                self.assertEqual(tool_definitions(ordinary), expected)
+                self.assertEqual(tool_definitions(caps), expected)
+                self.assertFalse(operation_allowed("withdraw_decided", caps))
+                self.assertFalse(operation_allowed("withdraw_decided", ordinary))
+                for operation in operations:
+                    self.assertTrue(operation_allowed(operation, caps))
 
     def test_exact_inherited_grants_surface_and_denial(self):
         from mizu.config import CAPABILITIES
