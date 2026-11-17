@@ -369,6 +369,39 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         self.assertLessEqual(changes.call_count, 1)
         return result, reader
 
+    def test_empty_page_shares_enrollment_receipt_listing(self):
+        items = [self.block(str(i)) for i in range(6)]
+        self.receipt_for()
+        self.subjects = []
+        result, reader = self.poll(self.rows("pending"))
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["polled"], result["observed"]), (1, 0))
+        reader.assert_called_once_with(self.config.vcs, "status",
+                                       {"branch": "published", "sha": SHA})
+        directory = self.project.root / "ci-wait-observations"
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.assertEqual(set(before), {item["id"] + ".json" for item in items})
+        for item in items:
+            self.assertIsNone(ci_waits.evidence(self.store, item))
+            self.assertEqual(len(read_json(directory / (item["id"] + ".json"))["observed"]), 1)
+
+        changes = Mock(return_value={"subjects": [], "next_cursor": "stationary"})
+        reader = Mock()
+        self.clock += 30
+        with patch.object(Publication, "list_receipts",
+                          wraps=Publication.list_receipts) as listings:
+            result = ci_waits.poll(self.config, self.project, self.state, now=self.clock,
+                                  interval=15, reader=reader, changes_reader=changes)
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["polled"], result["observed"]), (0, 0))
+        changes.assert_called_once()
+        reader.assert_not_called()
+        self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+        self.assertEqual(listings.call_count, 1)
+        listings.assert_called_once_with(self.store.root, code_digest=self.snapshot["code_digest"],
+                                         branch="published", limit=2, strict=True,
+                                         policy=self.store.publication_evidence)
+
     def test_new_descendant_after_empty_page_is_enrolled(self):
         item = self.block()
         self.receipt_for()

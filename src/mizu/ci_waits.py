@@ -697,7 +697,7 @@ class _Enrollment:
     The polling writer prunes revisions, vanished candidates and settled items.
     Absence means enrollment/retry is needed, including after interrupted writes.
     """
-    def __init__(self, store, epoch):
+    def __init__(self, store, epoch, *, receipt_cache=None):
         self.store, self.epoch = store, epoch
         self.cached_item, self.cached_keys = None, set()
         self.directory = store.root / "ci-wait-observations"
@@ -717,7 +717,7 @@ class _Enrollment:
                 continue
             keys = set()
             for _, candidate in _candidates(store, item, True):
-                wait = _candidate_wait(store, item["wait"], candidate)
+                wait = _candidate_wait(store, item["wait"], candidate, receipt_cache=receipt_cache)
                 if wait is not None:
                     keys.add(self.key(candidate, wait))
             old = self._read(item)
@@ -873,7 +873,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                     if epoch is not None:
                         raise Denied("Invalid CI observation epoch")
                     epoch = state["ci_changes_epoch"] = uuid.uuid4().hex
-                enrollment = _Enrollment(store, epoch)
+                enrollment = _Enrollment(store, epoch, receipt_cache=receipt_cache)
                 page = _change_page(config, state, limit, changes_reader)
             except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError) as exc:
                 errors.append(_poll_error_code(exc))
