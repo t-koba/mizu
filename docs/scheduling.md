@@ -243,7 +243,7 @@ work, not an external liveness source; it is admitted through the normal ready
 set rather than a timer. Two waits are holder-only. One is `code_change` when
 the holder is the only project-assigned `workspace = "write"` role with an
 independent dispatch route (`event_wakes`, `daemon`, `interval_seconds` or
-`calendar`); a delegated-only second write role makes the wait external.
+`calendar`); a delegated-only second write role does not make the wait external.
 The other is
 `object_resolved` on an Insight (historically `insight_decided`) with a current, substantively answered (`accept`, `modify` or
 `reject`) `kind = "question"` authored by that holder. Exactly one enabled,
