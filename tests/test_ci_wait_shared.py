@@ -440,7 +440,9 @@ class SharedCiWaitTests(CiWaitFixture):
         self.assertIn("always carry identity-bound `ack_token`s", policy)
         self.assertIn("Finishing alone never handles CI rows", policy)
         finish_text = protocol.DEFINITIONS["finish"][0]
-        self.assertIn("always use explicit, identity-bound ack_tokens", finish_text)
+        self.assertIn("CI or proposal merge waits", finish_text)
+        self.assertIn("CI and proposal merge waits require explicit tokens to acknowledge them", finish_text)
+        self.assertIn("Omitted events stay pending", finish_text)
         self.assertNotIn("legacy CI rows have no tokens", finish_text)
 
     def test_failed_model_run_cannot_acknowledge(self):
