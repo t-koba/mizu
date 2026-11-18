@@ -662,201 +662,60 @@ kinds remain permanent. External archives are outside this predicate; restoring
 one can reintroduce its captured managed state. Acknowledgement time and a global
 TTL never authorize deletion.
 
-## CI-wait explicit-receipt preflight (shadow only)
+## Design evidence from shadow experiments
 
-The bounded isolated experiment `f249c22172974261904ef623ca3ad616` projected
-four terminal waiter results (three routed to `worker`, one to `reviewer`) from
-the existing `CiWaitTests` fixture into disposable `ci.wait.result`
-`SharedRecords` envelopes. Reading them through frozen role manifests exactly
-reconstructed the current `ci_waits.pending` event fields and evidence digests;
-manifest order followed the current `updated_at`/item-ID order, and envelope
-`created_at` preserved the blocked WorkItem revision's `updated_at`. Omitted
-and empty selections wrote no receipt; one exact selection receipted only that
-record; a wrong-role selection was refused. This is contract evidence for the
-existing transport only, not integrated runtime or performance evidence.
+Before the active routes below, bounded disposable experiments compared the
+existing source-specific authorities with temporary `SharedRecords` shadows for
+`ci.wait` (`f249c22172974261904ef623ca3ad616`), `work-item.terminal`
+(`d05a868b0a6f4a9fac50e451cbcdc975`), `insight.wait`/`insight.obligation`
+(`7e65ad00a6ac4c27af77a1435f592728`), and `insight.decision` page projection
+(`0adfa0cbd6e46e847d04f211c87795caf7a1398b2a6d83758097ece8382de1ea`,
+`3a2e941a2322b6589655ab68b194cc07b4ee2c365d760fd89beb4bc04fcfc742`,
+`83aee77506a2ccd56eb73538673e15ba7873236239cfee7f6f88b37c99acd13c`,
+`48eea5880d056641e98b5631b510fb593fdbf77c2742d861d9b9778b3eed4683`).
+These were local fixtures, not integrated runtime, production or model
+measurements. Their load-bearing results are:
 
-The experiment also moved one waiter to a new revision/holder: current
-`ci_waits.pending` no longer routed its old event, and the fixture's
-source-current acknowledgement check rejected the old selection.
-`tests/test_ci_waits.py::CiWaitTests.test_stale_observation_and_old_delivery_cannot_reach_reopened_waiter`
-exercises the existing refusal. `SharedRecords` itself intentionally validates
-only the frozen role/record/digest manifest and allows an exact receipt after
-source movement; therefore a CI adapter must keep the current
-blocked-revision, holder, wait-digest and evidence checks before both new
-delivery and acknowledgement. `WorkItems` history/CAS, the exact
-`Publication` receipt, and `ci_waits.terminal`'s unique declared check set,
-exact SHA, and terminal-state validation remain authoritative; the shared
-record is notification evidence, never a task transition or publication
-approval. Preserve `external-untrusted` status evidence and the existing
-oldest-first filtering before page limits.
+- **Payload and order parity, no new authority.** Frozen-manifest reads
+  reconstructed each current source event's payload and event-time order; exact
+  replay was idempotent and wrong-role or cross-role selections were refused.
+  No shadow delivered, woke, acknowledged or transitioned live work; each source
+  authority remained authoritative.
+- **Source-current filtering belongs to the source owner.** A waiter moved to a
+  new revision/holder, or a revised unacknowledged waiter, disappeared from the
+  current source projection while its immutable shadow record remained.
+  `SharedRecords` validates only the frozen role/record/digest manifest and can
+  receipt an exact selected record after source movement, so the CI adapter,
+  WorkItems and Insights must keep their own revision, holder, wait-digest,
+  evidence and eligibility checks before both delivery and acknowledgement. The
+  still-tested refusals are
+  `tests/test_ci_waits.py::CiWaitTests.test_stale_observation_and_old_token_cannot_ack_reopened_waiter`
+  and
+  `tests/test_work_item_events.py::WorkItemEventTests.test_corrected_terminal_revision_invalidates_old_delivered_token`.
+- **No performance or index case.** In small fixtures (205 decisions, 24
+  terminal events, nine wait/obligation rows) the matched shadows added
+  immutable-record and receipt reads and bytes; the decision shadow page was
+  roughly 3-5 times slower than the source scan and the other shadows were
+  likewise slower. Five-sample maxima are not p95 estimates, and no fixture
+  measured integrated source validation, large-body tails or a model workload.
+  These results justify no speed claim and no index. Each active route below was
+  adopted for exact receipt and routing consolidation, not for speed.
+- **Legacy acknowledgements are not importable.** The former CI auto-ack file
+  records only role, source evidence digest and acknowledgement time after unit
+  success, with no per-record token selection; `SharedRecords.received` is false
+  for it, so it is never mapped to a shared receipt. An otherwise-current result
+  without an explicit shared receipt is replayed.
 
-A separate bound-oriented fixture `b558226bbbf342bd940dadba3bebb7b1` carried
-64 declared checks and maximum-length run IDs. Its source evidence was 23,589
-bytes and the compact shared envelope 25,716 bytes, both below the unchanged
-131,072-byte per-waiter evidence bound; no size cap was raised. This is not a
-proof for every accepted payload shape, so an implementation must retain the
-same cap and test its full boundary before activation.
+The bound-oriented fixture `b558226bbbf342bd940dadba3bebb7b1` carried 64
+declared checks and maximum-length run IDs: 23,589-byte source evidence and a
+25,716-byte envelope, both below the unchanged 131,072-byte per-waiter evidence
+bound. No cap was raised, and the active route keeps that cap and tests its
+boundary.
 
-The legacy CI acknowledgement is not mappable to a SharedRecords receipt: the
-current file contains only role, source evidence digest and acknowledgement
-time, and is written after unit success without an explicit per-record token
-selection or run binding. `SharedRecords.received` therefore remains false for
-that old acknowledgement in the experiment. Do not import it as handling;
-under a future cutover an otherwise-current result without a new explicit
-SharedRecords receipt may be replayed. Stale source events remain ineligible.
-
-No production CI kind policy, source store, wake, or runtime activation changed
-here. A later cutover must use the existing `SharedRecords` store and explicit host-only
-kind/route activation, must not write a parallel CI acknowledgement file, and
-must prove durable replay, partial selection, wrong-role and stale-revision
-refusal, backup/restore, exact publication/check validation and bounded reads.
-Code presence alone never activates it. Stop if the source checks cannot be
-revalidated before delivery and selected acknowledgement, if ordering or
-payload identity changes, if legacy auto-acks would need to be inferred, or if
-the existing 128 KiB cap cannot be preserved.
-
-## Terminal work-item event shadow preflight (fixture only)
-
-Experiment `d05a868b0a6f4a9fac50e451cbcdc975` projected 24 deterministic
-terminal events (23 `dropped`, one `done`) into a disposable `work-item.terminal`
-SharedRecords envelope, then compared the bounded pending view with
-`work_item_events.pending`. The candidate repeated WorkItems seed/full-chain
-and current-terminal validation before exact shared-record and receipt checks;
-WorkItems remained authoritative. With tied event times and mixed reviewer /
-searcher origins, the initial and post-partial-ack views matched exactly; exact
-record replay was idempotent, conflicting identity and cross-role selection
-were refused, and the fixture had no unseeded decisions. This did not exercise
-terminal revision correction or maximum-size rows; the existing
-`test_corrected_terminal_revision_invalidates_old_delivered_token` regression
-remains relevant.
-
-The largest fixture row was 1,926 bytes and envelope 2,195 bytes, below the
-unchanged 8 KiB row cap; page JSON was 16,726 bytes before and 16,827 after
-receipts, below the 1 MiB page cap. Five page-read samples had median 35.745 ms
-for the legacy path and 54.859 ms for the authority scan plus shadow lookup.
-This small fixture is not a production performance estimate: it shows no
-speedup, and retaining source-current validation while adding immutable record
-and receipt checks adds work. It justifies neither a cutover nor an index; any
-future migration needs a separate design and evidence for source-current
-acknowledgement, correction/replay, backup/restore and full-size bounds.
-
-## Structured wait and obligation shadow preflight (fixture only)
-
-Experiment `7e65ad00a6ac4c27af77a1435f592728` compared the current
-`Insights.due_waits` and `pending_obligations` paths with temporary
-`insight.wait` and `insight.obligation` SharedRecords envelopes. The deterministic
-fixture held four due deadlines, one satisfied dependency wait, and four
-unresolved obligations. Per-source business payloads and event-time order
-matched after excluding each transport's distinct acknowledgement token; a
-cross-role SharedRecords acknowledgement was refused. After one explicit wait
-consumption and one obligation receipt, then revising an unacknowledged waiter,
-the current projections still matched. The shadow retained all nine immutable
-records; three no longer appeared in current source projections, including the
-revised waiter. Therefore SharedRecords records alone cannot replace the
-source-current revision, dependency and registration checks.
-
-The nine legacy event rows totaled 3,735 canonical bytes (largest 599); the
-SharedRecords envelopes totaled 6,303 bytes (largest 875). In the measured
-post-partial-ack fixture state, nine local samples had median 8.143 ms for the
-current source projections and 16.732 ms for those projections plus shared
-record/receipt validation. These are disposable local fixture measurements,
-not production or Windows estimates. They show no performance case for a
-cutover or index and preserve the need for current-source filtering; no runtime,
-wake or admission path was changed.
-
-## Bounded disposable pilot
-
-The high-volume representative was `insight.decision`, because the current decision-event reader already handles exact per-role receipts and has a 205-event oldest-first regression. The experiment created 205 rejected insights in an isolated test `Fixture`, repeated each read five times, built the normal prompt locally, and projected the same events into a scratch common envelope (`kind`, stable decision event ID, author, insight/revision subject, bounded payload) with scratch per-role receipts. It changed no source files and used no model/provider, network, CI runner or deployment. Evidence: experiment `0adfa0cbd6e46e847d04f211c87795caf7a1398b2a6d83758097ece8382de1ea`.
-
-| Page | Current `decision_events` scan median/sample max | Current `prompt_for` build median/sample max | Current event JSON / full prompt bytes | Scratch shared-file scan median/sample max | Scratch shared-event JSON bytes |
-|---:|---:|---:|---:|---:|---:|
-| 10 | 138.410 / 149.462 ms | 87.944 / 91.565 ms | 3,471 / 5,701 | 26.847 / 28.682 ms | 3,431 |
-| 100 | 115.133 / 137.395 ms | 76.255 / 86.956 ms | 34,701 / 39,092 | 25.965 / 26.856 ms | 34,301 |
-
-| Retained bytes for 205 events | Current source-shaped records/receipts | Scratch normalized projection/receipts |
-|---|---:|---:|
-| Decision history records / common records | 42,845 B | 70,110 B |
-| Exact per-role receipts | 38,540 B (188 B/receipt mean) | 41,820 B (204 B/receipt mean) |
-
-The normalized envelope's delivered JSON was 40 B smaller at 10 rows and 400 B smaller at 100 rows in this sample because it replaced the source-specific acknowledgement token with a stable record ID and shared fields. Its stored record files were larger than decision-history files because the projection carried the full title/body/evidence payload; those source decision files do not. Receipt size grew by 16 B per row in this particular serialization. These are shape measurements, not a product capacity estimate.
-
-The scratch scanner was plain `os.scandir` + `json.loads` and intentionally omitted the production reader's safe-path checks, exact source-chain validation, locks, receipt validation, and durable writes. Its lower scan time is **not** evidence that a production shared store will be faster; correctness and no-follow/fail-closed behavior must be retained. With five samples, the reported upper statistic is a sample maximum, not a meaningful p95. The initial pilot remains useful for shape and receipt-storage comparisons: 100 small decision records used about 34.7 KiB of event JSON in this fixture. It does not establish which cost dominates an integrated build.
-
-### Corrected full-prompt comparison
-
-Experiment `3a2e941a2322b6589655ab68b194cc07b4ee2c365d760fd89beb4bc04fcfc742` used the same `prompt_for` and common fields on both paths, injecting the normalized field at final serialization. Source scanning was outside the measurement; each path had five samples. This corrects earlier experiment `b48c`, whose prebuilt base was not comparable for full-build timing and is not used here for that claim.
-
-| Rows | Legacy full-prompt median / sample max | Legacy bytes | Shared full-prompt median / sample max | Shared bytes |
-|---:|---:|---:|---:|---:|
-| 10 | 201.175 / 259.547 ms | 5,701 | 166.925 / 288.886 ms | 5,466 |
-| 100 | 92.128 / 118.436 ms | 39,092 | 126.757 / 143.673 ms | 38,856 |
-
-These maxima are not meaningful p95 estimates with `n=5`. The mixed timings do not demonstrate a speedup: order effects/noise remain, and integrated shared-store validation is omitted. These are local full-prompt construction measurements, not model latency or a causal scan-dominance result. A production slice must measure matched workloads with source validation, current eligibility and aggregate prompt limits in place.
-
-### Production-safe projection/read baseline
-
-Experiment `83aee77506a2ccd56eb73538673e15ba7873236239cfee7f6f88b37c99acd13c`,
-command evidence `104c57b71b924d9b8cc4ba7bbf91586c`, used code digest
-`089ee4252ec14dc7e3146ed3032e39ab4efe116c2209593de0135ac47beec6db`. It made
-205 short rejected insights in a disposable `Fixture`, then compared the legacy
-reader with a prototype using `project_decision_records()` plus the production
-`SharedRecords.get/received/freeze` paths. Five samples alternated order. No
-legacy or shared receipts existed; both event lists matched after removing the
-role-specific token, and both full prompts used the same `prompt_for()`. The
-shared timing includes full source reconciliation, exact idempotent record
-validation, safe record reads, receipt checks and manifest creation. This is a
-historical shadow-only prototype measurement; it does not measure the later
-active page path or the full shared prompt with its read-tool surface.
-
-| Rows | Legacy scan median / sample max | Projection + shared read/freeze median / sample max | Legacy / shared event bytes | Legacy / shared full-prompt bytes |
-|---:|---:|---:|---:|---:|
-| 10 | 212.563 / 270.555 ms | 709.656 / 783.823 ms | 3,632 / 3,632 | 6,453 / 6,453 |
-| 100 | 223.728 / 289.990 ms | 657.122 / 787.655 ms | 36,302 / 36,302 | 41,284 / 41,284 |
-
-Prompt construction medians were 102.730 / 108.608 ms for 10 rows and 129.936 /
-124.301 ms for 100 rows (legacy / shared); with only five samples, sample maxima
-are not p95 estimates and the mixed timings show no prompt speedup. The one cold
-205-record projection took 466.016 ms. Retained `decision-history` bytes were
-43,050; shared immutable record bytes were 115,620; receipt bytes were zero in
-both stores, so receipt storage was not measured. This small fixture measures
-serialized shape, not large-body/evidence tails or an integrated run. In this
-prototype, the extra safe projection/read work is slower than the legacy scan;
-it does not justify adding an index. The actual page/receipt prototype is
-measured below; neither experiment establishes an integrated prompt budget.
-
-### Bounded shadow-page and matched-receipt prototype
-
-Experiment `48eea5880d056641e98b5631b510fb593fdbf77c2742d861d9b9778b3eed4683`,
-command evidence `be2d71b49cf54c9db1e17c7b17332dd7`, used code digest
-`b9e99402ff93bfdc12c3a1e363f1b8dd9528d74ef5dec205dc3c5c89dd3fd2cb`. It used
-205 short current decisions, a 128 KiB explicit page bound, and five alternating
-samples. Legacy and shadow event payload/order matched after removing their
-role-bound token. The shared-reader timing covers source reconciliation,
-projection, exact shared-receipt checks, page sizing and selected-manifest
-freezing under the source lock. Prompt measurements reused the real
-`prompt_for(Context)` with each row list substituted; the shadow page remains
-unintegrated, so page metadata was not inserted into a runtime prompt.
-
-| Receipt state | Rows | Legacy / shadow page read median (sample max), ms | Legacy / shadow prompt build median, ms | Full-prompt bytes (legacy / shadow) | Shared page bytes |
-|---|---:|---:|---:|---:|---:|
-| Empty | 10 | 235.236 / 765.139 (264.145 / 1,255.192) | 160.150 / 187.496 | 6,542 / 6,542 | 3,815 |
-| Empty | 100 | 208.802 / 1,018.942 (687.498 / 1,325.305) | 131.930 / 146.073 | 42,160 / 42,160 | 37,272 |
-| Matched partial (oldest 100 acknowledged in each store) | 10 | 298.058 / 927.528 (332.510 / 1,476.439) | 146.158 / 147.233 | 6,539 / 6,539 | 3,812 |
-| Matched partial (oldest 100 acknowledged in each store) | 100 | 271.400 / 982.764 (606.945 / 1,657.235) | 122.360 / 121.360 | 42,159 / 42,159 | 37,271 |
-
-The partial-receipt sets matched by exact oldest event identity; legacy and shared
-pending pages remained payload/order-equal. Full prompt bytes stayed equal, while
-shared `canonical(page)` bytes include the bounded page envelope metadata. The
-cold 205-record projection took 454.196 ms. Stored bytes were 47,932 in
-`decision-history`, 117,414 in shared immutable records, 18,800 in 100 legacy
-receipts and 21,300 in 100 shared receipts. The five-sample maxima are not p95
-estimates. This actual shadow path is roughly 3–5 times slower than the legacy
-scan on this small fixture because it performs full reconciliation and safe
-record/receipt validation under lock; prompt timings are mixed, with no clear
-speedup. These measurements justify no index or speed claim. The tested 128 KiB
-page budget is about 3.1 times the largest measured full prompt (42,160 bytes),
-but is not a configured default or a worst-case bound: activation must budget
-other prompt sections and validate large-body/evidence tails separately.
+The decision-page timings and byte tables were superseded by the active page
+path in the decision-page and host-activation sections below; no shadow timing
+is a production budget. The active `decision_page_bytes` policy is stated in
+Scope and invariants above.
 
 ## Persistence-only decision-source adapter
 
@@ -1429,7 +1288,7 @@ refuse once the marker is present.
 
 The runtime now routes every CI-wait delivery through the existing SharedRecords
 mechanism. This is a source-specific route for the `ci.wait` kind, not a general
-model-writable SharedRecords interface. The preceding shadow preflight is design
+model-writable SharedRecords interface. The shadow experiments above are design
 evidence; this cutover is the active runtime path. The obsolete
 `ci_wait_shared_records` configuration key is rejected and must be removed from
 older host configurations.
