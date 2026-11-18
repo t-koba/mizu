@@ -120,6 +120,20 @@ class Kernel(unittest.TestCase):
         self.assertIsNone(self.objects.next_instant())
         self.assertEqual(list((self.root / "timers").glob("*.json")), [])
 
+    def test_unchanged_instant_is_not_rescheduled_by_a_later_write(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual([e["name"] for e in self.objects.fire_due(later)], ["task.due"])
+        timer = self.root / "timers" / f"task.{task['id']}.due.json"
+        self.assertFalse(timer.exists())
+        claimed = self.objects.transition("task", task["id"], "claim", expected_rev=1,
+                                          fields={"holder": "role:beta"}, actor="role:beta")
+        self.assertEqual(claimed["fields"]["due"], soon)  # merged, still present
+        self.assertFalse(timer.exists())
+        self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(self.objects.fire_due(later), [])
+
     def test_reserved_event_write_is_idempotent_and_fails_closed(self):
         event = self.log.append("task.created", {"title": "t"}, "operator")
         (self.root / "events" / "head.json").unlink()  # crash after the file, before the head
@@ -352,6 +366,53 @@ class ExampleInsightLifecycle(unittest.TestCase):
         self.assertEqual([(e["name"], e["id"], e["field"]) for e in fired],
                          [("insight.revisit", insight["id"], "revisit_at")])
         self.assertEqual(self.objects.fire_due(later), [])
+
+    def test_revisiting_a_consumed_instant_does_not_refire(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        insight = self.submit()
+        deferred = self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
+                                           fields={"revisit_at": soon}, actor="role:reviewer")
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual([e["name"] for e in self.objects.fire_due(later)], ["insight.revisit"])
+        revised = self.objects.transition("insight", insight["id"], "revise", expected_rev=deferred["rev"],
+                                          fields={"title": "t2", "body": "b2", "urgency": "low"},
+                                          actor="role:writer")
+        self.assertEqual(revised["fields"]["revisit_at"], soon)
+        self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(self.objects.fire_due(later), [])
+        self.assertEqual([e["name"] for e in self.log.pending("author")["events"]], ["insight.revisit"])
+
+    def test_accepting_a_deferral_clears_its_pending_instant(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        insight = self.submit()
+        deferred = self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
+                                           fields={"revisit_at": soon}, actor="role:reviewer")
+        self.assertEqual(self.objects.next_instant(), soon)
+        accepted = self.objects.transition("insight", insight["id"], "accept", expected_rev=deferred["rev"],
+                                           fields={}, actor="role:reviewer")
+        self.assertEqual(accepted["state"], "accepted")
+        self.assertIsNone(self.objects.next_instant())
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual(self.objects.fire_due(later), [])
+        self.assertEqual(self.log.pending("author")["events"], [])
+
+    def test_a_new_instant_value_still_fires_after_a_revision(self):
+        first = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        second = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).isoformat()
+        insight = self.submit()
+        deferred = self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
+                                           fields={"revisit_at": first}, actor="role:reviewer")
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual([e["name"] for e in self.objects.fire_due(later)], ["insight.revisit"])
+        revised = self.objects.transition("insight", insight["id"], "revise", expected_rev=deferred["rev"],
+                                          fields={"title": "t2"}, actor="role:writer")
+        self.objects.transition("insight", insight["id"], "defer", expected_rev=revised["rev"],
+                                fields={"revisit_at": second}, actor="role:reviewer")
+        self.assertEqual(self.objects.next_instant(), second)
+        after = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=11)
+        self.assertEqual([e["name"] for e in self.objects.fire_due(after)], ["insight.revisit"])
+        self.assertEqual([e["name"] for e in self.log.pending("author")["events"]],
+                         ["insight.revisit", "insight.revisit"])
 
     def test_decision_record_binds_revision_and_emits_event(self):
         insight = self.submit()

@@ -4,6 +4,7 @@ Layout under the project root:
   objects/<kind>/<id>/<rev:08d>.json   create-only revisions; the highest is current
   objects/intent.json                  the one in-flight write (crash recovery)
   timers/<kind>.<id>.<field>.json      pending instants that emit an event when due
+  timers/.declared/<...>.json          one marker per instant value ever declared
   timers/.firing.json                  the one in-flight instant firing (crash recovery)
   locks/kernel.lock                    serialises object writes and event appends
 
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from ..errors import Denied
-from ..fs import atomic_write, canonical, loads_finite, lock, mkdir, now, safe_read
+from ..fs import atomic_write, canonical, digest, loads_finite, lock, mkdir, now, safe_read
 from .events import EVENT_BYTES, EventLog
 from .kinds import NAME, PRINCIPAL, Kind
 
@@ -36,6 +37,8 @@ REVISION_MAX = 10 ** 8 - 1
 PAGE_MAX = 512
 _ID = re.compile(r"[0-9a-f]{32}\Z")
 _FIRING = ".firing.json"
+#: Hidden ledger of instant values already declared, so none is armed twice.
+_DECLARED = ".declared"
 
 
 class Objects:
@@ -267,13 +270,37 @@ class Objects:
         if append:
             body = {k: intent[k] for k in ("kind", "id", "rev", "from", "to")}
             self.events.append(intent["event"], body, intent["actor"])
-        for field, at, event in kind.instant_events(record["fields"]):
-            path = self.root / "timers" / f"{record['kind']}.{record['id']}.{field}.json"
-            mkdir(path.parent)
-            atomic_write(path, canonical({"kind": record["kind"], "id": record["id"], "field": field,
-                                          "at": at, "event": event}))
+        self._schedule_instants(kind, record)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.root / "objects" / "intent.json")
+
+    def _schedule_instants(self, kind: Kind, record: Mapping[str, Any]) -> None:
+        """Arm a newly declared instant once; each later revision supersedes the old one.
+
+        The value, not just the field, is part of a declaration's identity: a
+        consumed or superseded instant must not be armed again by a later write
+        that still carries the field. The declaring revision is kept with the
+        value so recovery of the same write restores a timer lost mid-publish.
+        """
+        for field, at, event in kind.instant_events(record["fields"]):
+            stem = f"{record['kind']}.{record['id']}.{field}"
+            name = f"{stem}.{digest(at.encode())}.json"
+            ledger = self.root / "timers" / _DECLARED / name
+            timer = self.root / "timers" / f"{stem}.json"
+            mkdir(ledger.parent)
+            if ledger.exists():
+                declared = loads_finite(safe_read(self.root, f"timers/{_DECLARED}/{name}", 4096))
+                arm = declared.get("rev") == record["rev"]
+            else:
+                atomic_write(ledger, canonical({"kind": record["kind"], "id": record["id"],
+                                                "field": field, "at": at, "rev": record["rev"]}))
+                arm = True
+            if arm:
+                atomic_write(timer, canonical({"kind": record["kind"], "id": record["id"], "field": field,
+                                               "at": at, "event": event}))
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(timer)
 
     def _recover_firing(self) -> None:
         """Finish a firing whose timer removal or intent removal was interrupted."""
