@@ -335,14 +335,16 @@ class Snapshots:
         self.excludes = excludes
         self.max_file, self.max_bytes, self.max_files = max_file, max_bytes, max_files
         self.history_index = history_index
-        # Snapshot IDs bind the exact immutable path list. Cache only the
-        # deterministic path-policy walk; get() still reads and digest-checks
-        # the full manifest on every access before consulting this bounded cache.
+        # Snapshot IDs bind the exact immutable path list. The path-policy walk
+        # and the validated immutable record are each reused only while the
+        # manifest's stat identity is unchanged; a replaced or modified file is
+        # read and verified again before either result can be reused.
         self._path_validation_cache = OrderedDict()
         self._path_validation_lock = threading.Lock()
-        # Binding checks (id + code digest) are witnessed by the manifest
-        # file's stat identity and bounded like the path-validation cache.
+        # Binding facts (id + code digest) and full get() records are witnessed
+        # by the manifest file's stat identity and bounded like the path cache.
         self._binding_cache = OrderedDict()
+        self._record_cache = OrderedDict()
         if create_dirs:
             mkdir(root / "objects")
             mkdir(root / "snapshots")
@@ -797,10 +799,27 @@ class Snapshots:
             snapshot_id = pointer.get("snapshot")
         if not isinstance(snapshot_id, str) or not DIGEST.fullmatch(snapshot_id):
             raise Denied("Invalid snapshot ID")
-        record = read_json(self.root / "snapshots" / f"{snapshot_id}.json")
+        path = self.root / "snapshots" / f"{snapshot_id}.json"
+        # Windows metadata is not a trustworthy witness (see binding()): skip
+        # the memo entirely and keep the full read and validation on every call.
+        identity = None if _platform.IS_WINDOWS else self._manifest_identity(path)
+        if identity is not None:
+            with self._path_validation_lock:
+                cached = self._record_cache.get(snapshot_id)
+                if cached is not None and cached[0] == identity:
+                    self._record_cache.move_to_end(snapshot_id)
+                    return deepcopy(cached[1])
+        record = read_json(path)
         if record is None:
             raise Denied("Snapshot not found")
-        return self.validate_manifest(snapshot_id, record)
+        validated = self.validate_manifest(snapshot_id, record)
+        if identity is not None and self._manifest_identity(path) == identity:
+            with self._path_validation_lock:
+                self._record_cache[snapshot_id] = (identity, validated)
+                self._record_cache.move_to_end(snapshot_id)
+                while len(self._record_cache) > _PATH_VALIDATION_CACHE_LIMIT:
+                    self._record_cache.popitem(last=False)
+        return deepcopy(validated)
 
     @staticmethod
     def _manifest_identity(path: Path):
