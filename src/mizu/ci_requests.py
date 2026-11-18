@@ -16,11 +16,14 @@ from __future__ import annotations
 import datetime as dt
 import os
 import re
+import stat
+import uuid
+from itertools import islice
 from pathlib import Path
 
 from .config import CiRequestEvidence, TOML_INTEGER_MAX
 from .errors import Denied, LimitExceeded
-from .fs import canonical, digest, loads_finite, mkdir, safe_read, sync_dir, write_json
+from .fs import canonical, digest, loads_finite, lock, mkdir, safe_read, write_json
 from .process import ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
 
@@ -30,9 +33,9 @@ RECORD_BYTES = 8192
 CI_DIAGNOSTIC_RECORD_BYTES = 65536
 #: The diagnostic tail plus its fixed external-untrusted label.
 MAX_CI_DIAGNOSTIC_BYTES = ADAPTER_DIAGNOSTIC_BYTES_MAX + 128
-REQUEST_FILE = re.compile(r"([0-9a-f]{64})\.request\.json\Z")
 UNKNOWN_REASON = "dispatch_outcome_timeout"
-DISPATCH_FILE = re.compile(r"([0-9a-f]{64})\.dispatch\.json\Z")
+ATTEMPT_FILE = re.compile(r"([0-9a-f]{64})\.(?:dispatch|request|resolution)\.json\Z")
+ACTIVITY = "evidence/ci-request-activity.json"
 
 
 def request_id(publication_id: str, sha: str, workflows: list[str], attempt: int = 1) -> str:
@@ -53,7 +56,9 @@ class CiRequests:
     """The project's durable CI request records."""
 
     def __init__(self, root: Path, policy: CiRequestEvidence | None = None):
-        self.root = Path(root) / "evidence" / "ci-requests"
+        self.project_root = Path(root)
+        self.root = self.project_root / "evidence" / "ci-requests"
+        self.lock = self.project_root / "locks" / "ci-requests.lock"
         self.policy = policy if policy is not None else CiRequestEvidence()
 
     def _path(self, identity: str, kind: str) -> Path:
@@ -175,9 +180,40 @@ class CiRequests:
                    if self._has_diagnostic_outcome(record, kind) else RECORD_BYTES)
         if len(canonical(record)) > maximum:
             raise LimitExceeded(f"CI {kind} record exceeds {maximum} bytes")
-        mkdir(self.root)
-        write_json(self._path(identity, kind), record, exclusive=True)
-        sync_dir(self.root)
+        with lock(self.lock):
+            mkdir(self.root)
+            # Revoke prior quiet observations durably before any evidence
+            # change (in particular before a dispatch reaches the adapter).
+            write_json(self.project_root / ACTIVITY, uuid.uuid4().hex)
+            write_json(self._path(identity, kind), record, exclusive=True)
+
+    def activity(self) -> str:
+        """Cheap local identity, not proof the ledger was read or is quiet."""
+        try:
+            info = self.root.lstat()
+        except FileNotFoundError:
+            return digest(b"")
+        if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise Denied("Invalid CI request evidence directory")
+        try:
+            generation = loads_finite(safe_read(self.project_root, ACTIVITY, 64))
+        except FileNotFoundError:
+            generation = None  # Legacy records predate the invalidation token.
+        else:
+            if not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{32}", generation):
+                raise Denied("Invalid CI request activity token")
+        return digest(canonical([generation, info.st_dev, info.st_ino,
+                                 info.st_mtime_ns, info.st_ctime_ns]))
+
+    def quiet_activity(self) -> str | None:
+        """Certify one complete, quiescent ledger generation under the writer lock."""
+        with lock(self.lock, blocking=False):
+            activity = self.activity()
+            rows, incomplete = self._rows(strict=True)
+            if (not incomplete and all(row["state"] in ("resolved", "not_dispatched") for row in rows)
+                    and activity == self.activity()):
+                return activity
+        return None
 
     def daily(self, *, limit: int = 100) -> dict:
         """The recorded CI requests of the project, grouped by UTC day.
@@ -246,20 +282,33 @@ class CiRequests:
                 "next_offset": end if end < len(rows) else None,
                 "truncated": offset > 0 or end < len(rows), "scan_stopped": stopped}
 
-    def _rows(self) -> tuple[list, bool]:
-        """One bounded validated scan shared by the count and cost views."""
+    def _rows(self, *, strict=False) -> tuple[list, bool]:
+        """Bounded validation; strict consumers cannot skip ambiguous records."""
+        maximum = self.policy.name_processing_limit
         try:
-            names = sorted(os.listdir(self.root))
-        except (FileNotFoundError, NotADirectoryError):
+            if strict:
+                with os.scandir(self.root) as entries:
+                    names = [entry.name for entry in islice(entries, maximum + 1)]
+                if len(names) > maximum:
+                    return [], True
+            else:
+                names = sorted(os.listdir(self.root))
+        except FileNotFoundError:
             return [], False
+        except NotADirectoryError:
+            return [], strict
         except OSError as exc:
             raise Denied("CI request evidence is unavailable") from exc
         rows = []
         seen = set()
-        scan_stopped = len(names) > self.policy.name_processing_limit
-        for name in names[:self.policy.name_processing_limit]:
-            match = REQUEST_FILE.fullmatch(name) or DISPATCH_FILE.fullmatch(name)
-            if match is None or match.group(1) in seen:
+        scan_stopped = len(names) > maximum
+        for name in names[:maximum]:
+            match = ATTEMPT_FILE.fullmatch(name)
+            if match is None:
+                if strict:
+                    return [], True
+                continue
+            if match.group(1) in seen or (not strict and name.endswith(".resolution.json")):
                 continue
             seen.add(match.group(1))
             if len(seen) > self.policy.record_limit:
@@ -277,6 +326,8 @@ class CiRequests:
                 marker = None
             marker_row = None if marker is None else _unresolved_summary(marker, identity)
             if marker_row is None:
+                if strict:
+                    return [], True
                 # Without a valid dispatch marker there is no evidence that a
                 # CI run may have been spent, and no instant to date the
                 # request by, so the request is not listed at all.

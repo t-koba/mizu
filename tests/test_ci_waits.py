@@ -7,16 +7,18 @@ from collections import Counter
 from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver, without_blocked_age, forget_ledger
-from mizu import ci_waits, vcs
+from mizu import ci_requests, ci_waits, vcs
 from mizu.config import PublicationEvidence
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical, read_json
+from mizu.fs import PREVIEW_BYTES, canonical, digest, read_json
 from support import history_write_json as write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
 from mizu.publication import Publication
 from mizu.distribution import public_source_identity
-from mizu.runtime import Context, Engine, _role_events_due, poll_project_vcs, refresh_poll_state, should_run
+from mizu.runtime import (Context, Engine, _ready_work_observation, _role_events_due,
+                          poll_project_vcs, refresh_poll_state, should_run)
+from mizu.work_item_waits import holder_only
 
 SHA = "b" * 40
 
@@ -36,6 +38,27 @@ class CiWaitFixture(Fixture):
         self.wait = {"kind": "ci", "publication_id": self.publication.id, "checks": ["unit", "lint"]}
         self.clock = 1000
         self.state = {}
+
+    def receipt_for(self, *, code_digest=None, branch="published", source="d" * 40, sha=SHA):
+        publication = Publication(self.project.root, source,
+                                  self.snapshot["code_digest"] if code_digest is None else code_digest,
+                                  branch, "push", projection=public_source_identity(self.snapshot["files"]))
+        intent, _ = publication.prepare("approval", "run")
+        publication.mark_dispatch()
+        return publication.complete(intent, sha)
+
+    def descendant(self, label, *, parent=None, publish=True, verified=False):
+        snapshots = self.project.snapshots
+        (self.project.workspace / 'descendant.txt').write_text(label)
+        captured = snapshots.capture_files(self.project.workspace)
+        verification = ({'passed': True, 'code_digest': captured['code_digest'], 'run': 'offline'}
+                        if verified else None)
+        snap = snapshots.create(captured, goal='Goal', state='State', run='offline',
+                                outcome='wait', summary=label, verification=verification,
+                                **({'parent': parent} if parent else {}))
+        if publish:
+            snapshots.publish(snap)
+        return snap
 
     def block(self, key="item", actor="worker", wait=None):
         seed = self.store.create(actor=actor, idempotency_key=key, title="Observe CI")["record"]["work_item"]
@@ -932,14 +955,6 @@ class PublicationCiWaitTests(CiWaitFixture):
         self.wait = {"kind": "publication_ci", "snapshot_id": self.snapshot["id"],
                      "checks": ["unit", "lint"]}
 
-    def receipt_for(self, *, code_digest=None, branch="published", source="d" * 40, sha=SHA):
-        publication = Publication(self.project.root, source,
-                                  self.snapshot["code_digest"] if code_digest is None else code_digest,
-                                  branch, "push", projection=public_source_identity(self.snapshot["files"]))
-        intent, _ = publication.prepare("approval", "run")
-        publication.mark_dispatch()
-        return publication.complete(intent, sha)
-
     def test_publication_rebinding_preserves_age_without_releasing_pending_or_unknown_waits(self):
         from test_blocked_wait_age import clock
         with clock(0) as start:
@@ -1185,19 +1200,6 @@ class PublicationCiWaitTests(CiWaitFixture):
         reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
         self.assertEqual([event["work_item"] for event in ci_waits.pending(self.store, "worker")],
                          [old["id"]])
-
-    def descendant(self, label, *, parent=None, publish=True, verified=False):
-        snapshots = self.project.snapshots
-        (self.project.workspace / 'descendant.txt').write_text(label)
-        captured = snapshots.capture_files(self.project.workspace)
-        verification = ({'passed': True, 'code_digest': captured['code_digest'], 'run': 'offline'}
-                        if verified else None)
-        snap = snapshots.create(captured, goal='Goal', state='State', run='offline',
-                                outcome='wait', summary=label, verification=verification,
-                                **({'parent': parent} if parent else {}))
-        if publish:
-            snapshots.publish(snap)
-        return snap
 
     def publish_descendant(self, snapshot, sha=SHA, **kwargs):
         return self.receipt_for(code_digest=snapshot['code_digest'], sha=sha, **kwargs)
@@ -1622,3 +1624,258 @@ class PublicationCiWaitTests(CiWaitFixture):
             self.assertEqual(event['snapshot_relation'], 'exact')
         for item in items:
             self.assertEqual(self.store.get(item['id']), item)
+
+
+class HolderOnlyCiWaitTests(CiWaitFixture):
+    repository = "e" * 64
+
+    def setUp(self):
+        super().setUp()
+        self.config.vcs.update(request_grant=True, ci_branch="published")
+        self.project.lineage_target = {"repository": self.repository, "remote": "origin",
+                                       "target_ref": "refs/heads/main", "version": 1}
+        worker = self.config.roles["worker"]
+        self.config.roles["worker"] = dataclasses.replace(
+            worker, capabilities=(*worker.capabilities, "vcs_request"))
+
+    def empty_inventory(self, **changes):
+        return {"branch": "published", "sha": SHA, "complete": True, "checks": [],
+                "ci_inventory": {"repository": self.repository, "branch": "published",
+                                 "sha": SHA, "complete": True, "run_count": 0}, **changes}
+
+    def block_both(self):
+        snapshot = self.snapshot = self.project.snapshots.get()
+        self.receipt_for()
+        self.publication_wait = {"kind": "publication_ci", "snapshot_id": snapshot["id"],
+                                 "checks": ["unit", "lint"]}
+        return self.block(), self.block("publication", wait=self.publication_wait)
+
+    def test_exact_empty_inventory_makes_both_existing_waits_holder_ready(self):
+        with patch("mizu.vcs.invoke") as adapter:
+            items = self.block_both()
+            self.assertEqual(self.store.page_ready(role_name="worker")["total"], 0)
+            reader = Mock(return_value=self.empty_inventory())
+            _, reader = self.poll(reader=reader)
+            reader.assert_called_once()
+            page = self.store.page_ready(role_name="worker")
+            self.assertEqual(page["total"], 2, page)
+            self.assertEqual({(row["id"], row["status"]) for row in page["items"]},
+                             {(item["id"], "open") for item in items})
+            self.assertEqual(self.store.page_ready(role_name="reviewer")["total"], 0)
+            for item in items:
+                self.assertEqual(self.store.get(item["id"]), item)
+            adapter.assert_not_called()
+
+    def observe(self, **changes):
+        result, reader = self.poll(reader=Mock(return_value=self.empty_inventory(**changes)))
+        self.assertTrue(result["ok"], result)
+        return reader
+
+    def assert_readiness(self, items, ready):
+        page = self.store.page_ready(role_name="worker")
+        self.assertTrue(page["coverage_complete"], page)
+        self.assertEqual(page["total"], len(items) if ready else 0, page)
+        for item in items:
+            self.assertEqual(holder_only(self.store, item, None, writer_roles=None),
+                             "sole_requester_ci" if ready else None)
+
+    def test_same_live_wait_rewrite_is_immediately_ready_without_adapter_calls(self):
+        items = self.block_both()
+        self.observe()
+        with patch("mizu.vcs.invoke") as adapter:
+            refreshed = []
+            for item, wait in zip(items, (self.wait, self.publication_wait)):
+                record = self.store.transition(item["id"], expected_rev=item["rev"], status="blocked",
+                                               actor="worker", wait=wait, scope="Confirm target", reason="Clarify scope")
+                self.assertEqual(record["status"], "blocked")
+                refreshed.append(record)
+            self.assert_readiness(refreshed, True)
+            changed = [self.store.transition(item["id"], expected_rev=item["rev"], status="blocked",
+                                             actor="worker", wait={**wait, "checks": ["other"]},
+                                             scope="Change checks", reason="Change target checks")
+                       for item, wait in zip(refreshed, (self.wait, self.publication_wait))]
+            self.assert_readiness(changed, False)
+            adapter.assert_not_called()
+
+    def test_new_nonempty_partial_or_wrong_observation_revokes_absence(self):
+        items = self.block_both()
+        good = self.empty_inventory()["ci_inventory"]
+        for label, changes in {
+            "positive inventory with no checks": {"ci_inventory": {**good, "run_count": 1}},
+            "queued check contradicts inventory": {"checks": self.rows("queued")},
+            "other SHA rows were not an empty inventory": {"checks": self.rows(sha="d" * 40)},
+            "no run attestation": {"ci_inventory": None},
+            "wrong repository": {"ci_inventory": {**good, "repository": "a" * 64}},
+            "wrong branch": {"branch": "wrong"},
+            "missing SHA echo": {"sha": None},
+            "different inventory SHA": {"ci_inventory": {**good, "sha": "c" * 40}},
+            "partial checks": {"complete": False},
+            "truncated inventory": {"ci_inventory": {**good, "truncated": True}},
+            "unfinished page": {"cursor": "more"},
+            "ambiguous run count": {"ci_inventory": {**good, "run_count": False}},
+        }.items():
+            with self.subTest(label=label):
+                self.observe()
+                self.assert_readiness(items, True)
+                self.observe(**changes).assert_called_once()
+                self.assert_readiness(items, False)
+
+    def test_unreadable_stale_and_retargeted_observations_fail_closed(self):
+        items = self.block_both()
+        with patch("mizu.ci_waits.time", return_value=100):
+            self.observe()
+            self.assert_readiness(items, True)
+            result, _ = self.poll(reader=Mock(side_effect=Denied("adapter unavailable")))
+            self.assertFalse(result["ok"])
+            self.assert_readiness(items, False)
+            self.observe()
+            with patch.dict(self.config.vcs, command=["different-adapter"]):
+                self.assert_readiness(items, False)
+            with patch.object(self.project, "lineage_target", None):
+                self.assert_readiness(items, False)
+            with patch.object(self.project, "lineage_target",
+                              {**self.project.lineage_target, "repository": "c" * 64}):
+                self.assert_readiness(items, False)
+            # An unreadable optional record does not veto a normal finish.
+            self.assert_readiness(items, True)
+            path = ci_waits._absence_path(self.store, items[0]["id"])
+            path.write_bytes(b"unreadable")
+            page = self.store.page_ready(role_name="worker")
+            self.assertTrue(page["coverage_complete"])
+            self.assertEqual([row["id"] for row in page["items"]], [items[1]["id"]])
+            self.observe()
+        with patch("mizu.ci_waits.time", return_value=100 + self.config.vcs["poll_interval_seconds"]):
+            self.assert_readiness(items, False)
+
+    def test_publication_observation_requires_unique_exact_receipt_not_a_descendant(self):
+        self.snapshot = self.project.snapshots.get()
+        item = self.block(wait={"kind": "publication_ci", "snapshot_id": self.snapshot["id"],
+                               "checks": ["unit", "lint"]})
+        self.observe().assert_not_called()
+        self.assert_readiness([item], False)
+        child = self.descendant("Descendant with receipt")
+        self.receipt_for(code_digest=child["code_digest"], source="e" * 40, sha="d" * 40)
+        inventory = self.empty_inventory()["ci_inventory"]
+        self.observe(sha="d" * 40, ci_inventory={**inventory, "sha": "d" * 40}).assert_called_once()
+        self.assert_readiness([item], False)
+        self.receipt_for()
+        self.observe()
+        self.assert_readiness([item], True)
+        self.receipt_for(source="f" * 40)  # Ambiguous even when both receipts name the same SHA.
+        self.assert_readiness([item], False)
+        self.observe()
+        self.assert_readiness([item], False)
+
+    def request(self, ledger, workflow):
+        publication = self.receipt["publication_id"]
+        identity = ci_requests.request_id(publication, SHA, [workflow])
+        stamp = "2024-01-01T00:00:00+00:00"
+        marker = {"request_id": identity, "publication_id": publication, "sha": SHA,
+                  "workflows": [workflow], "dispatched_at": stamp}
+        ledger.mark_dispatch(identity, marker)
+        return identity, {k: v for k, v in marker.items() if k != "dispatched_at"} | {"requested_at": stamp}
+
+    def test_dispatch_race_unresolved_timeout_and_resolution_invalidate_absence(self):
+        items = self.block_both()
+        self.observe()
+        self.assert_readiness(items, True)
+        ledger = ci_requests.CiRequests(self.project.root)
+        first, outcome = self.request(ledger, "unit")
+        self.assert_readiness(items, False)
+        self.observe()
+        self.assert_readiness(items, False)
+        ledger.record_outcome(first, {**outcome, "outcome": "unknown", "runs": [],
+                                      "reason_code": ci_requests.UNKNOWN_REASON,
+                                      "requested_at": "2024-01-01T00:01:00+00:00",
+                                      "dispatch_digest": digest(canonical(ledger.dispatched(first))),
+                                      "unknown_after_seconds": 60})
+        self.assertIsNone(ledger.outcome(first))
+        self.observe()
+        self.assert_readiness(items, False)
+        ledger.resolve(first, {**outcome, "outcome": "not_dispatched", "runs": [],
+                               "reason_code": "provider_rejected"})
+        self.assert_readiness(items, False)  # Must repoll, not reuse the pre-dispatch observation.
+        self.observe()
+        with patch.object(ci_requests.CiRequests, "_rows", side_effect=AssertionError("ready read scanned requests")):
+            self.assert_readiness(items, True)
+
+        def race(*_args):
+            identity, outcome = self.request(ledger, "lint")
+            ledger.record_outcome(identity, {**outcome, "runs": [{"workflow": "lint", "run_id": "run-1",
+                                  "head_sha": SHA, "url": "https://ci.invalid/1"}]})
+            self.assertIsNotNone(ledger.outcome(identity))
+            return self.empty_inventory()
+
+        self.poll(reader=Mock(side_effect=race))
+        self.assert_readiness(items, False)
+
+    def test_incomplete_request_ledger_scan_is_not_a_quiet_ledger(self):
+        items = self.block_both()
+        ledger = ci_requests.CiRequests(self.project.root)
+        identity, outcome = self.request(ledger, "unit")
+        ledger.record_outcome(identity, {**outcome, "outcome": "not_dispatched", "runs": [],
+                                         "reason_code": "provider_rejected"})
+        policy = dataclasses.replace(self.config.ci_requests, name_processing_limit=1)
+        with patch.object(self, "config", dataclasses.replace(self.config, ci_requests=policy)):
+            self.observe()
+            self.assert_readiness(items, False)
+        self.observe()
+        self.assert_readiness(items, True)
+        ledger.mark_dispatch("1" * 64, {"malformed": True})
+        self.observe()
+        self.assert_readiness(items, False)
+
+    def test_request_grants_and_scope_are_reevaluated_at_use(self):
+        items = self.block_both()
+        self.observe()
+        worker = self.config.roles["worker"]
+        reviewer = self.config.roles["reviewer"]
+        competing = dataclasses.replace(reviewer, workspace="read", interval_seconds=60,
+                                       capabilities=(*reviewer.capabilities, "vcs_request"))
+        with patch.dict(self.config.vcs, request_grant=False):
+            self.assert_readiness(items, False)
+        with patch.dict(self.config.roles, worker=dataclasses.replace(
+                worker, capabilities=tuple(cap for cap in worker.capabilities if cap != "vcs_request"))):
+            self.assert_readiness(items, False)
+        with patch.dict(self.config.roles, reviewer=competing):
+            self.assert_readiness(items, False)
+            with patch.object(self.project, "roles", [role for role in self.project.roles if role != "reviewer"]):
+                self.assert_readiness(items, True)
+        with patch.dict(self.config.roles, reviewer=dataclasses.replace(reviewer, workspace="write",
+                                                                        interval_seconds=60)):
+            self.assert_readiness(items, True)
+
+    def test_exact_absence_wakes_parked_holder_without_terminal_delivery_or_repeated_edges(self):
+        items = self.block_both()
+        engine = Engine(self.config, driver=ScriptDriver())
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        parked = self.project.snapshots.get()
+        self.assertFalse(should_run(self.project, parked, role_name="worker"))
+        self.observe()
+        self.assertTrue(should_run(self.project, parked, role_name="worker"))
+        self.assertFalse(_ready_work_observation(self.project, parked, self.config.roles["reviewer"])[0])
+        signature = self.store.page_ready(role_name="worker")["signature"]
+        self.observe()
+        self.assertEqual(self.store.page_ready(role_name="worker")["signature"], signature)
+        self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+
+        def handle(ctx, *_):
+            self.assertEqual(ctx.wait_events, [])
+            for item in items:
+                self.store.transition(item["id"], expected_rev=item["rev"], status="dropped",
+                                      actor="worker", reason="No runs; change approach")
+
+        engine = Engine(self.config, driver=ScriptDriver(handle))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        self.observe().assert_not_called()
+        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="worker"))
+        self.assertEqual(list(ci_waits._absence_dir(self.store).iterdir()), [])
+
+    def test_poll_adapter_passes_attestation_without_changing_public_status(self):
+        items = self.block_both()
+        with patch("mizu.vcs.invoke", return_value=self.empty_inventory()) as adapter:
+            ci_waits.poll(self.config, self.project, {}, now=1000, interval=15)
+            adapter.assert_called_once()
+            self.assert_readiness(items, True)
+            data = vcs.read_via(self.config.vcs, "status", {"branch": "published", "sha": SHA})
+        self.assertNotIn("ci_inventory", data)

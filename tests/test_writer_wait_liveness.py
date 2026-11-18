@@ -341,7 +341,7 @@ class HolderOnlyTests(Fixture):
                                        writer_roles={'worker'})['state'], 'due')
         self.assertIsNone(holder_only(store, fresh, current, writer_roles={'worker'}))
 
-    def test_holder_only_ci_never_holder_only(self):
+    def test_holder_only_ci_requires_more_than_no_terminal_evidence(self):
         store = self.project.work_items
         snapshot = self.project.snapshots.get()
         waits = [

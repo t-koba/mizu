@@ -206,12 +206,15 @@ class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  effective_verification_projection=None, writer_roles_lookup=None,
+                 ci_wait_settings=None, ci_request_roles=None,
                  record_question_lookup=None, register_question_wait=None, record_answer_evidence=None,
                  publication_evidence: PublicationEvidence | None = None,
                  completion_evidence: CompletionEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
         self.writer_roles_lookup = writer_roles_lookup
+        self.ci_wait_settings = ci_wait_settings
+        self.ci_request_roles = ci_request_roles
         self.record_question_lookup = record_question_lookup
         self.register_question_wait = register_question_wait
         self.record_answer_evidence = record_answer_evidence
@@ -2026,9 +2029,10 @@ class WorkItems:
         releasers; they never imply completion. Holder-only waits (whose holder is
         the sole possible resolver) appear in the holder's page as ordinary
         held-open work, without satisfying the registered wait.
-        Writer authority comes from writer_roles or the optional configured lookup.
-        CI/proposal waits become ready only
-        from their validated local terminal route, independent of event ack.
+        Code-change authority comes from writer_roles or the configured lookup.
+        CI holder-only readiness requires the independent requester grant and
+        fresh exact local absence evidence. Otherwise CI/proposal waits are ready
+        only from their validated terminal route, independent of event ack.
         Legacy unseeded decisions remain explicit coverage gaps, never inferred ready work. Unreadable
         liveness (``unknown``) excludes only that blocked item and never
         releases it; known ready rows are still returned with

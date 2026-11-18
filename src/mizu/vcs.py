@@ -1118,7 +1118,8 @@ def read_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,
             # Host CI wait consumers can refuse partial or mismatched evidence;
             # ordinary VCS reads retain their existing public response shape.
             result.update({key: data[key] for key in
-                           ("branch", "sha", "complete", "truncated", "scan_stopped", "cursor")
+                           ("branch", "sha", "complete", "truncated", "scan_stopped", "cursor",
+                            "ci_inventory")
                            if key in data})
         if "publication_id" in params:
             raw = data.get("lineage")

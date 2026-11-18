@@ -243,7 +243,8 @@ project-assigned `workspace = "write"` role with an independent dispatch route
 (`event_wakes`, `daemon`, `interval_seconds` or `calendar`). A delegated-only
 second writer does not make the wait external. Holder-only waits are open
 role-eligible work in the ready set; this projection does not transition the
-stored item or grant timer re-admission.
+stored item or grant timer re-admission. Held CI waits use a separate
+[exact absence and requester test](#exact-sha-work-item-ci-waits).
 
 A role asks the operator through a
 [configured SharedRecords question kind](shared-records.md#opt-in-role-questions-to-the-operator).
@@ -536,10 +537,10 @@ insight target or an exact dependency revision superseded or substantively
 conflicting), `terminal` (the same exact CI/publication/proposal route as holder
 readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
-exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change`
-(the holder is the only project writer with independent dispatch) or `null`.
-This witness lets the holder-only classifier surface the wait as open ready work;
-it does not change the stored wait or grant timer re-admission.
+exact route. The local liveness classifier can report `self_resolvable` as
+`sole_writer_code_change` or `sole_requester_ci`. Status omits those effectively
+open items from the blocked view. The witness does not change the stored wait
+or grant timer re-admission.
 `coverage_complete` reports inventory/observation completeness; `truncated` and
 `overflow_count` separately identify omitted diagnostic rows. An incomplete
 view is not proof that no holder-only or external cause exists.
@@ -706,6 +707,33 @@ An explicitly declared [host publisher outcome](shared-records.md#declared-host-
 can also wake this exact waiter when its route enables wake: `refused` with a bounded reason, or `superseded`
 with the exact newer retained snapshot. These use the existing holder/revision
 delivery and explicit acknowledgement path, never automatic work completion.
+A held `ci` or `publication_ci` wait is effectively open for its holder only
+when that holder is the project's only independently dispatched role with the
+`vcs_request` capability and adapter request grant, the local CI request
+ledger is completely known and has no unresolved attempt, and an exact poll
+has established zero provider runs. This is a ready-set change, not CI success,
+a delivery event, an acknowledgement, or a ledger transition. A still-valid
+observation applies immediately to the same held wait. Missing evidence leaves
+ordinary blocked and terminal handling unchanged.
+
+Adapters may attest exact run coverage in the existing `status` reply with
+`ci_inventory: {repository, branch, sha, complete: true, run_count: 0}`. The
+repository is the 64-hex identity from the project's existing trusted
+`[vcs.lineage_target]`; it must also match any repository bound to the receipt.
+The branch and SHA must match the queried receipt, with a unique exact receipt
+for `publication_ci`. `complete: true` on the outer reply, no partial-page
+flags/cursor, and an unfiltered empty `checks` array are also required. The
+inventory asserts complete coverage of **all** workflow runs at that target,
+including queued workflows that have no check rows yet. A filtered or merely
+empty checks listing, a descendant result, or an absent inventory cannot attest
+this. The extra field is host-only and not returned by ordinary `vcs_read`.
+
+The poll keeps at most one disposable observation per live wait within the
+existing target-call budget. Evidence expires after one configured poll
+interval; a newer target poll or local request activity revokes the old
+observation. Reads and item writes only check local evidence and do not call the
+adapter; they do not retry or reconcile uncertain requests.
+
 There is no deadline, automatic retry/CI dispatch, promotion, or item transition.
 The existing daemon's configured observation cadence is used, not a writer
 polling deadline. Unrelated work remains schedulable.

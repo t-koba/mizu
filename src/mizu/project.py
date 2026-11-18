@@ -12,7 +12,8 @@ import uuid
 from pathlib import Path
 
 from .budget import Budget
-from .config import Config, ProjectImport, _lineage_target, keys, strings, wait_writer_roles
+from .config import (Config, ProjectImport, _lineage_target, keys, strings,
+                     wait_ci_request_roles, wait_writer_roles)
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .check_job_index import CHECK_JOBS, CheckJobSource
@@ -149,6 +150,8 @@ class Project:
         self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
                                     completion_evidence=config.completion_evidence,
                                     writer_roles_lookup=lambda: wait_writer_roles(self.config, self.roles),
+                                    ci_wait_settings=self.vcs_settings,
+                                    ci_request_roles=lambda: wait_ci_request_roles(self.config, self.roles),
                                     record_question_lookup=lambda: record_question_lookup(self),
                                     record_answer_evidence=lambda subject, holder, proof: record_answer_evidence(self, subject, holder, proof),
                                     register_question_wait=lambda subject, holder: register_question_wait(self, subject, holder),

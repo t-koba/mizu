@@ -14,8 +14,11 @@ import json
 import os
 import uuid
 from dataclasses import asdict
+from time import time
 
-from .errors import Denied, LimitExceeded
+from . import lineage
+from .ci_requests import CiRequests
+from .errors import Busy, Denied, LimitExceeded
 from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, loads_finite, lock,
                  mkdir, safe_read, sync_dir, write_json)
 from .fs import now as observed_now
@@ -23,6 +26,7 @@ from .shared_records import RECORD_BYTES, RECEIPT_BYTES, KindPolicy, SharedRecor
 from .publication import Publication
 from .snapshot import SnapshotNotDescendant
 from .vcs import _reject_terminal_controls, parse_status_checks
+from .vcs_poll_policy import DEFAULT_VCS_POLL_INTERVAL_SECONDS
 from .work_items import _directory, _timestamp
 
 MAX_CHECK_SET_BYTES = 2048
@@ -126,6 +130,151 @@ def _complete_status(wait, data):
             and data.get("truncated", False) is False
             and data.get("scan_stopped", False) is False
             and data.get("cursor") is None)
+
+
+# A complete check listing is not a run inventory: queued workflows may
+# have no checks, and adapter-side filtering may hide other revisions.
+def _exact_empty(params, data, rows, repository):
+    inventory = data.get("ci_inventory")
+    return (not rows and repository is not None and data.get("complete") is True
+            and isinstance(inventory, dict) and type(inventory.get("run_count")) is int
+            and inventory == {**params, "repository": repository, "complete": True, "run_count": 0}
+            and inventory["complete"] is True)
+
+
+def _absence_source(settings):
+    target = lineage.check_target(settings.get("lineage_target"))
+    if target and settings.get("command") and settings.get("poll_enabled"):
+        return target["repository"], digest(canonical([settings["command"], target]))
+    return None, None
+
+
+def _absence_dir(store):
+    return store.root / "ci-wait-absence"
+
+
+def _absence_path(store, item_id):
+    identifier(item_id)
+    return _absence_dir(store) / f"{item_id}.json"
+
+
+def _absence_record(store, path):
+    try:
+        value = loads_finite(safe_read(store.root, path.relative_to(store.root).as_posix(), 2048))
+        return value if isinstance(value, dict) else {}
+    except (Denied, LimitExceeded, OSError, ValueError, RecursionError):
+        return {}
+
+
+def _absence_item(item):
+    return {"work_item": item["id"], "holder": item["holder"],
+            "wait_digest": digest(canonical(item["wait"]))}
+
+
+def _absence_matches(item, record, settings, source, activity):
+    stamp = record.get("observed_at")
+    return (source is not None and activity is not None and item is not None and item["status"] == "blocked"
+            and item["holder"] is not None and record.get("source") == source
+            and record.get("activity") == activity
+            and type(stamp) in (int, float)
+            and 0 <= time() - stamp < settings.get("poll_interval_seconds", DEFAULT_VCS_POLL_INTERVAL_SECONDS)
+            and all(record.get(k) == v for k, v in _absence_item(item).items()))
+
+
+def _absence_target(store, wait, repository):
+    receipt = Publication.read_receipt(store.root, wait["publication_id"])
+    recorded = receipt.get("lineage")
+    if recorded is None or recorded["repository"] == repository:
+        return {k: wait[k] for k in ("publication_id", "branch", "sha")}
+    return None
+
+
+def holder_only(store, item):
+    """Read only advisory absence for the supplied current item; unknown is not terminal."""
+    try:
+        record = _absence_record(store, _absence_path(store, item["id"]))
+        if not record or store.ci_request_roles is None or store.ci_request_roles() != {item["holder"]}:
+            return False
+        settings = store.ci_wait_settings()
+        repository, source = _absence_source(settings)
+        requests = CiRequests(store.root)
+        activity = requests.activity()
+        if not _absence_matches(item, record, settings, source, activity):
+            return False
+        wait = _resolved(store, item["wait"])
+        target = _absence_target(store, wait, repository) if wait is not None else None
+        return target is not None and record.get("target") == target and requests.activity() == activity
+    except (Denied, LimitExceeded, OSError, ValueError, AttributeError, TypeError, KeyError, OverflowError):
+        return False
+
+
+class _Absences:
+    """Poll-owned, one disposable exact absence record per live held wait.
+
+    The source binds the configured adapter command and trusted repository
+    descriptor. The target and item bind the exact receipt, holder and wait;
+    a revision that keeps all those bindings need not wait for another poll.
+    """
+    def __init__(self, project, config):
+        self.store = project.work_items
+        self.settings = project.vcs_settings(config)
+        self.repository, self.source = _absence_source(self.settings)
+        self.requests = CiRequests(project.root, config.ci_requests)
+        self.activity = None
+        if self.source is not None:
+            with contextlib.suppress(Denied, LimitExceeded, OSError, ValueError):
+                self.activity = self.requests.activity()
+        self.quiet = None  # Lazily certify the ledger once per tick, not once per waiter.
+
+    def prune(self, targets):
+        directory = _absence_dir(self.store)
+        try:
+            if not _directory(directory):
+                return
+        except (Denied, OSError):
+            return  # The same unsafe directory cannot supply an absence witness.
+        removed = False
+        for path in directory.iterdir():
+            record = _absence_record(self.store, path)
+            target = record.get("target")
+            pair = (target.get("branch"), target.get("sha")) if isinstance(target, dict) else ()
+            if len(pair) == 2 and all(isinstance(part, str) for part in pair) and pair not in targets:
+                try:
+                    item = self.store.current(path.stem)
+                    if _absence_matches(item, record, self.settings, self.source, self.activity):
+                        continue
+                except (Denied, LimitExceeded, OSError, ValueError, TypeError, OverflowError):
+                    pass
+            with contextlib.suppress(IsADirectoryError):  # Not a readable observation.
+                path.unlink(missing_ok=True)
+                removed = True
+        if removed:
+            sync_dir(directory)
+
+    def remember(self, item, wait, stamp):
+        # Failure here is just missing optional absence evidence. It must not
+        # affect the status row, terminal delivery, or CI stream coverage.
+        with contextlib.suppress(Busy, Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError):
+            if self.activity is None:
+                return
+            if self.quiet is None:
+                self.quiet = False  # Also cache an unavailable ledger.
+                self.quiet = self.requests.quiet_activity() == self.activity
+            if not self.quiet or self.requests.activity() != self.activity:
+                return
+            target = _absence_target(self.store, wait, self.repository)
+            if target is not None:
+                path = _absence_path(self.store, item["id"])
+                _directory(path.parent)
+                write_json(path, {**_absence_item(item), "target": target, "source": self.source,
+                                  "activity": self.activity, "observed_at": stamp})
+
+    def forget(self, item):
+        with contextlib.suppress(Denied, OSError):
+            path = _absence_path(self.store, item["id"])
+            if _directory(path.parent):
+                path.unlink()
+                sync_dir(path.parent)
 
 
 def _check_names(checks):
@@ -937,6 +1086,10 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
         # captured before its adapter call and revalidated afterwards. Cache
         # failures too: no selected pair is queried twice in this tick.
         responses = {}
+        absences = _Absences(project, config)
+        # Revoke all selected targets before the first call, even if its answer
+        # is unreadable or a poll is interrupted midway through its waiters.
+        absences.prune(targets)
         observed = 0
         # With no selected pairs the response pass would hit `target not in
         # targets` for every candidate: full enumeration and receipt resolution
@@ -959,16 +1112,21 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                 if target not in responses:
                     responses[target] = None
                     params = {"branch": wait["branch"], "sha": wait["sha"]}
+                    stamp = time()
                     data = (reader(config.vcs, "status", params) if reader else read_via(
                         capped_vcs_settings(config.vcs, vcs_poll_status_timeout(config)),
                         "status", params, preserve_status_rows=True))
                     if _complete_status(params, data):
-                        responses[target] = parse_status_checks(data)
-                status_rows = responses[target]
-                if status_rows is None:
+                        status_rows = parse_status_checks(data)
+                        empty = _exact_empty(params, data, status_rows, absences.repository)
+                        responses[target] = (status_rows, stamp if empty else None)
+                response = responses[target]
+                if response is None:
                     continue
+                status_rows, empty_at = response
                 rows = _terminal_rows(wait, status_rows)
-                if rows is None and enrollment is None:
+                exact_empty = empty_at is not None and candidate is None
+                if rows is None and enrollment is None and not exact_empty:
                     continue
                 with lock(project.root / "locks" / "insights.lock"):
                     current = project.work_items.current(item["id"])
@@ -979,7 +1137,11 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                     if _candidate_wait(project.work_items, current["wait"], candidate) != wait:
                         continue
                     if rows is None:
-                        if enrollment is not None:
+                        if exact_empty:
+                            absences.remember(item, wait, empty_at)
+                            # Recheck this absence within the existing rotating
+                            # poll budget even on a quiet change stream.
+                        elif enrollment is not None:
                             enrollment.set(item, candidate, wait, True)
                         continue
                     binding = ("publication_id", "branch", "sha")
@@ -1002,6 +1164,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                     sync_dir(project.root)
                     write_json(path, record, exclusive=True)
                     observed += 1
+                    absences.forget(item)
                     if enrollment is not None:
                         enrollment.set(item, candidate, wait, False)
                     # Coarse platform-watch hint only, after durable evidence.

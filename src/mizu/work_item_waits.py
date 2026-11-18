@@ -171,7 +171,8 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
     def result(state, reason):
         return {"state": state, "reason": reason,
                 "wait_kind": wait.get("kind") if isinstance(wait, dict) else None,
-                **({"self_resolvable": self_resolvable} if writer_roles is not None else {})}
+                **({"self_resolvable": self_resolvable}
+                   if writer_roles is not None or self_resolvable is not None else {})}
 
     try:
         if wait is None:
@@ -190,6 +191,8 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
                 from . import ci_waits
                 observed = ci_waits.terminal_evidence(store, item)
             if observed is None:
+                if kind != "proposal_merged" and ci_waits.holder_only(store, item):
+                    self_resolvable = "sole_requester_ci"
                 return result("pending", "terminal_evidence_absent")
             envelope, computed = observed
             event = envelope["payload"]
@@ -297,41 +300,17 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
 _HOLDER_ONLY_STATES = ("pending", "receipt_bound")
 
 def holder_only(store, item, snapshot, *, writer_roles, record_question=None) -> str | None:
-    """Positive witness that only the holder can end this wait.
-
-    Returns ``sole_writer_code_change`` for a pending code-change wait held by
-    the sole independently dispatched writer. Returns ``None`` otherwise,
-    failing closed.
-
-    CI and ``publication_ci`` waits are deliberately never holder-only: every
-    publication push spends a CI run (ADR-035), so the absence of a ci-request
-    record does not prove that no provider run exists. Unknown or unreadable
-    evidence also fails closed to ``None``.
-    """
+    """Positive witness for a pending wait only its holder can release."""
     try:
-        if not isinstance(writer_roles, (set, frozenset)) or not writer_roles:
+        if not isinstance(item, dict) or item.get("status") != "blocked" or not item.get("holder"):
             return None
-        if not isinstance(item, dict):
-            return None
-        if item.get("status") != "blocked":
-            return None
-        holder = item.get("holder")
-        if holder is None:
-            return None
-        wait = item.get("wait")
-        if wait is None:
-            return None
-        if holder not in writer_roles:
-            return None
+        wait = item.get("wait") or {}
+        if wait.get("kind") not in ("ci", "publication_ci"):
+            if not isinstance(writer_roles, (set, frozenset)) or writer_roles != {item["holder"]}:
+                return None
         observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
                              record_question=record_question)
-        if not isinstance(observed, dict):
-            return None
-        if observed.get("state") not in _HOLDER_ONLY_STATES:
-            return None
-        witness = observed.get("self_resolvable")
-        if witness != "sole_writer_code_change" or set(writer_roles) != {holder}:
-            return None
-        return witness
+        if observed["state"] in _HOLDER_ONLY_STATES:
+            return observed.get("self_resolvable")
     except (Denied, KeyError, TypeError, AttributeError, ValueError, OSError):
         return None

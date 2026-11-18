@@ -169,11 +169,23 @@ def wait_writer_roles(config: Config, names=None) -> frozenset[str]:
     ``names`` scopes authority to the roles assigned to one project; a role
     configured but never assigned there cannot release its waits.
     """
+    return frozenset(name for name, role in _independent_wait_roles(config, names)
+                     if role.workspace == "write")
+
+
+def wait_ci_request_roles(config: Config, names) -> frozenset[str]:
+    """Independently dispatched project roles with the real CI request grant."""
+    if config.vcs.get("request_grant") is not True or not config.vcs.get("command"):
+        return frozenset()
+    return frozenset(name for name, role in _independent_wait_roles(config, names)
+                     if "vcs_request" in role.capabilities)
+
+
+def _independent_wait_roles(config: Config, names):
     items = (config.roles.items() if names is None
              else ((name, config.roles[name]) for name in names if name in config.roles))
-    return frozenset(name for name, role in items
-                     if role.workspace == "write" and (
-                         role.event_wakes or role.daemon or role.interval_seconds or role.calendar))
+    return ((name, role) for name, role in items
+            if role.event_wakes or role.daemon or role.interval_seconds or role.calendar)
 
 
 def artifact_page_bytes(settings: dict) -> int:
