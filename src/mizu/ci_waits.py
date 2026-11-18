@@ -233,8 +233,12 @@ class _Absences:
                 return
         except (Denied, OSError):
             return  # The same unsafe directory cannot supply an absence witness.
+        try:
+            paths = list(directory.iterdir())
+        except (Denied, OSError, ValueError):
+            return
         removed = False
-        for path in directory.iterdir():
+        for path in paths:
             record = _absence_record(self.store, path)
             target = record.get("target")
             pair = (target.get("branch"), target.get("sha")) if isinstance(target, dict) else ()
@@ -245,11 +249,18 @@ class _Absences:
                         continue
                 except (Denied, LimitExceeded, OSError, ValueError, TypeError, OverflowError):
                     pass
-            with contextlib.suppress(IsADirectoryError):  # Not a readable observation.
+            try:
                 path.unlink(missing_ok=True)
                 removed = True
+            except (IsADirectoryError, FileNotFoundError):
+                pass  # Not a readable observation.
+            except (Denied, OSError):
+                # An undeletable witness must not survive as evidence of absence.
+                with contextlib.suppress(Denied, OSError, ValueError, TypeError):
+                    write_json(path, {})
         if removed:
-            sync_dir(directory)
+            with contextlib.suppress(Denied, OSError):
+                sync_dir(directory)
 
     def remember(self, item, wait, stamp):
         # Failure here is just missing optional absence evidence. It must not

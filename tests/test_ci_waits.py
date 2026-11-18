@@ -1,9 +1,11 @@
 """Offline receipt-pinned CI waits: no publication or real network adapter."""
 import dataclasses
+import errno
 import json
 import uuid
 import weakref
 from collections import Counter
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from support import Fixture, ScriptDriver, without_blocked_age, forget_ledger
@@ -1719,6 +1721,33 @@ class HolderOnlyCiWaitTests(CiWaitFixture):
                 self.assert_readiness(items, True)
                 self.observe(**changes).assert_called_once()
                 self.assert_readiness(items, False)
+
+    def test_unlink_failure_revokes_absence_without_interrupting_poll(self):
+        items = self.block_both()
+        witness = ci_waits._absence_path(self.store, items[0]["id"])
+        unlink = Path.unlink
+
+        def deny_witness_unlink(path, *args, **kwargs):
+            if path == witness:
+                raise PermissionError(errno.EACCES, "advisory witness unlink denied")
+            return unlink(path, *args, **kwargs)
+
+        with patch("mizu.ci_waits.time", return_value=100):
+            for state in ("queued", "success"):
+                with self.subTest(state=state):
+                    self.observe()
+                    self.assert_readiness(items, True)
+                    with patch.object(Path, "unlink", deny_witness_unlink):
+                        result, reader = self.poll(rows=self.rows(state))
+                    self.assertTrue(result["ok"], result)
+                    reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
+                    if state == "queued":
+                        self.assertEqual(result["observed"], 0)
+                        self.assert_readiness(items, False)
+                    else:
+                        self.assertEqual(result["observed"], len(items))
+                        self.assertEqual({event["work_item"] for event in ci_waits.pending(self.store, "worker")},
+                                         {item["id"] for item in items})
 
     def test_unreadable_stale_and_retargeted_observations_fail_closed(self):
         items = self.block_both()
