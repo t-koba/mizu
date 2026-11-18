@@ -10,6 +10,7 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
+from mizu.config import MAX_WAIT_SECONDS
 from mizu.errors import Busy, Denied
 from mizu.fs import held, lock, read_json, MAX_JSON_DEPTH, write_json as write_indexed_json
 from support import forget_ledger, history_write_json as write_json
@@ -166,6 +167,62 @@ class JobTests(Fixture):
         result_file.write_bytes(b'{"pad":"' + b'x' * (cap + 10) + b'"}')
         with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
             check_jobs.result(ctx, job['id'])
+
+    def test_result_without_wait_seconds_returns_queued_immediately(self):
+        ctx, job = self.submit()
+        started = time.monotonic()
+        self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'queued')
+        self.assertLess(time.monotonic() - started, 0.5)
+        started = time.monotonic()
+        self.assertEqual(check_jobs.result(ctx, job['id'], wait_seconds=0)['status'], 'queued')
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_result_wait_seconds_collects_completion(self):
+        ctx, job = self.submit()
+        outcomes = []
+        def finish():
+            time.sleep(0.15)
+            outcomes.append(self.run_job())
+        runner = threading.Thread(target=finish)
+        runner.start()
+        try:
+            started = time.monotonic()
+            output = check_jobs.result(ctx, job['id'], wait_seconds=2)
+            elapsed = time.monotonic() - started
+        finally:
+            runner.join(3)
+        self.assertEqual(output['status'], 'completed')
+        self.assertLess(elapsed, 2)
+        self.assertEqual(outcomes[0]['id'], job['id'])
+        self.assertTrue(output['accepted_for_current_source'])
+
+    def test_result_wait_seconds_bound_returns_non_terminal(self):
+        ctx, job = self.submit()
+        started = time.monotonic()
+        output = check_jobs.result(ctx, job['id'], wait_seconds=1)
+        elapsed = time.monotonic() - started
+        self.assertIn(output['status'], ('queued', 'running'))
+        self.assertGreaterEqual(elapsed, 0.75)
+        self.assertLess(elapsed, 2)
+
+    def test_result_rejects_invalid_wait_seconds(self):
+        ctx, job = self.submit()
+        for value in (-1, 1.5, '1', True, False, None, MAX_WAIT_SECONDS + 1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(Denied, 'Invalid check wait bound'):
+                    check_jobs.result(ctx, job['id'], wait_seconds=value)
+        # The inclusive upper bound is valid; a terminal job never waits.
+        self.assertEqual(self.run_job()['status'], 'completed')
+        self.assertEqual(check_jobs.result(ctx, job['id'], wait_seconds=MAX_WAIT_SECONDS)['status'], 'completed')
+
+    def test_result_wait_seconds_stops_at_run_deadline(self):
+        ctx, job = self.submit()
+        ctx.deadline = time.monotonic() + 0.05
+        started = time.monotonic()
+        output = check_jobs.result(ctx, job['id'], wait_seconds=2)
+        elapsed = time.monotonic() - started
+        self.assertEqual(output['status'], 'queued')
+        self.assertLess(elapsed, 0.75)
 
     def test_detached_shared_job_cannot_escape_evidence_directory(self):
         ctx, job = self.submit()

@@ -1265,7 +1265,7 @@ class Context(ContextFinishMixin):
             return check_jobs.logs(self, args['id'], args.get('evidence_id'), offset=args.get('offset', 0), limit=args.get('limit', 8192), content_id=args.get('content_id'))
         if action == 'cancel':
             return check_jobs.cancel(self, args['id'])
-        return check_jobs.result(self, args['id'])
+        return check_jobs.result(self, args['id'], wait_seconds=args.get('wait_seconds', 0))
 
     def _op_verify(self, args: dict) -> dict:
         if "check_job" in self.role.capabilities:

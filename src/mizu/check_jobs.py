@@ -18,7 +18,7 @@ import time
 import math
 from pathlib import Path
 from .admission import check_slot_exclusion
-from .config import MAX_CHECK_INPUT_BOUND, MEBIBYTE_BYTES
+from .config import MAX_CHECK_INPUT_BOUND, MAX_WAIT_SECONDS, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
 from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, loads_finite, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
@@ -1210,12 +1210,41 @@ def _valid_result_proof(record, job, owner, image):
                     for c in record['commands']))
 
 
-def result(context, job_id):
+def _await_terminal(context, job_id, wait_seconds):
+    """Poll for a terminal job inside a bounded in-unit wait.
+
+    The runner writes job state under check-jobs.lock, so never sleep while
+    holding it. Configuration and the run deadline shorten the effective
+    bound: an in-unit wait must never outlive the unit that asked for it.
+    """
+    from .check_job_index import TERMINAL
+    start = time.monotonic()
+    cap = min(wait_seconds, context.config.limits.maximum_wait_seconds)
+    if context.deadline is not None:
+        cap = min(cap, max(0, context.deadline - start))
+    deadline = start + cap
+    while True:
+        job = read(context.project, job_id)
+        if context.stop.is_set() or job['status'] in TERMINAL:
+            return job
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return job
+        time.sleep(min(0.25, remaining))
+
+
+def result(context, job_id, *, wait_seconds=0):
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= MAX_WAIT_SECONDS:
+        raise Denied('Invalid check wait bound')
     project = context.project
     with lock(project.root / 'locks/check-jobs.lock'):
         job = read(project, job_id)
     if context.role.name not in (job['role'], job.get('producer_role')):
         raise Denied('Check job belongs to another role')
+    if wait_seconds > 0:
+        from .check_job_index import TERMINAL
+        if job['status'] not in TERMINAL:
+            job = _await_terminal(context, job_id, wait_seconds)
     output = summary(job, project)
     if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
         return output
