@@ -12,6 +12,7 @@ import support  # noqa: F401  (puts src on the path)
 from mizu.errors import ConfigError, Denied
 from mizu.fs import now
 from mizu.kernel import EventLog, Objects, matches, parse_kinds, parse_subscriptions
+from mizu.kernel.kinds import EVENT
 
 KINDS = tomllib.loads('''
 [kinds.check]
@@ -276,3 +277,124 @@ class ExampleUserland(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "examples/development/kinds.toml"
         kinds = parse_kinds(tomllib.loads(root.read_text())["kinds"])
         self.assertIn("proposal", kinds)
+
+
+class ExampleInsightLifecycle(unittest.TestCase):
+    """The example declarations drive insight/decision objects and events."""
+
+    def setUp(self):
+        source = Path(__file__).resolve().parents[1] / "examples/development/kinds.toml"
+        self.kinds = parse_kinds(tomllib.loads(source.read_text(encoding="utf-8"))["kinds"])
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log = EventLog(self.root, {
+            "holder": parse_subscriptions(["insight.*", "decision.*"], "roles.holder.subscribe"),
+            "author": parse_subscriptions(["insight.revisit"], "roles.author.subscribe"),
+            "idle": parse_subscriptions(["insight.never"], "roles.idle.subscribe"),
+        })
+        self.objects = Objects(self.root, self.kinds, self.log)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def submit(self, **extra):
+        fields = {"title": "t", "body": "b", "holder": "role:reviewer", "urgency": "high", **extra}
+        return self.objects.create("insight", fields, "role:writer")
+
+    def test_submission_and_addressed_decisions(self):
+        insight = self.submit()
+        self.assertEqual((insight["state"], insight["rev"], insight["author"]), ("pending", 1, "role:writer"))
+        with self.assertRaises(Denied):  # not a configured submitter
+            self.objects.create("insight", {"title": "t", "body": "b", "holder": "role:reviewer"}, "role:stranger")
+        self.assertEqual(self.objects.create(
+            "insight", {"title": "t", "body": "b", "holder": "role:reviewer"}, "operator")["author"], "operator")
+        for actor in ("role:writer", "role:stranger"):  # author is not the addressee
+            with self.assertRaises(Denied):
+                self.objects.transition("insight", insight["id"], "accept", expected_rev=1,
+                                        fields={}, actor=actor)
+        accepted = self.objects.transition("insight", insight["id"], "accept", expected_rev=1,
+                                           fields={}, actor="role:reviewer")
+        self.assertEqual(accepted["state"], "accepted")
+        for name, state in (("modify", "modified"), ("reject", "rejected")):
+            other = self.submit()
+            done = self.objects.transition("insight", other["id"], name, expected_rev=1,
+                                           fields={}, actor="role:reviewer")
+            self.assertEqual(done["state"], state)
+
+    def test_revise_and_withdraw_are_author_only(self):
+        insight = self.submit()
+        for name in ("revise", "withdraw"):
+            with self.assertRaises(Denied):
+                self.objects.transition("insight", insight["id"], name, expected_rev=1,
+                                        fields={}, actor="role:reviewer")
+        revised = self.objects.transition("insight", insight["id"], "revise", expected_rev=1,
+                                          fields={"title": "t2", "body": "b2", "urgency": "low"},
+                                          actor="role:writer")
+        self.assertEqual((revised["state"], revised["rev"], revised["fields"]["title"]),
+                         ("pending", 2, "t2"))
+        withdrawn = self.objects.transition("insight", insight["id"], "withdraw", expected_rev=2,
+                                            fields={}, actor="role:writer")
+        self.assertEqual(withdrawn["state"], "withdrawn")
+        with self.assertRaises(Denied):  # withdrawn is terminal
+            self.objects.transition("insight", insight["id"], "revise", expected_rev=3,
+                                    fields={}, actor="role:writer")
+
+    def test_defer_instant_fires_once(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        insight = self.submit()
+        deferred = self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
+                                           fields={"revisit_at": soon}, actor="role:reviewer")
+        self.assertEqual(deferred["state"], "deferred")
+        self.assertEqual(self.objects.next_instant(), soon)
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual(self.objects.fire_due(), [])
+        fired = self.objects.fire_due(later)
+        self.assertEqual([(e["name"], e["id"], e["field"]) for e in fired],
+                         [("insight.revisit", insight["id"], "revisit_at")])
+        self.assertEqual(self.objects.fire_due(later), [])
+
+    def test_decision_record_binds_revision_and_emits_event(self):
+        insight = self.submit()
+        accepted = self.objects.transition("insight", insight["id"], "accept", expected_rev=1,
+                                           fields={}, actor="role:reviewer")
+        decision = self.objects.create("decision", {"insight": insight["id"], "revision": accepted["rev"],
+                                                    "action": "accept", "reason": "ok", "scope": "do work"},
+                                       "host")
+        self.assertEqual(decision["state"], "recorded")
+        self.assertEqual((decision["fields"]["insight"], decision["fields"]["revision"]),
+                         (insight["id"], accepted["rev"]))
+        self.assertEqual(decision["fields"]["scope"], "do work")
+        self.assertEqual(self.kinds["decision"].transitions, {})  # create-only record
+        self.assertEqual(self.objects.create("decision", {"insight": insight["id"], "revision": 2,
+                                                          "action": "reject", "reason": "late"},
+                                             "operator")["actor"], "operator")
+        names = [self.log.read(seq)["name"] for seq in range(1, self.log.head() + 1)]
+        self.assertEqual(names, ["insight.created", "insight.accept", "decision.recorded", "decision.recorded"])
+
+    def test_subscriptions_deliver_only_declared_matching_events(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        insight = self.submit()
+        deferred = self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
+                                           fields={"revisit_at": soon}, actor="role:reviewer")
+        self.objects.fire_due(dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6))
+        accepted = self.objects.transition("insight", insight["id"], "accept", expected_rev=deferred["rev"],
+                                           fields={}, actor="role:reviewer")
+        self.objects.create("decision", {"insight": insight["id"], "revision": accepted["rev"],
+                                         "action": "accept", "reason": "ok"}, "host")
+        names = [e["name"] for e in self.log.pending("holder")["events"]]
+        self.assertEqual(names, ["insight.created", "insight.defer", "insight.revisit",
+                                 "insight.accept", "decision.recorded"])
+        self.assertEqual([e["name"] for e in self.log.pending("author")["events"]], ["insight.revisit"])
+        self.assertEqual(self.log.pending("idle")["events"], [])
+        self.assertTrue((self.root / "wake" / "holder").exists())
+        self.assertTrue((self.root / "wake" / "author").exists())
+        self.assertFalse((self.root / "wake" / "idle").exists())
+
+    def test_declared_event_names_respect_the_kernel_grammar(self):
+        for kind in self.kinds.values():
+            self.assertIsNotNone(EVENT.fullmatch(kind.created_event))
+            for transition in kind.transitions.values():
+                self.assertIsNotNone(EVENT.fullmatch(transition.emits))
+            for field in kind.fields.values():
+                if field.event:
+                    self.assertIsNotNone(EVENT.fullmatch(field.event))

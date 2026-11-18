@@ -76,3 +76,73 @@ from = ["pending", "deferred"]
 to = "withdrawn"
 by = ["author"]
 fields = ["reason"]
+
+# The insight/proposal lifecycle and its separate, immutable decisions.
+# An insight is submitted by a configured role (or the operator), names the
+# addressed holder in `holder` (the addressee) and may name an `urgency`
+# ("low", "normal", "high", or "none" for explicit no-urgency; omission also
+# means none). Only the addressed holder may decide. Only the author may revise
+# (which makes the insight pending again at a new revision) or withdraw.
+# A deferral may carry an aware revisit instant, fired once as an event.
+[kinds.insight]
+states = ["pending", "accepted", "modified", "deferred", "rejected", "withdrawn"]
+initial = "pending"
+create = ["role:writer", "role:reviewer", "role:auditor", "role:searcher", "operator"]
+fields.title = {type = "string", max = 240, required = true}
+fields.body = {type = "string", max = 65536, required = true}
+fields.holder = {type = "principal", required = true}
+fields.urgency = {type = "string", max = 16}
+fields.revisit_at = {type = "instant", event = "insight.revisit"}
+[[kinds.insight.transitions]]
+name = "accept"
+from = ["pending", "deferred"]
+to = "accepted"
+by = ["holder"]
+[[kinds.insight.transitions]]
+name = "modify"
+from = ["pending", "deferred"]
+to = "modified"
+by = ["holder"]
+[[kinds.insight.transitions]]
+name = "defer"
+from = ["pending"]
+to = "deferred"
+by = ["holder"]
+fields = ["revisit_at"]
+requires = [{field = "revisit_at", present = true}]
+[[kinds.insight.transitions]]
+name = "reject"
+from = ["pending", "deferred"]
+to = "rejected"
+by = ["holder"]
+[[kinds.insight.transitions]]
+name = "revise"
+from = ["pending", "accepted", "modified", "deferred", "rejected"]
+to = "pending"
+by = ["author"]
+fields = ["title", "body", "urgency"]
+[[kinds.insight.transitions]]
+name = "withdraw"
+from = ["pending", "deferred"]
+to = "withdrawn"
+by = ["author"]
+
+# A decision is a separate create-only record, never edited in place. The host
+# writes it after the addressed holder's authorized transition above; the
+# operator may also write one where the workflow allows. It names the exact
+# insight object and the revision that was decided, so a later revision needs a
+# new decision. `action` is one of accept/modify/defer/reject; `reason` is
+# required, and an accept/modify may state an accepted `scope` while a defer may
+# state a `revisit` instant. The kernel bounds the fields; their vocabulary is
+# this declaration's policy, not kernel code.
+[kinds.decision]
+states = ["recorded"]
+initial = "recorded"
+create = ["host", "operator"]
+created_event = "decision.recorded"
+fields.insight = {type = "ref", kinds = ["insight"], required = true}
+fields.revision = {type = "integer", min = 1, required = true}
+fields.action = {type = "string", max = 32, required = true}
+fields.reason = {type = "string", max = 8192, required = true}
+fields.scope = {type = "string", max = 65536}
+fields.revisit = {type = "instant", event = "decision.revisit"}
