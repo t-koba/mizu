@@ -47,8 +47,10 @@ class SnapshotRecordCacheTests(unittest.TestCase):
             with patch.object(snapshot_store, "validate_manifest",
                               wraps=snapshot_store.validate_manifest) as validate:
                 results = [snapshot_store.get(record["id"]) for _ in range(4)]
-            self.assertEqual(validate.call_count, 1)
-            self.assertEqual(len(snapshot_store._record_cache), 1)
+            # Windows metadata is not a trustworthy witness, so get() keeps
+            # the full read and validation on every call and caches nothing.
+            self.assertEqual(validate.call_count, 4 if _platform.IS_WINDOWS else 1)
+            self.assertEqual(len(snapshot_store._record_cache), 0 if _platform.IS_WINDOWS else 1)
             self.assertEqual(len({id(result) for result in results}), len(results))
             for result in results:
                 self.assertEqual(result, record)
@@ -70,14 +72,17 @@ class SnapshotRecordCacheTests(unittest.TestCase):
                                   wraps=snapshot_store.validate_manifest) as validate:
                     snapshot_store.get(record["id"])
                     snapshot_store.get(record["id"])
-                    self.assertEqual(validate.call_count, 1)
+                    self.assertEqual(validate.call_count, 2 if _platform.IS_WINDOWS else 1)
                     current[0] = (*identity, "replaced")
                     snapshot_store.get(record["id"])
                     snapshot_store.get(record["id"])
-                    self.assertEqual(validate.call_count, 2)
-            cached_identity, cached_record = snapshot_store._record_cache[record["id"]]
-            self.assertEqual(cached_identity, current[0])
-            self.assertEqual(cached_record, record)
+                    self.assertEqual(validate.call_count, 4 if _platform.IS_WINDOWS else 2)
+            if _platform.IS_WINDOWS:
+                self.assertFalse(snapshot_store._record_cache)
+            else:
+                cached_identity, cached_record = snapshot_store._record_cache[record["id"]]
+                self.assertEqual(cached_identity, current[0])
+                self.assertEqual(cached_record, record)
 
     def test_corrupt_record_is_never_cached(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,8 +134,10 @@ class SnapshotRecordCacheTests(unittest.TestCase):
                     with self.assertRaises(SnapshotNotDescendant):
                         snapshot_store._descendant_distance_from(parent["id"])(parent["id"])
             validated_ids = Counter(call.args[0] for call in validate.call_args_list)
-            self.assertEqual(validated_ids[parent["id"]], 1)
-            self.assertEqual(validated_ids[child["id"]], 1)
+            # Each traversal asks for both manifests twice per iteration.
+            expected = 6 if _platform.IS_WINDOWS else 1
+            self.assertEqual(validated_ids[parent["id"]], expected)
+            self.assertEqual(validated_ids[child["id"]], expected)
 
     def test_windows_keeps_the_full_read_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:

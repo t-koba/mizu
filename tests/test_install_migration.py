@@ -1,6 +1,7 @@
 """Promotion against synthetic projects and staged metadata only."""
 import hashlib
 import importlib.util
+import io
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -178,21 +179,38 @@ class InstallMigrationTests(Fixture):
 
     def test_unrestorable_archive_refuses_before_any_conversion(self):
         flat, _, _ = self.flat_record()
-        weird = self.project.root / 'sessions/worker/weird' / 'a\\b.json'
-        weird.parent.mkdir(parents=True, exist_ok=True)
-        weird.write_text('{}')
+        # A literal backslash is a path separator on Windows, so a fixture
+        # file cannot have that name there. Insert the member into the real
+        # archive instead: backup verification and restore must both refuse
+        # it on every platform, without depending on OS filename semantics.
+        bad_name = 'sessions/worker/weird/a\\b.json'
+        add = tarfile.TarFile.add
+        inserted = []
+
+        def add_unrestorable_member(archive, *args, **kwargs):
+            result = add(archive, *args, **kwargs)
+            if not inserted:
+                info = tarfile.TarInfo(bad_name)
+                payload = b'{}'
+                info.size, info.mode = len(payload), 0o600
+                info.uid = info.gid = 0
+                info.uname = info.gname = ''
+                archive.addfile(info, io.BytesIO(payload))
+                inserted.append(bad_name)
+            return result
+
         with (patch.object(record_migration, 'apply') as records,
-              patch.object(INSTALLER, 'link_atomically') as link):
+              patch.object(INSTALLER, 'link_atomically') as link,
+              patch.object(tarfile.TarFile, 'add', add_unrestorable_member)):
             with self.assertRaisesRegex(Denied, r'verified backup and receipt failed.*Invalid relative path.*mizu migrate-records sample.*archive:'):
                 self.promote()
         records.assert_not_called()
         link.assert_not_called()
         self.assertTrue(flat.is_file())
-        self.assertTrue(weird.is_file())
         archive, = self.backups.glob('*/*.tar.gz')
         self.assertEqual(list(self.backups.glob('*/*.json')), [])
         with tarfile.open(archive, 'r:gz') as saved:
-            self.assertIn('sessions/worker/weird/a\\b.json', saved.getnames())
+            self.assertIn(bad_name, saved.getnames())
 
     def test_failed_apply_reports_partial_progress_and_retry_keeps_first_archive(self):
         flat, _, _ = self.flat_record()
