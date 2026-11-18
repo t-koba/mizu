@@ -85,6 +85,12 @@ PURPOSE_PREFIXES = {
         "Record your ordered work-item plan without changing any item's priority, status or "
         "scheduling."),
     "result_read": "Retrieve the next page of a truncated tool result without rerunning the tool.",
+    "objects_create": "Create an object of a declared kind.",
+    "objects_transition": "Make a declared transition on an object.",
+    "objects_read": "Read the current or a numbered revision of an object of a declared kind.",
+    "objects_list": "List current objects of a declared kind ordered by id,",
+    "events_read": "Read events matching your role's configured subscriptions, oldest first.",
+    "events_ack": "Advance your role's durable event cursor to seq;",
     "finish": "End this work unit and release its model slot and workspace lock.",
 }
 
@@ -97,7 +103,7 @@ HISTORY_WORDING = re.compile(
 
 class ToolDescriptionTests(unittest.TestCase):
     def test_definition_inventory(self):
-        self.assertEqual(len(DEFINITIONS), 44)
+        self.assertEqual(len(DEFINITIONS), 50)
         for retired in ("work_items_legacy_read", "work_items_reconcile"):
             self.assertNotIn(retired, DEFINITIONS)
         for tool, (description, _) in DEFINITIONS.items():

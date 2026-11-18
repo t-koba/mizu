@@ -669,8 +669,8 @@ DEFINITIONS = {
                     obj({"cursor": text(32), "offset": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}},
                         ("cursor", "offset"))),
     "objects_create": ("Create an object of a declared kind. The host binds your role as the actor; "
-                       "no actor may be supplied. Fields must match the kind's declared types and include "
-                       "its required fields; undeclared kinds and fields are refused. Creation appends "
+                       "no actor may be supplied. Fields are checked against the kind's declared types "
+                       "and required fields; undeclared kinds and fields are refused. Creation appends "
                        "the kind's created event.",
                        obj({"kind": KERNEL_NAME_SCHEMA, "fields": KERNEL_FIELDS_SCHEMA},
                            ("kind", "fields"))),
@@ -688,20 +688,21 @@ DEFINITIONS = {
                      obj({"kind": KERNEL_NAME_SCHEMA, "id": KERNEL_ID_SCHEMA,
                           "rev": KERNEL_REV_SCHEMA}, ("kind", "id"))),
     "objects_list": ("List current objects of a declared kind ordered by id, optionally filtered by "
-                     "state and exact field values. cursor is the last object id of a previous next "
+                     "state and exact field values. cursor is the last object id from a next page "
                      "(exclusive); pass next as cursor for the following page. next is null on the "
                      "last page. limit defaults to 64 and is at most 512.",
                      obj({"kind": KERNEL_NAME_SCHEMA, "state": KERNEL_NAME_SCHEMA,
                           "where": KERNEL_FIELDS_SCHEMA, "cursor": KERNEL_ID_SCHEMA,
                           "limit": KERNEL_LIMIT_SCHEMA}, ("kind",))),
     "events_read": ("Read events matching your role's configured subscriptions, oldest first. "
-                    "Reads start after your role's durable cursor, or after cursor (a previous "
-                    "next) when supplied; unacknowledged events are delivered again. next, head "
+                    "Reads start after your role's durable cursor, or after cursor (a next "
+                    "returned by a read) when supplied; unacknowledged events are delivered "
+                    "again. next, head "
                     "and more locate and bound the page; limit defaults to 64 and is at most 512. "
                     "The host binds the role; no role may be supplied.",
                     obj({"cursor": KERNEL_CURSOR_SCHEMA, "limit": EVENT_LIMIT_SCHEMA})),
-    "events_ack": ("Advance your role's durable event cursor to seq, which must not exceed the "
-                   "current head. Cursors only move forward; the host binds the role, so no "
+    "events_ack": ("Advance your role's durable event cursor to seq; a seq above the current "
+                   "head is refused. Cursors only move forward; the host binds the role, so no "
                    "other role's cursor can be advanced.",
                    obj({"seq": KERNEL_CURSOR_SCHEMA}, ("seq",))),
     "finish": finish_definition(FINISH_OUTCOMES),
