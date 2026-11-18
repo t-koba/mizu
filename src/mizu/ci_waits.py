@@ -100,9 +100,9 @@ def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_d
     if receipt_cache is not None and key in receipt_cache:
         publication_id = receipt_cache[key]
     else:
-        # The keyed lookup shares one strict, witness-validated scan across
-        # candidates; zero, ambiguous and stopped scans resolve nothing.
-        # Exceptions escape without creating a cache entry.
+        # The writer-owned key index resolves one exact receipt or none;
+        # corruption and out-of-band changes fail closed. Exceptions escape
+        # without creating a cache entry.
         publication_id = Publication.receipt_for_key(
             store.root, wait["branch"], target["code_digest"],
             policy=store.publication_evidence)
