@@ -1840,6 +1840,8 @@ PARAMETER_DEFAULTS = {
         '8', 'policy', 'snapshots / caller-selected anchored history projection size'),
     ('storage.py', 'restore', 'max_bytes'): (
         '1073741824', 'configured policy', 'storage / CLI restore --max-bytes fallback'),
+    ('storage.py', 'validate_backup_archive', 'max_bytes'): (
+        '1073741824', 'configured policy', 'install migration / backup preflight mirrors the restore byte ceiling'),
     ('storage_runs.py', 'Scan.preflight', 'depth'): (
         '0', 'mechanism', 'run storage / root traversal depth counter, not the depth ceiling'),
     ('vcs.py', 'parse_artifact', 'offset'): (
