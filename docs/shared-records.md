@@ -145,8 +145,8 @@ claim. Work is proportional to the explicit per-call bounds, not the total
 number of stored role records.
 
 When at least one question is returned, closure validation additionally uses
-`--scan-limit` as a separate budget across operator-partition, legacy-root and
-operator-index directory entries. All entries count, including unrelated entries
+`--scan-limit` as a separate budget across operator-partition and operator-index
+directory entries. All entries count, including unrelated entries
 and atomic stages; enumeration is bounded before sorting, and each canonical
 file/ref read retains the existing byte bounds. `scanned` still counts only role
 envelopes. An exhausted closure budget raises `LimitExceeded` for the whole call,
@@ -402,9 +402,10 @@ are sharded by the record ID's first component under
 `shared-records/<namespace>/` (long namespace components use a bounded digest
 directory; operator records live under `shared-records/operator/`). Runtime
 readers only use this sharded layout. Mizu refuses to start a unit if a flat
-`.json` entry remains or the bounded check cannot rule one out. Before upgrading
-an affected project, pause it and run `mizu migrate-records <project> --apply`
-(see [migration steps](operations.md#migrate-flat-shared-records)). The generic
+`.json` entry remains or the bounded check cannot rule one out. Normal promotion
+converts affected projects after verifying a backup of each; see
+[migration steps](operations.md#migrate-flat-shared-records). The explicit
+migration commands remain available for diagnosis and repair. The generic
 `records(namespace="operator")` scanner covers only the operator partition;
 dispatch uses the checked metadata projection described below. The kind `answer`
 is single-component; other envelope IDs and writers remain namespaced. An answer
