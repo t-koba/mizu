@@ -27,8 +27,6 @@ def exec_experiment(context, op: str, args: dict) -> dict:
             raise Denied("Async mode requires check_job")
         if "source_receipt" in args:
             raise Denied("Async mode cannot carry a source receipt")
-        if not (op == "experiment" or context.role.workspace == "read"):
-            raise Denied("Cannot detach live workspace writes")
         return check_jobs.submit(context, args["script"], kind=op, **scratch)
     # Omitted mode and sync share the direct path; only explicit async queues.
     if context.role.workspace == "none":

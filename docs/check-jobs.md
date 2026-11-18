@@ -5,16 +5,16 @@ acceptance commands against a frozen copy and returns a job ID without waiting
 for the commands. Ordinary `experiment` and `exec` calls run directly on the
 existing synchronous path even with `check_job`; only an explicit `mode=async`
 submits those calls as jobs. `verify` and explicit `check_job` starts are
-unchanged. Arbitrary workspace-mutating `exec` remains synchronous; it is not
-safe to detach writes to a workspace that the caller can continue modifying.
+unchanged. Detached `exec` and `experiment` commands run read-only on a frozen
+copy of the workspace; the caller cannot keep modifying their inputs.
 
 Ordinary `exec` and `experiment` calls accept an optional `mode` of `sync` or
 `async`. Omitting `mode` runs the existing direct synchronous path even with
 `check_job`, under the same role grants and workspace restrictions. `mode=sync`
 selects the same direct path as omission, without bypassing workspace denial
 or changing sandbox permissions. `mode=async` requires the `check_job` grant
-and uses only the already-safe queued paths, so writable-workspace `exec` and
-`source_receipt` experiments are refused instead of detached, and `verify`
+and runs on a frozen read-only snapshot, so any role with that grant may detach
+`exec`; `source_receipt` experiments are refused instead of detached, and `verify`
 behavior is unchanged (queued and frozen when `check_job` is granted); explicit
 `check_job` starts (including named recorded batches) are unchanged. Mode alone
 does not change queue identity or sharing.

@@ -211,8 +211,8 @@ DEFINITIONS = {
     "exec": ("Run a shell script in your sandbox, not on the host. The script can edit /workspace "
              "only under your workspace grant. "
              "Omit mode or use mode=sync to receive the result directly. mode=async requires "
-             "check_job and a read-only workspace role; it queues a check with frozen inputs. "
-             "Collect it with check_job action=result.",
+             "check_job and queues the command on a frozen read-only snapshot of the workspace; "
+             "any role with that grant may detach. Collect it with check_job action=result.",
              obj({"script": text(SCRIPT_MAX), "mode": MODE_SCHEMA}, ("script",))),
     "experiment": ("Test a hypothesis in disposable /work without editing /workspace. Supplied "
                    "question, comparison and measure are recorded with the command. "

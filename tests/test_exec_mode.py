@@ -154,10 +154,12 @@ class ExecModeRoutingTests(Fixture):
         with self.assertRaises(Denied):
             ctx._op_exec_experiment("experiment", {"script": "echo hi", "mode": "async"})
 
-    def test_async_refuses_live_writes_and_receipts(self):
+    def test_async_refuses_receipts_but_allows_writer_exec(self):
         writer = self.context()
-        with self.assertRaises(Denied):
-            writer._op_exec_experiment("exec", {"script": "echo hi", "mode": "async"})
+        with patch.object(writer.sandbox, "execute",
+                          side_effect=AssertionError("async must queue")):
+            job = writer._op_exec_experiment("exec", {"script": "echo hi", "mode": "async"})
+            self.assertEqual(job["status"], "queued")
         with self.assertRaises(Denied):
             writer._op_exec_experiment(
                 "experiment", {"script": "echo hi", "source_receipt": "r" * 64, "mode": "async"})

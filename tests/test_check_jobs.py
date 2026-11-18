@@ -34,8 +34,8 @@ class JobTests(Fixture):
     def submit(self):
         ctx = self.context()
         return ctx, check_jobs.submit(ctx)
-    def run_job(self):
-        return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=FakeSandbox)
+    def run_job(self, factory=FakeSandbox):
+        return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=factory)
 
     def test_summary_gates_wait_recipe_on_recorded_outcomes(self):
         _, job = self.submit()
@@ -412,6 +412,27 @@ class JobTests(Fixture):
         job = ctx._op_exec_experiment('experiment', {'script': 'test -f /workspace/app.py', 'mode': 'async'})
         self.assertEqual(job['status'], 'queued')
         self.assertEqual(self.run_job()['status'], 'completed')
+
+    def test_writer_exec_uses_isolated_read_only_job(self):
+        class RecordingSandbox(FakeSandbox):
+            executions = []
+
+            def execute(self, workspace, script, **kwargs):
+                self.executions.append((workspace, kwargs))
+                return super().execute(workspace, script, **kwargs)
+
+        RecordingSandbox.executions = []
+        ctx = self.context()
+        with patch.object(ctx.sandbox, 'execute', side_effect=AssertionError('synchronous execution')):
+            job = ctx._op_exec_experiment('exec', {'script': 'test -f /workspace/app.py', 'mode': 'async'})
+        self.assertEqual(job['status'], 'queued')
+        self.assertEqual(self.run_job(factory=RecordingSandbox)['status'], 'completed')
+        self.assertEqual(len(RecordingSandbox.executions), 1)
+        workspace, flags = RecordingSandbox.executions[0]
+        self.assertEqual(workspace, self.project.root / 'check-jobs' / job['id'] / 'input')
+        self.assertFalse(flags['writable'])
+        self.assertFalse(flags['experiment'])
+
     def test_check_runner_recovery_timer_uses_configured_service_cadence(self):
         from mizu.services import render
         from pathlib import Path
@@ -854,12 +875,11 @@ class JobTests(Fixture):
         self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
         self.assertEqual(check_jobs.result(parent, job['id'])['status'], 'completed')
 
-    def test_read_only_exec_returns_job_but_writer_exec_is_not_detached(self):
+    def test_read_and_writer_roles_return_exec_jobs(self):
         reader = self.context('reviewer')
         reader.role = dataclasses.replace(reader.role, capabilities=(*reader.role.capabilities, 'exec'))
         self.assertEqual(reader._op_exec_experiment('exec', {'script': 'echo hello', 'mode': 'async'})['status'], 'queued')
-        with self.assertRaises(Denied):
-            check_jobs.submit(self.context(), 'echo hello', kind='exec')
+        self.assertEqual(check_jobs.submit(self.context(), 'echo hello', kind='exec')['status'], 'queued')
     def test_matching_async_acceptance_can_complete_a_later_unit(self):
         from support import ScriptDriver
         from mizu.runtime import Engine

@@ -808,8 +808,8 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
         raise Denied("At most 32 commands per check job")
     if not job_commands:
         raise Denied('No acceptance commands configured')
-    if kind not in ('experiment', 'exec') or (kind == 'exec' and context.role.workspace == 'write'):
-        raise Denied('Cannot detach live workspace writes')
+    if kind not in ('experiment', 'exec'):
+        raise Denied('Cannot detach unsupported job kind')
     if custom and kind not in context.role.capabilities:
         raise Denied('Custom check jobs require the corresponding sandbox capability')
     if not custom and 'verify' not in context.role.capabilities:
