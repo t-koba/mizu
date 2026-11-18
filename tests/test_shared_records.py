@@ -55,17 +55,16 @@ class SharedRecordsTests(unittest.TestCase):
         manifest = self.store.freeze("worker", [record["id"]])
         return record, computed, manifest, asdict(manifest[0])
 
-    def test_store_has_no_deletion_or_release_api(self):
+    def test_public_api_has_no_deletion_or_release_surface(self):
         # Retention is permanent until a source owner proves an exact release
-        # condition; acknowledgement and source-current ineligibility are not
-        # release signals (docs/shared-records.md).
-        forbidden = ("delete", "remove", "prune", "retire", "cleanup", "release",
-                     "forget", "reclaim", "purge", "unlink")
-        for name in forbidden:
-            with self.subTest(name=name):
-                self.assertFalse(hasattr(self.store, name))
-                self.assertFalse(any(name in public for public in
-                                     vars(SharedRecords) if not public.startswith("_")))
+        # condition; any new public method needs explicit review against that
+        # invariant (docs/shared-records.md).
+        self.assertEqual(
+            {name for name in vars(SharedRecords) if not name.startswith("_")},
+            {"acknowledge", "freeze", "get", "put", "read_page", "received",
+             "record_name", "records"})
+        self.assertFalse({name for name, value in vars(self.store).items()
+                          if not name.startswith("_") and callable(value)})
 
     def test_exact_replay_and_digest_recomputation(self):
         record, computed = self.put()
