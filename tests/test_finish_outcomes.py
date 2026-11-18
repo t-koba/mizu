@@ -43,7 +43,7 @@ class FinishOutcomeTests(Fixture):
         description, _ = DEFINITIONS["finish"]
         for text in (opening, description):
             for purpose in ("outcome=continue as the ordinary finish",
-                            "must supply a typed `next_step` naming a new proposed follow-up",
+                            "ordinary finish with a typed `next_step` naming a new proposed follow-up",
                             "outcome=wait to pause", "outcome=blocked to report", "outcome=done to mark"):
                 self.assertIn(purpose, text)
             for refusal in ("A malformed writer continue is refused", "next_step alone does not admit",

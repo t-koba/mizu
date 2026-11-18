@@ -14,8 +14,8 @@ from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS
 
 def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
     purposes = (
-        ("continue", "Use outcome=continue as the ordinary finish; a writable role must supply "
-                     "a typed `next_step` naming a new proposed follow-up."),
+        ("continue", "Use outcome=continue as the ordinary finish with a typed "
+                     "`next_step` naming a new proposed follow-up."),
         ("wait", "Use outcome=wait to pause until a wake event."),
         ("blocked", "Use outcome=blocked to report what prevents further work."),
         ("done", "Use outcome=done to mark the work complete."),
