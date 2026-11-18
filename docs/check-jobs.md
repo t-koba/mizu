@@ -575,10 +575,10 @@ summary/state fields the caller must supply. It neither seals a unit nor claims
 success. Continue independent work when available; invoking that finish returns
 the model slot and workspace lock and resumes on completion or new input. The
 recipe disappears on terminal results. The recipe is offered only when the
-job's owning role has `wait` among its configured `finish_outcomes`; the
-outcomes are recorded on the job at creation (for the subscriber on a joined
-job), so a role configured without `wait` never receives a recipe it cannot
-take. Records created before that field existed keep the historical
+job's owning role currently has `wait` among its configured `finish_outcomes`.
+The gate is resolved from live config at projection time, so a config reload
+that removes `wait` removes the recipe rather than leaving one the role would
+refuse. A job whose owner role is no longer configured keeps the historical
 continuation. Normal ownership and finish validation still apply.
 
 ## Retained acceptance evidence — IMPLEMENTED SLICE

@@ -526,7 +526,7 @@ class DiscoveryTests(Fixture):
             'snapshot': report['snapshot'], 'code_digest': report['code_digest'],
             'same_code': True, 'summary': report['summary'].encode()[:4000].decode('utf-8', 'ignore'),
             'state': report['state'].encode()[:4000].decode('utf-8', 'ignore'),
-            'check': check_jobs.summary(check_jobs.read(self.project, job['id']))})
+            'check': check_jobs.summary(check_jobs.read(self.project, job['id']), self.project)})
         for budget in (4000, 7, 5000, 128000, 0):
             with self.subTest(budget=budget):
                 self.project.config = dataclasses.replace(self.config, limits=dataclasses.replace(

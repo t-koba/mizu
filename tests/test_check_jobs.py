@@ -37,47 +37,68 @@ class JobTests(Fixture):
     def run_job(self, factory=FakeSandbox):
         return check_jobs.run_one(self.project, threading.Event(), sandbox_factory=factory)
 
-    def test_summary_gates_wait_recipe_on_recorded_outcomes(self):
-        _, job = self.submit()
-        raw = check_jobs.read(self.project, job['id'])
-        self.assertIn('wait', check_jobs.summary(raw))
-        self.assertIn('wait', check_jobs.summary({**raw, 'finish_outcomes': ['wait', 'done']}))
-        for outcomes in (['continue', 'done'], [], ['blocked']):
-            with self.subTest(outcomes=outcomes):
-                result = check_jobs.summary({**raw, 'finish_outcomes': outcomes})
-                self.assertNotIn('wait', result)
-                self.assertEqual(result['status'], 'queued')
-        # Legacy records without the field keep the historical continuation.
-        self.assertIn('wait', check_jobs.summary(
-            {k: v for k, v in raw.items() if k != 'finish_outcomes'}))
-        # A malformed field fails closed rather than advertising the outcome.
-        self.assertNotIn('wait', check_jobs.summary({**raw, 'finish_outcomes': 'wait'}))
-
-    def test_submit_freezes_owner_outcomes_and_gates_wait_recipe(self):
-        ctx, default_job = self.submit()
-        self.assertIn('wait', default_job)
-        name = ctx.role.name
-        role = dataclasses.replace(self.config.roles[name], finish_outcomes=("continue", "done"))
+    def _set_live_outcomes(self, name, outcomes):
+        role = dataclasses.replace(self.config.roles[name], finish_outcomes=outcomes)
         self.config = dataclasses.replace(self.config, roles={**self.config.roles, name: role})
         self.project.config = self.config
-        restricted_ctx = self.context(name)
-        result = check_jobs.submit(restricted_ctx)
-        raw = check_jobs.read(self.project, result['id'])
-        self.assertEqual(raw['finish_outcomes'], ['continue', 'done'])
-        self.assertNotIn('wait', result)
-        self.assertEqual(result['status'], 'queued')
-        # The projection shown in the prompt and wakes obeys the same gate.
-        listed = {row['id']: row for row in check_jobs.list_jobs(self.project, name)}
-        self.assertIn(result['id'], listed)
-        self.assertNotIn('wait', listed[result['id']])
-        self.assertIn('wait', listed[default_job['id']])
 
-    def test_join_uses_subscriber_outcomes_not_producer_outcomes(self):
+    def test_summary_gates_wait_recipe_on_live_outcomes(self):
+        _, job = self.submit()
+        raw = check_jobs.read(self.project, job['id'])
+        self.assertNotIn('finish_outcomes', raw)
+        self.assertIn('wait', check_jobs.summary(raw, self.project))
+        for outcomes in (("continue", "done"), (), ("blocked",)):
+            with self.subTest(outcomes=outcomes):
+                self._set_live_outcomes('worker', outcomes)
+                result = check_jobs.summary(raw, self.project)
+                self.assertNotIn('wait', result)
+                self.assertEqual(result['status'], 'queued')
+        # A malformed configured value fails closed rather than advertising it.
+        self._set_live_outcomes('worker', 'wait')
+        self.assertNotIn('wait', check_jobs.summary(raw, self.project))
+        # Restoring wait in live config restores the recipe with no job rewrite.
+        self._set_live_outcomes('worker', ("continue", "wait", "blocked", "done"))
+        self.assertIn('wait', check_jobs.summary(raw, self.project))
+        # An owner role absent from config keeps the historical continuation.
+        roles = {k: v for k, v in self.config.roles.items() if k != 'worker'}
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project.config = self.config
+        self.assertIn('wait', check_jobs.summary(raw, self.project))
+
+    def test_submit_does_not_record_outcomes(self):
+        ctx, job = self.submit()
+        self.assertIn('wait', job)
+        raw = check_jobs.read(self.project, job['id'])
+        self.assertNotIn('finish_outcomes', raw)
+        self.assertIn('wait', check_jobs.summary(raw, self.project))
+
+    def test_config_reload_removes_stale_wait_recipe(self):
+        ctx, job = self.submit()
+        self.assertIn('wait', job)
+        name = ctx.role.name
+        # Restrict after submission: the shape the daemon creates on reload.
+        self._set_live_outcomes(name, ("continue", "done"))
+        restricted_ctx = self.context(name)
+        raw = check_jobs.read(self.project, job['id'])
+        self.assertNotIn('wait', check_jobs.summary(raw, self.project))
+        self.assertNotIn('wait', check_jobs.result(restricted_ctx, job['id']))
+        listed = {row['id']: row for row in check_jobs.list_jobs(self.project, name)}
+        self.assertIn(job['id'], listed)
+        self.assertNotIn('wait', listed[job['id']])
+        projection = check_jobs.prompt_projection(restricted_ctx)
+        rows = [row for row in projection['check_jobs'] if row['id'] == job['id']]
+        self.assertTrue(rows)
+        self.assertNotIn('wait', rows[0])
+        # _op_finish agrees with every projection: the outcome is now refused.
+        with self.assertRaises(Denied):
+            restricted_ctx._op_finish(
+                {'outcome': 'wait', 'summary': 'stale', 'wait_for_check': job['id']})
+
+    def test_join_gates_on_subscriber_role_not_producer(self):
         name = 'reviewer'
-        role = dataclasses.replace(self.config.roles[name], finish_outcomes=("continue", "done"))
+        self._set_live_outcomes(name, ("continue", "done"))
         self.config = dataclasses.replace(
             self.config,
-            roles={**self.config.roles, name: role},
             sandbox=dataclasses.replace(self.config.sandbox, check_reuse=True))
         self.project.config = self.config
         ctx, queued = self.submit()
@@ -85,9 +106,11 @@ class JobTests(Fixture):
         self.assertEqual(subscription['status'], 'queued')
         self.assertNotIn('wait', subscription)
         raw = check_jobs.read(self.project, subscription['id'])
-        self.assertEqual(raw['finish_outcomes'], ['continue', 'done'])
+        self.assertNotIn('finish_outcomes', raw)
+        # Gate follows the owner role: subscriber restricted, producer still allowed.
+        self.assertNotIn('wait', check_jobs.summary(raw, self.project))
         self.assertIn('wait', check_jobs.summary(
-            check_jobs.read(self.project, queued['id'])))
+            check_jobs.read(self.project, queued['id']), self.project))
 
     def test_completed_verification_import_requires_job_bound_proof(self):
         ctx, job = self.submit()
@@ -2632,7 +2655,7 @@ class CacheInputTests(Fixture):
                 with self.assertRaises(acceptance.InvalidProducer):
                     acceptance.read_job(self.project, job['id'])
                 with self.assertRaises(Denied):
-                    check_jobs.summary({**raw, 'cache_diagnostics': diagnostics})
+                    check_jobs.summary({**raw, 'cache_diagnostics': diagnostics}, self.project)
         write_json(path, raw)
         self.seed('unbounded')
         with patch.object(check_jobs, 'cache_input', return_value=None):

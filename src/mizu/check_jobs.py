@@ -580,7 +580,7 @@ def available(context, *, validate=True, discovery=None):
             candidates = [j for j in candidates if env is not None and j['environment'] == env
                           and cache_matches(context.project, j, current)]
     return [
-        {**summary(job), 'requires_input_check': not validate}
+        {**summary(job, context.project), 'requires_input_check': not validate}
         for job in candidates[:MAX_CHECK_JOB_PROJECTION_ROWS]
     ]
 
@@ -616,7 +616,7 @@ def _delivered_summary(project, job_id, owner):
             raw['acknowledged'] = True
             write_job(project, job_id, raw)
             job = read(project, job_id)
-    return summary(job)
+    return summary(job, project)
 
 
 def _subscribe(context, original, *, purpose=None, request=None, request_id=None,
@@ -639,9 +639,6 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
     job = {**original, 'id': job_id, 'shared_job': original['id'], 'role': owner,
            'producer_role': context.role.name, 'run': context.run_dir.name,
            'created_at': now(), 'acknowledged': already_delivered}
-    owner_role = context.project.config.roles.get(owner)
-    if owner_role is not None:
-        job['finish_outcomes'] = list(owner_role.finish_outcomes)
     job.pop('cache_request', None)
     job.pop('request_sequence', None)
     if request is not None:
@@ -662,7 +659,7 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
         job['purpose'] = purpose
     write_job(context.project, job_id, job)
     os.utime(root(context.project), None)
-    return summary(read(context.project, job_id))
+    return summary(read(context.project, job_id), context.project)
 
 
 def _release_locked(project, ids, *, protect=frozenset()):
@@ -1028,9 +1025,6 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                        'commands': job_commands, 'status': 'queued', 'created_at': now(),
                        'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                        'inputs_bound_required': context.config.sandbox.check_reuse}
-                owner_role = context.config.roles.get(owner)
-                if owner_role is not None:
-                    job['finish_outcomes'] = list(owner_role.finish_outcomes)
                 if cache_configured:
                     job['cache_request'] = cache_request
                     job['request_sequence'] = request_sequence
@@ -1058,7 +1052,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 raise
             for record in superseded:
                 _withdraw_locked(project, record['id'], role=owner, replaced_by=job_id)
-        return summary(job)
+        return summary(job, project)
 
 
 def _withdrawable(project, job):
@@ -1076,19 +1070,24 @@ def _retire_superseded(project, role, purpose, *, keep=frozenset(), replaced_by=
         _withdraw_locked(project, record['id'], role=role, replaced_by=replaced_by)
 
 
-def _wait_outcome_allowed(job):
-    """Whether the job owner can use the ``wait`` finish outcome.
+def _wait_outcome_allowed(job, project):
+    """Whether the job owner can currently use the ``wait`` finish outcome.
 
-    The value is frozen into the job at creation from the owner role's
-    configured outcomes, so a result never advertises an outcome that role
-    cannot take. Legacy records predate restricted finish outcomes and keep
-    the historical behaviour of offering the continuation.
+    Only the owner can consume the recipe (unit_finish enforces this), so the
+    gate is resolved from that role's live configured outcomes at projection
+    time: a config reload that drops ``wait`` removes the recipe instead of
+    leaving one the role would refuse. A job whose owner role is no longer
+    configured keeps the historical offer; malformed configured outcomes fail
+    closed.
     """
-    outcomes = job.get('finish_outcomes')
-    return outcomes is None or (isinstance(outcomes, (list, tuple)) and 'wait' in outcomes)
+    owner = project.config.roles.get(job.get('role'))
+    if owner is None:
+        return True  # legacy record / owner role removed from config
+    outcomes = getattr(owner, 'finish_outcomes', None)
+    return isinstance(outcomes, (list, tuple)) and 'wait' in outcomes
 
 
-def summary(job):
+def summary(job, project):
     if 'cache_diagnostics' in job:
         from .acceptance import valid_cache_diagnostics
         if not valid_cache_diagnostics(job['cache_diagnostics']):
@@ -1097,7 +1096,7 @@ def summary(job):
                              'arguments': {'outcome': 'wait', 'wait_for_check': job['id']},
                              'supply': ['summary', 'state'],
                              'resumes_on': 'check completion or new input'}}
-                    if _wait_outcome_allowed(job) and job.get('status') in ('queued', 'running')
+                    if _wait_outcome_allowed(job, project) and job.get('status') in ('queued', 'running')
                     else {})
     return {
         **continuation,
@@ -1128,7 +1127,7 @@ def pending(project, role, *, discovery=None):
         from .acceptance import discover
         discovery = discover(project)
     return [
-        summary(job) for job in discovery[0].values()
+        summary(job, project) for job in discovery[0].values()
         if job.get('role') == role
         and job.get('status') in ('completed', 'interrupted', 'refused', 'cancelled',
                                   'cleanup_failed')
@@ -1150,7 +1149,7 @@ def list_jobs(project, role, *, include_acknowledged=True, discovery=None, wake_
                          job.get('created_at', '')),
         reverse=True,
     )
-    return [summary(job) for job in ordered[:MAX_CHECK_JOB_PROJECTION_ROWS]]
+    return [summary(job, project) for job in ordered[:MAX_CHECK_JOB_PROJECTION_ROWS]]
 
 
 def prompt_projection(context):
@@ -1217,7 +1216,7 @@ def result(context, job_id):
         job = read(project, job_id)
     if context.role.name not in (job['role'], job.get('producer_role')):
         raise Denied('Check job belongs to another role')
-    output = summary(job)
+    output = summary(job, project)
     if job['status'] not in ('completed', 'interrupted', 'refused', 'cancelled', 'cleanup_failed'):
         return output
     owner = _evidence_owner(job, job_id)
@@ -1373,7 +1372,7 @@ def _withdraw_locked(project, job_id, *, role, replaced_by=None):
     if job.get('role') != role:
         raise Denied('Check job belongs to another role')
     if job['status'] not in ('queued', 'running'):
-        return summary(job)
+        return summary(job, project)
     original_id = job.get('shared_job', job_id)
     raw = raw_read(project, job_id)
     raw['detached'] = True
@@ -1393,7 +1392,7 @@ def _withdraw_locked(project, job_id, *, role, replaced_by=None):
         with project.insights.ledger.write('check_jobs', [original_id]):
             write_json(root(project) / original_id / 'cancel.json', {'requested_at': now()})
     os.utime(root(project), None)
-    return {**summary(read(project, job_id)), 'cancel_requested': True}
+    return {**summary(read(project, job_id), project), 'cancel_requested': True}
 
 
 def cancel(context, job_id):
@@ -1522,14 +1521,14 @@ def _run_one(project, stop, sandbox_factory, invalid):
                 save_execution(project, job)
                 shutil.rmtree(path.parent / 'input', ignore_errors=True)
                 os.utime(root(project), None)
-                return summary(job)
+                return summary(job, project)
             try:
                 result = _execute(project, job, stop, sandbox_factory, slot)
             except acceptance.InvalidProducer as exc:
                 # Execution has finalized; only its retention content failed.
                 invalid[exc.job_id] = exc.code
                 os.utime(root(project), None)
-                result = summary(job)
+                result = summary(job, project)
             if result['status'] == 'cleanup_failed':
                 return quarantine(project, read(project, job['id']), slot, result.get('error', 'Cleanup failed'))
             return result
@@ -1584,7 +1583,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
         save_execution(project, job)
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
-        return summary(job)
+        return summary(job, project)
 
     role = project.config.roles.get(job.get('producer_role', job['role']))
     receiver = project.config.roles.get(job['role'])
@@ -1644,7 +1643,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
         save_execution(project, job)
         shutil.rmtree(directory / 'input', ignore_errors=True)
         os.utime(root(project), None)
-        return summary(job)
+        return summary(job, project)
     job.update(status='running', started_at=now())
     save_execution(project, job)
     # A job-specific container role prevents ordinary role cleanup from deleting
@@ -1825,7 +1824,7 @@ def _execute(project, job, stop, sandbox_factory, slot):
     from .acceptance import recover_job
     recover_job(project, job['id'])
     os.utime(root(project), None)
-    return summary(job)
+    return summary(job, project)
 
 
 def wait_signature(project):
@@ -1977,7 +1976,7 @@ def continuation(project, role, snapshot, *, discovery=None):
             'same_code': report.get('code_digest') == snapshot.get('code_digest'),
             'summary': text_preview(str(report.get('summary', '')), preview_bytes)[0],
             'state': text_preview(str(report.get('state', '')), preview_bytes)[0],
-            'check': summary(job)}
+            'check': summary(job, project)}
 
 
 def waiting(project, role):
@@ -2095,7 +2094,7 @@ def quarantine(project, job, slot, error):
     write_json(project.config.data / 'check-slots' / f'{slot}.fault.json',
                {'project': project.name, 'id': job['id']})
     os.utime(root(project), None)
-    return summary(job)
+    return summary(job, project)
 
 
 def recover(project):
