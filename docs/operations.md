@@ -453,14 +453,17 @@ mizu storage demo --apply                   # 未参照マニフェストと孤�
 
 ### Migrate flat shared records
 
-The runtime no longer reads flat shared records. If an installation still has
-these files, pause each affected project and run
-`mizu migrate-records <project> --apply` before upgrading. Installation does not
-run this migration automatically. Mizu refuses to start work units when a
-top-level `.json` entry remains in `shared-records/`, and the refusal prints the
-migration command for that project. It also refuses if it cannot check the
-directory or reaches 1,000 entries without confirming absence. An absent
-directory is normal.
+Promotion converts flat shared records on paused projects after creating and
+verifying a backup of each affected project. Staging alone does not convert
+anything. See [upgrade and rollback](#バージョン更新とロールバック) for backup
+locations and recovery. The explicit dry-run and `--apply` commands remain
+available for diagnosis and repair.
+
+The runtime no longer reads flat shared records. It refuses to start work
+units if a top-level `.json` entry remains in `shared-records/`, and tells the
+operator to run `mizu migrate-records <project> --apply`. It also refuses if
+it cannot check the directory or reaches 1,000 entries without confirming
+absence. An absent directory is normal.
 
 ```bash
 mizu migrate-records demo          # read-only preview (default)
@@ -492,6 +495,10 @@ candidates. Resolve scan errors or truncation before resuming the project;
 a truncated scan that stops making progress does not prove all flat files are gone.
 
 ### Reconcile and convert legacy work-item resolutions
+
+Promotion also converts existing `legacy.json` sidecars after backup. Reconcile
+unresolved decisions explicitly if the migration preview reports them; the
+installer does not decide their outcomes.
 
 ```sh
 mizu pause demo
@@ -554,9 +561,9 @@ stops on the first per-item failure; `errors` identifies the stage and error
 class (and OS error number if available). `ok: false` exits with status 1; a
 failed verification or sync can leave `renamed` greater than `converted`.
 
-No rollback is needed after an interruption. Each item still has one atomic
-name, and readers accept a mix of converted and unconverted items. Run preview
-again to check readiness, then rerun apply: it counts valid current names as
+To resume a conversion after interruption, run preview again and then rerun
+apply. Each item still has one atomic name, and current readers accept a mix
+of converted and unconverted items. Apply counts valid current names as
 `already_current` and renames only those still using the old name. A successful
 retry with no remaining legacy names reports zero conversions.
 
@@ -1037,7 +1044,40 @@ mizu smoke --live
 
 昇格（promote）処理時には、導入時に記録されたソースコードのマニフェスト、ファイルのハッシュ値、実行権限ビット、および依存パッケージロックファイルのハッシュ値が検証されます。これは同一運用者によるステージング後の意図しない変更を検知するための仕組みであり、暗号署名の検証や悪意ある別ユーザーによる改ざんを防ぐものではありません。また、インストール済み依存ライブラリの全バイナリ検査や脆弱性スキャンの代わりになるものでもありません。
 
-有効化が完了すると置換対象の旧コードは削除します。過去形式のデータを現行契約へ自動変換しません。
+Use the candidate release's installer. With the configured projects stopped,
+promotion performs bounded checks for flat shared records and legacy work-item
+resolution filenames before switching `current`. Staging does not touch project
+data. Promotion uses the same bounds as the migration commands: 1,000 top-level
+shared-record entries and 10,000 entries per work-item scan. An unreadable or
+incomplete scan blocks promotion; the installer does not raise the bounds or
+skip a project on retry.
+
+If a conversion is needed, pause the affected project and leave services
+stopped. The installer creates and verifies one project archive per affected
+project using `mizu backup --verify` semantics. It writes the archives and
+sibling JSON receipts under `<data_dir>/migration-backups/<attempt>/` before
+running either conversion. The promotion result's `migrations` array gives the
+archive path, SHA-256, receipt path, status, and conversion counts for each
+project. It is empty if no conversion was needed. These archives contain private
+code and evidence; protect them as you would other project backups.
+
+A failed backup or preflight prevents conversion. If apply fails, `current`
+is not switched but some records may already have been converted. Keep the
+projects stopped, inspect the named command and receipt, and repair or restore
+before resuming. A receipt left in `applying` after interruption is not proof
+of completion. A retry uses a fresh archive if further conversion is needed;
+it does not replace earlier archives.
+
+Activation removes the replaced managed release. Keep its source bundle and
+the pre-conversion archives through the rollback window. To roll back, stop
+the newer release and use `mizu restore NAME --archive FILE` to restore into a
+new, unarmed project (or move the existing project aside first to reuse its
+name); restore never overwrites it. Use the archive from **before the first
+conversion** for that project, not a snapshot of a partial retry. Stage and
+promote the earlier release with its installer, then review the restored
+project before arming it.
+See [backup and restore](#バックアップと復元) for archive coverage and restore
+limits. Remove archive and receipt together when no longer needed for rollback.
 
 既存のポリシーファイル（`policies/*.md`）は自動更新されないため、新バージョンのテンプレートとの差分を手動で確認して反映してください。
 

@@ -22,8 +22,9 @@ create-only, bounded, and never repaired.
 Canonical files are sharded by the record ID's first component under
 ``shared-records/<namespace>/``; long namespace components use a bounded digest
 directory. This generic store has no index or timestamp cursor; source-specific
-derived projections, when needed, are owned outside this module. Conversion
-is an explicit operator command (``mizu migrate-records``).
+derived projections, when needed, are owned outside this module. The installer
+converts flat records before activation; ``mizu migrate-records`` also previews
+or applies that conversion explicitly.
 Managed project directories must remain host-owned during writes, as required by
 fs.atomic_write; safe_read additionally pins read paths on supported platforms.
 A batch validates before writing, but an I/O failure may commit a prefix: replay

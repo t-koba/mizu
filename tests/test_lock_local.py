@@ -109,6 +109,12 @@ class LocalLockTests(unittest.TestCase):
                 with self.assertRaises(Busy):
                     with lock(self.path, blocking=False):
                         pass
+                with fs.reuse_owned_locks([self.path]):
+                    with lock(self.path, blocking=False):
+                        pass
+                self.assertTrue(fs.held(self.path))
+                with self.assertRaises(Busy), lock(self.path, blocking=False):
+                    self.fail("Lock reuse escaped its scope")
             with lock(self.path, blocking=False):
                 pass
 

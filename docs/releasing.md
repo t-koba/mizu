@@ -113,9 +113,14 @@ claim of byte-reproducible transitive npm resolution.
 
 ## Current formats and dependency changes
 
-Version lives in `src/mizu/__init__.py` and product metadata. Internal records and bridge configuration have no generation numbers or
-compatibility readers. Current structure, bounds and integrity checks remain. Activation removes the
-replaced managed release after successful pointer and launcher updates.
+Version lives in `src/mizu/__init__.py` and product metadata. When removing a
+reader for a stored format, keep a bounded conversion at promotion and make the
+runtime refuse unconverted data, naming the migration. Promotion currently
+converts flat shared records and legacy work-item resolution filenames only
+after verified project backups and before switching `current`. Activation
+removes the replaced managed release after successful pointer and launcher
+updates. Keep its source bundle and the pre-conversion archives for rollback;
+see [upgrade and rollback](operations.md#バージョン更新とロールバック).
 
 Model profiles do not change the product version. Changing the Pi dependency
 requires tagged API review, refreshed lock, installed-package validation, live

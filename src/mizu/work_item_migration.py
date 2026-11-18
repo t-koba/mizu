@@ -55,6 +55,33 @@ def _candidate(event):
             and not {"work_item", "work_items", "work_item_specs"}.intersection(event))
 
 
+@contextlib.contextmanager
+def _scan_entries(directory, scan_limit):
+    def bounded(entries):
+        for count, entry in enumerate(entries):
+            if count >= scan_limit:
+                raise _ScanLimit("Work-item migration scan exceeds entry bound")
+            yield entry
+    with os.scandir(directory) as entries:
+        yield bounded(entries)
+
+
+def legacy_resolutions_present(project, *, scan_limit=DEFAULT_SCAN_LIMIT) -> bool:
+    """Prove presence or absence by name in one complete, bounded directory scan."""
+    items = project.root / "work-items"
+    if not _directory(items):
+        return False
+    found = False
+    with _scan_entries(items, scan_limit) as entries:
+        for entry in entries:
+            item = items / entry.name
+            if ITEM_ID.fullmatch(entry.name) is None or not _directory(item):
+                raise Denied("Invalid work-item directory entry")
+            if _present(item / _LEGACY_RESOLUTION_NAME):
+                found = True
+    return found
+
+
 def _scan(project, scan_limit, report, moves):
     store = project.work_items
     history = project.root / "decision-history"
@@ -62,15 +89,8 @@ def _scan(project, scan_limit, report, moves):
     candidates = set()
     by_origin = {}
 
-    @contextlib.contextmanager
     def scan(directory):
-        def bounded(entries):
-            for count, entry in enumerate(entries):
-                if count >= scan_limit:
-                    raise _ScanLimit("Work-item migration scan exceeds entry bound")
-                yield entry
-        with os.scandir(directory) as entries:
-            yield bounded(entries)
+        return _scan_entries(directory, scan_limit)
 
     if store._prepare_decision_history(history, recover=False, scan=scan):
         with scan(history) as entries:

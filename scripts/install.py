@@ -16,13 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from mizu import NODE_MINIMUM, __version__
-from mizu import platform as _platform
+from mizu import install_migration, platform as _platform
 from mizu.cli import configure
 from mizu.distribution import OFFLINE_REPORT_VERSION, source_files as inventory
 from mizu.distribution import source_manifest as distribution_manifest
 from mizu.config import load
 from mizu.errors import Denied, MizuError
-from mizu.fs import canonical, digest, sync_dir, lock, mkdir, now, read_json, write_json
+from mizu.fs import canonical, digest, sync_dir, lock, mkdir, now, read_json, reuse_owned_locks, write_json
 
 
 
@@ -216,6 +216,7 @@ def verify_release(release: Path, *, expected_manifest=None):
     if receipt.get("pi_durable_lock_sha256"):
         if digest((release / "adapters/pi-durable/package-lock.json").read_bytes()) != receipt["pi_durable_lock_sha256"]:
             raise Denied("Installed pi-durable dependency lock changed after validation")
+    return manifest
 
 
 def command(argv, *, cwd=None, timeout=600):
@@ -225,24 +226,28 @@ def command(argv, *, cwd=None, timeout=600):
 @contextlib.contextmanager
 def stopped(config_file: Path):
     with contextlib.ExitStack() as stack:
+        config, projects, project_locks = None, [], []
         if config_file.exists():
             config = load(config_file)
             for path in sorted((config.data / "locks").glob("daemon-*.lock")):
                 stack.enter_context(lock(path, blocking=False))
-            for project in sorted((config.data / "projects").glob("*")):
-                if not project.is_dir() or project.name.startswith("."):
-                    continue
+            projects = install_migration.managed_projects(config)
+            for project in projects:
                 control = read_json(project / "control.json", {})
                 if control.get("armed") and not control.get("paused"):
                     raise Denied("Pause all projects and stop their services before promoting a release")
                 for path in sorted((project / "locks").glob("*.lock")):
                     stack.enter_context(lock(path, blocking=False))
+                    project_locks.append(path)
             for path in sorted((config.data / "slots").glob("*.lock")):
                 stack.enter_context(lock(path, blocking=False))
             # Locks serialize mizu processes; service state is a best-effort second check.
             for unit in active_service_units():
                 raise Denied(f"Stop service {unit} before promoting a release")
-        yield
+        # Storage and explicit converters take their usual locks; borrow only
+        # the overlapping exclusions already acquired by this thread.
+        with reuse_owned_locks(project_locks):
+            yield config, projects
 
 
 def active_service_units() -> list[str]:
@@ -339,13 +344,13 @@ def promote(args, release: Path):
         raise Denied("Only a staged release in this prefix can be promoted")
     if read_json(release / "installation.json").get("validation") != "local-install-checks-passed":
         raise Denied("The candidate has not passed installation checks")
-    verify_release(release)
+    manifest = verify_release(release)
     command([sys.executable, release / "bin/mizu", "--version"], timeout=15)
     launcher = args.bin_dir / "mizu"
     if launcher.exists() or launcher.is_symlink():
         if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
             raise Denied("Refusing to replace an unrelated mizu command")
-    with stopped(args.config):
+    with stopped(args.config) as project_state:
         current = args.prefix / "current"
         recover_link(current)
         old = current.resolve() if current.is_symlink() else None
@@ -356,18 +361,30 @@ def promote(args, release: Path):
         if old_mode and old_mode != new_mode and not getattr(args, "allow_mode_change", False):
             raise Denied(f"Release mode changes from {old_mode} to {new_mode}; "
                          "re-run with --allow-mode-change after review")
-        link_atomically(current, release)
-        mkdir(args.bin_dir)
-        launcher = args.bin_dir / "mizu"
-        if launcher.exists() or launcher.is_symlink():
-            if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
-                raise Denied("Refusing to replace an unrelated mizu command")
-        link_atomically(launcher, current / "bin/mizu")
-        if old and old != release and old.parent == release.parent and not old.is_symlink():
-            shutil.rmtree(old)
-    result = {"status": "promoted", "release": str(release),
-              "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. "
-                      "Only code was switched; data, side effects and budgets are unchanged."}
+        # An older staged release must not trigger this release's conversions.
+        migrations = (install_migration.convert(*project_state, release)
+                      if "src/mizu/install_migration.py" in manifest else [])
+        try:
+            link_atomically(current, release)
+            mkdir(args.bin_dir)
+            launcher = args.bin_dir / "mizu"
+            if launcher.exists() or launcher.is_symlink():
+                if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
+                    raise Denied("Refusing to replace an unrelated mizu command")
+            link_atomically(launcher, current / "bin/mizu")
+            if old and old != release and old.parent == release.parent and not old.is_symlink():
+                shutil.rmtree(old)
+        except (MizuError, OSError) as exc:
+            if not migrations:
+                raise
+            raise Denied(f"Promotion failed after project data conversion: {exc}. "
+                         f"Inspect the current/launcher links and conversion receipts in "
+                         f"{Path(migrations[0]['archive']).parent} before resuming.") from exc
+    change_note = ("Superseded records were converted after verified backups; "
+                   "see migrations for archives and receipts. Budgets are unchanged."
+                   if migrations else "Only code was switched; data, side effects and budgets are unchanged.")
+    result = {"status": "promoted", "release": str(release), "migrations": migrations,
+              "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. " + change_note}
     if old_mode and old_mode != new_mode:
         result["mode_change"] = {"from": old_mode, "to": new_mode}
         result["note"] += " Agent runtime availability changed; re-run doctor and smoke before arming."

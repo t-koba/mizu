@@ -424,7 +424,8 @@ def read_json(path: Path, default: Any = None, *, max_bytes: int | None = None) 
 _LOCAL_GUARD = threading.Lock()
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 # Only successful kernel acquisitions, not threads waiting for the kernel.
-_LOCAL_OWNED: set[str] = set()
+_LOCAL_OWNED: dict[str, int] = {}
+_REUSED_LOCKS = contextvars.ContextVar("reuse_owned_locks", default=frozenset())
 # Execution-local policy, never set by loading a config or constructing a project.
 # New threads must bind their owning Config.runtime_policy() explicitly.
 _LOCAL_BLOCKING_TIMEOUT = _platform.LOCK_TIMEOUT
@@ -473,6 +474,20 @@ def _acquire_local(key: str, *, blocking: bool, timeout: float) -> threading.Loc
 
 
 @contextlib.contextmanager
+def reuse_owned_locks(paths) -> Iterator[None]:
+    """Let synchronous maintenance reuse specific outer locks held by this thread.
+
+    The caller keeps the enclosing lock contexts alive. Other paths and callers
+    still acquire normally; losing ownership never grants an exemption.
+    """
+    token = _REUSED_LOCKS.set(frozenset(paths))
+    try:
+        yield
+    finally:
+        _REUSED_LOCKS.reset(token)
+
+
+@contextlib.contextmanager
 def lock(path: Path, *, blocking: bool = True, create: bool = True) -> Iterator[None]:
     """Kernel releases the lock on death. Never unlink a lock inode.
 
@@ -481,6 +496,13 @@ def lock(path: Path, *, blocking: bool = True, create: bool = True) -> Iterator[
     Contention fails as Busy; nonblocking acquires never wait (ADR-026).
     With create=False, a missing lock raises FileNotFoundError without writes.
     """
+    if path in _REUSED_LOCKS.get():
+        key = _local_key(path)
+        with _LOCAL_GUARD:
+            owned = _LOCAL_OWNED.get(key) == threading.get_ident()
+        if owned:
+            yield
+            return
     timeout = _lock_timeout.get()
     if timeout is None:
         timeout = _LOCAL_BLOCKING_TIMEOUT
@@ -536,7 +558,7 @@ def _lock(path: Path, *, blocking: bool, create: bool, timeout: float,
                 observation.row["outcome"] = "blocking-io-error"
             raise Busy(f"Already running: {path.stem}") from None
         with _LOCAL_GUARD:
-            _LOCAL_OWNED.add(key)
+            _LOCAL_OWNED[key] = threading.get_ident()
         if observation is not None:
             observation.advance("body")
         yield
@@ -548,7 +570,7 @@ def _lock(path: Path, *, blocking: bool, create: bool, timeout: float,
         raise Busy(f"Already running: {path.stem}") from None
     finally:
         with _LOCAL_GUARD:
-            _LOCAL_OWNED.discard(key)
+            _LOCAL_OWNED.pop(key, None)
         with contextlib.suppress(Exception):
             _platform.unlock_fd(fd)
         with contextlib.suppress(Exception):
