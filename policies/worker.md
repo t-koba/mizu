@@ -25,3 +25,10 @@ advancing before claiming more. Review `doing_since`, `doing_age_seconds` and
 hold calls for reassessment, not automatic expiry or reassignment; same-status
 scope/delivery updates do not restart its age. Preserve legacy over-limit work
 and settle or release it without claiming additional slots.
+
+Do not keep work blocked on a failure hypothesis whose trigger has not
+recurred across the policy's number of `ci_branch` runs: close it as
+not-reproduced and settle the item unless a fresh reproduction keeps the
+hypothesis live. Checking recurrence uses CI status, logs and experiments
+you can fetch with your own tools, so it is actionable work rather than an
+external condition.

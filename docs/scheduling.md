@@ -615,6 +615,17 @@ experiment evidence with its own tools, it should keep the work actionable
 rather than waiting on that condition. This is a usage rule; readiness checks
 do not mechanically establish externality.
 
+A failure hypothesis is likewise not a standing block. When the condition
+that would reproduce a failure has not recurred across the number of
+consecutive `ci_branch` runs set by policy, the writer closes the hypothesis
+as not-reproduced and settles the work it blocked, unless a fresh
+reproduction keeps the hypothesis live. Non-recurrence is evidence the
+writer can gather with its own tools (`vcs_read` CI status and logs,
+experiments), so an item waiting only for a recurrence is actionable, not
+external; the case that motivated this rule had not recurred in five runs.
+The threshold and the closure are the writer's policy judgment: no harness
+check mechanically counts runs or closes a hypothesis.
+
 ### Idle-with-open-work diagnostic
 
 `Project.status()` carries a bounded `idle_with_open_work` diagnostic of a
