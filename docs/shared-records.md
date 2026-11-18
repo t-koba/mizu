@@ -218,8 +218,10 @@ use `object_resolved`. Historical wait reads validate the normalized subject wit
 that publishing still be enabled. Closure uses the same canonical SharedRecords
 and disposable operator catalog authority as listing, through a distinct lazy
 read-only lookup cached once per work-item projection. It is independent of
-Insight decisions; no Insight answer route remains, and questions are handled
-only through configured SharedRecords kinds. Under project
+Insight decisions. New questions are no longer accepted as Insights; they route
+only through configured SharedRecords `operator_question` kinds, while Insight
+proposal decisions and their `{type:"insight", id}` `object_resolved` resolution
+waits remain a separate, unchanged authority. Under project
 `work_item_wait_resolution = "reopen"`, the host may reopen only the waiting
 item for its holder with proof pinning one exact permanent authenticated answer.
 Later answers or disabled publishing do not invalidate that immutable proof;
