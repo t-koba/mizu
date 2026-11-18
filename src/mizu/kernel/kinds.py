@@ -17,7 +17,12 @@ NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
 EVENT = re.compile(r"[a-z][a-z0-9_-]{0,62}(?:\.[a-z][a-z0-9_-]{0,62}){0,7}\Z")
 _COMPONENT = r"(?:[a-z][a-z0-9_-]{0,62}|\*)"
 #: ``**`` is only valid as the final component of a subscription pattern.
-PATTERN = re.compile(rf"(?:{_COMPONENT}(?:\.{_COMPONENT}){{0,6}}(?:\.\*\*)?|\*\*)\Z")
+#: Exact patterns keep EVENT's component bound; a ``**`` prefix has one fewer
+#: component so the terminal wildcard does not push the pattern past it.
+PATTERN = re.compile(
+    rf"(?:\*\*|{_COMPONENT}(?:\.{_COMPONENT}){{0,6}}\.\*\*"
+    rf"|{_COMPONENT}(?:\.{_COMPONENT}){{0,7}})\Z"
+)
 PRINCIPAL = re.compile(r"(?:role:[a-z][a-z0-9_-]{0,62}|host|operator)\Z")
 OBJECT_REFS = ("author", "holder")
 TYPES = ("string", "integer", "boolean", "instant", "ref", "principal", "list")

@@ -233,6 +233,13 @@ class Kernel(unittest.TestCase):
         self.assertFalse(matches("check.**", "check"))
         self.assertTrue(matches("check.*.failed", "check.run.failed"))
         self.assertFalse(matches("check.*.failed", "check.run.deep.failed"))
+        exact = "a.b.c.d.e.f.g.h"
+        self.assertEqual(parse_subscriptions([exact], "roles.x.subscribe"), (exact,))
+        self.assertTrue(matches(exact, exact))
+        self.assertFalse(matches(exact, "a.b.c.d.e.f.g"))
+        for pattern in ("a.b.c.d.e.f.g.h.i", "a.b.c.d.e.f.g.h.**"):
+            with self.subTest(pattern=pattern), self.assertRaises(ConfigError):
+                parse_subscriptions([pattern], "roles.x.subscribe")
 
     def test_pattern_matching(self):
         self.assertTrue(matches("task.*", "task.created"))
