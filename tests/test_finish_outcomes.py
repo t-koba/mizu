@@ -2,7 +2,7 @@ import json
 
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
-from mizu.protocol import DEFINITIONS, tool_definitions
+from mizu.protocol import DEFINITIONS, finish_definition, tool_definitions
 from support import Fixture
 
 
@@ -40,6 +40,18 @@ class FinishOutcomeTests(Fixture):
         self.assertNotRegex(description, r"outcome=wait|a wait\b|wait_for_check|wait_seconds")
         self.assertIn("a blocked finish is accepted", description)
         self.assertNotIn("outcome=done", description)
+
+    def test_no_parking_outcomes_have_no_ready_work_clause(self):
+        for outcomes in (("continue", "done"), ("done",)):
+            with self.subTest(outcomes=outcomes):
+                description, _ = finish_definition(outcomes)
+                self.assertNotIn("ready work", description)
+                self.assertNotIn("re-admits", description)
+
+    def test_parking_without_continue_keeps_only_the_parking_clause(self):
+        description, _ = finish_definition(("blocked",))
+        self.assertIn("With role-eligible ready work, a blocked finish is accepted", description)
+        self.assertNotIn("a continue or bounded finish", description)
 
     def test_invalid_outcomes_fail_configuration(self):
         original = self.file.read_text()

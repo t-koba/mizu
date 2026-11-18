@@ -28,11 +28,12 @@ def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
         "role-matching validated progress record with at least one selected true `tool`, `code`, "
         "`decision`, or `insight` signal. An admitted continuation shows that step "
         "in the published snapshot as your proposal, not as an assignment. "
-        "With role-eligible ready work, "
-        + (f"a {parking} finish is accepted and the host re-admits from that work; " if parking else "")
-        + f"a {'continue or ' if can_continue else ''}bounded finish is accepted only with a "
-        "validated next_step handoff or a host-sealed run bound. "
-        "Unknown or truncated evidence refuses finish before sealing or acknowledgements. "
+        + (("With role-eligible ready work, "
+            f"a {parking} finish is accepted and the host re-admits from that work"
+            + ("; a continue or bounded finish is accepted only with a validated next_step "
+               "handoff or a host-sealed run bound. " if can_continue else ". "))
+           if parking else "")
+        + "Unknown or truncated evidence refuses finish before sealing or acknowledgements. "
         "Ready work alone does not create a timed re-admission.")
 
 
