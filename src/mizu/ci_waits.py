@@ -293,6 +293,7 @@ class _Absences:
             with contextlib.suppress(Denied, OSError):
                 sync_dir(directory)
         if stale and _rotate_absence_generation(self.store) is None:
+            self.requests.revoke_quiet_activity()
             self.revocation_failed = True
 
     def remember(self, item, wait, stamp):

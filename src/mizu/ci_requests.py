@@ -22,7 +22,7 @@ from itertools import islice
 from pathlib import Path
 
 from .config import CiRequestEvidence, TOML_INTEGER_MAX
-from .errors import Denied, LimitExceeded
+from .errors import Denied, LimitExceeded, MizuError
 from .fs import canonical, digest, loads_finite, lock, mkdir, safe_read, write_json
 from .process import ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs import MAX_CI_REQUEST_ATTEMPT, validate_ci_request, validate_ci_runs
@@ -204,6 +204,17 @@ class CiRequests:
                 raise Denied("Invalid CI request activity token")
         return digest(canonical([generation, info.st_dev, info.st_ino,
                                  info.st_mtime_ns, info.st_ctime_ns]))
+
+    def revoke_quiet_activity(self) -> bool:
+        """Rotate the durable quiet-observation token without recording a request."""
+        try:
+            before = self.activity()
+            with lock(self.lock, blocking=False):
+                mkdir(self.root)
+                write_json(self.project_root / ACTIVITY, uuid.uuid4().hex)
+                return self.activity() != before
+        except (MizuError, OSError, ValueError, TypeError):
+            return False
 
     def quiet_activity(self) -> str | None:
         """Certify one complete, quiescent ledger generation under the writer lock."""

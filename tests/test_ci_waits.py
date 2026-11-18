@@ -1789,6 +1789,44 @@ class HolderOnlyCiWaitTests(CiWaitFixture):
             self.observe().assert_called_once()
             self.assert_readiness(items, True)
 
+    def test_unwritable_absence_generation_revokes_witnesses_via_ci_activity(self):
+        items = self.block_both()
+        directory = ci_waits._absence_dir(self.store)
+        generation_path = ci_waits._absence_generation_path(self.store)
+        requests = ci_requests.CiRequests(self.store.root)
+        unlink, write = Path.unlink, ci_waits.write_json
+
+        def deny_witness_unlink(path, *args, **kwargs):
+            if path.parent == directory:
+                raise PermissionError(errno.EACCES, "advisory witness unlink denied")
+            return unlink(path, *args, **kwargs)
+
+        def deny_absence_write(path, *args, **kwargs):
+            if path.parent == directory or path == generation_path:
+                raise PermissionError(errno.EACCES, "advisory absence write denied")
+            return write(path, *args, **kwargs)
+
+        with patch("mizu.ci_waits.time", return_value=100):
+            self.observe()
+            self.assert_readiness(items, True)
+            witnesses = [ci_waits._absence_path(self.store, item["id"]) for item in items]
+            original = [path.read_bytes() for path in witnesses]
+            generation = read_json(generation_path)["generation"]
+            activity = requests.activity()
+            with (patch.object(Path, "unlink", deny_witness_unlink),
+                  patch.object(ci_waits, "write_json", deny_absence_write)):
+                result, reader = self.poll(rows=self.rows("queued"))
+            self.assertTrue(result["ok"], result)
+            reader.assert_called_once_with(self.config.vcs, "status", {"branch": "published", "sha": SHA})
+            self.assertEqual(result["observed"], 0)
+            self.assertEqual([path.read_bytes() for path in witnesses], original)
+            self.assertEqual(read_json(generation_path)["generation"], generation)
+            self.assertEqual(ci_waits.pending(self.store, "worker"), [])
+            self.assert_readiness(items, False)
+            self.assertNotEqual(requests.activity(), activity)
+            self.observe().assert_called_once()
+            self.assert_readiness(items, True)
+
     def test_unreadable_stale_and_retargeted_observations_fail_closed(self):
         items = self.block_both()
         with patch("mizu.ci_waits.time", return_value=100):
