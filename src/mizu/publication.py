@@ -30,6 +30,7 @@ import datetime as dt
 import os
 import re
 import stat
+import sys
 import threading
 from collections import OrderedDict
 from copy import deepcopy
@@ -172,13 +173,15 @@ def _receipt_file_name(publication_id, kind):
     return f"{publication_id}.{kind}.json"
 
 
-def _receipt_names_differ(store, policy, index, own_name):
+def _receipt_names_differ(store, policy, index):
     """Compare receipt-like directory names with the names the index implies.
 
-    The stamp is a cheap change detector, not proof: an out-of-band change
-    could share its value. Only receipt-like names matter; other evidence is
-    owned by other writers. A malformed receipt-like name is reported as a
-    change so the rebuild refuses it exactly as it would on any other write.
+    A new writer prepares before its receipt exists, so the index describes
+    exactly the names on disk until the append. The stamp is a cheap change
+    detector, not proof: an out-of-band change could share its value. Only
+    receipt-like names matter; other evidence is owned by other writers. A
+    malformed receipt-like name is reported as a change so the rebuild
+    refuses it exactly as it would on any other write.
     """
     try:
         names = os.listdir(store.root)
@@ -196,7 +199,6 @@ def _receipt_names_differ(store, policy, index, own_name):
             return True
     expected = {_receipt_file_name(entry["publication_id"], entry["kind"])
                 for entry in index["entries"]}
-    expected.add(own_name)
     return current != expected
 
 
@@ -676,9 +678,8 @@ class Publication:
                 cls._update_key_index(store, stored, "external", PublicationEvidence(),
                                       before_stamp)
                 return stored
-            store._write("external", record)
-        cls._update_key_index(store, record, "external", PublicationEvidence(),
-                              before_stamp)
+            cls._write_with_key_index(store, record, "external",
+                                      PublicationEvidence(), before_stamp)
         return record
 
     @classmethod
@@ -813,59 +814,100 @@ class Publication:
                 "incomplete": incomplete}
 
     @classmethod
-    def _update_key_index(cls, store, record, kind, policy, before_stamp):
-        """Maintain the key index in the same operation that writes a receipt.
+    def _prepare_key_index(cls, store, record, kind, policy, before_stamp, raw):
+        """Compute the prospective index while the caller holds its lock.
 
-        ``before_stamp`` is the directory stamp observed before the writer's
-        own receipt write (or, for a replay, around its read). A changed stamp,
-        a receipt-like name the index does not imply, or an
+        ``raw`` is the exact receipt bytes: ``canonical(record)`` for a new
+        write, or the bounded read of an existing receipt for a replay, so a
+        new receipt never has to be read back from disk. A capacity refusal
+        writes only the current index view with a refreshed stamp and commits
+        no receipt. ``before_stamp`` is the directory stamp observed before
+        the writer's own receipt write (or, for a replay, around its read). A
+        changed stamp, a receipt-like name the index does not imply, or an
         incomplete/corrupt index forces a bounded rebuild from current
-        directory names; only an unchanged view is ever appended to. An append
-        never clears incompleteness -- only a fresh rebuild can.
+        directory names; only an unchanged view is ever appended to. An
+        append never clears incompleteness -- only a fresh rebuild can.
         """
-        directory, index_path, lock_path = _key_index_paths(store)
+        try:
+            index = cls._read_key_index(store, policy)
+        except (Denied, LimitExceeded, OSError):
+            # The writer owns this file: replace an unusable index with a
+            # rebuilt one instead of blocking every later receipt write.
+            index = None
+        if (index is None or index["incomplete"]
+                or index["stamp"] != before_stamp
+                or _receipt_names_differ(store, policy, index)):
+            index = cls._build_key_index(store, policy)
+        publication_id = record["publication_id"]
+        entry = {"publication_id": publication_id, "kind": kind,
+                 "sha256": digest(raw)}
+        entries = [item for item in index["entries"]
+                   if not (item["publication_id"] == publication_id and item["kind"] == kind)]
+        entries.append(entry)
+        branch, code_digest = record["branch"], record["code_digest"]
+        keys = []
+        for key in index["keys"]:
+            ids = [item for item in key["publication_ids"] if item != publication_id]
+            if ids:
+                keys.append({**key, "publication_ids": ids})
+        for key in keys:
+            if key["branch"] == branch and key["code_digest"] == code_digest:
+                if publication_id not in key["publication_ids"]:
+                    key["publication_ids"].append(publication_id)
+                break
+        else:
+            keys.append({"branch": branch, "code_digest": code_digest,
+                         "publication_ids": [publication_id]})
+        value = {"schema": KEY_INDEX_SCHEMA, "stamp": before_stamp,
+                 "entries": entries, "keys": keys,
+                 "incomplete": index["incomplete"]}
+        # The stamp is refreshed after a receipt commit; reserve the widest
+        # native stamp representation for this pre-commit capacity check.
+        reason = None
+        if len(entries) > policy.record_limit:
+            reason = "Publication evidence scan incomplete"
+        elif len(canonical({**value, "stamp": [sys.maxsize, sys.maxsize]})) > KEY_INDEX_BYTES:
+            reason = "Publication key index exceeds capacity"
+        if reason is not None:
+            # No receipt was committed, so refresh only the writer's stamp;
+            # the current entries still describe the unchanged directory and
+            # previously resolved keys stay valid.
+            cls._write_key_index(store, {**value, "entries": index["entries"],
+                                         "keys": index["keys"]})
+            raise Denied(reason)
+        return value
+
+    @classmethod
+    def _write_key_index(cls, store, value):
+        """Publish a prepared index from the writer that holds its lock."""
+        directory, index_path, _ = _key_index_paths(store)
+        value["stamp"] = _directory_stamp(store.root)
+        write_json(index_path, value)
+        sync_dir(directory)
+
+    @classmethod
+    def _update_key_index(cls, store, record, kind, policy, before_stamp):
+        """Refresh the index for an already-written receipt (a replay)."""
+        directory, _, lock_path = _key_index_paths(store)
         mkdir(directory)
-        own_name = _receipt_file_name(record["publication_id"], kind)
         with kernel_lock(lock_path):
-            try:
-                index = cls._read_key_index(store, policy)
-            except (Denied, LimitExceeded, OSError):
-                # The writer owns this file: replace an unusable index with a
-                # rebuilt one instead of blocking every later receipt write.
-                index = None
-            if (index is None or index["incomplete"]
-                    or index["stamp"] != before_stamp
-                    or _receipt_names_differ(store, policy, index, own_name)):
-                index = cls._build_key_index(store, policy)
-            publication_id = record["publication_id"]
-            raw = safe_read(store.root, own_name, RECORD_BYTES)
-            entry = {"publication_id": publication_id, "kind": kind,
-                     "sha256": digest(raw)}
-            entries = [item for item in index["entries"]
-                       if not (item["publication_id"] == publication_id and item["kind"] == kind)]
-            entries.append(entry)
-            if len(entries) > policy.record_limit:
-                raise Denied("Publication evidence scan incomplete")
-            branch, code_digest = record["branch"], record["code_digest"]
-            keys = []
-            for key in index["keys"]:
-                ids = [item for item in key["publication_ids"] if item != publication_id]
-                if ids:
-                    keys.append({**key, "publication_ids": ids})
-            for key in keys:
-                if key["branch"] == branch and key["code_digest"] == code_digest:
-                    if publication_id not in key["publication_ids"]:
-                        key["publication_ids"].append(publication_id)
-                    break
-            else:
-                keys.append({"branch": branch, "code_digest": code_digest,
-                             "publication_ids": [publication_id]})
-            value = {"schema": KEY_INDEX_SCHEMA,
-                     "stamp": _directory_stamp(store.root),
-                     "entries": entries, "keys": keys,
-                     "incomplete": index["incomplete"]}
-            write_json(index_path, value)
-            sync_dir(directory)
+            raw = safe_read(store.root,
+                            _receipt_file_name(record["publication_id"], kind),
+                            RECORD_BYTES)
+            cls._write_key_index(
+                store, cls._prepare_key_index(store, record, kind, policy,
+                                              before_stamp, raw))
+
+    @classmethod
+    def _write_with_key_index(cls, store, record, kind, policy, before_stamp):
+        """Commit a new receipt and its index as one lock-scoped operation."""
+        directory, _, lock_path = _key_index_paths(store)
+        mkdir(directory)
+        with kernel_lock(lock_path):
+            value = cls._prepare_key_index(store, record, kind, policy,
+                                           before_stamp, canonical(record))
+            store._write(kind, record)
+            cls._write_key_index(store, value)
 
     @classmethod
     def _receipt_names(cls, project_root) -> list[str]:
@@ -1030,7 +1072,7 @@ class Publication:
         if lineage.validate(observation, published_sha) is not None:
             receipt["lineage"] = observation
         before_stamp = _directory_stamp(self.root)
-        self._write("receipt", receipt)
-        self._update_key_index(self, receipt, "receipt", PublicationEvidence(),
-                               before_stamp)
+        cls = type(self)
+        cls._write_with_key_index(self, receipt, "receipt",
+                                  PublicationEvidence(), before_stamp)
         return receipt

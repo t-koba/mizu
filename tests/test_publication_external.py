@@ -1187,3 +1187,85 @@ class ReceiptValidationReuseTests(Fixture):
         extra.write_bytes(canonical(receipt))
         with self.assertRaises(Denied):
             self.lookup()
+
+
+class ReceiptWriteCapacityTests(Fixture):
+    """A capacity refusal commits no receipt and keeps the index usable."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.project.root
+        self.directory = self.root / "evidence" / "publications"
+        self.index_path = (self.root / "evidence" / publication.KEY_INDEX_DIR
+                           / publication.KEY_INDEX_FILE)
+        self.narrow = dataclasses.replace(PublicationEvidence(), record_limit=1)
+
+    def record(self, **overrides):
+        arguments = {"branch": BRANCH, "published_sha": SHA, "code_digest": DIGEST,
+                     "approval": APPROVAL, "projection": public_source_identity({})}
+        arguments.update(overrides)
+        return Publication.record_external(self.root, **arguments)
+
+    def receipts(self):
+        return sorted(path.name for path in self.directory.glob("*.json")
+                      if publication.RECEIPT_FILE.fullmatch(path.name))
+
+    def assert_index_matches(self, receipt):
+        value = json.loads(self.index_path.read_text(encoding="utf-8"))
+        raw = (self.directory / (receipt["publication_id"] + ".external.json")).read_bytes()
+        self.assertEqual(value["stamp"], publication._directory_stamp(self.directory))
+        self.assertFalse(value["incomplete"])
+        self.assertEqual(value["entries"], [
+            {"publication_id": receipt["publication_id"], "kind": "external",
+             "sha256": digest(raw)}])
+        self.assertEqual(value["keys"], [
+            {"branch": receipt["branch"], "code_digest": receipt["code_digest"],
+             "publication_ids": [receipt["publication_id"]]}])
+        return value
+
+    def test_second_external_receipt_is_refused_before_it_is_committed(self):
+        with patch.object(publication, "PublicationEvidence", return_value=self.narrow):
+            first = self.record()
+            original = self.index_path.read_bytes()
+            with self.assertRaises(Denied):
+                self.record(published_sha=OTHER_SHA, code_digest=OTHER_DIGEST)
+            self.assertEqual(
+                Publication.receipt_for_key(self.root, BRANCH, DIGEST, policy=self.narrow),
+                first["publication_id"])
+        self.assertEqual(self.receipts(), [first["publication_id"] + ".external.json"])
+        current = self.assert_index_matches(first)
+        self.assertEqual(current["entries"], json.loads(original)["entries"])
+        self.assertEqual(current["keys"], json.loads(original)["keys"])
+
+    def test_product_receipt_is_refused_before_it_is_committed(self):
+        product = Publication(self.root, "e" * 40, "f" * 64, BRANCH, "push",
+                              projection=public_source_identity({}))
+        intent, _ = product.prepare(APPROVAL, "run-ref")
+        product.mark_dispatch()
+        with patch.object(publication, "PublicationEvidence", return_value=self.narrow):
+            first = self.record()
+            original = self.index_path.read_bytes()
+            with self.assertRaises(Denied):
+                product.complete(intent, "1" * 40)
+            self.assertEqual(
+                Publication.receipt_for_key(self.root, BRANCH, DIGEST, policy=self.narrow),
+                first["publication_id"])
+        self.assertEqual(self.receipts(), [first["publication_id"] + ".external.json"])
+        current = self.assert_index_matches(first)
+        self.assertEqual(current["entries"], json.loads(original)["entries"])
+        self.assertEqual(current["keys"], json.loads(original)["keys"])
+
+    def test_serialized_index_capacity_is_checked_before_the_receipt_is_committed(self):
+        first = self.record()
+        original = self.index_path.read_bytes()
+        tight = len(original) - 1
+        with patch.object(publication, "KEY_INDEX_BYTES", tight):
+            with self.assertRaisesRegex(Denied, "capacity"):
+                self.record(published_sha=OTHER_SHA, code_digest=OTHER_DIGEST)
+        self.assertEqual(self.receipts(), [first["publication_id"] + ".external.json"])
+        current = self.assert_index_matches(first)
+        self.assertEqual(current["entries"], json.loads(original)["entries"])
+        self.assertEqual(current["keys"], json.loads(original)["keys"])
+        self.assertEqual(
+            Publication.receipt_for_key(self.root, BRANCH, DIGEST, policy=PublicationEvidence()),
+            first["publication_id"])
