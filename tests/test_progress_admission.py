@@ -243,8 +243,11 @@ class ProgressAdmissionTests(Fixture):
 
     def test_existing_state_reads_and_receipt_replays_are_observational(self):
         for operation in ("files", "read", "diff", "insights", "research_read", "vcs_read",
-                          "command_evidence_read", "experiment_evidence_read"):
+                          "command_evidence_read", "experiment_evidence_read",
+                          "objects_read", "objects_list", "events_read"):
             self.assertTrue(_is_observational_operation(operation, {}), operation)
+        for operation in ("objects_create", "objects_transition", "events_ack"):
+            self.assertFalse(_is_observational_operation(operation, {}), operation)
         for action in ("list", "logs", "result"):
             self.assertTrue(_is_observational_operation("check_job", {"action": action}))
         for status in ("queued", "running"):
