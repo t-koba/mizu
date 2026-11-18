@@ -217,8 +217,9 @@ route. Historical `record_closed` wait bytes remain valid and unchanged; new reg
 use `object_resolved`. Historical wait reads validate the normalized subject without requiring
 that publishing still be enabled. Closure uses the same canonical SharedRecords
 and disposable operator catalog authority as listing, through a distinct lazy
-read-only lookup cached once per work-item projection. It does not use or change
-the existing Insight `answer_lookup` route. Under project
+read-only lookup cached once per work-item projection. It is independent of
+Insight decisions; no Insight answer route remains, and questions are handled
+only through configured SharedRecords kinds. Under project
 `work_item_wait_resolution = "reopen"`, the host may reopen only the waiting
 item for its holder with proof pinning one exact permanent authenticated answer.
 Later answers or disabled publishing do not invalidate that immutable proof;
