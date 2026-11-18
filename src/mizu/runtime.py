@@ -4421,31 +4421,8 @@ def _writer_wait_liveness(project, role, *, releases=()) -> bool | None:
     return _writer_wait_sources(project, role, releases=releases)
 
 
-def _live_unanswered_own_question(project, role_name, is_answered=None) -> bool | None:
-    """True if an exact unanswered own question remains an external source.
-
-    An exact authenticated operator answer for the current revision removes
-    only that question from external liveness; the insight and any held wait
-    remain pending until the writer records a substantive decision. Missing,
-    ambiguous or unreadable answer evidence stays live. The answer catalog is
-    lazy and scanned at most once during the unresolved-input projection.
-    """
-    try:
-        if is_answered is None:
-            factory = getattr(project.work_items, "operator_answer_lookup", None)
-            is_answered = factory() if callable(factory) else operator_records.answer_lookup(project)
-        if not callable(is_answered):
-            return None
-        return bool(project.insights.unresolved_counts(
-            [role_name], kind="question", addressee="operator",
-            is_answered=is_answered)[role_name])
-    except (Busy, Denied, LimitExceeded, OSError, ValueError, TypeError,
-            KeyError, AttributeError, RecursionError):
-        return None
-
-
 def _writer_wait_sources(project, role, *, releases=()) -> bool | None:
-    """Return external liveness from checks, questions and pending waits.
+    """Return external liveness from checks and pending waits.
 
     Holder-only waits are ordinary ready work through the ready set, never an
     external source here: the blocked-item status projection already reclassifies
@@ -4465,18 +4442,9 @@ def _writer_wait_sources(project, role, *, releases=()) -> bool | None:
                 return True
             unknown = bool(invalid)
         store = project.work_items
-        factory = getattr(store, "operator_answer_lookup", None)
-        operator_answer = factory() if callable(factory) else operator_records.answer_lookup(project)
-        _question_live = _live_unanswered_own_question(project, role.name, operator_answer)
-        if _question_live is None:
-            unknown = True
-        elif _question_live:
-            external = True
-            return True
         writers = wait_writer_roles(project.config, project.roles)
         status = store.open_state_readonly(
-            limit=project.config.limits.work_items_prompt, writer_roles=writers,
-            operator_answer=operator_answer)
+            limit=project.config.limits.work_items_prompt, writer_roles=writers)
         blocked = status.get("blocked_work") if isinstance(status, dict) else None
         if not isinstance(blocked, dict) or not isinstance(blocked.get("items"), list):
             return None

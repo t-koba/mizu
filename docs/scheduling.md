@@ -238,41 +238,34 @@ run-level wait expiry and scheduled dispatch remain independent. Historical `wai
 remain valid snapshot evidence and status fields, but are no longer emitted or
 timer authority. No FIFO, affinity, CI-red or check-job policy changes here.
 
-A held wait whose sole resolver is its own holder is open role-eligible ready
-work, not an external liveness source; it is admitted through the normal ready
-set rather than a timer. Two waits are holder-only. One is `code_change` when
-the holder is the only project-assigned `workspace = "write"` role with an
-independent dispatch route (`event_wakes`, `daemon`, `interval_seconds` or
-`calendar`); a delegated-only second write role does not make the wait external.
-The other is
-`object_resolved` on an Insight (historically `insight_decided`) with a current, substantively answered (`accept`, `modify` or
-`reject`) `kind = "question"` authored by that holder. Exactly one enabled,
-authenticated operator `answer` to that same current question revision, routed
-back to its author, also annotates the held wait as holder-only and
-suppresses that same answered revision as an independent open-question source.
-This leaves the question and the wait pending without deciding for the writer;
-only an actual substantive current-revision decision settles it. Holder-only
-classification is projection-only: it does not reopen, unblock or transition work,
-and it grants no timer re-admission.
+A held `code_change` wait is holder-only when its holder is the only
+project-assigned `workspace = "write"` role with an independent dispatch route
+(`event_wakes`, `daemon`, `interval_seconds` or `calendar`). A delegated-only
+second writer does not make the wait external. Holder-only waits are open
+role-eligible work in the ready set; this projection does not transition the
+stored item or grant timer re-admission.
 
-The host records `finish.wait_liveness` in the existing
-finish intent/result: `true` for a live owned queued/running check, an own
-unresolved operator-addressed question without an exact authenticated answer for
-its current revision, a pending external ledger wait, or a
+A role asks the operator through a
+[configured SharedRecords question kind](shared-records.md#opt-in-role-questions-to-the-operator).
+A held `object_resolved` wait on that record follows the exact authenticated
+answer route. Retained Insight questions do not contribute independent wait
+liveness. Waits on Insights still require a substantive decision on the current
+revision, not an answer record.
+
+The host records `finish.wait_liveness` in the existing finish intent/result:
+`true` for an owned queued/running check, a pending external ledger wait, or a
 held CI wait with an exact publication/SHA dispatch request and no terminal
 evidence; `false` for proven absence/terminal/self-resolvable sources; `null`
-for unknown evidence. Future deadlines, pending dependencies, questions awaiting
-another role's decision, code-change waits with another independently dispatched
-project writer, and
-pending proposal waits remain external sources. Admission rechecks current
-liveness. Check discovery, strict insight counts and the configured work-item
-prompt page bound the local reads; incomplete, ambiguous, corrupt or unreadable
-evidence cannot prove absence. A CI wait alone, including an unpublished snapshot
-without request evidence, stays unknown. No provider is called or wait store
-created. Existing wait expiry, subscribed event wakes and default/maximum wait
-durations are unchanged; a timer fallback is not an event subscription. The
-`idle_with_open_work` status remains the recorded-at-finish diagnostic, not a
-live scheduler verdict.
+for unknown evidence. Future deadlines, pending dependencies, pending object or
+proposal waits, and code-change waits with another independently dispatched
+project writer remain external sources. Admission rechecks current liveness.
+Check discovery and the configured work-item prompt page bound the local reads;
+incomplete, ambiguous, corrupt or unreadable evidence cannot prove absence.
+A CI wait alone, including an unpublished snapshot without request evidence,
+stays unknown. No provider is called or wait store created. Existing wait expiry,
+subscribed event wakes and default/maximum wait durations are unchanged; a timer
+fallback is not an event subscription. The `idle_with_open_work` status remains
+the recorded-at-finish diagnostic, not a live scheduler verdict.
 
 The published parent pair retains readiness across daemon restarts and repeated
 readiness probes. A successful successor publication consumes it; repeating the
@@ -543,16 +536,10 @@ insight target or an exact dependency revision superseded or substantively
 conflicting), `terminal` (the same exact CI/publication/proposal route as holder
 readiness), and `unknown`. Generic wait diagnostics without a current
 item retain `receipt_bound`; status scans have the current item and validate its
-exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change` (the holder
-is the only project writer with independent dispatch), `answered_own_question`,
-or `null`. This internal liveness witness is consumed by the holder-only
-classifier to surface such waits as open ready work; it is not a timer or
-readiness grant and does not change the stored wait's state. Operator
-answer evidence uses at most one read-only catalog scan per projection, only
-when an eligible own-question wait needs it; the writer wait-source check reuses
-the same lazy lookup once per projection, only when an unresolved own question
-remains; missing, stale, ambiguous or
-unreadable answers leave the annotation unset and keep the question live. The existing
+exact route. Status rows also carry `self_resolvable`: `sole_writer_code_change`
+(the holder is the only project writer with independent dispatch) or `null`.
+This witness lets the holder-only classifier surface the wait as open ready work;
+it does not change the stored wait or grant timer re-admission.
 `coverage_complete` reports inventory/observation completeness; `truncated` and
 `overflow_count` separately identify omitted diagnostic rows. An incomplete
 view is not proof that no holder-only or external cause exists.

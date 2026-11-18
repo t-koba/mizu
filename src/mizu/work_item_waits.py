@@ -149,13 +149,13 @@ def blocked_age(item):
     return {"blocked_since": since, "blocked_age_seconds": age}
 
 
-def liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None, record_question=None):
+def liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_question=None):
     observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
-                         operator_answer=operator_answer, record_question=record_question)
+                         record_question=record_question)
     return observed if item is None else {**observed, **blocked_age(item)}
 
 
-def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_answer=None, record_question=None) -> dict:
+def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_question=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
     Insight-decided waits follow the current revision; dependency waits bind an
@@ -210,7 +210,7 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                       if subject["type"] == "insight" else
                       {"kind": "record_closed", "subject": subject})
             return {**_liveness(store, legacy, snapshot, item=item, writer_roles=writer_roles,
-                               operator_answer=operator_answer, record_question=record_question),
+                               record_question=record_question),
                     "wait_kind": kind}
         if kind == "record_closed":
             if record_question is None:
@@ -237,6 +237,7 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
         else:
             from . import insight_archive
             from .fs import PREVIEW_BYTES
+            from .insights import insight_metadata
             target = wait["target"] if kind == "insight_decided" else wait["requires"]["insight"]
             item = store._optional_record(f"inbox/{target}.json")
             if item is None:
@@ -263,6 +264,7 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                     or not isinstance(item.get("evidence", []), list)
                     or dt.datetime.fromisoformat(item.get("created_at", "")).tzinfo is None):
                 return result("unknown", "target_unavailable")
+            insight_metadata(item)
             if decision is not None and decision_rev > rev:
                 return result("unknown", "inconsistent_revision")
             if kind == "dependency":
@@ -272,14 +274,6 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                     return result("impossible", "target_superseded")
                 if rev < wait["requires"]["rev"]:
                     return result("pending", "future_revision")
-            own_question = False
-            if (kind == "insight_decided" and writer_roles is not None and holder in writer_roles
-                    and item["source"] == holder):
-                from .insights import insight_metadata
-                own_question = insight_metadata(item).get("kind", "proposal") == "question"
-                if (own_question and (decision is None or decision_rev < rev or action == "defer")
-                        and operator_answer is not None and operator_answer(item)):
-                    self_resolvable = "answered_own_question"
             if decision is None:
                 return result("pending", "undecided")
             if decision_rev < rev:
@@ -288,8 +282,6 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
                 if action == "withdraw":
                     return result("impossible", "target_withdrawn")
                 due = action in ("accept", "modify", "reject")
-                if due and own_question:
-                    self_resolvable = "answered_own_question"
             else:
                 if action in ("accept", "modify", "reject") and action != wait["requires"]["action"]:
                     return result("impossible", "decision_conflict")
@@ -304,18 +296,11 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, operator_a
 #: needs no classifier; ``unknown`` and other non-pending states fail closed.
 _HOLDER_ONLY_STATES = ("pending", "receipt_bound")
 
-#: Known self-resolvable reasons that prove only the holder can end the wait.
-_HOLDER_ONLY_REASONS = ("sole_writer_code_change", "answered_own_question")
-
-
-def holder_only(store, item, snapshot, *, writer_roles, operator_answer=None, record_question=None) -> str | None:
+def holder_only(store, item, snapshot, *, writer_roles, record_question=None) -> str | None:
     """Positive witness that only the holder can end this wait.
 
-    Returns the liveness ``self_resolvable`` reason (``sole_writer_code_change``
-    or ``answered_own_question``) when the blocked item's wait is still pending
-    on its writer holder's own action. Code changes require the sole independent
-    writer; answered own questions are proven by authorship and an exact operator
-    answer, even with other independent writers. Returns ``None`` otherwise,
+    Returns ``sole_writer_code_change`` for a pending code-change wait held by
+    the sole independently dispatched writer. Returns ``None`` otherwise,
     failing closed.
 
     CI and ``publication_ci`` waits are deliberately never holder-only: every
@@ -339,15 +324,13 @@ def holder_only(store, item, snapshot, *, writer_roles, operator_answer=None, re
         if holder not in writer_roles:
             return None
         observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
-                             operator_answer=operator_answer, record_question=record_question)
+                             record_question=record_question)
         if not isinstance(observed, dict):
             return None
         if observed.get("state") not in _HOLDER_ONLY_STATES:
             return None
         witness = observed.get("self_resolvable")
-        if witness not in _HOLDER_ONLY_REASONS:
-            return None
-        if witness == "sole_writer_code_change" and set(writer_roles) != {holder}:
+        if witness != "sole_writer_code_change" or set(writer_roles) != {holder}:
             return None
         return witness
     except (Denied, KeyError, TypeError, AttributeError, ValueError, OSError):

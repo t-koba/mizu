@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, stored_question_insight
 from mizu import fs, host_records, operator_records as records
 from mizu.cli import execute, parser
 from mizu.config import load
@@ -102,8 +102,7 @@ class OperatorQuestionTests(Fixture):
                     records.questions(self.project, limit=20, scan_limit=1000)['questions']}
 
         self.assertFalse(any(closed().values()), 'reading a question does not close it')
-        legacy = self.project.insights.submit(source='worker', title='Legacy question',
-            body='Q: Which?', base_snapshot=None, kind='question', addressee='operator')
+        legacy = stored_question_insight(self.project)
         records.write(self.project, event_id='legacy', kind='answer', body='Legacy answer',
                       subject=dict(type='insight', id=legacy['id'], rev=1))
         records.write(self.project, event_id='notice', kind='operator.notice', body='Answer in prose',
@@ -382,11 +381,8 @@ class OperatorQuestionTests(Fixture):
             with self.subTest(tail=tail), self.assertRaises(ConfigError):
                 self.cli(*args, *tail)
         self.answer(subject)
-        question = self.project.insights.submit(source='worker', title='Legacy question',
-                                               body='Q: Which?', base_snapshot=None, kind='question', addressee='operator')
-        self.assertFalse(records.answer_lookup(self.project)(question))
+        question = stored_question_insight(self.project)
         insight_subject = dict(type='insight', id=question['id'], rev=1)
         records.write(self.project, event_id='legacy', kind='answer', body='Legacy answer', subject=insight_subject)
-        self.assertTrue(records.answer_lookup(self.project)(question))
         events = records.pending(self.project, self.config.roles['worker'])[0]['events']
         self.assertEqual({row['subject']['type'] for row in events}, {'record', 'insight'})

@@ -6,6 +6,7 @@ import re
 from .config import MAX_WAIT_SECONDS
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
+from .insights import QUESTION_RECORD_ROUTE
 from .work_item_seed import MAX_DECISION_TASKS
 from .prompt_sections import WORK_CAPABILITIES
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
@@ -54,7 +55,8 @@ def validate(value, schema: dict, path: str = "arguments") -> None:
     if not correct.get(kind, False):
         raise Denied(f"{path} must have type {kind}")
     if "enum" in schema and value not in schema["enum"]:
-        raise Denied(f"Unsupported value for {path}")
+        hint = f": {schema['description']}" if schema.get("description") else ""
+        raise Denied(f"Unsupported value for {path}{hint}")
     if kind == "object":
         missing = set(schema.get("required", [])) - set(value)
         extra = set(value) - set(schema.get("properties", {}))
@@ -141,7 +143,7 @@ WORK_ITEM_WAIT_SCHEMA = obj({**WAIT_SCHEMA["properties"],
                    minItems=1, uniqueItems=True)}, ("kind",))
 
 INSIGHT_METADATA_SCHEMA = {
-    "kind": {"type": "string", "enum": ["proposal", "question"]},
+    "kind": {"type": "string", "enum": ["proposal"], "description": QUESTION_RECORD_ROUTE},
     "addressee": {**text(63), "minLength": 1, "pattern": r"^[a-z0-9][a-z0-9_-]{0,62}$"},
     "urgency": {"type": "string", "enum": ["low", "normal", "high"]},
 }

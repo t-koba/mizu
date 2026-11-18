@@ -6,7 +6,7 @@ from support import Fixture
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, read_json, write_json
 from mizu.insights import INSIGHT_METADATA_DEFAULTS, _archive_summary, _content_sha, _identity_payload, insight_metadata
-from mizu.protocol import DEFINITIONS, validate
+from mizu.protocol import DEFINITIONS, INSIGHT_METADATA_SCHEMA, validate
 
 
 class InsightMetadataTests(Fixture):
@@ -19,13 +19,13 @@ class InsightMetadataTests(Fixture):
                                             body=item["body"], base_snapshot=item["base_snapshot"],
                                             expected_rev=item["rev"], **metadata)
 
-    def legacy(self):
+    def legacy(self, **metadata):
         item = {"id": "a" * 32, "source": "searcher", "title": "Q: Claim", "body": "Body",
                 "base_snapshot": None, "run": "old-run", "origin": None,
                 "created_at": "2020-01-01T00:00:00+00:00", "rev": 1, "evidence": [],
-                "updated_at": "2020-01-01T00:00:00+00:00"}
+                "updated_at": "2020-01-01T00:00:00+00:00", **metadata}
         write_json(self.project.root / "inbox" / f'{item["id"]}.json', item)
-        payload = {k: item[k] for k in ("id", "source", "title", "body", "base_snapshot", "run", "origin")}
+        payload = _identity_payload(item)
         write_json(self.project.root / "insight-ids" / f'{item["id"]}.json',
                    {"id": item["id"], "sha256": digest(canonical(payload)), "created_at": item["created_at"]})
         return item
@@ -93,19 +93,19 @@ class InsightMetadataTests(Fixture):
         legacy = self.legacy()
         explicit = self.submit(kind="proposal")
         self.assertNotEqual(explicit["id"], legacy["id"])
-        question = self.submit(kind="question", addressee="operator", urgency="high")
-        self.assertNotEqual(question["id"], explicit["id"])
-        replay = self.submit(kind="question", addressee="operator", urgency="high")
-        self.assertEqual(replay["id"], question["id"])
+        addressed = self.submit(kind="proposal", addressee="operator", urgency="high")
+        self.assertNotEqual(addressed["id"], explicit["id"])
+        replay = self.submit(kind="proposal", addressee="operator", urgency="high")
+        self.assertEqual(replay["id"], addressed["id"])
         self.assertTrue(replay["replayed"])
-        self.assertNotIn("replayed", self.project.insights.read(question["id"]))
+        self.assertNotIn("replayed", self.project.insights.read(addressed["id"]))
 
     def test_typed_revision_inherits_metadata_and_reopens_decision(self):
-        item = self.submit(kind="question", addressee="a" * 63, urgency="high")
+        item = self.submit(kind="proposal", addressee="a" * 63, urgency="high")
         self.project.insights.decide(item["id"], "reject", "Reviewed", "", "test", expected_rev=1)
         self.assertEqual(self.project.insights.list(), [])
         revised = self.revise(item, urgency="low")
-        self.assertEqual(insight_metadata(revised), {"kind": "question", "addressee": "a" * 63, "urgency": "low"})
+        self.assertEqual(insight_metadata(revised), {"kind": "proposal", "addressee": "a" * 63, "urgency": "low"})
         self.assertIsNone(self.project.insights.list()[0]["decision"])
         with self.assertRaises(Denied):
             self.project.insights.decide(item["id"], "reject", "Stale", "", "test", expected_rev=1)
@@ -128,7 +128,7 @@ class InsightMetadataTests(Fixture):
 
     def test_metadata_survives_permanent_archive_and_retry(self):
         for legacy in (True, False):
-            item = self.legacy() if legacy else self.submit(kind="question", addressee="operator", urgency="high")
+            item = self.legacy() if legacy else self.submit(kind="proposal", addressee="operator", urgency="high")
             self.project.insights.decide(item["id"], "reject", "Reviewed", "", "test", expected_rev=1)
             path = self.project.root / "decisions" / f'{item["id"]}.json'
             decision = read_json(path)
@@ -144,6 +144,42 @@ class InsightMetadataTests(Fixture):
             revised = self.revise(item, urgency="low")
             self.assertEqual(revised["rev"], 2)
             self.assertEqual(insight_metadata(self.project.insights.history(item["id"])["records"][0]), insight_metadata(item))
+
+    def test_retained_question_projects_without_rewriting_history(self):
+        metadata = {"kind": "question", "addressee": "operator", "urgency": "high"}
+        item = self.legacy(**metadata)
+        iid = item["id"]
+        paths = [self.project.root / name / f"{iid}.json" for name in ("inbox", "insight-ids")]
+        before = [path.read_bytes() for path in paths]
+        for row in (self.project.insights.read(iid), self.project.insights.list()[0],
+                    self.project.insights.list_page()["items"][0]):
+            self.assertEqual(row["id"], iid)
+            self.assertEqual(insight_metadata(row), metadata)
+        for write in (lambda: self.submit(insight_id=iid), lambda: self.revise(item, urgency="low")):
+            with self.assertRaisesRegex(Denied, "SharedRecords.*operator_question"):
+                write()
+        self.assertEqual([path.read_bytes() for path in paths], before)
+        self.assertEqual(self.project.insights.history(iid)["records"], [])
+
+    def test_tool_schemas_refuse_question_with_record_route(self):
+        self.assertEqual(INSIGHT_METADATA_SCHEMA["kind"]["enum"], ["proposal"])
+        args = {"title": "Question", "body": "Body", "kind": "question"}
+        for tool, fields in (("submit_insight", args),
+                             ("revise_insight", {**args, "id": "a" * 32, "rev": 1})):
+            with self.subTest(tool=tool), self.assertRaisesRegex(Denied, "SharedRecords.*operator_question"):
+                validate(fields, DEFINITIONS[tool][1])
+
+    def test_submit_refuses_question_with_record_route(self):
+        with self.assertRaisesRegex(Denied, "SharedRecords.*operator_question"):
+            self.submit(kind="question", addressee="operator")
+        self.assertEqual(self.project.insights.list(), [])
+
+    def test_revise_refuses_question_with_record_route(self):
+        item = self.submit()
+        with self.assertRaisesRegex(Denied, "SharedRecords.*operator_question"):
+            self.revise(item, kind="question")
+        self.assertEqual(self.project.insights.read(item["id"]), item)
+        self.assertEqual(self.project.insights.history(item["id"])["records"], [])
 
     def test_invalid_values_fail_before_writes(self):
         item = self.submit()
@@ -172,7 +208,7 @@ class InsightMetadataTests(Fixture):
     def test_tool_schema_and_context_preserve_authority_and_omission(self):
         ctx = self.context("searcher")
         ctx.role = dataclasses.replace(ctx.role, capabilities=(*ctx.role.capabilities, "insights"))
-        args = {"title": "Q: Claim", "body": "Body", "kind": "question",
+        args = {"title": "Q: Claim", "body": "Body", "kind": "proposal",
                 "addressee": "operator", "urgency": "high"}
         with patch.object(self.project.insights, "submit", wraps=self.project.insights.submit) as submit:
             item = ctx.handle("submit_insight", args)
@@ -194,7 +230,7 @@ class InsightMetadataTests(Fixture):
             for field in INSIGHT_METADATA_DEFAULTS:
                 with self.assertRaises(Denied):
                     validate({**valid, field: None}, DEFINITIONS[tool][1])
-        self.assertEqual(ctx.handle("insights", {"id": item["id"]})["kind"], "question")
+        self.assertEqual(ctx.handle("insights", {"id": item["id"]})["kind"], "proposal")
         listed = ctx.handle("insights", {"limit": 1})["insights"][0]
         self.assertEqual(listed["attention"], "reviewer")
         self.assertNotIn("addressee", listed)

@@ -520,7 +520,7 @@ class DecisionCutoverTests(Fixture):
 
     def submit_pending(self, title="Attention", *, source="searcher", addressee="reviewer"):
         return self.project.insights.submit(source=source, title=title, body="Exact current body",
-                                            base_snapshot=None, kind="question",
+                                            base_snapshot=None, kind="proposal",
                                             addressee=addressee, urgency="high")
 
     def test_pending_activation_maps_acknowledged_and_preserves_legacy(self):

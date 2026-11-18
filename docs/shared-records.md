@@ -104,8 +104,9 @@ subject = "object"
 maximum = 8192
 ```
 
-The same `mizu_record_write` contract above creates immutable questions. No
-questions are migrated from Insights. The host operator can inspect them with
+Use `mizu_record_write` to create immutable questions; Insights cannot submit
+or revise questions. Stored Insight questions remain readable without migration.
+The host operator can inspect record questions with
 explicit per-call bounds (shown values are examples, not defaults):
 
 ```sh
@@ -332,8 +333,9 @@ The host `mizu record` CLI uses the same trusted human/operator control plane as
 is the authentication boundary. The CLI is not an RPC/model tool. Its writer is
 always `operator.cli`; neither the operator command nor a model can supply a
 writer field. Model sandbox files, Editor text and origin labels grant no writer
-identity. No text is parsed to infer a kind. Insights remain proposals; these
-records are never Insight decisions and do not mutate or resolve a question.
+identity. No text is parsed to infer a kind. These records never decide an
+Insight or mutate the subject. Only record-bound answers close SharedRecords
+questions.
 
 The configuration defaults (also in `config/config.example.toml`) are:
 
@@ -380,8 +382,10 @@ introduced. Acknowledged or closed records cease to admit; omitted acknowledgeme
 remain eligible. Re-render operator-managed services to install the new watch;
 these changes do not modify installed services.
 
-For an Insight answer, supply the full existing question/Insight ID **and exact revision**
-(record-bound answers use the separate subject form above):
+To send a reply referencing an existing Insight (including a retained question),
+supply the full Insight ID **and exact revision**. This is a message, not a
+question submission route or an Insight decision. For new questions use the
+record-bound subject described above:
 
 ```sh
 mizu record PROJECT publish --kind answer --id answer-event-1 \

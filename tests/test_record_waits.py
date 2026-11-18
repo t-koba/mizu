@@ -3,7 +3,7 @@ import copy
 from dataclasses import replace
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, stored_question_insight
 from test_operator_questions import ARGS, DECLARATION
 from mizu import operator_records as records
 from mizu.config import load
@@ -227,17 +227,13 @@ class RecordWaitTests(Fixture):
         self.config.record_kinds.clear()
         self.assertEqual(self.state(first), 'unknown')
 
-    def test_lazy_catalog_and_existing_insight_answer_lookup_are_independent(self):
+    def test_lazy_catalog_and_legacy_insight_answer_cannot_close_record_wait(self):
         with patch.object(records, 'catalog', side_effect=AssertionError('not lazy')):
             self.store.page_ready(role_name='worker')
             records.record_question_lookup(self.project)
-        question = self.project.insights.submit(source='worker', title='Legacy question',
-            body='Q: Which?', base_snapshot=None, kind='question', addressee='operator')
+        question = stored_question_insight(self.project)
         records.write(self.project, event_id='legacy', kind='answer', body='Legacy answer',
                       subject=dict(type='insight', id=question['id'], rev=1))
         self.project.config = replace(self.project.config, limits=replace(
             self.project.config.limits, operator_record_catalog_scan_entries=1))
-        with patch.object(records, 'catalog', wraps=records.catalog) as catalog:
-            self.assertTrue(records.answer_lookup(self.project)(question))
-            self.assertEqual(catalog.call_args.kwargs, dict(readonly=True))
         self.assertIsNone(records.record_question_lookup(self.project)(self.subject))

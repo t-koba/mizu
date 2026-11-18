@@ -205,13 +205,12 @@ def _directory(path: Path) -> bool:
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
-                 effective_verification_projection=None, operator_answer_lookup=None, writer_roles_lookup=None,
+                 effective_verification_projection=None, writer_roles_lookup=None,
                  record_question_lookup=None, register_question_wait=None, record_answer_evidence=None,
                  publication_evidence: PublicationEvidence | None = None,
                  completion_evidence: CompletionEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
         self.root, self.snapshots, self.insights = root, snapshots, insights
-        self.operator_answer_lookup = operator_answer_lookup
         self.writer_roles_lookup = writer_roles_lookup
         self.record_question_lookup = record_question_lookup
         self.register_question_wait = register_question_wait
@@ -2215,8 +2214,7 @@ class WorkItems:
                         role_name: str | None = None, order_fingerprint: bool = False,
                         blocked_only: bool = False, include_open_count: bool = False, writer_roles=None,
                         wait_resolution_role: str | None = None, _active_transform=None,
-                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None,
-                        operator_answer=None):
+                        delivered_wait_resolution_tokens=None, wait_resolution_high_water=None):
         """Collect the bounded open page from the index.
 
         Callers hold insights.lock when ``readonly`` is False; the read-only
@@ -2229,8 +2227,6 @@ class WorkItems:
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
         record_question = self.record_question_lookup() if self.record_question_lookup is not None else None
-        if operator_answer is None and writer_roles is not None and self.operator_answer_lookup is not None:
-            operator_answer = self.operator_answer_lookup()
         cursor_key = _open_cursor_key(cursor)
         if delivered_wait_resolution_tokens is None:
             delivered_resolution_tokens = None
@@ -2309,7 +2305,6 @@ class WorkItems:
                         and published_snapshot is None):
                     published_snapshot = self.snapshots.get()
                 if holder_only(self, item, published_snapshot, writer_roles=writer_roles,
-                               operator_answer=operator_answer,
                                record_question=record_question) is not None:
                     item = {key: value for key, value in item.items()
                             if key not in ("wait", "blocked_since")}
@@ -2319,7 +2314,7 @@ class WorkItems:
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
                 state = liveness(self, wait, published_snapshot,
-                                 item=item, writer_roles=writer_roles, operator_answer=operator_answer,
+                                 item=item, writer_roles=writer_roles,
                                  record_question=record_question)
                 if ready_only:
                     if state["state"] == "unknown":
@@ -2527,7 +2522,7 @@ class WorkItems:
                     "truncated": None, "unseeded_decisions": None,
                     "coverage_complete": False, "diagnostic": "unreadable"}
 
-    def open_state_readonly(self, *, limit=25, writer_roles=None, operator_answer=None) -> dict:
+    def open_state_readonly(self, *, limit=25, writer_roles=None) -> dict:
         """Return the seeded open count and blocked liveness from one scan.
 
         The caller gets the same fail-closed diagnostic shape as
@@ -2543,7 +2538,7 @@ class WorkItems:
         try:
             blocked = self._page_open_impl(cursor=None, limit=limit, readonly=True,
                                            blocked_only=True, include_open_count=True,
-                                           writer_roles=writer_roles, operator_answer=operator_answer)
+                                           writer_roles=writer_roles)
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
             return {"open_count": None,
                     "blocked_work": {"items": [], "total": None, "counts": None,

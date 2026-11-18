@@ -420,9 +420,13 @@ trusted host callers, preserved across revisions, never routed on, and never
 grants operator approval. Ordinary prompts, lists, and reads expose only
 the current content, its current decision/evidence gap and `rev`; obsolete
 claims are replaced, never appended. The first submission creates `rev` 1.
-New insights store `kind` (`proposal` or `question`), `addressee` (`writer`,
-`operator`, or a configured role name), and `urgency` (`low`, `normal`, or
-`high`), defaulting to `proposal`/`writer`/`normal`. Core storage validates
+New insights store `kind` (`proposal` only), `addressee` (`writer`, `operator`,
+or a configured role name), and `urgency` (`low`, `normal`, or `high`),
+defaulting to `proposal`/`writer`/`normal`. Use `mizu_record_write` with a
+[configured SharedRecords question kind](shared-records.md#opt-in-role-questions-to-the-operator)
+to ask the operator a question. Stored `kind = "question"` insights remain
+readable and are not migrated; submit and revise cannot write that kind.
+Core storage validates
 addressee syntax using the configured-role identifier bound (1–63 lowercase
 ASCII letters/digits/underscore/hyphen, first character alphanumeric); model
 tool submissions additionally validate explicit addressees against configured

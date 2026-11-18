@@ -63,6 +63,18 @@ def history_write_json(path, value, **kwargs):
             forget_ledger(ancestor)
 
 
+def stored_question_insight(project, *, source='worker'):
+    """Seed a retained insight from before the SharedRecords question route."""
+    from uuid import uuid4
+    from mizu.fs import now
+    stamp = now()
+    item = dict(id=uuid4().hex, source=source, title='Legacy question', body='Q: Which?',
+                base_snapshot=None, kind='question', addressee='operator', run=None, origin=None,
+                created_at=stamp, updated_at=stamp, rev=1, evidence=[])
+    history_write_json(project.root / 'inbox' / f"{item['id']}.json", item)
+    return item
+
+
 def index_items(root, items, *, replace=False):
     """Put synthetic current records straight into the derived index (scale tests)."""
     import sqlite3

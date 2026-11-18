@@ -515,7 +515,7 @@ class DecisionReconciliationTests(unittest.TestCase):
 
     def submit_pending(self, index=0, *, source="searcher", addressee="reviewer"):
         return self.insights.submit(source=source, title=f"Attention {index}", body=f"Body {index}",
-                                    base_snapshot=None, kind="question", addressee=addressee, urgency="high")
+                                    base_snapshot=None, kind="proposal", addressee=addressee, urgency="high")
 
     def pending_rows(self, role="reviewer"):
         rows, _ = self.insights.pending_insight_events(role, set(self.routes), limit=100)
@@ -727,7 +727,7 @@ class DecisionReconciliationTests(unittest.TestCase):
         fresh_root = Path(self.temp.name) / "project2"
         fresh = Insights(fresh_root)
         fresh_item = fresh.submit(source="searcher", title="Attention 0", body="Body 0",
-                                  base_snapshot=None, kind="question", addressee="reviewer", urgency="high")
+                                  base_snapshot=None, kind="proposal", addressee="reviewer", urgency="high")
         fresh_rows, _ = fresh.pending_insight_events("reviewer", set(self.routes), limit=100)
         fresh.acknowledge_decisions("reviewer", fresh_rows, sources="any")
         fresh_plan = preflight_decision_receipts(fresh, self.routes, enabled_roles=list(self.routes))

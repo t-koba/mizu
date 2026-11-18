@@ -39,7 +39,7 @@ class InsightRoutingLegacyTests(Fixture):
     def submit(self, title='Attention', **metadata):
         return self.project.insights.submit(source=metadata.pop('source', 'searcher'),
             title=title, body='Exact current body', base_snapshot=None,
-            **dict(kind='question', addressee='reviewer', urgency='high') | metadata)
+            **dict(kind='proposal', addressee='reviewer', urgency='high') | metadata)
 
     def pending(self, name='reviewer', **kwargs):
         return delivery.pending(self.project, self.config.roles[name], **kwargs)
@@ -75,7 +75,7 @@ class InsightRoutingLegacyTests(Fixture):
         self.assertEqual(self.pending('reporter')['events'], [])
         row = self.pending()['events'][0]
         self.assertEqual((row['kind'], row['insight_kind'], row['urgency'], row['target']),
-                         ('insight.pending', 'question', 'high', 'reviewer'))
+                         ('insight.pending', 'proposal', 'high', 'reviewer'))
         self.assertEqual({human['id'], human_own['id']} & {e['insight'] for e in self.pending()['events']}, set())
         with self.assertRaises(Denied):
             delivery.pending(self.project, replace(self.config.roles['reviewer'], name='operator'))
@@ -306,7 +306,7 @@ class InsightRoutingLegacyTests(Fixture):
             for i in range(10):
                 self.project.insights.submit(source='searcher', title=f'Large {i}',
                     body='S' * 110000, base_snapshot=None,
-                    kind='question', addressee='reviewer', urgency='high')
+                    kind='proposal', addressee='reviewer', urgency='high')
             budget = 1000
             role = replace(self.config.roles['reviewer'], decision_page_bytes=budget)
             state = delivery.pending(self.project, role)
@@ -340,7 +340,7 @@ class InsightRoutingLegacyTests(Fixture):
         for i in range(10):
             self.project.insights.submit(source='searcher', title=f'Large {i}',
                 body='L' * 120000, base_snapshot=None,
-                kind='question', addressee='reviewer', urgency='high')
+                kind='proposal', addressee='reviewer', urgency='high')
         state = delivery.pending(self.project, self.config.roles['reviewer'])
         events, page = state['events'], state['page']
         decisions = [e for e in events if e.get('action') == 'accept']
@@ -425,7 +425,7 @@ class InsightRoutingLegacyTests(Fixture):
         for i in range(11):
             self.project.insights.submit(source='searcher', title=f'Large {i}',
                 body='L' * 110000, base_snapshot=None,
-                kind='question', addressee='reviewer', urgency='high')
+                kind='proposal', addressee='reviewer', urgency='high')
         # Capped source (exactly `limit` rows, true total larger): count is
         # unavailable, truncation is conservative, output stays bounded.
         capped = delivery.pending(self.project, self.config.roles['reviewer'], limit=10)
@@ -541,7 +541,7 @@ class PendingInsightLockTests(Fixture):
     def submit(self, title):
         return self.project.insights.submit(source='searcher', title=title,
             body='Exact current body', base_snapshot=None,
-            kind='question', addressee='reviewer', urgency='high')
+            kind='proposal', addressee='reviewer', urgency='high')
 
     def pending(self):
         return self.project.insights.pending_insight_events('reviewer', self.config.roles)

@@ -306,6 +306,21 @@ def insight_metadata(record: dict) -> dict:
     return out
 
 
+QUESTION_RECORD_ROUTE = (
+    'Submit questions through configured SharedRecords kinds with route = "operator_question", not as insights.')
+
+
+def _require_writable_kind(kind) -> None:
+    if kind == "question":
+        raise Denied(QUESTION_RECORD_ROUTE)
+
+
+def _specified_metadata(kind, addressee, urgency) -> dict:
+    _require_writable_kind(kind)
+    return insight_metadata({k: v for k, v in (("kind", kind), ("addressee", addressee), ("urgency", urgency))
+                             if v is not _UNSPECIFIED})
+
+
 def _identity_payload(record: dict) -> dict:
     return {**{k: record.get(k) for k in
                ("id", "source", "title", "body", "base_snapshot", "run", "origin")},
@@ -541,9 +556,7 @@ class Insights:
         """
         identifier(source)
         origin = _check_origin(origin)
-        specified = insight_metadata({k: v for k, v in
-                                      (("kind", kind), ("addressee", addressee), ("urgency", urgency))
-                                      if v is not _UNSPECIFIED})
+        specified = _specified_metadata(kind, addressee, urgency)
         metadata = {**INSIGHT_METADATA_DEFAULTS, **specified}
         explicit = bool(insight_id)
         if explicit:
@@ -589,6 +602,7 @@ class Insights:
                 for key in INSIGHT_METADATA_DEFAULTS:
                     payload.pop(key, None)
                 payload.update({**insight_metadata(old), **specified})
+                _require_writable_kind(payload.get("kind"))
             elif identity and not specified:
                 # Retained pre-metadata identities may have no surviving body.
                 legacy = {k: v for k, v in payload.items() if k not in INSIGHT_METADATA_DEFAULTS}
@@ -677,9 +691,7 @@ replacement insight without implying rejected substance.
             raise Denied("base_snapshot must be a SHA-256 ID or null")
         if expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1):
             raise Denied("expected_rev must be a positive integer")
-        specified = insight_metadata({k: v for k, v in
-                                      (("kind", kind), ("addressee", addressee), ("urgency", urgency))
-                                      if v is not _UNSPECIFIED})
+        specified = _specified_metadata(kind, addressee, urgency)
         with lock_diagnostics.operation("write"), record_lock(self.root):
             path = self.root / "inbox" / f"{insight_id}.json"
             old = read_json(path)
@@ -698,6 +710,7 @@ replacement insight without implying rejected substance.
             current_rev = _rev_of(old)
             if expected_rev is not None and expected_rev != current_rev:
                 raise Denied("Insight revision conflict; reread the current revision")
+            _require_writable_kind(payload.get("kind"))
             if (old.get("title") == title and old.get("body") == body
                     and old.get("base_snapshot") == base_snapshot
                     and insight_metadata(old) == insight_metadata(payload)):
@@ -1117,13 +1130,11 @@ replacement insight without implying rejected substance.
                                       "ON d.insight_id = i.id AND d.rev = i.rev "
                                       "WHERE i.live = 1 AND d.action = 'defer' LIMIT 1"))
 
-    def unresolved_counts(self, sources, *, kind=None, addressee=None, is_answered=None) -> dict:
+    def unresolved_counts(self, sources) -> dict:
         """Count live unresolved inputs for each named source, fail-closed.
 
         Undecided plus deferred revisions count, resolved and archive-only
-        history do not. Optional kind/addressee filters select exact metadata.
-        ``is_answered`` optionally excludes only inputs for which a caller has
-        exact completion evidence; it changes no stored decision or record.
+        history do not.
         An unreadable live record or decision raises rather than undercount;
         a missing decision only leaves its input unresolved. Unknown or
         malformed requested sources raise.
@@ -1135,23 +1146,12 @@ replacement insight without implying rejected substance.
         counts = {name: 0 for name in wanted}
         where = ("FROM insights i LEFT JOIN decisions d ON d.insight_id = i.id AND d.rev = i.rev "
                  "WHERE i.live = 1 AND (d.insight_id IS NULL OR d.action = 'defer')")
-        params = []
-        for column, value in (("kind", kind), ("addressee", addressee)):
-            if value is not None:
-                where += f" AND i.{column} = ?"
-                params.append(value)
         with lock_diagnostics.operation("read"), project_record_lock(self.root):
             with self.ledger.read("insights", locked=True) as db:
                 self._refuse_malformed(db)
-                if is_answered is None:
-                    for source, count in _rows(
-                            db, f"SELECT i.source, COUNT(*) {where} GROUP BY i.source", params):
-                        if source in wanted:
-                            counts[source] = count
-                else:
-                    for source, raw in _rows(db, f"SELECT i.source, i.item {where}", params):
-                        if source in wanted and not is_answered(json.loads(raw)):
-                            counts[source] += 1
+                for source, count in _rows(db, f"SELECT i.source, COUNT(*) {where} GROUP BY i.source"):
+                    if source in wanted:
+                        counts[source] = count
         return counts
 
     def unresolved_count(self, source: str) -> int:

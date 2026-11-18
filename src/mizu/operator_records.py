@@ -413,45 +413,6 @@ def record_answer_evidence(project, subject, holder, proof=None):
     return proof
 
 
-def answer_lookup(project):
-    """Lazy, projection-local evidence only; no delivery, repair or decision.
-
-    Exactly one authenticated answer must bind the observed current question
-    revision and its asking role. Missing, ambiguous or unreadable evidence
-    proves nothing. Even a failed catalog scan is attempted only once.
-    """
-    answers = None
-
-    def answered(question):
-        nonlocal answers
-        try:
-            if answers is None:
-                answers = {}
-                if configuration(project.config.operator_records)['answer']['enabled']:
-                    with lock(project.root / 'locks' / 'operator-records.lock'):
-                        for envelope, _ in catalog(store(project), readonly=True).values():
-                            if (envelope['kind'] == 'answer'
-                                    and envelope['subject']['type'] == 'insight'):
-                                subject = envelope['subject']
-                                key = (subject['id'], subject['rev'], envelope['payload']['addressee'])
-                                answers[key] = None if key in answers else envelope
-            match = answers.get((question['id'], question.get('rev', 1), question['source']))
-            if match is None:
-                return False
-            current = project.insights.read(question['id'])
-            from .insights import insight_metadata
-            return (current['id'] == question['id']
-                    and current.get('rev', 1) == question.get('rev', 1)
-                    and current['source'] == question['source']
-                    and insight_metadata(current).get('kind', 'proposal') == 'question'
-                    and _route(project, match) == question['source'])
-        except (Busy, ConfigError, Denied, LimitExceeded, OSError, ValueError,
-                TypeError, AttributeError, KeyError):
-            return False
-
-    return answered
-
-
 def due(project, role_name=None):
     if role_name is not None:
         _role(project, role_name)
