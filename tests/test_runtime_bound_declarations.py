@@ -1856,8 +1856,10 @@ PARAMETER_DEFAULTS = {
         '8', 'policy', 'snapshots / caller-selected anchored history projection size'),
     ('storage.py', 'restore', 'max_bytes'): (
         '1073741824', 'configured policy', 'storage / CLI restore --max-bytes fallback'),
+    ('storage.py', 'preflight_restore_archive', 'max_bytes'): (
+        '1073741824', 'configured policy', 'storage / install migration full restore preflight uses the restore byte ceiling'),
     ('storage.py', 'validate_backup_archive', 'max_bytes'): (
-        '1073741824', 'configured policy', 'install migration / backup preflight mirrors the restore byte ceiling'),
+        '1073741824', 'configured policy', 'storage / structural archive reader mirrors the restore byte ceiling'),
     ('storage_runs.py', 'Scan.preflight', 'depth'): (
         '0', 'mechanism', 'run storage / root traversal depth counter, not the depth ceiling'),
     ('vcs.py', 'parse_artifact', 'offset'): (
@@ -3848,13 +3850,18 @@ def no_defaults(limit, /, count, *, size):
 
     def test_restore_streaming_uses_declared_chunk_bound(self):
         tree = ast.parse((ROOT / 'storage.py').read_text(encoding='utf-8'))
-        restore = next(node for node in ast.walk(tree)
-                       if isinstance(node, ast.FunctionDef) and node.name == 'restore')
-        reads = [node for node in ast.walk(restore)
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)}
+        stage = functions['_restore_stage']
+        reads = [node for node in ast.walk(stage)
                  if isinstance(node, ast.Call) and callee_name(node.func) == 'stream.read']
         self.assertEqual(len(reads), 1)
         self.assertEqual(ast.unparse(reads[0].args[0]),
                          'min(RESTORE_CHUNK_BYTES, remaining)')
+        for name in ('restore', 'preflight_restore_archive'):
+            calls = [callee_name(node.func) for node in ast.walk(functions[name])
+                     if isinstance(node, ast.Call)]
+            self.assertIn('_restore_stage', calls)
         self.assertEqual(DECLARATIONS['storage.py']['RESTORE_CHUNK_BYTES'][0], '1048576')
 
     def test_check_input_ceiling_is_shared_by_config_and_readers(self):

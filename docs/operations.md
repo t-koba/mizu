@@ -1053,16 +1053,23 @@ incomplete scan blocks promotion; the installer does not raise the bounds or
 skip a project on retry.
 
 If a conversion is needed, pause the affected project and leave services
-stopped. The installer creates and verifies one project archive per affected
-project using `mizu backup --verify` semantics. It writes the archives and
-sibling JSON receipts under `<data_dir>/migration-backups/<attempt>/` before
-running either conversion. The promotion result's `migrations` array gives the
-archive path, SHA-256, receipt path, status, and conversion counts for each
-project. It is empty if no conversion was needed. These archives contain private
-code and evidence; protect them as you would other project backups.
+stopped. The installer creates one project archive per affected project, then
+runs the full `mizu restore` validation path on that exact archive in
+disposable staging: member and size limits, extraction, snapshot and object
+integrity (including retained history), settings and goal, staged control and
+outbox state, publication, and smoke-reference checks. No project is published
+and live records are untouched by this preflight. This is stronger than the
+structural member check reported by `mizu backup --verify`. The installer
+writes the archives and sibling JSON receipts under
+`<data_dir>/migration-backups/<attempt>/` before running either conversion.
+The promotion result's `migrations` array gives the archive path, SHA-256,
+receipt path, status, and conversion counts for each project. It is empty if
+no conversion was needed. These archives contain private code and evidence;
+protect them as you would other project backups.
 
-A failed backup or preflight prevents conversion. If apply fails, `current`
-is not switched but some records may already have been converted. Keep the
+A failed backup, receipt write, or restore preflight prevents conversion. The
+preflight does not make promotion crash-atomic: if apply fails, `current` is
+not switched but some records may already have been converted. Keep the
 projects stopped, inspect the named command and receipt, and repair or restore
 before resuming. A receipt left in `applying` after interruption is not proof
 of completion. A retry uses a fresh archive if further conversion is needed;

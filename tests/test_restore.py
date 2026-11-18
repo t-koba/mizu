@@ -113,6 +113,11 @@ class RestoreTests(Fixture):
             tar.addfile(info, io.BytesIO(content))
         with self.assertRaisesRegex(Denied, 'Invalid relative path'):
             storage.validate_backup_archive(archive)
+        projects = set((self.config.data / 'projects').iterdir())
+        with self.assertRaisesRegex(Denied, 'Invalid relative path'):
+            storage.preflight_restore_archive(self.config, archive)
+        self.assertEqual(set((self.config.data / 'projects').iterdir()), projects)
+        self.assertEqual(list((self.config.data / 'staging/projects').glob('.restore-*')), [])
         clean = self.root / 'clean.tar.gz'
         with tarfile.open(clean, 'w:gz') as tar:
             info = tarfile.TarInfo('sessions/worker/weird/a.json')
@@ -124,6 +129,27 @@ class RestoreTests(Fixture):
         with self.assertRaisesRegex(Denied, 'Restore member limit must be positive'):
             storage.validate_backup_archive(clean, max_members=0)
         self.assertEqual([p for p in (self.config.data / 'projects').iterdir()], [self.project.root])
+
+    def test_preflight_validates_without_publishing_a_project(self):
+        self.project.set_control(paused=True)
+        archive = self.root / 'saved.tar.gz'
+        saved = backup(self.project, archive, verify=True)
+        projects = set((self.config.data / 'projects').iterdir())
+        staging = self.config.data / 'staging/projects'
+        locks = set((self.config.data / 'locks').iterdir())
+        result = storage.preflight_restore_archive(self.config, archive)
+        self.assertTrue(result['project'].startswith('preflight-'))
+        self.assertEqual(result['checkpoint'], saved['checkpoint'])
+        self.assertEqual(result['archive'], str(archive))
+        self.assertEqual(set((self.config.data / 'projects').iterdir()), projects)
+        self.assertEqual(list(staging.glob('.restore-*')), [])
+        self.assertFalse(held(self.config.data / 'locks' / f"init-{result['project']}.lock"))
+        # A fresh project name must not leave a fresh permanent lock file.
+        new_locks = set((self.config.data / 'locks').iterdir()) - locks
+        self.assertEqual(new_locks - {self.config.data / 'locks' / 'smoke-retention.lock'},
+                         {self.config.data / 'locks' / 'init-restore-preflight.lock'})
+        restored = restore(self.config, 'restored', archive)
+        self.assertEqual(restored['checkpoint'], saved['checkpoint'])
 
     def test_restore_stage_is_invisible_to_active_retention(self):
         self.project.set_control(paused=True)

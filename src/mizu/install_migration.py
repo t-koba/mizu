@@ -113,7 +113,10 @@ def convert(config, projects: list[Path], release: Path) -> list[dict]:
                     or backup.get("archive") != str(archive.resolve())
                     or type(backup.get("members")) is not int or backup["members"] < 1):
                 raise Denied("Backup did not report a verified archive")
-            storage.validate_backup_archive(archive)
+            # Full restore validation of this exact archive in disposable
+            # staging; structural archive checks alone cannot see a
+            # missing historical snapshot object.
+            storage.preflight_restore_archive(config, archive)
             checkpoint = backup.get("checkpoint")
             if not isinstance(checkpoint, str) or project.snapshots.get(checkpoint).get("skipped"):
                 raise Denied("Backup checkpoint is missing or omitted unsupported workspace files")

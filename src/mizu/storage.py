@@ -1687,12 +1687,15 @@ def validate_backup_archive(archive_path: Path, *, max_bytes: int = 1073741824,
     return {"members": count, "bytes": total}
 
 
-def restore(config, name: str, archive_path: Path, *, max_bytes: int = 1073741824,
-            max_members: int = DEFAULT_RESTORE_MEMBER_COUNT) -> dict:
-    """Restore a checkpoint into a NEW, unarmed project without extracting links.
+def _restore_stage(config, name: str, archive_path: Path, *, max_bytes: int,
+                   max_members: int, locks: contextlib.ExitStack,
+                   lock_name: str | None = None, finalize=None) -> tuple[Path, Path, dict, str]:
+    """Extract and validate an archive in a disposable staging project.
 
-    Backups carry code and evidence, not Git history, credentials, global policy,
-    or the shared budget. Resource limits also apply to malicious archives.
+    ``locks`` stays with the caller so the init-project lock also covers
+    publication (restore) or stage disposal (preflight). ``finalize`` runs
+    under the shared admission lock after all validation; only restore
+    supplies one, to publish the stage under its final project name.
     """
     identifier(name)
     if max_bytes < 1:
@@ -1700,84 +1703,125 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
     if max_members < 1:
         raise Denied("Restore member limit must be positive")
     parent, staging, identities = _project_parents(config)
-    destination = parent / name
     allowed = set(MEMBERS) | {"backup.json"}
-    with lock(config.data / "locks" / f"init-{name}.lock", blocking=False):
-        if destination.exists():
-            raise Denied("Restore never overwrites an existing project")
+    locks.enter_context(lock(config.data / "locks" / f"init-{lock_name or name}.lock", blocking=False))
+    if (parent / name).exists():
+        raise Denied("Restore never overwrites an existing project")
+    _check_project_paths(identities)
+    stage = Path(tempfile.mkdtemp(prefix=".restore-", dir=staging))
+    identities[stage] = _directory_identity(stage)
+    try:
         _check_project_paths(identities)
-        stage = Path(tempfile.mkdtemp(prefix=".restore-", dir=staging))
-        try:
-            identities[stage] = _directory_identity(stage)
+        total = count = 0
+        seen = set()
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive:
+                relative, _ = _validated_backup_member(member, allowed, seen)
+                count += 1
+                total += member.size
+                if count > max_members or member.size < 0 or total > max_bytes:
+                    raise Denied("Backup exceeds restore limits")
+                target = stage / relative
+                if member.isdir():
+                    mkdir(target)
+                    continue
+                mkdir(target.parent)
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise Denied("Backup file has no content")
+                with stream, target.open("xb") as output:
+                    remaining = member.size
+                    while remaining:
+                        block = stream.read(min(RESTORE_CHUNK_BYTES, remaining))
+                        if not block:
+                            raise Denied("Truncated backup member")
+                        output.write(block)
+                        remaining -= len(block)
+                    output.flush()
+                    os.fsync(output.fileno())
+                with contextlib.suppress(OSError, AttributeError, NotImplementedError):
+                    target.chmod(0o600)
+        acceptance.audit(stage)
+        metadata = read_json(stage / "backup.json")
+        if not isinstance(metadata, dict):
+            raise Denied("Invalid backup metadata")
+        store = open_store(stage, config)
+        checkpoint = store.get(metadata["checkpoint"])
+        # get() verifies the manifest; materialize() verifies every code object.
+        store.materialize(checkpoint, stage / "workspace")
+        if checkpoint.get("skipped"):
+            raise Denied("Checkpoint omitted unsupported filesystem objects")
+        # Parse operator-owned fields before publishing a usable project.
+        settings = tomllib.loads((stage / "project.toml").read_text(encoding="utf-8"))
+        roles, _, _, _ = check_project_settings(settings)
+        if not roles or any(r not in config.roles for r in roles):
+            raise Denied("Backup roles are not configured on this installation")
+        read_goal(
+            stage / "PROJECT.md",
+            "Restored goal must be nonempty and at most {max_bytes} bytes",
+            config.limits.project_goal_bytes)
+        # Validate every published history reference before exposing the project.
+        for sid in store._history_ids():
+            historical = store.get(sid)
+            for path in historical["files"]:
+                store.read(historical, path)
+        write_json(stage / "control.json", {"armed": False, "paused": True,
+                   "draining": False,
+                   "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})
+        atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
+        store.publish(checkpoint)
+        from .smoke_refs import shared_lock
+        from .smoke_retention import Budgets, validate_restored_refs
+        with shared_lock(config.data, blocking=False):
+            validate_restored_refs(config.data, stage,
+                                   budgets=Budgets.from_limits(config.limits))
             _check_project_paths(identities)
-            total = count = 0
-            seen = set()
-            with tarfile.open(archive_path, "r:gz") as archive:
-                for member in archive:
-                    relative, _ = _validated_backup_member(member, allowed, seen)
-                    count += 1
-                    total += member.size
-                    if count > max_members or member.size < 0 or total > max_bytes:
-                        raise Denied("Backup exceeds restore limits")
-                    target = stage / relative
-                    if member.isdir():
-                        mkdir(target)
-                        continue
-                    mkdir(target.parent)
-                    stream = archive.extractfile(member)
-                    if stream is None:
-                        raise Denied("Backup file has no content")
-                    with stream, target.open("xb") as output:
-                        remaining = member.size
-                        while remaining:
-                            block = stream.read(min(RESTORE_CHUNK_BYTES, remaining))
-                            if not block:
-                                raise Denied("Truncated backup member")
-                            output.write(block)
-                            remaining -= len(block)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    with contextlib.suppress(OSError, AttributeError, NotImplementedError):
-                        target.chmod(0o600)
-            acceptance.audit(stage)
-            metadata = read_json(stage / "backup.json")
-            if not isinstance(metadata, dict):
-                raise Denied("Invalid backup metadata")
-            store = open_store(stage, config)
-            checkpoint = store.get(metadata["checkpoint"])
-            # get() verifies the manifest; materialize() verifies every code object.
-            store.materialize(checkpoint, stage / "workspace")
-            if checkpoint.get("skipped"):
-                raise Denied("Checkpoint omitted unsupported filesystem objects")
-            # Parse operator-owned fields before publishing a usable project.
-            settings = tomllib.loads((stage / "project.toml").read_text(encoding="utf-8"))
-            roles, _, _, _ = check_project_settings(settings)
-            if not roles or any(r not in config.roles for r in roles):
-                raise Denied("Backup roles are not configured on this installation")
-            read_goal(
-                stage / "PROJECT.md",
-                "Restored goal must be nonempty and at most {max_bytes} bytes",
-                config.limits.project_goal_bytes)
-            # Validate every published history reference before exposing the project.
-            for sid in store._history_ids():
-                historical = store.get(sid)
-                for path in historical["files"]:
-                    store.read(historical, path)
-            write_json(stage / "control.json", {"armed": False, "paused": True,
-                       "draining": False,
-                       "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})
-            atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
-            store.publish(checkpoint)
-            from .smoke_refs import shared_lock
-            from .smoke_retention import Budgets, validate_restored_refs
-            with shared_lock(config.data, blocking=False):
-                validate_restored_refs(config.data, stage,
-                                       budgets=Budgets.from_limits(config.limits))
-                _check_project_paths(identities)
-                os.rename(stage, destination)
-                sync_dir(staging)
-                sync_dir(parent)
+            if finalize is not None:
+                finalize(parent, stage, identities)
+    except BaseException:
+        _discard_project_stage(stage, identities)
+        raise
+    return parent, stage, identities, checkpoint["id"]
+
+
+def restore(config, name: str, archive_path: Path, *, max_bytes: int = 1073741824,
+            max_members: int = DEFAULT_RESTORE_MEMBER_COUNT) -> dict:
+    """Restore a checkpoint into a NEW, unarmed project without extracting links.
+
+    Backups carry code and evidence, not Git history, credentials, global policy,
+    or the shared budget. Resource limits also apply to malicious archives.
+    """
+    def publish(destination_parent, stage, identities):
+        os.rename(stage, destination_parent / name)
+        sync_dir(stage.parent)
+        sync_dir(destination_parent)
+
+    with contextlib.ExitStack() as locks:
+        _, _, _, checkpoint = _restore_stage(
+            config, name, archive_path, max_bytes=max_bytes, max_members=max_members,
+            locks=locks, finalize=publish)
+    return {"project": name, "checkpoint": checkpoint, "armed": False, "paused": True,
+            "note": "Review restored goals, acceptance commands, policies and evidence before arming. Git history is not included."}
+
+
+def preflight_restore_archive(config, archive_path: Path, *, max_bytes: int = 1073741824,
+                              max_members: int = DEFAULT_RESTORE_MEMBER_COUNT) -> dict:
+    """Validate an untrusted archive on restore's full path without publishing.
+
+    Uses a fresh temporary project name per call, the same max_bytes/max_members
+    bounds, and the same extraction, metadata, snapshot/object, identity and
+    admission checks as restore(). The stage is discarded on success and on
+    failure; no project is published and no lock remains held. Returns
+    ``{"project": name, "checkpoint": id, "archive": path}`` only after all
+    validation passes. Rejection raises the same errors as restore(), so a
+    caller may retry independently after the archive is repaired.
+    """
+    name = "preflight-" + uuid.uuid4().hex
+    with contextlib.ExitStack() as locks:
+        _, stage, identities, checkpoint = _restore_stage(
+            config, name, archive_path, max_bytes=max_bytes, max_members=max_members,
+            locks=locks, lock_name="restore-preflight")
+        try:
+            return {"project": name, "checkpoint": checkpoint, "archive": str(archive_path)}
         finally:
             _discard_project_stage(stage, identities)
-    return {"project": name, "checkpoint": checkpoint["id"], "armed": False, "paused": True,
-            "note": "Review restored goals, acceptance commands, policies and evidence before arming. Git history is not included."}

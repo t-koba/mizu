@@ -49,6 +49,16 @@ class InstallMigrationTests(Fixture):
         current.rename(flat)
         return flat, current, canonical(record)
 
+    def tracked_preflight(self):
+        calls = []
+        real = storage.preflight_restore_archive
+
+        def record(config, archive):
+            calls.append((config, archive))
+            return real(config, archive)
+
+        return calls, record
+
     def legacy_resolution(self):
         event_id = '1' * 32
         write_json(self.project.root / 'decision-history' / f'{event_id}.json',
@@ -96,7 +106,7 @@ class InstallMigrationTests(Fixture):
         old, current, old_raw = self.legacy_resolution()
         records_apply, work_apply = record_migration.apply, work_item_migration.apply
         link_atomically = INSTALLER.link_atomically
-
+        calls, record_preflight = self.tracked_preflight()
         def link(destination, target):
             self.assertTrue(held(self.workspace_lock))
             self.assertFalse(flat.exists())
@@ -120,9 +130,14 @@ class InstallMigrationTests(Fixture):
                   'migrate-records', flat, flat_raw, records_apply, p)),
               patch.object(work_item_migration, 'apply', side_effect=lambda p: assert_backup(
                   'migrate-work-items', old, old_raw, work_apply, p)),
-              patch.object(INSTALLER, 'link_atomically', side_effect=link)):
+              patch.object(INSTALLER, 'link_atomically', side_effect=link),
+              patch.object(storage, 'preflight_restore_archive', side_effect=record_preflight)):
             result = self.promote()
         row, = result['migrations']
+        archive, = self.backups.glob('*/*.tar.gz')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], self.config)
+        self.assertEqual(calls[0][1], archive)
         self.assertIn('Listed migrations were applied after verified backups', result['note'])
         self.assertNotIn('Only code', result['note'])
         self.assertEqual(result['status'], 'promoted')
@@ -144,6 +159,49 @@ class InstallMigrationTests(Fixture):
         for path, raw in ((flat, flat_raw), (old, old_raw)):
             self.assertEqual((self.project.root.with_name('restored') /
                               path.relative_to(self.project.root)).read_bytes(), raw)
+
+    def test_historical_object_gap_denies_promotion_before_conversion(self):
+        workspace_file = self.project.workspace / 'app.py'
+        first = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=self.project.goal, state='first snapshot', run=None,
+            outcome='wait', summary='First synthetic snapshot')
+        self.project.snapshots.publish(first)
+        workspace_file.write_bytes(b'VALUE = 99\n')
+        second = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=self.project.goal, state='second snapshot', run=None,
+            outcome='wait', summary='Second synthetic snapshot')
+        self.project.snapshots.publish(second)
+        old_object = first['files']['app.py']['sha256']
+        self.assertNotEqual(old_object, second['files']['app.py']['sha256'])
+        missing = self.project.root / 'objects' / old_object
+        self.assertTrue(missing.is_file())
+        missing.unlink()  # Now referenced only by the retained older snapshot.
+        old, current, old_raw = self.legacy_resolution()
+        calls, record_preflight = self.tracked_preflight()
+        with (patch.object(storage, 'preflight_restore_archive', side_effect=record_preflight),
+              patch.object(work_item_migration, 'apply') as work,
+              patch.object(record_migration, 'apply') as records,
+              patch.object(INSTALLER, 'link_atomically') as link):
+            with self.assertRaisesRegex(Denied, r'verified backup and receipt failed.*mizu migrate-work-items sample.*archive:') as raised:
+                self.promote()
+        self.assertIn(old_object, str(raised.exception))
+        self.assertEqual(len(calls), 1)
+        work.assert_not_called()
+        records.assert_not_called()
+        link.assert_not_called()
+        self.assertTrue(old.is_file())
+        self.assertFalse(current.exists())
+        self.assertEqual(old.read_bytes(), old_raw)
+        self.assertEqual(list(self.backups.glob('*/*.json')), [])
+        staging = self.config.data / 'staging/projects'
+        self.assertEqual(list(staging.glob('.restore-*')), [])
+        self.assertEqual([p for p in (self.config.data / 'projects').iterdir()
+                          if p.name.startswith('preflight-')], [])
+        archive, = self.backups.glob('*/*.tar.gz')
+        with tarfile.open(archive, 'r:gz') as saved:
+            self.assertNotIn(f'objects/{old_object}', saved.getnames())
 
     def test_incomplete_scan_refuses_before_backup_or_any_conversion(self):
         flat, _, _ = self.flat_record()
@@ -199,8 +257,10 @@ class InstallMigrationTests(Fixture):
                 inserted.append(bad_name)
             return result
 
+        calls, record_preflight = self.tracked_preflight()
         with (patch.object(record_migration, 'apply') as records,
               patch.object(INSTALLER, 'link_atomically') as link,
+              patch.object(storage, 'preflight_restore_archive', side_effect=record_preflight),
               patch.object(tarfile.TarFile, 'add', add_unrestorable_member)):
             with self.assertRaisesRegex(Denied, r'verified backup and receipt failed.*Invalid relative path.*mizu migrate-records sample.*archive:'):
                 self.promote()
@@ -208,6 +268,7 @@ class InstallMigrationTests(Fixture):
         link.assert_not_called()
         self.assertTrue(flat.is_file())
         archive, = self.backups.glob('*/*.tar.gz')
+        self.assertEqual([call[1] for call in calls], [archive])
         self.assertEqual(list(self.backups.glob('*/*.json')), [])
         with tarfile.open(archive, 'r:gz') as saved:
             self.assertIn(bad_name, saved.getnames())
