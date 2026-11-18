@@ -569,7 +569,7 @@ class DecisionReconciliationTests(unittest.TestCase):
         self.assertEqual(self.pending_rows("reviewer"), [reviewer[1]])
         self.assertEqual(self.pending_rows("worker"), worker)
 
-    def test_pending_prepartition_record_and_receipt_reconcile_without_copy(self):
+    def test_existing_pending_record_and_receipt_reconcile_without_rewrite(self):
         self.submit_pending()
         row = self.pending_rows()[0]
         self.pending_ack("reviewer", [row])
@@ -578,10 +578,9 @@ class DecisionReconciliationTests(unittest.TestCase):
             set(self.routes), "reviewer"))[rid]
         store = SharedRecords(self.root, {"insight.decision": INSIGHT_DECISION_POLICY,
                                           "insight.pending": INSIGHT_PENDING_POLICY})
-        legacy_name = store._legacy_record_name(rid)
-        legacy_path = self.root / legacy_name
-        legacy_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(legacy_path, envelope, exclusive=True)
+        computed = store.put(envelope, writer=envelope['writer'])
+        path = self.root / store.record_name(rid)
+        before = path.read_bytes()
         manifest = store.freeze("reviewer", [rid])
         from dataclasses import asdict as _asdict
         store.acknowledge("reviewer", [_asdict(manifest[0])], manifest=manifest)
@@ -592,8 +591,8 @@ class DecisionReconciliationTests(unittest.TestCase):
         self.assertEqual(pending["shared_received_ids"], [rid])
         result = self.apply(plan)
         self.assertEqual(result["roles"]["reviewer"]["pending_insights"]["shared_received_ids"], [rid])
-        self.assertFalse((self.root / store._record_name(rid)).exists())
-        self.assertTrue(legacy_path.exists())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(store.get(rid, expected_digest=computed), (envelope, computed))
         self.assertEqual(self.legacy_bytes(), legacy_receipts)
 
     def test_pending_stale_receipt_after_revision_and_reroute_not_mapped(self):

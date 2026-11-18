@@ -590,8 +590,7 @@ def _legacy_acknowledged(shared, envelope):
     legacy = {**envelope, "id": identity,
               "payload": {key: value for key, value in event.items()
                           if key != "snapshot_relation"}}
-    if any(shared._read(name, RECORD_BYTES) is not None
-           for name in shared._record_names(identity)):
+    if shared._read(shared.record_name(identity), RECORD_BYTES) is not None:
         _, computed = shared.get(identity)
         if computed != digest(canonical(legacy)):
             raise Denied("Legacy shared CI evidence differs from its source")
@@ -605,8 +604,7 @@ def _legacy_acknowledged(shared, envelope):
 def _existing(shared, envelope):
     # Read-only eligibility/wake checks must not create records. Exact replay
     # also handles a previous create-only write whose directory sync failed.
-    if any(shared._read(name, RECORD_BYTES) is not None
-           for name in shared._record_names(envelope["id"])):
+    if shared._read(shared.record_name(envelope["id"]), RECORD_BYTES) is not None:
         _, computed = shared.get(envelope["id"])
         if computed != digest(canonical(envelope)):
             raise Denied("Shared CI evidence differs from current source")

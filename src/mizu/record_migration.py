@@ -6,10 +6,10 @@ from itertools import islice
 
 from . import ci_waits, host_records, operator_records, proposal_waits
 from .errors import Denied, MizuError
-from .fs import atomic_write, digest, loads_finite, lock, sync_dir
+from .fs import atomic_write, loads_finite, lock, sync_dir
 from .insights import INSIGHT_DELIVERY_POLICIES
 from .operator_record_index import DIRECTORY as OPERATOR_INDEX
-from .shared_records import RECORD_BYTES, SharedRecords
+from .shared_records import RECORD_BYTES, SharedRecords, _name, digest
 from .storage import quiescent
 
 SCAN_ENTRIES = 1000
@@ -44,9 +44,8 @@ def _move(shared, name, target, raw, expected, existing):
     # Persist the partition's directory entry before removing the flat one.
     sync_dir(source.parent)
     if dest.parent.name != "operator":
-        # The operator catalog indexes foreign flat records but doesn't scan
-        # foreign partitions. Invalidate this disposable ref before its last
-        # catalog-visible source goes away, under operator-records.lock.
+        # Older operator catalogs indexed foreign flat records. Drop any such
+        # disposable reference under operator-records.lock before removing its source.
         ref = f"{OPERATOR_INDEX}/{source.name}"
         if shared._parents(ref):
             if shared._read(ref, RECORD_BYTES) is not None:
@@ -75,7 +74,7 @@ def _validate_flat(shared, name, validators):
     if store._validate(envelope) != raw:
         raise Denied("Noncanonical shared record bytes")
     record_id = envelope["id"]
-    if name != shared._legacy_record_name(record_id):
+    if name != f"{_DIRECTORY}/{digest(_name(record_id).encode())}.json":
         raise Denied("Flat shared record filename identity mismatch")
     return raw, shared.record_name(record_id)
 

@@ -170,7 +170,7 @@ class OperatorRecordTests(Fixture):
         with self.assertRaises(Denied):
             records.write(self.project, event_id='answer1', kind='answer', body='Conflicting', subject=self.subject)
         self.assertEqual(before, {str(p.relative_to(self.project.root)): p.read_bytes() for p in (self.project.root / 'shared-records').rglob('*.json')})
-        path = self.project.root / shared._record_name(result['record']['id'])
+        path = self.project.root / shared.record_name(result['record']['id'])
         path.write_bytes(b'{}\n')
         with self.assertRaises(Denied):
             self.answer()
@@ -414,7 +414,7 @@ class OperatorRecordTests(Fixture):
         context = self.context('worker')
         records.bind(context)
         row = result['record']
-        path = self.project.root / records.store(self.project)._record_name(row['id'])
+        path = self.project.root / records.store(self.project).record_name(row['id'])
         row['payload']['body'] = 'Changed immutable content'
         path.write_bytes(canonical(row))
         token = context.operator_record_manifest[0].ack_token
@@ -470,10 +470,11 @@ class OperatorRecordTests(Fixture):
         notice = self.notice()
         shared = records.store(self.project)
         for result in (answer, notice):
-            canonical = shared._record_name(result['record']['id'])
+            canonical = shared.record_name(result['record']['id'])
             self.assertTrue(canonical.startswith('shared-records/operator/'))
             self.assertTrue((self.project.root / canonical).is_file())
-            self.assertFalse((self.project.root / shared._legacy_record_name(result['record']['id'])).exists())
+        self.assertCountEqual((self.project.root / 'shared-records').iterdir(),
+                              [self.project.root / 'shared-records' / 'operator'])
         self.assertEqual({row[0]['id'] for row in shared.records(namespace='operator')},
                          {answer['record']['id'], notice['record']['id']})
         # A corrupt file outside the operator partition must not break pending.

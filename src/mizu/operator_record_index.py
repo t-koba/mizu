@@ -3,8 +3,7 @@
 Call under operator-records.lock. Every query enumerates canonical filenames,
 reads/hashes their bytes and checks the projection against those bytes. Only
 missing projections decode bodies; invalid existing projections are refused.
-Legacy flat files (including other source families) are covered too. This cache
-is outside shared-records and the backup member list; restore rebuilds it.
+This cache is outside shared-records and the backup member list; restore rebuilds it.
 """
 from copy import deepcopy
 import os
@@ -13,7 +12,7 @@ import stat
 
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, atomic_write, canonical, digest, loads_finite
-from .shared_records import RECORD_BYTES, _ENVELOPE, _name, _namespace, _time
+from .shared_records import RECORD_BYTES, _ENVELOPE, _name, _namespace
 
 DIRECTORY = 'operator-record-index'
 _FILE = re.compile(r'[0-9a-f]{64}\.json\Z')
@@ -43,11 +42,6 @@ def _parts(envelope):
     The full digest pins the omitted value, previously validated at creation.
     """
     raw = canonical(envelope)
-    if _namespace(envelope['id']) != 'operator':
-        # Foreign legacy records need only identity classification. Their
-        # payload/subject can be large; the bounded ID precedes both in JSON.
-        return (raw.split(b'"payload":', 1)[0] + b'"payload":',
-                b',"writer":' + canonical(envelope['writer']).rstrip(b'\n') + b'}\n')
     marker = b'"body":""'
     if raw.count(marker) != 1:
         raise Denied('Invalid operator record index projection')
@@ -55,7 +49,7 @@ def _parts(envelope):
     return head + b'"body":', tail
 
 
-def _projection(shared, raw, name, *, operator):
+def _projection(shared, raw, name):
     try:
         row = loads_finite(raw)
         row_raw = canonical(row)
@@ -67,22 +61,16 @@ def _projection(shared, raw, name, *, operator):
         raise Denied('Invalid shared record envelope')
     record_id = _name(row['id'])
     _name(row['kind'], kind=True)
-    is_operator = _namespace(record_id) == 'operator'
-    if (name not in shared._record_names(record_id) or (operator and not is_operator)
+    if (name != shared.record_name(record_id) or _namespace(record_id) != 'operator'
             or row_raw != raw):
         raise Denied('Shared record filename or canonical identity mismatch')
-    if is_operator:
-        if shared._validate(row) != raw:
-            raise Denied('Invalid operator record')
-        row['payload']['body'] = ''
-    else:
-        _name(row['writer'])
-        _time(row['created_at'])
-        row['payload'] = row['subject'] = {}
+    if shared._validate(row) != raw:
+        raise Denied('Invalid operator record')
+    row['payload']['body'] = ''
     return {'envelope': row, 'digest': digest(raw)}
 
 
-def _check(shared, ref, raw, name, *, operator):
+def _check(shared, ref, raw, name):
     if (type(ref) is not dict or set(ref) != {'envelope', 'digest'}
             or not isinstance(ref['digest'], str) or not DIGEST.fullmatch(ref['digest'])):
         raise Denied('Invalid operator record index reference')
@@ -92,21 +80,14 @@ def _check(shared, ref, raw, name, *, operator):
         raise Denied('Invalid operator record index envelope')
     record_id = _name(row['id'])
     _name(row['kind'], kind=True)
-    is_operator = _namespace(record_id) == 'operator'
-    if name not in shared._record_names(record_id) or (operator and not is_operator):
+    if name != shared.record_name(record_id) or _namespace(record_id) != 'operator':
         raise Denied('Operator record index identity mismatch')
-    if is_operator:
-        copy = deepcopy(row)
-        if type(copy['payload']) is not dict or copy['payload'].get('body') != '':
-            raise Denied('Invalid operator record index body projection')
-        if copy['payload'].get('action') != 'withdraw':
-            copy['payload']['body'] = 'x'
-        shared._validate(copy)
-    else:
-        _name(row['writer'])
-        _time(row['created_at'])
-        if row['payload'] != {} or row['subject'] != {}:
-            raise Denied('Invalid legacy record index projection')
+    copy = deepcopy(row)
+    if type(copy['payload']) is not dict or copy['payload'].get('body') != '':
+        raise Denied('Invalid operator record index body projection')
+    if copy['payload'].get('action') != 'withdraw':
+        copy['payload']['body'] = 'x'
+    shared._validate(copy)
     head, tail = _parts(row)
     if (not raw.startswith(head) or not raw.endswith(tail)
             or len(raw) <= len(head) + len(tail) or digest(raw) != ref['digest']):
@@ -114,12 +95,12 @@ def _check(shared, ref, raw, name, *, operator):
     return row, ref['digest']
 
 
-def _reference(shared, name, raw, *, operator, readonly=False):
+def _reference(shared, name, raw, *, readonly=False):
     filename = name.rsplit('/', 1)[1]
     ref_name = f'{DIRECTORY}/{filename}'
     ref_raw = shared._read(ref_name, RECORD_BYTES)
     if ref_raw is None:
-        ref = _projection(shared, raw, name, operator=operator)
+        ref = _projection(shared, raw, name)
         if not readonly:
             shared._parents(ref_name, create=True)
             atomic_write(shared.root / ref_name, canonical(ref), exclusive=True)
@@ -131,12 +112,12 @@ def _reference(shared, name, raw, *, operator, readonly=False):
             raise Denied('Corrupt operator record index') from exc
         if encoded_ref != ref_raw:
             raise Denied('Noncanonical operator record index')
-    return _check(shared, ref, raw, name, operator=operator)
+    return _check(shared, ref, raw, name)
 
 
 def remember(shared, envelope):
     """After a successful canonical put, repair/check this event's ref only."""
-    _reference(shared, shared._record_name(envelope['id']), canonical(envelope), operator=True)
+    _reference(shared, shared.record_name(envelope['id']), canonical(envelope))
 
 
 def catalog(shared, *, readonly=False, scan_limit=None):
@@ -144,9 +125,8 @@ def catalog(shared, *, readonly=False, scan_limit=None):
 
     All canonical bytes are hashed, including unrelated recipients and disabled
     kinds. No mtime trust, mutable cursor or per-recipient canonical identity.
-    Identical legacy/sharded duplicates share a ref; conflicting copies refuse.
     Read-only projections validate missing refs in memory without repairing them.
-    Optional scan_limit bounds entries across canonical, legacy and index
+    Optional scan_limit bounds entries across canonical and index
     directories, including staging/unrelated entries. Exhaustion refuses the
     entire catalog, even at EOF, without an unbounded sort or lookahead.
     """
@@ -168,26 +148,14 @@ def catalog(shared, *, readonly=False, scan_limit=None):
                 yield shared.root / directory / entry.name
 
     files = _files(shared, 'shared-records/operator', entries)
-    legacy = {}
-    if shared._parents('shared-records/probe'):
-        for path in entries('shared-records'):
-            if path.name.endswith('.json'):
-                if not _FILE.fullmatch(path.name):
-                    raise Denied('Unsafe legacy shared record filename')
-                legacy[path.name] = f'shared-records/{path.name}'
     refs = _files(shared, DIRECTORY, entries)
-    if refs.keys() - (files.keys() | legacy.keys()):
+    if refs.keys() - files.keys():
         raise Denied('Dangling operator record index reference')
     result = {}
-    for filename in sorted(files.keys() | legacy.keys()):
-        name = files.get(filename, legacy.get(filename))
+    for name in files.values():
         raw = shared._read(name, RECORD_BYTES)
         if raw is None:
             raise Denied('Shared record is unavailable')
-        if filename in files and filename in legacy:
-            if shared._read(legacy[filename], RECORD_BYTES) != raw:
-                raise Denied('Shared record identity conflict')
-        row, computed = _reference(shared, name, raw, operator=filename in files, readonly=readonly)
-        if _namespace(row['id']) == 'operator':
-            result[row['id']] = (row, computed)
+        row, computed = _reference(shared, name, raw, readonly=readonly)
+        result[row['id']] = (row, computed)
     return result

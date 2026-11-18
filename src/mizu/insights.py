@@ -2153,8 +2153,7 @@ replacement insight without implying rejected substance.
             def validate_decision(record_id, envelope, computed):
                 # Validate every existing decision projection, including rows
                 # filtered from this role, without retaining the full history.
-                if any(store._read(name, RECORD_BYTES) is not None
-                       for name in store._record_names(record_id)):
+                if store._read(store.record_name(record_id), RECORD_BYTES) is not None:
                     existing, current = store.get(record_id, expected_digest=computed)
                     if existing != envelope:
                         raise Denied("Shared decision projection identity conflict")
@@ -2165,8 +2164,7 @@ replacement insight without implying rejected substance.
                     return False
                 if sources == "own" and payload["source"] != role_name:
                     return False
-                if any(store._read(name, RECORD_BYTES) is not None
-                       for name in store._record_names(record_id)):
+                if store._read(store.record_name(record_id), RECORD_BYTES) is not None:
                     return not store.received(role_name, record_id, computed)
                 if store._read(store._receipt_name(role_name, record_id),
                                RECEIPT_BYTES) is not None:
@@ -2185,8 +2183,7 @@ replacement insight without implying rejected substance.
                 for record_id, envelope in self._pending_insight_envelopes_locked(
                         configured_roles, role_name):
                     computed = digest(canonical(envelope))
-                    if any(store._read(name, RECORD_BYTES) is not None
-                           for name in store._record_names(record_id)):
+                    if store._read(store.record_name(record_id), RECORD_BYTES) is not None:
                         existing, current = store.get(record_id, expected_digest=computed)
                         if existing != envelope:
                             raise Denied("Shared insight projection identity conflict")
@@ -2212,8 +2209,7 @@ replacement insight without implying rejected substance.
             projected = {}
             new_decisions = {}
             for record_id, envelope in decision_candidates.items():
-                if any(store._read(name, RECORD_BYTES) is not None
-                       for name in store._record_names(record_id)):
+                if store._read(store.record_name(record_id), RECORD_BYTES) is not None:
                     existing, computed = store.get(record_id)
                     if existing != envelope:
                         raise Denied("Shared decision projection identity conflict")
@@ -2222,8 +2218,7 @@ replacement insight without implying rejected substance.
                     new_decisions[record_id] = envelope
             new_pending = {}
             for record_id, envelope in pending_candidates.items():
-                if any(store._read(name, RECORD_BYTES) is not None
-                       for name in store._record_names(record_id)):
+                if store._read(store.record_name(record_id), RECORD_BYTES) is not None:
                     existing, current = store.get(record_id)
                     if existing != envelope:
                         raise Denied("Shared insight projection identity conflict")

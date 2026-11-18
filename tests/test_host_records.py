@@ -188,13 +188,8 @@ class HostRecordTests(CiWaitFixture):
 
     def test_host_reference_scan_budget_is_incomplete_and_blocks_reclaim(self):
         (self.project.workspace / "host-record-one.txt").write_text("first")
-        legacy_candidate = self.newer(publish=False)
-        first = self.write(subject=legacy_candidate)
-        legacy_name = self.shared()._legacy_record_name(first["record"]["id"])
-        canonical_path = self.project.root / self.shared()._record_name(first["record"]["id"])
-        legacy_path = self.project.root / legacy_name
-        legacy_path.parent.mkdir(parents=True, exist_ok=True)
-        canonical_path.replace(legacy_path)
+        first_candidate = self.newer(publish=False)
+        self.write(subject=first_candidate)
         (self.project.workspace / "host-record-two.txt").write_text("second")
         referenced_candidate = self.newer(publish=False)
         self.write(subject=referenced_candidate)
@@ -204,7 +199,7 @@ class HostRecordTests(CiWaitFixture):
         orphan_object.write_bytes(b"orphan")
         self.project.set_control(paused=True)
 
-        for budget, should_be_incomplete in ((4, False), (3, True), (2, True)):
+        for budget, should_be_incomplete in ((3, False), (2, True), (1, True)):
             limits = dataclasses.replace(
                 self.config.limits, host_record_reference_scan_entries=budget)
             config = dataclasses.replace(self.config, limits=limits)
@@ -225,7 +220,7 @@ class HostRecordTests(CiWaitFixture):
                     self.assertEqual(report["reference_records_skipped"], 0)
                     self.assertEqual(report["references"]["host_record_snapshots"], 2)
                     complete = reclaim(self.project)["snapshots"]
-                    self.assertNotIn(f"snapshots/{legacy_candidate['snapshot_id']}.json", complete)
+                    self.assertNotIn(f"snapshots/{first_candidate['snapshot_id']}.json", complete)
                     self.assertNotIn(f"snapshots/{referenced_candidate['snapshot_id']}.json", complete)
                     self.assertIn(f"snapshots/{unreferenced['snapshot_id']}.json", complete)
 
@@ -237,7 +232,7 @@ class HostRecordTests(CiWaitFixture):
         self.write(subject=newer)
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
         result = self.write()
-        path = self.project.root / self.shared()._record_name(result['record']['id'])
+        path = self.project.root / self.shared().record_name(result['record']['id'])
         original = path.read_bytes()
         for change in ({'subject': newer}, {'writer': 'unknown.host'},
                        {'payload': {'outcome': 'unknown'}}, {'payload': {}}):
@@ -251,9 +246,6 @@ class HostRecordTests(CiWaitFixture):
         self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
         path.write_bytes(original)
         self.assertEqual(len(ci_waits.pending(self.store, 'worker')), 1)
-        legacy = self.project.root / self.shared()._legacy_record_name(result['record']['id'])
-        legacy.write_bytes(b'{}')
-        self.assertEqual(ci_waits.pending(self.store, 'worker'), [])
 
     def test_foreign_kind_record_in_host_partition_is_an_incomplete_reference(self):
         # A canonically stored record of another declared family can sit in the
@@ -321,7 +313,7 @@ class HostRecordTests(CiWaitFixture):
         self.write()
         context = self.delivery_context()
         event = context.wait_events[0]
-        path = self.project.root / self.shared()._record_name(event['source_record'])
+        path = self.project.root / self.shared().record_name(event['source_record'])
         original = path.read_bytes()
         path.write_bytes(b'{}')
         with self.assertRaises(Denied):

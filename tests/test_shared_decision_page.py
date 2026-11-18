@@ -223,7 +223,7 @@ class SharedDecisionPageTests(unittest.TestCase):
         ):
             with self.subTest(role=role, token=token), self.assertRaises(Denied):
                 self.store.read_page(role, token, manifest=frozen)
-        path = self.root / self.store._record_name(entry.record_id)
+        path = self.root / self.store.record_name(entry.record_id)
         original = path.read_bytes()
         changed = json.loads(original)
         changed["payload"]["title"] = "Changed after first read"
@@ -251,7 +251,7 @@ class SharedDecisionPageTests(unittest.TestCase):
 
                 def corrupt(store, envelope, *, writer):
                     computed = put(store, envelope, writer=writer)
-                    path = self.root / store._record_name(envelope["id"])
+                    path = self.root / store.record_name(envelope["id"])
                     original = path.read_bytes()
                     changed = json.loads(original)
                     changed["payload"]["title"] = "Changed after put"
@@ -282,7 +282,7 @@ class SharedDecisionPageTests(unittest.TestCase):
                     projected = self.insights.project_decision_records()
                     self.assertEqual(len(projected), 1)
                     record_id = next(iter(projected))
-                    path = self.root / self.store._record_name(record_id)
+                    path = self.root / self.store.record_name(record_id)
                     original = path.read_bytes()
                     changed = json.loads(original)
                     changed["payload"]["title"] = "Changed after put"

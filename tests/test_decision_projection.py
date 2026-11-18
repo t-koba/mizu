@@ -45,7 +45,7 @@ class DecisionProjectionTests(unittest.TestCase):
                                              sources="any", limit=100)
 
     def record_path(self, record_id):
-        return self.root / self.store._record_name(record_id)
+        return self.root / self.store.record_name(record_id)
 
     def seed_decision_batch(self, count):
         """Create four real action/source examples and clone valid rev-1 rows."""

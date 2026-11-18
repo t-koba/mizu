@@ -250,11 +250,7 @@ def write(project, *, event_id, kind, body='', addressee=None, subject=None,
                                                 addressee=addressee, target=target))
     with lock(project.root / 'locks' / 'operator-records.lock'):
         # Existence is tested safely; absence only, never corruption, is a new write.
-        # Both the sharded canonical file and a pre-partition flat legacy file
-        # count as existence; get() fails closed on conflicting duplicates.
-        canonical, legacy = shared._record_names(record_id)
-        if (shared._read(canonical, 140000) is not None
-                or (legacy != canonical and shared._read(legacy, 140000) is not None)):
+        if shared._read(shared.record_name(record_id), 140000) is not None:
             previous, _ = shared.get(record_id)
             envelope['created_at'] = previous['created_at']
         shared._validate(envelope)

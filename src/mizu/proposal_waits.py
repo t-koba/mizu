@@ -156,7 +156,7 @@ def evidence(store, item):
     shared = shared_store(store)
     record_id = _record_id(item)
     # Distinguish absence from unsafe or corrupt evidence; never repair it.
-    if not any(shared._read(name, 8192) is not None for name in shared._record_names(record_id)):
+    if shared._read(shared.record_name(record_id), 8192) is None:
         if shared._read(shared._receipt_name(item["holder"], record_id), 2048) is not None:
             raise Denied("Proposal receipt has no record")
         return None

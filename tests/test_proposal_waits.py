@@ -333,7 +333,7 @@ class ProposalWaitTests(Fixture):
         shared = proposal_waits.shared_store(self.store)
         record_id = proposal_waits._record_id(blocked)
         envelope, _ = shared.get(record_id)
-        path = self.project.root / shared._record_names(record_id)[0]
+        path = self.project.root / shared.record_name(record_id)
         for changes in ({"holder": "reviewer"}, {"rev": blocked["rev"] + 1},
                         {"wait": {**blocked["wait"], "proposal_id": "forge:owner/repo#2"}},
                         {"state": "open"}):
@@ -366,7 +366,7 @@ class ProposalWaitTests(Fixture):
         with self.assertRaises(Denied):
             proposal_waits.pending(self.store, "worker")
         path.unlink()
-        record_path = self.project.root / shared._record_name(ctx.proposal_wait_manifest[0].record_id)
+        record_path = self.project.root / shared.record_name(ctx.proposal_wait_manifest[0].record_id)
         raw = record_path.read_bytes()
         record_path.unlink()
         record_path.symlink_to(target)

@@ -400,11 +400,12 @@ hyphen), required for uncertain-response retries. Identity is
 `operator/PROJECT/EVENT_ID` in the existing SharedRecords store. Canonical files
 are sharded by the record ID's first component under
 `shared-records/<namespace>/` (long namespace components use a bounded digest
-directory; operator records live under `shared-records/operator/`); pre-partition flat `shared-records/*.json` files
-remain readable by exact `get`, the unfiltered scan and operator dispatch without
-gaining a second copy on replay. The generic `records(namespace="operator")`
-scanner still covers only the operator partition; dispatch instead uses the
-checked metadata projection described below. The kind `answer`
+directory; operator records live under `shared-records/operator/`). Runtime
+readers only use this sharded layout; see
+[Migrate flat shared records](operations.md#migrate-flat-shared-records) before
+upgrading a project that still uses the old layout. The generic
+`records(namespace="operator")` scanner covers only the operator partition;
+dispatch uses the checked metadata projection described below. The kind `answer`
 is single-component; other envelope IDs and writers remain namespaced. An answer
 to an Insight requires subject `{type="insight", id, rev}`; prefixes, missing revisions and
 unavailable revisions are refused. A retained prior revision can be answered.
@@ -454,28 +455,24 @@ projection, outside generic `shared-records` scans and **excluded from backup**.
 A restore rebuilds it from retained canonical envelopes on first lookup. Each
 canonical JSON reference has exactly `{envelope, digest}`; `digest` is the
 SHA-256 of the complete canonical bytes. Operator `envelope` retains all fields
-except that `payload.body` is the empty string. Foreign legacy flat-file
-projections omit payload and subject (both `{}`) and are used only to classify
-identity, never to deliver another source's events. References are bounded by
+except that `payload.body` is the empty string. References are bounded by
 the existing shared-record byte bound; they contain no copied bodies, receipts,
 queue position or delivery cursor. Event identity remains globally
 `operator/PROJECT/EVENT_ID`, **never** recipient-dependent.
 
 Writes and lookups hold the existing operator-record lock. A write publishes the
 immutable envelope first, then its projection; an exact retry repairs a missing
-projection before returning. Lookup enumerates operator canonical filenames and
-all legacy flat filenames, checks completeness against reference filenames, and
+projection before returning. Lookup enumerates canonical filenames in the
+operator partition, checks completeness against reference filenames, and
 reconstructs only missing references by fully validating canonical content.
 Already-present malformed, dangling, duplicate/misnamed, conflicting or unsafe
 references refuse rather than being overwritten. Unpublished regular
-`.new-XXXXXXXX` atomic-write scratch files are not references. Identical
-legacy/sharded copies share one reference; conflicting copies refuse.
+`.new-XXXXXXXX` atomic-write scratch files are not references.
 
 On **every** lookup, all covered canonical bytes are safely read and hashed.
 For operator references, canonical JSON framing before and after the body value
 must match the projected metadata byte-for-byte, authenticating routing, subject,
-kind, time and closure target independently of the reference's digest. Foreign
-legacy identity prefixes and writer suffixes are checked against canonical bytes too. Changed
+kind, time and closure target independently of the reference's digest. Changed
 canonical bytes or reference metadata fail closed, even for another recipient
 or a disabled kind (if all kinds are disabled, delivery stays closed without a
 lookup). Canonical bodies are fully decoded/validated on projection

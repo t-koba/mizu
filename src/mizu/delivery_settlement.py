@@ -288,14 +288,8 @@ def backup_preflight(root, scan):
                         raise Denied("Backup refused: conflicting settlement source digests")
                 else:
                     source_digests[record_id] = expected
-                    canonical_name, legacy_name = source_store._record_names(record_id)
-                    canonical_raw = source_store._read(canonical_name, shared_records.RECORD_BYTES)
-                    legacy_raw = (None if legacy_name == canonical_name else
-                                  source_store._read(legacy_name, shared_records.RECORD_BYTES))
-                    if (canonical_raw is not None and legacy_raw is not None
-                            and canonical_raw != legacy_raw):
-                        raise Denied("Backup refused: conflicting settlement source records")
-                    source_raw = canonical_raw if canonical_raw is not None else legacy_raw
+                    source_raw = source_store._read(source_store.record_name(record_id),
+                                                    shared_records.RECORD_BYTES)
                     if source_raw is None or digest(source_raw) != expected:
                         raise Denied("Backup refused: missing or changed settlement source")
                 if row["effects"][family][entry["ack_token"]] != "succeeded":

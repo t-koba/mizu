@@ -382,7 +382,7 @@ class DecisionCutoverTests(Fixture):
         self.role(decision_events=())
         self.assertEqual(ctx._op_decision_read({'ack_token': row['ack_token'], 'limit': 20}), original)
         store = delivery.store(ctx)
-        path = self.project.root / store._record_name(row['ref']['record_id'])
+        path = self.project.root / store.record_name(row['ref']['record_id'])
         path.write_bytes(path.read_bytes() + b' ')
         with self.assertRaises(Denied): ctx._op_decision_read({'ack_token': row['ack_token']})
 

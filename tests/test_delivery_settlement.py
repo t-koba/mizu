@@ -639,7 +639,7 @@ class DeliverySettlementTests(Fixture):
         row = settlement._read(self.project.root, result['run'])
         entry = row['manifests']['operator'][0]
         store = shared_records.SharedRecords(self.project.root)
-        source = self.project.root / store._record_name(entry['record_id'])
+        source = self.project.root / store.record_name(entry['record_id'])
         original = source.read_bytes()
         self.project.set_control(paused=True)
 
@@ -682,7 +682,7 @@ class DeliverySettlementTests(Fixture):
         run = result['run']
         row = settlement._read(self.project.root, run)
         store = shared_records.SharedRecords(self.project.root)
-        record = self.project.root / store._record_name(row['manifests']['operator'][0]['record_id'])
+        record = self.project.root / store.record_name(row['manifests']['operator'][0]['record_id'])
         run_link = self.project.root / 'runs' / run / 'pinned-evidence-link'
         self.project.set_control(paused=True)
         cases = ((run_link, self.root / 'run-link-target', 'run-link.tar.gz'),

@@ -453,6 +453,11 @@ mizu storage demo --apply                   # 未参照マニフェストと孤�
 
 ### Migrate flat shared records
 
+The runtime no longer reads flat shared records. If an installation still has
+these files, pause each affected project and run
+`mizu migrate-records <project> --apply` before upgrading. Installation does not
+run this migration automatically.
+
 ```bash
 mizu migrate-records demo          # read-only preview (default)
 mizu pause demo
@@ -463,8 +468,7 @@ This operator command inspects only top-level `shared-records/*.json` in the
 project's private data directory. It examines at most 1,000 directory entries
 (including non-JSON entries), never recurses, and reports `truncated: true`
 when it reaches the budget. It uses the store's byte bound and current kind
-and writer validators. Runtime readers still accept flat files; removing that
-support is a separate change. Installation does not run this migration.
+and writer validators.
 
 The JSON report gives `entries_examined`, `candidates` and `converted` counts,
 `records` with project-relative flat and canonical paths and the SHA-256 of

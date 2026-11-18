@@ -136,7 +136,14 @@ class RecordMigrationTests(Fixture):
         flat, shard = self.paths(ci, foreign["id"])
         flat.write_bytes(canonical(foreign))
         refs = self.project.root / DIRECTORY
-        before = catalog(self.shared)
+        # Seed the same disposable projections an older runtime would have built.
+        projected = dict(self.envelope, payload=dict(self.envelope["payload"], body=""))
+        expected = digest(self.raw)
+        before = {self.envelope["id"]: (projected, expected)}
+        refs.mkdir()
+        (refs / self.flat.name).write_bytes(canonical(dict(envelope=projected, digest=expected)))
+        foreign_ref = dict(envelope=dict(foreign, subject={}, payload={}), digest=digest(canonical(foreign)))
+        (refs / flat.name).write_bytes(canonical(foreign_ref))
         self.assertEqual({ref.name for ref in refs.iterdir()}, {self.flat.name, flat.name})
 
         report = record_migration.apply(self.project)

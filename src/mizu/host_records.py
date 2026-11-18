@@ -139,8 +139,7 @@ def write_publisher(project, *, kind, subject, payload):
         record_id = _id(kind, subject)
         envelope = dict(schema=1, id=record_id, kind=kind, writer=PUBLISHER,
                         created_at=now(), subject=subject, payload=payload)
-        existing = any(shared._read(name, RECORD_BYTES) is not None
-                       for name in shared._record_names(record_id))
+        existing = shared._read(shared.record_name(record_id), RECORD_BYTES) is not None
         if existing:
             envelope['created_at'] = shared.get(record_id)[0]['created_at']
         # _validate has resolved each exact snapshot and digest. Do not require
@@ -191,8 +190,7 @@ def write_role(context, args):
     with lock(context.project.root / 'locks' / 'role-records.lock'):
         envelope = dict(schema=1, id=record_id, kind=kind, writer=writer,
                         created_at=now(), subject=subject, payload=payload)
-        existing = any(shared._read(name, RECORD_BYTES) is not None
-                       for name in shared._record_names(record_id))
+        existing = shared._read(shared.record_name(record_id), RECORD_BYTES) is not None
         if existing:
             envelope['created_at'] = shared.get(record_id)[0]['created_at']
         computed = shared.put(envelope, writer=writer)
@@ -242,9 +240,9 @@ def read_role(context, args):
 
 def _sync(shared, record_id):
     # Repair a prior create-only write whose final directory sync failed.
-    for name in shared._record_names(record_id):
-        if shared._read(name, RECORD_BYTES) is not None:
-            sync_dir((shared.root / name).parent)
+    name = shared.record_name(record_id)
+    if shared._read(name, RECORD_BYTES) is not None:
+        sync_dir((shared.root / name).parent)
 
 
 def publication_result(work_items, item, *, sync=True):
@@ -263,7 +261,7 @@ def publication_result(work_items, item, *, sync=True):
         if policy['route'] != 'publication_wait' or not policy['wake']:
             continue
         record_id = _id(kind, subject)
-        if not any(shared._read(name, RECORD_BYTES) is not None for name in shared._record_names(record_id)):
+        if shared._read(shared.record_name(record_id), RECORD_BYTES) is None:
             continue
         envelope, computed = shared.get(record_id)
         payload = envelope['payload']

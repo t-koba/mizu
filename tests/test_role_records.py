@@ -46,7 +46,7 @@ class RoleRecordTests(Fixture):
         self.assertEqual(record['id'], 'role/worker/role.note/note1')
         self.assertEqual(computed, digest(canonical(record)))
         shared = self.shared()
-        path = self.project.root / shared._record_name(record['id'])
+        path = self.project.root / shared.record_name(record['id'])
         self.assertEqual(path.read_bytes(), canonical(record))
         replay = {**ARGS, 'subject': '{ "topic": "fixture" }',
                   'payload': '{"n":1,"body":"A note"}'}

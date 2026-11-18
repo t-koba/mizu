@@ -132,7 +132,7 @@ class OperatorQuestionTests(Fixture):
         # Trusted low-level fixtures model stale/misrouted historical evidence;
         # the public write route already refuses these subjects.
         template = self.answer(subject)['record']
-        path = shared.root / shared._record_name(template['id'])
+        path = shared.root / shared.record_name(template['id'])
         ref = shared.root / 'operator-record-index' / path.name
         path.unlink()
         ref.unlink()
@@ -193,8 +193,10 @@ class OperatorQuestionTests(Fixture):
             page = records.questions(self.project, limit=1, scan_limit=2)
         self.assertEqual((len(page['questions']), page['scanned'], page['truncated']), (1, 2, True))
         self.assertEqual(read.call_count, 2)
-        with self.assertRaises(LimitExceeded):
-            records.questions(self.project, limit=10, scan_limit=1)
+        # An empty closure catalog no longer spends budget on unrelated partitions.
+        one = records.questions(self.project, limit=10, scan_limit=1)
+        self.assertEqual((len(one['questions']), one['scanned'], one['truncated']), (1, 1, True))
+        self.assertFalse(one['questions'][0]['closed'])
         full = records.questions(self.project, limit=10, scan_limit=10)
         self.assertEqual((len(full['questions']), full['truncated']), (4, False))
         self.assertEqual(full, records.questions(self.project, limit=10, scan_limit=10))
@@ -218,7 +220,7 @@ class OperatorQuestionTests(Fixture):
     def test_listing_skips_a_live_atomic_write_stage(self):
         shared = self.shared()
         record_id = 'role/worker/role.question/question-active'
-        record_path = shared.root / shared._record_name(record_id)
+        record_path = shared.root / shared.record_name(record_id)
         original_posix_publish = fs._rename_exclusive_posix
         original_windows_publish = fs.os.rename
         observed = []
@@ -247,7 +249,7 @@ class OperatorQuestionTests(Fixture):
     def test_listing_skips_orphan_atomic_stages_and_counts_them_in_scan_budget(self):
         question = self.question()
         shared = self.shared()
-        record_path = shared.root / shared._record_name(question['record']['id'])
+        record_path = shared.root / shared.record_name(question['record']['id'])
         # Simulate a process interruption after atomic_write created its stage.
         staging = record_path.parent / f"{ATOMIC_WRITE_TEMP_PREFIX}interrupted"
         staging.write_bytes(b"partial record bytes")
@@ -290,7 +292,7 @@ class OperatorQuestionTests(Fixture):
         self.assertEqual([row['subject'] for row in page['questions']], [self.subject(question)])
         self.assertEqual(read.call_count, 2)
         # A corrupt *scanned* source never becomes a complete empty result.
-        path = shared.root / shared._record_name(question['record']['id'])
+        path = shared.root / shared.record_name(question['record']['id'])
         path.write_text('{}')
         with self.assertRaises(Denied):
             records.questions(self.project, limit=20, scan_limit=1000)
@@ -314,7 +316,7 @@ class OperatorQuestionTests(Fixture):
         records.bind(context)
         token = context.operator_record_manifest[0].ack_token
         shared = self.shared()
-        path = shared.root / shared._record_name(subject['id'])
+        path = shared.root / shared.record_name(subject['id'])
         envelope, _ = shared.get(subject['id'])
         envelope['payload']['body'] = 'Changed after answer'
         path.write_bytes(canonical(envelope))

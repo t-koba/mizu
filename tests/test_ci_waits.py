@@ -262,7 +262,7 @@ class CiWaitTests(CiWaitFixture):
         context = self.delivery_context()
         shared = ci_waits.shared_store(self.store)
         envelope, _ = shared.get(context.ci_wait_manifest[0].record_id)
-        shared_path = self.project.root / shared._record_names(envelope["id"])[0]
+        shared_path = self.project.root / shared.record_name(envelope["id"])
         write_json(shared_path, {**envelope, "payload": {**envelope["payload"], "wait_digest": "0" * 64}})
         self.assertEqual(self.store.page_ready()["unknown_blocked"], 1)
         write_json(shared_path, envelope)

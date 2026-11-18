@@ -1181,7 +1181,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         records = host_record_store(
             root, project.snapshots, project.config.record_kinds).records(
                 namespace="host", scan_limit=host_record_scan_limit,
-                scan_progress=host_record_scan, include_legacy=True)
+                scan_progress=host_record_scan)
         try:
             for envelope, _ in records:
                 # The host partition may hold a canonically stored record of

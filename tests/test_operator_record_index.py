@@ -22,7 +22,7 @@ class OperatorRecordIndexTests(Fixture):
 
     def paths(self, result):
         shared = records.store(self.project)
-        name = shared._record_name(result['record']['id'])
+        name = shared.record_name(result['record']['id'])
         return self.project.root / name, self.project.root / index.DIRECTORY / Path(name).name
 
     def test_unrelated_large_bodies_and_closure_targets_are_not_decoded(self):
@@ -230,32 +230,6 @@ class OperatorRecordIndexTests(Fixture):
         ref.unlink()
         self.assertEqual(self.pending()['pending_count'], 1)
 
-    def test_flat_legacy_replay_other_namespaces_and_duplicates(self):
-        row = self.notice()
-        path, ref = self.paths(row)
-        shared = records.store(self.project)
-        legacy = self.project.root / shared._legacy_record_name(row['record']['id'])
-        path.rename(legacy)
-        ref.unlink()
-        # A flat file from another source must not be mistaken for an operator
-        # event, but its filename/content identity must still be checked.
-        other = copy.deepcopy(row['record'])
-        other.update(id='decision/sample/event', kind='insight.decision', payload={'body': 'x' * 32000})
-        other_path = self.project.root / shared._legacy_record_name(other['id'])
-        other_path.write_bytes(canonical(other))
-        self.assertEqual(self.pending()['pending_count'], 1)
-        self.assertEqual(self.notice(), row)
-        self.assertFalse(path.exists())  # exact legacy replay never copies it
-        path.write_bytes(legacy.read_bytes())
-        self.assertEqual(self.pending()['pending_count'], 1)
-        path.write_bytes(legacy.read_bytes().replace(b'Notice', b'Change'))
-        with self.assertRaises(Denied):
-            self.pending()
-        path.unlink()
-        other_path.write_bytes(other_path.read_bytes().replace(b'event', b'wrong'))
-        with self.assertRaises(Denied):
-            self.pending()
-
     def test_disabled_kind_still_checked_when_another_kind_enabled(self):
         row = self.notice()
         path, _ = self.paths(row)
@@ -276,10 +250,10 @@ class OperatorRecordIndexTests(Fixture):
             shared.put(envelope, writer=records.WRITER)
         with self.assertRaises(Denied):
             self.pending('worker')
-        second = self.project.root / shared._record_name('operator/sample/close-two')
+        second = self.project.root / shared.record_name('operator/sample/close-two')
         second.unlink()
         (self.project.root / index.DIRECTORY / second.name).unlink()
-        first = self.project.root / shared._record_name('operator/sample/close-one')
+        first = self.project.root / shared.record_name('operator/sample/close-one')
         first_ref = self.project.root / index.DIRECTORY / first.name
         changed = loads_finite(first.read_bytes())
         changed['payload']['addressee'] = 'worker'

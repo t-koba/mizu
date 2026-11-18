@@ -169,7 +169,7 @@ class RecordWaitTests(Fixture):
         item = self.block()
         answer = self.answer()['record']
         shared = records.store(self.project)
-        name = shared._record_name(answer['id'])
+        name = shared.record_name(answer['id'])
         path = shared.root / name
         index = shared.root / 'operator-record-index' / name.rsplit('/', 1)[-1]
         # Authenticate alternate fixtures through canonical validation, not a mocked lookup.

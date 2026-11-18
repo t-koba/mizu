@@ -52,9 +52,8 @@ def _bounded(value, maximum):
 
 
 def _has_shared_record(store, record_id):
-    """Check both canonical and pre-partition identities before treating a receipt as orphaned."""
-    return any(store._read(name, RECORD_BYTES) is not None
-               for name in store._record_names(record_id))
+    """Check the canonical record before treating a receipt as orphaned."""
+    return store._read(store.record_name(record_id), RECORD_BYTES) is not None
 
 
 @contextmanager

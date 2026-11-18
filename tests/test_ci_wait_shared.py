@@ -194,7 +194,7 @@ class SharedCiWaitTests(CiWaitFixture):
         context = self.context()
         entries = {e["work_item"]: entry for e, entry in zip(context.wait_events, context.ci_wait_manifest)}
         shared = ci_waits.shared_store(self.store)
-        record = self.store.root / shared._record_name(entries[a["id"]].record_id)
+        record = self.store.root / shared.record_name(entries[a["id"]].record_id)
         source = ci_waits._path(self.store, a)
         for path in (source, record):
             raw = path.read_bytes()
@@ -474,7 +474,7 @@ class SharedCiWaitTests(CiWaitFixture):
         context = self.context()
         entry = context.ci_wait_manifest[0]
         shared = ci_waits.shared_store(self.store)
-        path = self.store.root / shared._record_name(entry.record_id)
+        path = self.store.root / shared.record_name(entry.record_id)
         record = json.loads(path.read_bytes())
         record["subject"]["rev"] = float(record["subject"]["rev"])
         path.write_bytes(canonical(record))
