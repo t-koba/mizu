@@ -185,12 +185,23 @@ The model-facing object and event tools are generic:
 | `objects_create(kind, fields)` | Create an object of a declared kind if the caller may create it |
 | `objects_transition(kind, id, transition, expected_rev, fields)` | Make a declared transition; refused with the failed requirement named |
 | `objects_read(kind, id, rev?)` | Read the current or a given revision |
-| `objects_list(kind, state?, where?, cursor?)` | List current objects, bounded and paged |
-| `events_read(cursor?)` | Read subscribed events after the role's cursor, bounded |
+| `objects_list(kind, state?, where?, cursor?, limit?)` | List current objects, bounded and paged |
+| `events_read(cursor?, limit?)` | Read subscribed events after the role's cursor, bounded |
 | `events_ack(seq)` | Advance the role's cursor |
 
 Grants: `objects` and `events` capabilities in the role's capability list;
-per-kind and per-transition principals in the kind declaration.
+per-kind and per-transition principals in the kind declaration. No role holds
+either grant by default. The host binds the acting principal as `role:<name>`
+and binds every event read and acknowledgement to that role; tools carry no
+actor or role argument.
+
+Object ids are kernel-assigned 32-hex strings. `objects_list` orders by id;
+`cursor` is the last id of the previous page (`next`, exclusive), `state`
+filters by declared state name and `where` matches exact field values.
+`events_read` starts after the role's durable cursor, or after `cursor` (a
+previous page's `next`) when supplied, and returns `next`, `head` and `more`.
+Both pages default to 64 rows and are capped at 512; `objects_read` and
+`events_ack` refuse out-of-range revisions and sequences.
 
 ## Drivers
 
@@ -204,6 +215,10 @@ policy; none of them is a kernel concept.
 
 ## Bounds
 
-All bounds are configuration with documented defaults: object and field
-sizes, page sizes, event page sizes, log retention. Reads are bounded per
-response, never in total reachability.
+Bounds are either fixed mechanism limits or configuration with documented
+defaults: object and field sizes, page sizes, event page sizes, log retention.
+Reads are bounded per response, never in total reachability. Current mechanism
+defaults are a 1 MiB + 4 KiB object record, a 64 KiB event and 100,000,000
+revisions per object; tool pages default to 64 rows and are capped at 512.
+A tool field map holds at most 64 properties; declared field types and their
+own bounds are authoritative.

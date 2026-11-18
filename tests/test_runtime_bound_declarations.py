@@ -264,6 +264,11 @@ POLICY_DEFAULTS = {
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'protocol.py': {
+        'KERNEL_FIELD_MAP_MAX': (
+            '64', 'safety',
+            'kernel tool field maps / bounded generic property count before declared-field validation'),
+    },
     'acceptance.py': {
         'MAX_BYTES': (
             '1048576', 'safety',
@@ -1770,6 +1775,10 @@ PARAMETER_DEFAULTS = {
         '8192', 'policy', 'check jobs / caller-selected evidence page length'),
     ('check_jobs.py', 'result', 'wait_seconds'): (
         '0', 'mechanism', 'check jobs / zero means no in-unit wait, preserving the immediate-return result path for existing callers'),
+    ('kernel/events.py', 'EventLog.pending', 'limit'): (
+        '64', 'mechanism', 'kernel events / default subscribed-event page, capped by PAGE_MAX'),
+    ('kernel/objects.py', 'Objects.list', 'limit'): (
+        '64', 'mechanism', 'kernel objects / default object page, capped by PAGE_MAX'),
     ('ci_requests.py', 'CiRequests.daily', 'limit'): (
         '100', 'policy', 'CI requests / caller-selected daily request projection size'),
     ('ci_requests.py', 'CiRequests.page', 'limit'): (

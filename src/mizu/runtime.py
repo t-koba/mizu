@@ -86,6 +86,7 @@ from . import reviews
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
+from . import kernel_tools
 from . import work_item_operations
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
@@ -371,7 +372,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen",
-                               "work_order", "record_write", "review_verdict"})
+                               "work_order", "record_write", "objects", "events", "review_verdict"})
 
 
 #: Capabilities a delegation child must never hold. The child works in the
@@ -385,7 +386,7 @@ DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
                                 "work_items_create", "work_items_transition", "work_items_reopen",
-                                "work_order", "record_write", "review_verdict"})
+                                "work_order", "record_write", "objects", "events", "review_verdict"})
 
 
 def check_delegate_role(role_name: str, role) -> None:
@@ -1357,6 +1358,24 @@ class Context(ContextFinishMixin):
     def _op_work_order(self, args: dict) -> dict:
         return work_order_ops.record(self, args)
 
+    def _op_objects_create(self, args: dict) -> dict:
+        return kernel_tools.objects_create(self, args)
+
+    def _op_objects_transition(self, args: dict) -> dict:
+        return kernel_tools.objects_transition(self, args)
+
+    def _op_objects_read(self, args: dict) -> dict:
+        return kernel_tools.objects_read(self, args)
+
+    def _op_objects_list(self, args: dict) -> dict:
+        return kernel_tools.objects_list(self, args)
+
+    def _op_events_read(self, args: dict) -> dict:
+        return kernel_tools.events_read(self, args)
+
+    def _op_events_ack(self, args: dict) -> dict:
+        return kernel_tools.events_ack(self, args)
+
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
         return write_role(self, args)
@@ -2029,6 +2048,9 @@ class Context(ContextFinishMixin):
         "work_items_transition": _op_work_items_transition,
         "work_items_reopen": _op_work_items_reopen,
         "work_order": _op_work_order,
+        "objects_create": _op_objects_create, "objects_transition": _op_objects_transition,
+        "objects_read": _op_objects_read, "objects_list": _op_objects_list,
+        "events_read": _op_events_read, "events_ack": _op_events_ack,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "attach_evidence": _op_attach_evidence,

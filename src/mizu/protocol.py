@@ -10,6 +10,8 @@ from .insights import QUESTION_RECORD_ROUTE
 from .work_item_seed import MAX_DECISION_TASKS
 from .prompt_sections import WORK_CAPABILITIES
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
+from .kernel.events import PAGE_MAX as EVENT_PAGE_MAX
+from .kernel.objects import PAGE_MAX as OBJECT_PAGE_MAX, REVISION_MAX
 
 
 def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
@@ -95,6 +97,21 @@ SCRATCH_PATHS_SCHEMA = {"type": "array", "uniqueItems": True, "maxItems": 32,
 
 #: Caller-selected execution mode for ordinary exec/experiment calls.
 MODE_SCHEMA = {"type": "string", "enum": ["sync", "async"]}
+
+#: Generic kernel tool bounds. Names, kinds and object ids share the kernel
+#: declaration syntax; free-form field/where maps are validated fully by the
+#: kernel against the declared kind, here only by shape and property count.
+KERNEL_NAME_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 63,
+                      "pattern": "^[a-z][a-z0-9_-]{0,62}$"}
+KERNEL_ID_SCHEMA = {"type": "string", "minLength": 32, "maxLength": 32,
+                    "pattern": "^[0-9a-f]{32}$"}
+KERNEL_REV_SCHEMA = {"type": "integer", "minimum": 1, "maximum": REVISION_MAX}
+KERNEL_LIMIT_SCHEMA = {"type": "integer", "minimum": 1, "maximum": OBJECT_PAGE_MAX}
+EVENT_LIMIT_SCHEMA = {"type": "integer", "minimum": 1, "maximum": EVENT_PAGE_MAX}
+KERNEL_CURSOR_SCHEMA = {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+KERNEL_FIELD_MAP_MAX = 64
+KERNEL_FIELDS_SCHEMA = {"type": "object", "maxProperties": KERNEL_FIELD_MAP_MAX,
+                        "additionalProperties": True}
 
 #: Bounded ordered custom commands for check_job start; each entry shares the single-script bound.
 CHECK_COMMANDS_SCHEMA = {"type": "array", "minItems": 1, "maxItems": 32,
@@ -651,6 +668,42 @@ DEFINITIONS = {
                     "Use the cursor and offset in the result's continue field.",
                     obj({"cursor": text(32), "offset": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}},
                         ("cursor", "offset"))),
+    "objects_create": ("Create an object of a declared kind. The host binds your role as the actor; "
+                       "no actor may be supplied. Fields must match the kind's declared types and include "
+                       "its required fields; undeclared kinds and fields are refused. Creation appends "
+                       "the kind's created event.",
+                       obj({"kind": KERNEL_NAME_SCHEMA, "fields": KERNEL_FIELDS_SCHEMA},
+                           ("kind", "fields"))),
+    "objects_transition": ("Make a declared transition on an object. Supply expected_rev from a read; a "
+                           "stale revision, a transition not allowed from the current state, a principal "
+                           "the kind does not permit, or an unmet requirement is refused, naming the "
+                           "failed requirement. fields may only set fields the transition declares. "
+                           "The host binds the actor. The transition appends its declared event.",
+                           obj({"kind": KERNEL_NAME_SCHEMA, "id": KERNEL_ID_SCHEMA,
+                                "transition": KERNEL_NAME_SCHEMA, "expected_rev": KERNEL_REV_SCHEMA,
+                                "fields": KERNEL_FIELDS_SCHEMA},
+                               ("kind", "id", "transition", "expected_rev"))),
+    "objects_read": ("Read the current or a numbered revision of an object of a declared kind. "
+                     "A revision that does not exist is refused.",
+                     obj({"kind": KERNEL_NAME_SCHEMA, "id": KERNEL_ID_SCHEMA,
+                          "rev": KERNEL_REV_SCHEMA}, ("kind", "id"))),
+    "objects_list": ("List current objects of a declared kind ordered by id, optionally filtered by "
+                     "state and exact field values. cursor is the last object id of a previous next "
+                     "(exclusive); pass next as cursor for the following page. next is null on the "
+                     "last page. limit defaults to 64 and is at most 512.",
+                     obj({"kind": KERNEL_NAME_SCHEMA, "state": KERNEL_NAME_SCHEMA,
+                          "where": KERNEL_FIELDS_SCHEMA, "cursor": KERNEL_ID_SCHEMA,
+                          "limit": KERNEL_LIMIT_SCHEMA}, ("kind",))),
+    "events_read": ("Read events matching your role's configured subscriptions, oldest first. "
+                    "Reads start after your role's durable cursor, or after cursor (a previous "
+                    "next) when supplied; unacknowledged events are delivered again. next, head "
+                    "and more locate and bound the page; limit defaults to 64 and is at most 512. "
+                    "The host binds the role; no role may be supplied.",
+                    obj({"cursor": KERNEL_CURSOR_SCHEMA, "limit": EVENT_LIMIT_SCHEMA})),
+    "events_ack": ("Advance your role's durable event cursor to seq, which must not exceed the "
+                   "current head. Cursors only move forward; the host binds the role, so no "
+                   "other role's cursor can be advanced.",
+                   obj({"seq": KERNEL_CURSOR_SCHEMA}, ("seq",))),
     "finish": finish_definition(FINISH_OUTCOMES),
 }
 
@@ -663,18 +716,30 @@ STATE_READ_CAPABILITIES = {
     "report_read": frozenset({"report"}),
 }
 
+#: Several generic kernel tools share one capability: the grant names the
+#: part of the kernel, not each operation over it.
+KERNEL_CAPABILITIES = {
+    "objects_create": frozenset({"objects"}),
+    "objects_transition": frozenset({"objects"}),
+    "objects_read": frozenset({"objects"}),
+    "objects_list": frozenset({"objects"}),
+    "events_read": frozenset({"events"}),
+    "events_ack": frozenset({"events"}),
+}
+
 
 def operation_allowed(operation: str, capabilities) -> bool:
     if operation not in DEFINITIONS:
         return False
-    gates = STATE_READ_CAPABILITIES.get(operation)
+    gates = STATE_READ_CAPABILITIES.get(operation) or KERNEL_CAPABILITIES.get(operation)
     return bool(gates & set(capabilities)) if gates is not None else operation in capabilities
 
 
 def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
                      config: Config | None = None) -> list[dict]:
     operations = [name for name in capabilities if name in DEFINITIONS]
-    operations += [name for name in STATE_READ_CAPABILITIES
+    indirect = (*STATE_READ_CAPABILITIES, *KERNEL_CAPABILITIES)
+    operations += [name for name in indirect
                    if name not in capabilities and operation_allowed(name, capabilities)]
     tools = []
     for name in operations:

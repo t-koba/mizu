@@ -84,7 +84,19 @@ class Objects:
     def list(self, kind: str, *, state: str | None = None, where: Mapping[str, Any] | None = None,
              limit: int = 64, after: str | None = None) -> dict:
         """Current objects of a kind ordered by id, filtered, one bounded page."""
-        self._kind(kind)
+        declaration = self._kind(kind)
+        if state is not None and state not in declaration.states:
+            raise Denied(f"Undeclared state {state!r} for {kind}")
+        if where is not None:
+            if not isinstance(where, Mapping):
+                raise Denied("where must be an object")
+            unknown = set(where) - set(declaration.fields)
+            if unknown:
+                raise Denied(f"Undeclared fields in where: {', '.join(sorted(unknown))}")
+            where = {name: declaration.fields[name].validate(value)
+                     for name, value in where.items()}
+        if after is not None and (not isinstance(after, str) or not _ID.fullmatch(after)):
+            raise Denied("cursor must be an object id")
         if type(limit) is not int or not 1 <= limit <= PAGE_MAX:
             raise Denied(f"limit must be from 1 to {PAGE_MAX}")
         try:

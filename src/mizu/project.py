@@ -18,6 +18,7 @@ from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .check_job_index import CHECK_JOBS, CheckJobSource
 from .insights import Insights
+from .kernel import EventLog, Objects
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
                        progress_disposition, progress_projection, validate_progress)
@@ -133,6 +134,11 @@ class Project:
         self.workspace = self.root / "workspace"
         self._settings_read_only = read_only
         self.refresh_settings()
+        # Kernel stores are project-local, not per dispatch. Only roles enabled
+        # for this project subscribe; construction does no disk I/O or writes.
+        self.kernel_events = EventLog(
+            self.root, {name: config.roles[name].subscribe for name in self.roles})
+        self.kernel_objects = Objects(self.root, config.kinds, self.kernel_events)
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days,
                                  producer_inputs_per_source=config.limits.producer_inputs_per_source,
@@ -173,6 +179,8 @@ class Project:
         """Disable stale project authority after a settings read or validation failure."""
         self.settings = {}
         self.roles = []
+        if hasattr(self, "kernel_events"):
+            self.kernel_events.subscriptions = {}
         self.verify = ()
         self.recorded_batches = {}
         self.lineage_target = None
@@ -205,6 +213,9 @@ class Project:
             raise
         self.settings = settings
         self.roles = roles
+        if hasattr(self, "kernel_events"):
+            self.kernel_events.subscriptions = {
+                name: self.config.roles[name].subscribe for name in roles}
         self.verify = verify
         self.recorded_batches = recorded_batches
         self.lineage_target = lineage_target

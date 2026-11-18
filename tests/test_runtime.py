@@ -356,6 +356,15 @@ class ContextTests(Fixture):
         with self.assertRaises(ConfigError):
             check_delegate_role("helper", dataclasses.replace(
                 delegate, capabilities=(*delegate.capabilities, "work_items_transition")))
+        for capability in ("objects", "events"):
+            self.assertIn(capability, CONSULT_FORBIDDEN)
+            self.assertIn(capability, DELEGATE_FORBIDDEN)
+            with self.assertRaises(ConfigError):
+                check_consult_role("consult", dataclasses.replace(
+                    consult, capabilities=(*consult.capabilities, capability)))
+            with self.assertRaises(ConfigError):
+                check_delegate_role("helper", dataclasses.replace(
+                    delegate, capabilities=(*delegate.capabilities, capability)))
 
     def test_work_items_transition_preserves_store_wait_and_completion_checks(self):
         item = self._accepted_work_item()
