@@ -18,9 +18,9 @@ def is_private_name(name: str) -> bool:
     """
     return name in PRIVATE or name.startswith(".env")
 
-#: Versioned schema for the offline source-gate report reused by core-only
-#: installation. Both scripts/check.py (producer) and scripts/install.py
-#: (consumer) bind to this exact version; a mismatch is stale, not compatible.
+#: Versioned schema for the offline source-suite report. scripts/check.py is
+#: the sole producer of this versioned receipt; the installer does not consume
+#: it. A version mismatch marks a retained report stale, not compatible.
 OFFLINE_REPORT_VERSION = 1
 
 

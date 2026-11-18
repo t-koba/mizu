@@ -2941,6 +2941,43 @@ class InstallerStagingTests(unittest.TestCase):
         self.assertNotIn("checks_provenance", receipt)
         self.assertNotIn("validation", receipt)
 
+    def _valid_staged_release(self, root):
+        """Build a minimal release that passes verify_release's integrity checks."""
+        release = root / "release"
+        (release / "src").mkdir(parents=True)
+        (release / "src/probe.py").write_bytes(b"PROBE = 1\n")
+        manifest = INSTALLER.source_manifest(release)
+        INSTALLER.write_json(release / "source-manifest.json", manifest)
+        INSTALLER.write_json(release / "installation.json",
+                             {"source_sha256": INSTALLER.digest(INSTALLER.canonical(manifest)),
+                              "mode": "core-only"})
+        return release
+
+    def test_verify_release_rejects_tampered_source_file(self):
+        # mode-agnostic replacement for a deleted test_install_ci.py guard:
+        # actual_manifest != manifest is the last gate before promote() swaps
+        # the current link; a regression dropping it must fail this test.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            release = self._valid_staged_release(Path(tmp))
+            INSTALLER.verify_release(release)
+            (release / "src/probe.py").write_bytes(b"TAMPERED = 1\n")
+            with self.assertRaisesRegex(INSTALLER.Denied, "source files do not match"):
+                INSTALLER.verify_release(release)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX symlink support")
+    def test_verify_release_accepts_symlinked_prefix_ancestor(self):
+        # mode-agnostic replacement for a deleted test_install_ci.py guard:
+        # macOS /var -> /private/var style prefix ancestors must not break
+        # verification of an otherwise valid staged release.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release = self._valid_staged_release(root)
+            alias = root / "prefix-alias"
+            alias.symlink_to(release.parent, target_is_directory=True)
+            INSTALLER.verify_release(alias / release.name)
+
     def test_ci_installer_lifecycle_has_no_source_gate_wiring(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("run: ./scripts/test-install.sh\n", workflow)
