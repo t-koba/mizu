@@ -527,6 +527,9 @@ DECLARATIONS = {
             '1 << 20', 'safety',
             'publication / bounded writer-owned receipt key index read'),
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
+        'RECEIPT_VALIDATION_CACHE_LIMIT': (
+            '128', 'mechanism',
+            'publication / bounded process-local receipt validation reuse; eviction only revalidates'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
         'REFERENCE_CHARS': (
             '256', 'format',

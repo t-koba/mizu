@@ -6,13 +6,14 @@ import dataclasses
 import json
 import io
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from support import Fixture, set_project_target
+from mizu import publication
 from mizu.cli import execute, parser
 from mizu.config import PublicationEvidence
 from mizu.errors import Denied
-from mizu.fs import mkdir
+from mizu.fs import canonical, digest, mkdir
 from mizu.publication import Publication
 from mizu.distribution import public_source_identity
 from mizu.runtime import Context
@@ -882,3 +883,307 @@ class LineageTargetExternalTests(Fixture):
                 "--lineage", json.dumps(bad)]))
         listed = execute(parser().parse_args(["--config", str(self.file), "publication", "list", "sample"]))
         self.assertIn(record["publication_id"], [r["publication_id"] for r in listed["publications"]])
+
+
+class ReceiptValidationReuseTests(Fixture):
+    """Validation reuse keyed by the exact publication receipt bytes."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.project.root
+        self.directory = self.root / "evidence" / "publications"
+        self.policy = PublicationEvidence()
+        publication._VALIDATED_RECEIPTS.clear()
+
+    @property
+    def index_path(self):
+        return (self.root / "evidence" / publication.KEY_INDEX_DIR
+                / publication.KEY_INDEX_FILE)
+
+    def record(self, **overrides):
+        arguments = {"branch": BRANCH, "published_sha": SHA, "code_digest": DIGEST,
+                     "approval": APPROVAL, "projection": public_source_identity({})}
+        arguments.update(overrides)
+        record = Publication.record_external(self.root, **arguments)
+        # The writer's index build validates the receipt it just wrote. Start
+        # these reuse tests with that validation out of the process cache.
+        publication._VALIDATED_RECEIPTS.clear()
+        return record
+
+    def lookup(self, *, branch=BRANCH, code_digest=DIGEST):
+        return Publication.receipt_for_key(self.root, branch, code_digest,
+                                           policy=self.policy)
+
+    def counted_parses(self):
+        """Count receipt parse/validation work without changing its result."""
+        calls = []
+        real = publication._parse_record
+
+        def counted(raw, kind, publication_id):
+            calls.append((kind, publication_id, digest(raw)))
+            return real(raw, kind, publication_id)
+
+        return patch.object(publication, "_parse_record", side_effect=counted), calls
+
+    def cache_keys(self, publication_id):
+        return [key for key in publication._VALIDATED_RECEIPTS
+                if key[0] == str(self.directory) and key[1] == publication_id]
+
+    def no_enumeration(self):
+        labels = ("directory enumerated", "strict rescan", "index rebuilt")
+        mocks = tuple(Mock(side_effect=AssertionError(label)) for label in labels)
+        patches = tuple(patch.object(Publication, attribute, new=mock)
+                        for attribute, mock in zip(
+                            ("_receipt_names", "_scan_receipts", "_build_key_index"), mocks))
+        return patches, mocks
+
+    def test_key_lookup_validates_the_index_witness_byte_read(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        publication._VALIDATED_RECEIPTS.clear()
+        reads = []
+        real_read = publication.safe_read
+
+        def counted(root, name, maximum):
+            reads.append(name)
+            return real_read(root, name, maximum)
+
+        with patch.object(publication, "safe_read", side_effect=counted):
+            self.assertEqual(self.lookup(), publication_id)
+            self.assertEqual(self.lookup(), publication_id)
+        # One bounded read per lookup, not a second read for validation: the
+        # indexed digest, cache key and parsed record all describe those bytes.
+        self.assertEqual(reads.count(publication_id + ".external.json"), 2)
+
+    def test_external_receipt_validates_once_for_strict_reads_and_key_lookup(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        raw = (self.directory / (publication_id + ".external.json")).read_bytes()
+        counted, calls = self.counted_parses()
+        with counted:
+            for _ in range(2):
+                self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+                self.assertEqual(Publication.list_receipts(self.root, strict=True)["total"], 1)
+                self.assertEqual(self.lookup(), publication_id)
+        self.assertEqual(calls, [("external", publication_id, digest(raw))])
+        self.assertEqual(
+            self.cache_keys(publication_id),
+            [(str(self.directory), publication_id, (("external", digest(raw)),))])
+
+    def test_changed_receipt_bytes_revalidate_and_fail_closed(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        path = self.directory / (publication_id + ".external.json")
+        original = path.read_bytes()
+        changed = original.replace(
+            b'"published_sha":"' + SHA.encode() + b'"',
+            b'"published_sha":"' + OTHER_SHA.encode() + b'"')
+        self.assertNotEqual(changed, original)
+        counted, calls = self.counted_parses()
+        with counted:
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+            path.write_bytes(changed)
+            with self.assertRaises(Denied):
+                Publication.read_receipt(self.root, publication_id)
+            with self.assertRaises(Denied):
+                Publication.list_receipts(self.root, strict=True)
+            with self.assertRaises(Denied):
+                self.lookup()
+            # Strict listing revalidates too: failures are never cached.
+            self.assertEqual([call[2] for call in calls],
+                             [digest(original), digest(changed), digest(changed)])
+            not_cached = [key for key in self.cache_keys(publication_id)
+                          if any(part[1] == digest(changed) for part in key[2])]
+            self.assertEqual(not_cached, [])
+            # A failed validation is never cached: every read parses again.
+            with self.assertRaises(Denied):
+                Publication.read_receipt(self.root, publication_id)
+            self.assertEqual(len(calls), 4)
+            path.write_bytes(original)
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+            # The original bytes still have their cached validation.
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(self.lookup(), publication_id)
+
+    def test_corrupt_evidence_is_never_served_from_cache(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        path = self.directory / (publication_id + ".external.json")
+        original = path.read_bytes()
+        with self.counted_parses()[0]:
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+        corrupt = original[:len(original) // 2]
+        path.write_bytes(corrupt)
+        counted, calls = self.counted_parses()
+        with counted:
+            for read in (lambda: Publication.read_receipt(self.root, publication_id),
+                         lambda: Publication.list_receipts(self.root, strict=True),
+                         self.lookup):
+                with self.assertRaises(Denied):
+                    read()
+            self.assertTrue(calls)
+            self.assertEqual({call[2] for call in calls}, {digest(corrupt)})
+        path.write_bytes(original)
+        publication._VALIDATED_RECEIPTS.clear()
+        counted, calls = self.counted_parses()
+        with counted:
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+            self.assertEqual(self.lookup(), publication_id)
+        self.assertEqual(calls, [("external", publication_id, digest(original))])
+
+    def test_product_trio_key_covers_every_validated_component(self):
+        product = Publication(self.root, "e" * 40, "f" * 64, BRANCH, "push",
+                              projection=public_source_identity({}))
+        intent, _ = product.prepare("approval", "run")
+        product.mark_dispatch()
+        receipt = product.complete(intent, "1" * 40)
+        publication._VALIDATED_RECEIPTS.clear()
+        paths = {kind: self.directory / (product.id + "." + kind + ".json")
+                 for kind in ("intent", "dispatch", "receipt")}
+        raws = {kind: path.read_bytes() for kind, path in paths.items()}
+        expected_key = (str(self.directory), product.id,
+                        tuple((kind, digest(raws[kind])) for kind in raws))
+        counted, calls = self.counted_parses()
+        with counted:
+            for _ in range(2):
+                self.assertEqual(Publication.read_receipt(self.root, product.id), receipt)
+                self.assertEqual(Publication.list_receipts(self.root, strict=True)["total"], 1)
+                self.assertEqual(self.lookup(code_digest="f" * 64), product.id)
+        self.assertEqual(calls, [("intent", product.id, digest(raws["intent"])),
+                                 ("dispatch", product.id, digest(raws["dispatch"])),
+                                 ("receipt", product.id, digest(raws["receipt"]))])
+        self.assertEqual(self.cache_keys(product.id), [expected_key])
+        changed_intent = json.loads(raws["intent"])
+        changed_intent["approval"] = "approved"
+        changed_receipt = json.loads(raws["receipt"])
+        changed_receipt["approval"] = "approved"
+        mutations = {
+            "intent": canonical(changed_intent),
+            "dispatch": canonical({"publication_id": "0" * 64}),
+            "receipt": canonical(changed_receipt),
+        }
+        for kind, changed in mutations.items():
+            with self.subTest(component=kind):
+                paths[kind].write_bytes(changed)
+                counted, calls = self.counted_parses()
+                with counted:
+                    with self.assertRaises(Denied):
+                        Publication.read_receipt(self.root, product.id)
+                    with self.assertRaises(Denied):
+                        Publication.list_receipts(self.root, strict=True)
+                expected = [digest(mutations[part]) if part == kind else digest(raws[part])
+                            for part in ("intent", "dispatch", "receipt")]
+                self.assertEqual([call[2] for call in calls], expected * 2)
+                self.assertNotIn((str(self.directory), product.id,
+                                  tuple((part, digest(mutations[part]) if part == kind
+                                         else digest(raws[part]))
+                                        for part in raws)),
+                                 self.cache_keys(product.id))
+                paths[kind].write_bytes(raws[kind])
+                self.assertEqual(Publication.read_receipt(self.root, product.id), receipt)
+
+    def test_a_formatting_only_byte_change_revalidates_under_a_new_identity(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        path = self.directory / (publication_id + ".external.json")
+        original = path.read_bytes()
+        counted, calls = self.counted_parses()
+        with counted:
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+            # Whitespace is outside the record's semantic fields but inside
+            # the bytes that must be validated: it changes the cache key.
+            reformatted = original.replace(b"}\n", b"} \n")
+            self.assertNotEqual(reformatted, original)
+            path.write_bytes(reformatted)
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+        self.assertEqual([call[2] for call in calls],
+                         [digest(original), digest(reformatted)])
+        self.assertIn((str(self.directory), publication_id,
+                       (("external", digest(reformatted)),)),
+                      self.cache_keys(publication_id))
+
+    def test_missing_receipt_fails_closed_after_a_warm_read(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        path = self.directory / (publication_id + ".external.json")
+        self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+        path.unlink()
+        counted, calls = self.counted_parses()
+        with counted:
+            with self.assertRaises(Denied):
+                Publication.read_receipt(self.root, publication_id)
+            self.assertEqual(Publication.list_receipts(self.root, strict=True)["total"], 0)
+            with self.assertRaises(Denied):
+                self.lookup()
+        self.assertEqual(calls, [])
+        self.assertEqual(len(self.cache_keys(publication_id)), 1)
+
+    def test_metadata_change_alone_never_authorizes_validation_reuse(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        path = self.directory / (publication_id + ".external.json")
+        counted, calls = self.counted_parses()
+        with counted:
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+            path.touch()
+            self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+        self.assertEqual(len(calls), 1)
+
+    def test_key_lookup_never_enumerates_on_cold_or_warm_paths(self):
+        external = self.record()
+        product = Publication(self.root, "e" * 40, "f" * 64, BRANCH, "push",
+                              projection=public_source_identity({}))
+        intent, _ = product.prepare("approval", "run")
+        product.mark_dispatch()
+        product.complete(intent, "1" * 40)
+        publication._VALIDATED_RECEIPTS.clear()
+        patches, mocks = self.no_enumeration()
+        with patches[0], patches[1], patches[2]:
+            self.assertEqual(self.lookup(), external["publication_id"])
+            self.assertEqual(self.lookup(), external["publication_id"])
+            self.assertIsNone(self.lookup(code_digest="e" * 64))
+            self.assertEqual(self.lookup(code_digest="f" * 64), product.id)
+            self.assertIsNone(self.lookup(branch="absent"))
+            self.assertEqual([mock.call_count for mock in mocks], [0, 0, 0])
+
+    def test_warm_cache_still_checks_the_evidence_directories(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+        with patch.object(Publication, "_check_directories", side_effect=Denied("unsafe evidence")):
+            with self.assertRaisesRegex(Denied, "unsafe evidence"):
+                Publication.read_receipt(self.root, publication_id)
+            with self.assertRaisesRegex(Denied, "unsafe evidence"):
+                self.lookup()
+
+    def test_warm_cache_does_not_relax_key_index_witnesses(self):
+        receipt = self.record()
+        publication_id = receipt["publication_id"]
+        self.assertEqual(Publication.read_receipt(self.root, publication_id), receipt)
+        patches, mocks = self.no_enumeration()
+        with patches[0], patches[1], patches[2]:
+            self.assertEqual(self.lookup(), publication_id)
+            self.assertEqual(self.lookup(), publication_id)
+            self.assertEqual([mock.call_count for mock in mocks], [0, 0, 0])
+        original = self.index_path.read_bytes()
+        value = json.loads(original)
+        stale = dict(value)
+        stale["stamp"] = [value["stamp"][0] + 1, value["stamp"][1]]
+        incomplete = dict(value)
+        incomplete["incomplete"] = True
+        malformed = dict(value)
+        del malformed["incomplete"]
+        for bad in (canonical(stale), canonical(incomplete), canonical(malformed), b"{"):
+            with self.subTest(index=bad[:24]):
+                self.index_path.write_bytes(bad)
+                with self.assertRaises(Denied):
+                    self.lookup()
+        self.index_path.write_bytes(original)
+        self.assertEqual(self.lookup(), publication_id)
+        # A changed receipt name still fails closed even though the bytes and
+        # their cached validation are unchanged.
+        extra = self.directory / ("0" * 64 + ".external.json")
+        extra.write_bytes(canonical(receipt))
+        with self.assertRaises(Denied):
+            self.lookup()

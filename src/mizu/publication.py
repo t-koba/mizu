@@ -30,6 +30,9 @@ import datetime as dt
 import os
 import re
 import stat
+import threading
+from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 
 from . import lineage, process
@@ -40,6 +43,12 @@ from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
 
 SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 RECORD_BYTES = 8192
+#: Bounded process-local reuse of fully validated receipts. Each key carries
+#: the SHA-256 of the exact bounded bytes that were parsed and validated, so
+#: replaced or corrupt evidence cannot be served from an earlier result.
+RECEIPT_VALIDATION_CACHE_LIMIT = 128
+_VALIDATED_RECEIPTS = OrderedDict()
+_VALIDATED_RECEIPTS_LOCK = threading.Lock()
 
 #: Operation label of a receipt recorded by an operator-run publisher.
 EXTERNAL_OP = "external"
@@ -97,6 +106,23 @@ def _projection_of(record: dict) -> dict | None:
                 "algorithm": record.get("projection_algorithm"),
                 "digest": record.get("projection_digest")}
     return None
+
+
+def _parse_record(raw: bytes, kind: str, publication_id: str) -> dict:
+    """Parse one bounded receipt byte read for validation.
+
+    This is the single parse hook of receipt validation. Every cached result
+    is derived from the same bytes that passed through this function.
+    """
+    try:
+        record = loads_finite(raw)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise Denied(f"Invalid publication {kind}: {publication_id}") from exc
+    if not isinstance(record, dict):
+        raise Denied(f"Invalid publication {kind}: {publication_id}")
+    return record
+
+
 #: File names of recorded receipts inside the publications directory.
 RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
 #: A name that looks like a receipt but does not parse cannot be skipped by a
@@ -358,19 +384,26 @@ class Publication:
     def path(self, kind: str) -> Path:
         return self.root / (self.id + "." + kind + ".json")
 
-    def _read(self, kind: str) -> dict | None:
+    def _read_raw(self, kind: str, observed: dict | None = None) -> bytes | None:
+        """Return one bounded no-follow byte read, or absence.
+
+        ``observed`` carries ``(raw, sha256)`` already checked against the
+        writer's key index; reusing it avoids a second read whose bytes could
+        differ from the indexed witness.
+        """
+        if observed is not None and kind in observed:
+            return observed[kind][0]
         try:
             self.path(kind).lstat()
         except FileNotFoundError:
             return None
-        raw = safe_read(self.root, self.path(kind).name, RECORD_BYTES)
-        try:
-            record = loads_finite(raw)
-        except (ValueError, UnicodeError, RecursionError) as exc:
-            raise Denied(f"Invalid publication {kind}: {self.id}") from exc
-        if not isinstance(record, dict):
-            raise Denied(f"Invalid publication {kind}: {self.id}")
-        return record
+        return safe_read(self.root, self.path(kind).name, RECORD_BYTES)
+
+    def _read(self, kind: str) -> dict | None:
+        raw = self._read_raw(kind)
+        if raw is None:
+            return None
+        return _parse_record(raw, kind, self.id)
 
     def _write(self, kind: str, record: dict) -> None:
         self._check_directories()
@@ -385,66 +418,105 @@ class Publication:
         """Read and validate one completed receipt by its stable ID.
 
         This is a bounded, no-follow read only: missing or uncertain publication
-        evidence is refused, never reconstructed from a branch head.
+        evidence is refused, never reconstructed from a branch head. Repeated
+        reads of unchanged bytes reuse the bounded validation cache of
+        ``_validated_receipt``; metadata changes alone never authorize reuse.
         """
-        if not isinstance(publication_id, str) or not DIGEST.fullmatch(publication_id):
-            raise Denied("Invalid publication ID")
-        store = cls.__new__(cls)
-        store.id = publication_id
-        store.root = Path(project_root) / "evidence" / "publications"
-        store.identity = None
+        return cls._validated_receipt(
+            cls._receipt_store_for_id(project_root, publication_id), publication_id)
+
+    @classmethod
+    def _validated_receipt(cls, store, publication_id: str,
+                           observed: dict | None = None) -> dict:
+        """Validate one receipt from the exact bounded byte reads.
+
+        ``observed`` maps a component kind to ``(raw, sha256)`` from a read
+        already checked against the writer's key index by ``receipt_for_key``.
+        It replaces that read rather than reading twice, so the index witness,
+        the cache key and the validated record describe one set of bytes.
+
+        The process-local cache is keyed by the store root, the publication ID
+        and the SHA-256 of every byte read used for validation. An external
+        receipt is one bounded file, so its key is exactly
+        ``(root, publication_id, sha256)``. The product receipt binds three
+        independent files (intent, dispatch, receipt); one digest cannot name
+        them, so the key holds one digest per component in validation order.
+        Neither a stat, an mtime nor a directory name is a cache input.
+        Entries are bounded, never cache failures, and are returned as copies;
+        any changed byte misses and is parsed and validated afresh.
+        """
         store._check_directories()
-        intent = store._read("intent")
-        dispatched = store._read("dispatch")
-        receipt = store._read("receipt")
-        if intent is None and dispatched is None and receipt is None:
-            # An operator-run publisher records one receipt without the
-            # product's intent/dispatch trio; every other combination stays
-            # unresolved exactly as before.
-            external = store._read("external")
-            if external is not None:
-                return _external_record(external, publication_id)
-            raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
-        if intent is None or dispatched is None or receipt is None:
-            raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
-        from .vcs import PUBLISH_OPS, check_branch
-        if intent.get("schema") == 1:
-            fields = {"source_commit", "code_digest", "branch", "op", "schema",
-                      "publication_id", "approval", "run"}
-            identity_keys = ("source_commit", "code_digest", "branch", "op")
-        elif intent.get("schema") == PROJECTION_SCHEMA:
-            fields = {"source_commit", "code_digest", "branch", "op", "schema",
-                      "publication_id", "approval", "run",
-                      "projection_schema", "projection_algorithm", "projection_digest"}
-            identity_keys = ("source_commit", "code_digest", "branch", "op",
-                             "projection_schema", "projection_algorithm", "projection_digest")
+        raws = {kind: store._read_raw(kind, observed)
+                for kind in ("intent", "dispatch", "receipt")}
+        if all(value is None for value in raws.values()):
+            raws["external"] = store._read_raw("external", observed)
+        key_parts = tuple(
+            (kind, observed[kind][1] if observed is not None and kind in observed
+             else digest(raws[kind]))
+            for kind in ("intent", "dispatch", "receipt", "external")
+            if raws.get(kind) is not None)
+        key = (str(store.root), publication_id, key_parts)
+        with _VALIDATED_RECEIPTS_LOCK:
+            cached = _VALIDATED_RECEIPTS.get(key)
+            if cached is not None:
+                _VALIDATED_RECEIPTS.move_to_end(key)
+                return deepcopy(cached)
+        if raws.get("external") is not None:
+            external = _parse_record(raws["external"], "external", publication_id)
+            validated = _external_record(external, publication_id)
         else:
-            raise Denied(f"Invalid publication intent: {publication_id}")
-        if set(intent) != fields:
-            raise Denied(f"Invalid publication intent: {publication_id}")
-        identity = {key: intent[key] for key in identity_keys}
-        if ("projection_schema" in identity):
-            _check_projection(identity["projection_schema"],
-                              identity["projection_algorithm"],
-                              identity["projection_digest"])
-        if (intent.get("publication_id") != publication_id
-                or not isinstance(identity["source_commit"], str)
-                or not SHA.fullmatch(identity["source_commit"])
-                or not isinstance(identity["code_digest"], str)
-                or not DIGEST.fullmatch(identity["code_digest"])
-                or not isinstance(identity["op"], str) or identity["op"] not in PUBLISH_OPS
-                or digest(canonical(identity)) != publication_id):
-            raise Denied(f"Invalid publication identity: {publication_id}")
-        check_branch(identity["branch"])
-        identifier(intent["approval"])
-        identifier(intent["run"])
-        if dispatched != {"publication_id": publication_id}:
-            raise Denied(f"Invalid publication dispatch marker: {publication_id}")
-        published_sha = receipt.get("published_sha")
-        if (not isinstance(published_sha, str) or not SHA.fullmatch(published_sha)
-                or {k: v for k, v in receipt.items() if k != "lineage"} != {**intent, "published_sha": published_sha}):
-            raise Denied(f"Invalid publication receipt: {publication_id}")
-        return receipt
+            def parse(kind):
+                return (_parse_record(raws[kind], kind, publication_id)
+                        if raws[kind] is not None else None)
+            intent = parse("intent")
+            dispatched = parse("dispatch")
+            receipt = parse("receipt")
+            if intent is None or dispatched is None or receipt is None:
+                raise Denied(f"Publication receipt unavailable or unresolved: {publication_id}")
+            from .vcs import PUBLISH_OPS, check_branch
+            if intent.get("schema") == 1:
+                fields = {"source_commit", "code_digest", "branch", "op", "schema",
+                          "publication_id", "approval", "run"}
+                identity_keys = ("source_commit", "code_digest", "branch", "op")
+            elif intent.get("schema") == PROJECTION_SCHEMA:
+                fields = {"source_commit", "code_digest", "branch", "op", "schema",
+                          "publication_id", "approval", "run",
+                          "projection_schema", "projection_algorithm", "projection_digest"}
+                identity_keys = ("source_commit", "code_digest", "branch", "op",
+                                 "projection_schema", "projection_algorithm", "projection_digest")
+            else:
+                raise Denied(f"Invalid publication intent: {publication_id}")
+            if set(intent) != fields:
+                raise Denied(f"Invalid publication intent: {publication_id}")
+            identity = {key: intent[key] for key in identity_keys}
+            if ("projection_schema" in identity):
+                _check_projection(identity["projection_schema"],
+                                  identity["projection_algorithm"],
+                                  identity["projection_digest"])
+            if (intent.get("publication_id") != publication_id
+                    or not isinstance(identity["source_commit"], str)
+                    or not SHA.fullmatch(identity["source_commit"])
+                    or not isinstance(identity["code_digest"], str)
+                    or not DIGEST.fullmatch(identity["code_digest"])
+                    or not isinstance(identity["op"], str) or identity["op"] not in PUBLISH_OPS
+                    or digest(canonical(identity)) != publication_id):
+                raise Denied(f"Invalid publication identity: {publication_id}")
+            check_branch(identity["branch"])
+            identifier(intent["approval"])
+            identifier(intent["run"])
+            if dispatched != {"publication_id": publication_id}:
+                raise Denied(f"Invalid publication dispatch marker: {publication_id}")
+            published_sha = receipt.get("published_sha")
+            if (not isinstance(published_sha, str) or not SHA.fullmatch(published_sha)
+                    or {k: v for k, v in receipt.items() if k != "lineage"} != {**intent, "published_sha": published_sha}):
+                raise Denied(f"Invalid publication receipt: {publication_id}")
+            validated = receipt
+        with _VALIDATED_RECEIPTS_LOCK:
+            _VALIDATED_RECEIPTS[key] = deepcopy(validated)
+            _VALIDATED_RECEIPTS.move_to_end(key)
+            while len(_VALIDATED_RECEIPTS) > RECEIPT_VALIDATION_CACHE_LIMIT:
+                _VALIDATED_RECEIPTS.popitem(last=False)
+        return validated
 
     def prepare(self, approval: str, run: str) -> tuple[dict, dict | None]:
         """Reuse intent/receipt; refuse any uncertain prior dispatch."""
@@ -617,6 +689,15 @@ class Publication:
         store.root = Path(project_root) / "evidence" / "publications"
         store.identity = None
         store._check_directories()
+        return store
+
+    @classmethod
+    def _receipt_store_for_id(cls, project_root, publication_id):
+        """Build a checked store for one receipt ID."""
+        if not isinstance(publication_id, str) or not DIGEST.fullmatch(publication_id):
+            raise Denied("Invalid publication ID")
+        store = cls._receipt_store(project_root)
+        store.id = publication_id
         return store
 
     @classmethod
@@ -893,7 +974,9 @@ class Publication:
         Bounds: the writer-owned index is one bounded fixed-path read; every
         indexed receipt is re-read with its create-only bound and the receipt
         directory stamp is compared before any key is resolved. There is no
-        directory enumeration and no process-local witness.
+        directory enumeration. The byte read checked against the index digest
+        is passed to receipt validation, whose process-local reuse is keyed by
+        those exact bytes; no metadata witness authorizes validation reuse.
         Trust: the index is written only by the receipt writer. A missing index
         means completeness cannot be established and resolves nothing. A stamp
         or content mismatch, an incomplete rebuild, a corrupt index or a
@@ -914,20 +997,28 @@ class Publication:
             raise Denied("Publication evidence changed")
         if index["incomplete"]:
             raise Denied("Publication evidence scan incomplete")
+        keys = [key for key in index["keys"]
+                if key["branch"] == branch and key["code_digest"] == code_digest]
+        candidate = (keys[0]["publication_ids"][0]
+                     if len(keys) == 1 and len(keys[0]["publication_ids"]) == 1 else None)
+        observed = {}
         for entry in index["entries"]:
             name = _receipt_file_name(entry["publication_id"], entry["kind"])
             try:
                 raw = safe_read(store.root, name, RECORD_BYTES)
             except FileNotFoundError as exc:
                 raise Denied("Publication evidence changed") from exc
-            if digest(raw) != entry["sha256"]:
+            sha = digest(raw)
+            if sha != entry["sha256"]:
                 raise Denied("Publication evidence changed")
-        keys = [key for key in index["keys"]
-                if key["branch"] == branch and key["code_digest"] == code_digest]
-        if len(keys) != 1 or len(keys[0]["publication_ids"]) != 1:
+            if candidate is not None and entry["publication_id"] == candidate:
+                observed[entry["kind"]] = (raw, sha)
+        if candidate is None:
             return None
-        publication_id = keys[0]["publication_ids"][0]
-        receipt = cls.read_receipt(project_root, publication_id)
+        publication_id = candidate
+        store.id = publication_id
+        receipt = cls._validated_receipt(store, publication_id,
+                                         observed=observed or None)
         if receipt["code_digest"] != code_digest or receipt["branch"] != branch:
             return None
         return publication_id
