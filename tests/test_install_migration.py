@@ -64,13 +64,29 @@ class InstallMigrationTests(Fixture):
         for prepare in (self.flat_record, self.legacy_resolution):
             old, current, _ = prepare()
             old.rename(current)
+        insights = self.project.insights
+        live = insights.submit(source='reviewer', title='Pending finding', body='Synthetic finding',
+                               base_snapshot=None)
+        decided = insights.submit(source='reviewer', title='Decided finding', body='Synthetic finding',
+                                  base_snapshot=None)
+        insights.decide(decided['id'], 'reject', 'No action', 'New evidence', 'test-run', expected_rev=1)
+        event, = insights.decision_events('reviewer', ['reject'])
+        insights.acknowledge_decisions('reviewer', [event])
+        identity = self.project.root / 'insight-ids' / f"{live['id']}.json"
+        receipt = self.project.root / 'decision-receipts/reviewer' / f"{event['ack_token']}.json"
+        source_bytes = {path: path.read_bytes() for path in (identity, receipt)}
         with (patch.object(storage, 'backup') as backup, patch.object(record_migration, 'apply') as records,
               patch.object(work_item_migration, 'apply') as work):
             result = self.promote()
         backup.assert_not_called()
         records.assert_not_called()
         work.assert_not_called()
+        self.assertEqual(result['status'], 'promoted')
         self.assertEqual(result['migrations'], [])
+        self.assertEqual(set(result['uncovered_families']),
+                         {'insight-identities-and-tombstones', 'decision-receipts'})
+        for path, raw in source_bytes.items():
+            self.assertEqual(path.read_bytes(), raw)
         self.assertIn('data, side effects and budgets are unchanged', result['note'])
         self.assertFalse(self.backups.exists())
 
@@ -106,11 +122,15 @@ class InstallMigrationTests(Fixture):
               patch.object(INSTALLER, 'link_atomically', side_effect=link)):
             result = self.promote()
         row, = result['migrations']
-        self.assertIn('converted after verified backups', result['note'])
+        self.assertIn('Listed migrations were applied after verified backups', result['note'])
         self.assertNotIn('Only code', result['note'])
         self.assertEqual(result['status'], 'promoted')
+        self.assertEqual(set(result['uncovered_families']),
+                         {'insight-identities-and-tombstones', 'decision-receipts'})
         self.assertEqual(row['status'], 'converted')
-        self.assertEqual(read_json(Path(row['receipt'])), row)
+        receipt = read_json(Path(row['receipt']))
+        self.assertEqual(receipt, row)
+        self.assertEqual(set(receipt['conversions']), {'migrate-records', 'migrate-work-items'})
         archive = Path(row['archive'])
         self.assertEqual(row['sha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
         for path, destination, raw, command in ((flat, sharded, flat_raw, 'migrate-records'),

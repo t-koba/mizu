@@ -380,11 +380,19 @@ def promote(args, release: Path):
             raise Denied(f"Promotion failed after project data conversion: {exc}. "
                          f"Inspect the current/launcher links and conversion receipts in "
                          f"{Path(migrations[0]['archive']).parent} before resuming.") from exc
-    change_note = ("Superseded records were converted after verified backups; "
+    change_note = ("Listed migrations were applied after verified backups; "
                    "see migrations for archives and receipts. Budgets are unchanged."
                    if migrations else "Only code was switched; data, side effects and budgets are unchanged.")
-    result = {"status": "promoted", "release": str(release), "migrations": migrations,
-              "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. " + change_note}
+    result = {
+        "status": "promoted", "release": str(release), "migrations": migrations,
+        "uncovered_families": {
+            "insight-identities-and-tombstones": (
+                "Promotion does not convert this family; the runtime still reads and writes insight-ids/."),
+            "decision-receipts": (
+                "Promotion does not assess or convert this family; reconciliation is a separate route-bound host operation."),
+        },
+        "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. " + change_note,
+    }
     if old_mode and old_mode != new_mode:
         result["mode_change"] = {"from": old_mode, "to": new_mode}
         result["note"] += " Agent runtime availability changed; re-run doctor and smoke before arming."

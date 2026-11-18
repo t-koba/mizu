@@ -117,9 +117,17 @@ Version lives in `src/mizu/__init__.py` and product metadata. When removing a
 reader for a stored format, keep a bounded conversion at promotion and make the
 runtime refuse unconverted data, naming the migration. Promotion currently
 converts flat shared records and legacy work-item resolution filenames only
-after verified project backups and before switching `current`. Activation
-removes the replaced managed release after successful pointer and launcher
-updates. Keep its source bundle and the pre-conversion archives for rollback;
+after verified project backups and before switching `current`. The `migrations`
+result and its receipts cover only those named conversions. The promotion result's
+`uncovered_families` map lists what the invocation does not cover, not what is
+present in a project: the runtime still reads and writes `insight-ids/`, and
+decision receipts are reconciled separately by a route-bound host operation.
+Neither `migrations: []` nor a successful conversion of one family establishes
+absence or conversion of insight identities and tombstones or decision receipts,
+or justifies removing a reader for either family.
+
+Activation removes the replaced managed release after successful pointer and
+launcher updates. Keep its source bundle and the pre-conversion archives for rollback;
 see [upgrade and rollback](operations.md#バージョン更新とロールバック).
 
 Model profiles do not change the product version. Changing the Pi dependency
