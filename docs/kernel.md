@@ -141,7 +141,8 @@ subscribe = ["note.closed", "check.*"]
 ```
 
 - A role subscribes to event names; `*` matches one dotted component, `**`
-  any suffix.
+  matches any non-empty suffix and is valid only as the final component.
+  A non-terminal `**` is refused and never matches.
 - Each role has a durable cursor (the last acknowledged `seq`). A unit reads
   the events after its cursor that match its subscriptions, bounded per page,
   and acknowledges explicitly. Unacknowledged events are delivered again.
@@ -156,7 +157,9 @@ A field of type `instant` with an `event` name schedules that event for that
 instant. The scheduler keeps the earliest pending instant and sleeps until it,
 or until the next event, whichever comes first. When the instant passes the
 kernel appends the event once and then treats the field as consumed for that
-value.
+value. The firing reserves its sequence and full event (including the timestamp)
+before appending it; if the process stops or clearing the timer fails, recovery
+repeats that exact event without duplicating it and then clears the timer.
 
 ## Finishing a unit
 

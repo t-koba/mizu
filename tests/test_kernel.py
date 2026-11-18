@@ -1,13 +1,16 @@
 """Kernel objects, requirements, events, subscriptions, instants and recovery."""
 import datetime as dt
 import json
+import os
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import support  # noqa: F401  (puts src on the path)
 from mizu.errors import ConfigError, Denied
+from mizu.fs import now
 from mizu.kernel import EventLog, Objects, matches, parse_kinds, parse_subscriptions
 
 KINDS = tomllib.loads('''
@@ -53,7 +56,7 @@ class Kernel(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.kinds = parse_kinds(KINDS)
-        self.log = EventLog(self.root, {"beta": ("task.*",), "gamma": ("**",)})
+        self.log = EventLog(self.root, {"beta": ("task.*",), "gamma": ("**",), "delta": ("task.due",)})
         self.objects = Objects(self.root, self.kinds, self.log)
 
     def tearDown(self):
@@ -114,6 +117,65 @@ class Kernel(unittest.TestCase):
         self.assertEqual([(e["name"], e["id"]) for e in fired], [("task.due", task["id"])])
         self.assertEqual(self.objects.fire_due(later), [])
         self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(list((self.root / "timers").glob("*.json")), [])
+
+    def test_reserved_event_write_is_idempotent_and_fails_closed(self):
+        event = self.log.append("task.created", {"title": "t"}, "operator")
+        (self.root / "events" / "head.json").unlink()  # crash after the file, before the head
+        self.assertEqual(self.log.append_at(event), event)  # an identical retry repairs it
+        self.assertEqual(self.log.head(), 1)
+        with self.assertRaises(Denied):
+            self.log.append_at({**event, "actor": "host"})  # different content at the same seq
+        self.assertEqual(self.log.read(1), event)
+        self.assertEqual(self.log.append("task.created", {"title": "u"}, "operator")["seq"], 2)
+
+    def test_recovery_publishes_a_firing_whose_event_was_not_appended(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        event = {"seq": self.log.head() + 1, "name": "task.due", "kind": "task", "id": task["id"],
+                 "field": "due", "due": soon, "actor": "host", "at": now()}
+        (self.root / "timers" / ".firing.json").write_text(
+            json.dumps({"seq": event["seq"], "event": event}), encoding="utf-8")
+        fresh = Objects(self.root, self.kinds, self.log)
+        self.assertEqual(fresh.fire_due(dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)), [])
+        self.assertEqual(self.log.read(event["seq"]), event)
+        self.assertEqual([row["name"] for row in self.log.pending("delta")["events"]], ["task.due"])
+        self.assertEqual(fresh.fire_due(dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)), [])
+        self.assertEqual(self.log.head(), 2)
+
+    def test_instant_firing_survives_an_interrupted_unlink(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        timer = self.root / "timers" / f"task.{task['id']}.due.json"
+        intent = self.root / "timers" / ".firing.json"
+        self.assertFalse((self.root / "wake" / "delta").exists())
+        real_unlink = os.unlink
+        failures = []
+
+        def interrupted_unlink(path):
+            if Path(path) == timer and not failures:
+                failures.append(path)
+                raise OSError("interrupted unlink")
+            return real_unlink(path)
+
+        with patch("mizu.kernel.objects.os.unlink", side_effect=interrupted_unlink):
+            with self.assertRaisesRegex(OSError, "interrupted unlink"):
+                self.objects.fire_due(later)
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(timer.exists())
+        reserved = json.loads(intent.read_text())["event"]
+
+        fresh = Objects(self.root, self.kinds, self.log)
+        self.assertEqual(fresh.fire_due(later), [])  # recovery emits before normal processing
+        self.assertEqual([self.log.read(seq)["name"] for seq in range(1, self.log.head() + 1)],
+                         ["task.created", "task.due"])
+        self.assertEqual(self.log.head(), 2)
+        self.assertEqual(self.log.read(reserved["seq"]), reserved)
+        self.assertEqual(fresh.fire_due(later), [])
+        self.assertFalse(timer.exists())
+        self.assertFalse(intent.exists())
+        self.assertTrue((self.root / "wake" / "delta").exists())
 
     def test_recovery_completes_an_interrupted_write(self):
         task = self.objects.create("task", {"title": "t"}, "operator")
@@ -155,6 +217,22 @@ class Kernel(unittest.TestCase):
                 parse_kinds(raw)
         with self.assertRaises(ConfigError):
             parse_subscriptions(["Bad.Name"], "roles.x.subscribe")
+
+    def test_patterns_are_terminal_only(self):
+        with self.assertRaises(ConfigError):
+            parse_subscriptions(["check.**.failed"], "roles.x.subscribe")
+        for pattern in ("check.**.failed", "**.**", "a.**.b", "a.b.**.c"):
+            with self.subTest(pattern=pattern), self.assertRaises(ConfigError):
+                parse_subscriptions([pattern], "roles.x.subscribe")
+            for name in ("check.pass", "check.run.failed", "check.pass.deep"):
+                self.assertFalse(matches(pattern, name))
+        self.assertEqual(parse_subscriptions(["**", "check.**", "check.*.failed"], "roles.x.subscribe"),
+                         ("**", "check.**", "check.*.failed"))
+        self.assertTrue(matches("check.**", "check.pass"))
+        self.assertTrue(matches("check.**", "check.pass.deep"))
+        self.assertFalse(matches("check.**", "check"))
+        self.assertTrue(matches("check.*.failed", "check.run.failed"))
+        self.assertFalse(matches("check.*.failed", "check.run.deep.failed"))
 
     def test_pattern_matching(self):
         self.assertTrue(matches("task.*", "task.created"))

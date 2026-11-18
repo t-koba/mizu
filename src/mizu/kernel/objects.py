@@ -4,13 +4,16 @@ Layout under the project root:
   objects/<kind>/<id>/<rev:08d>.json   create-only revisions; the highest is current
   objects/intent.json                  the one in-flight write (crash recovery)
   timers/<kind>.<id>.<field>.json      pending instants that emit an event when due
+  timers/.firing.json                  the one in-flight instant firing (crash recovery)
   locks/kernel.lock                    serialises object writes and event appends
 
 A write validates fully, records an intent, publishes the revision, appends its
 event, schedules instants and clears the intent, all under the kernel lock. A
 process that finds an intent on acquiring the lock completes it (appending the
 event only if the revision exists and the event does not), so an event is never
-lost or duplicated. Reads take no lock. Listing scans one kind directory and is
+lost or duplicated. An instant firing likewise records its reserved event before
+appending it and clearing the timer; recovery repeats that exact event instead of
+appending a second one. Reads take no lock. Listing scans one kind directory and is
 bounded per page; an index is a later optimisation, not a semantic change.
 """
 from __future__ import annotations
@@ -25,13 +28,14 @@ from typing import Any, Iterator, Mapping
 
 from ..errors import Denied
 from ..fs import atomic_write, canonical, loads_finite, lock, mkdir, now, safe_read
-from .events import EventLog
-from .kinds import PRINCIPAL, Kind
+from .events import EVENT_BYTES, EventLog
+from .kinds import NAME, PRINCIPAL, Kind
 
 OBJECT_BYTES = 1024 * 1024 + 4096
 REVISION_MAX = 10 ** 8 - 1
 PAGE_MAX = 512
 _ID = re.compile(r"[0-9a-f]{32}\Z")
+_FIRING = ".firing.json"
 
 
 class Objects:
@@ -176,10 +180,17 @@ class Objects:
         with self._locked():
             for row in self._timers():
                 if dt.datetime.fromisoformat(row["at"]) <= at:
-                    fired.append(self.events.append(row["event"], {
-                        "kind": row["kind"], "id": row["id"], "field": row["field"], "due": row["at"]}, "host"))
+                    seq = self.events.head() + 1
+                    # The intent pins the whole event, including its timestamp, before
+                    # it is published, so an interrupted firing can be repeated exactly.
+                    event = {"seq": seq, "name": row["event"], "kind": row["kind"], "id": row["id"],
+                             "field": row["field"], "due": row["at"], "actor": "host", "at": now()}
+                    atomic_write(self.root / "timers" / _FIRING, canonical({"seq": seq, "event": event}),
+                                 exclusive=True)
+                    fired.append(self.events.append_at(event))
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(row["path"])
+                    os.unlink(self.root / "timers" / _FIRING)
         return fired
 
     def _timers(self) -> list[dict]:
@@ -190,7 +201,7 @@ class Objects:
             return []
         rows = []
         for name in names:
-            if name.endswith(".json"):
+            if name.endswith(".json") and not name.startswith("."):
                 row = loads_finite(safe_read(self.root, f"timers/{name}", 4096))
                 rows.append({**row, "path": directory / name})
         return rows
@@ -264,7 +275,29 @@ class Objects:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.root / "objects" / "intent.json")
 
+    def _recover_firing(self) -> None:
+        """Finish a firing whose timer removal or intent removal was interrupted."""
+        path = self.root / "timers" / _FIRING
+        if not path.exists():
+            return
+        intent = loads_finite(safe_read(self.root, f"timers/{_FIRING}", EVENT_BYTES + 4096))
+        if not isinstance(intent, Mapping):
+            raise Denied("Invalid firing intent")
+        seq, event = intent.get("seq"), intent.get("event")
+        if type(seq) is not int or seq < 1 or not isinstance(event, Mapping) or event.get("seq") != seq:
+            raise Denied("Invalid firing intent")
+        kind, object_id, field = event.get("kind"), event.get("id"), event.get("field")
+        if (not isinstance(kind, str) or kind not in self.kinds or not isinstance(object_id, str)
+                or not _ID.fullmatch(object_id) or not isinstance(field, str) or not NAME.fullmatch(field)
+                or not isinstance(event.get("due"), str)):
+            raise Denied("Invalid firing intent")
+        self.events.append_at(event)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.root / "timers" / f"{kind}.{object_id}.{field}.json")
+        os.unlink(path)
+
     def _recover(self) -> None:
+        self._recover_firing()
         if not (self.root / "objects" / "intent.json").exists():
             return
         intent = loads_finite(safe_read(self.root, "objects/intent.json", 4096))

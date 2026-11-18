@@ -15,7 +15,9 @@ from ..errors import ConfigError, Denied
 
 NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
 EVENT = re.compile(r"[a-z][a-z0-9_-]{0,62}(?:\.[a-z][a-z0-9_-]{0,62}){0,7}\Z")
-PATTERN = re.compile(r"(?:[a-z][a-z0-9_-]{0,62}|\*|\*\*)(?:\.(?:[a-z][a-z0-9_-]{0,62}|\*|\*\*)){0,7}\Z")
+_COMPONENT = r"(?:[a-z][a-z0-9_-]{0,62}|\*)"
+#: ``**`` is only valid as the final component of a subscription pattern.
+PATTERN = re.compile(rf"(?:{_COMPONENT}(?:\.{_COMPONENT}){{0,6}}(?:\.\*\*)?|\*\*)\Z")
 PRINCIPAL = re.compile(r"(?:role:[a-z][a-z0-9_-]{0,62}|host|operator)\Z")
 OBJECT_REFS = ("author", "holder")
 TYPES = ("string", "integer", "boolean", "instant", "ref", "principal", "list")

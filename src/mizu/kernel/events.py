@@ -6,9 +6,12 @@ Layout under the project root:
   events/cursors/<role>.json  the role's last acknowledged sequence
   wake/<role>              touched when an appended event matches the role
 
-Callers append while holding the kernel lock (``Objects`` does). Reads take no
-lock: an event file is complete or absent, and a reader never sees a sequence
-beyond the head it read. Bounds: page sizes are caller-supplied and capped.
+Callers append while holding the kernel lock (``Objects`` does). A fully
+constructed event can also be published at a reserved sequence, which is
+idempotent for an identical retry and refuses conflicting content. Reads take
+no lock: an event file is complete or absent, and a reader never sees a
+sequence beyond the head it read. Bounds: page sizes are caller-supplied and
+capped.
 """
 from __future__ import annotations
 
@@ -25,11 +28,15 @@ PAGE_MAX = 512
 
 
 def matches(pattern: str, name: str) -> bool:
-    """``*`` matches one dotted component, ``**`` any non-empty remainder."""
+    """``*`` matches one dotted component; terminal ``**`` any non-empty tail.
+
+    A non-terminal ``**`` never matches: validation refuses it, and this
+    matcher also fails closed for a pattern written by an older configuration.
+    """
     want, have = pattern.split("."), name.split(".")
     for index, part in enumerate(want):
         if part == "**":
-            return len(have) > index
+            return index == len(want) - 1 and len(have) > index
         if index >= len(have) or (part != "*" and part != have[index]):
             return False
     return len(want) == len(have)
@@ -42,11 +49,14 @@ class EventLog:
         self.subscriptions = {role: tuple(patterns) for role, patterns in (subscriptions or {}).items()}
 
     # -- writing (caller holds the kernel lock) -------------------------------------------
-    def head(self) -> int:
+    def _stored_head(self) -> int:
         value = None
         if (self.dir / "head.json").exists():
             value = loads_finite(safe_read(self.root, "events/head.json", 64)).get("seq")
-        seq = value if type(value) is int and value >= 0 else 0
+        return value if type(value) is int and value >= 0 else 0
+
+    def head(self) -> int:
+        seq = self._stored_head()
         # The head is derived: a crash after an event file and before the head moves forward.
         while (self.dir / f"{seq + 1:020d}.json").exists():
             seq += 1
@@ -55,16 +65,41 @@ class EventLog:
     def append(self, name: str, body: Mapping[str, Any], actor: str) -> dict:
         if not isinstance(name, str) or not EVENT.fullmatch(name):
             raise Denied("Invalid event name")
-        mkdir(self.dir)
         seq = self.head() + 1
-        event = {**body, "seq": seq, "name": name, "actor": actor, "at": now()}
+        return self.append_at({**body, "seq": seq, "name": name, "actor": actor, "at": now()})
+
+    def append_at(self, event: Mapping[str, Any]) -> dict:
+        """Publish a fully constructed event at its reserved sequence.
+
+        An identical event file at that sequence is a retry: it stays
+        untouched, the head advances past it and matching subscribers are
+        woken again. Different content at the same sequence fails closed, so
+        no event is silently overwritten or appended twice. Callers hold the
+        kernel lock.
+        """
+        if not isinstance(event, Mapping):
+            raise Denied("Invalid event")
+        seq, name, at = event.get("seq"), event.get("name"), event.get("at")
+        if type(seq) is not int or seq < 1:
+            raise Denied("Invalid event sequence")
+        if not isinstance(name, str) or not EVENT.fullmatch(name):
+            raise Denied("Invalid event name")
+        if not isinstance(at, str) or not at:
+            raise Denied("Invalid event timestamp")
         data = canonical(event)
         if len(data) > EVENT_BYTES:
             raise Denied("Event exceeds its size bound")
-        atomic_write(self.dir / f"{seq:020d}.json", data, exclusive=True)
-        atomic_write(self.dir / "head.json", canonical({"seq": seq}))
+        path = self.dir / f"{seq:020d}.json"
+        if path.exists():
+            if safe_read(self.root, f"events/{path.name}", EVENT_BYTES) != data:
+                raise Denied(f"Event sequence {seq} conflicts with existing content")
+        else:
+            atomic_write(path, data, exclusive=True)
+        if seq > self._stored_head():
+            mkdir(self.dir)
+            atomic_write(self.dir / "head.json", canonical({"seq": seq}))
         self._wake(name)
-        return event
+        return dict(event)
 
     def _wake(self, name: str) -> None:
         for role, patterns in self.subscriptions.items():
