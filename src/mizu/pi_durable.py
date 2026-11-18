@@ -366,7 +366,7 @@ class PiDurableDriver:
         policy_options = durable_options(settings)
         effective_config = {
             "provider": model["provider"], "model": model["model"],
-            "instructions": policy, "tools": tool_definitions(context.role.capabilities),
+            "instructions": policy, "tools": tool_definitions(context.role.capabilities, role=context.role),
             "cwd": str(cwd), "store": str(store_path),
             "requestId": getattr(context, "_durable_request_id", run_key), "prompt": prompt,
             "authPath": str(durable_auth_path(self.config)),
@@ -386,8 +386,8 @@ class PiDurableDriver:
         started = time.monotonic()
         context.model_evidence = {"profile": profile, **model, "engine": ENGINE, "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
-        with Bridge(context.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
-                    on_close=context.cancel_operations) as bridge:
+        with Bridge(context.handle, tool_definitions(context.role.capabilities, role=context.role),
+                    timeout=self.config.limits.model_request_seconds, on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(_pi.credentials(self.config.file.parent / "credentials.env"))
             try:

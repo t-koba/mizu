@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .config import MAX_WAIT_SECONDS
+from .config import FINISH_OUTCOMES, MAX_WAIT_SECONDS, Role
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
 from .insights import QUESTION_RECORD_ROUTE
@@ -11,23 +11,33 @@ from .work_item_seed import MAX_DECISION_TASKS
 from .prompt_sections import WORK_CAPABILITIES
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
-# Shared by full/delta unit openings and the finish-tool description.
-WRITER_CONTINUATION_CONTRACT = (
-    "To propose an immediate writer continuation, finish with outcome=continue (or a "
-    "host-sealed bounded outcome) and supply `next_step`, naming a new proposed follow-up. "
-    "The typed step is a 1–4096-character printable value without surrounding whitespace "
-    "or a none/nothing/n/a placeholder, and differ from the typed parent step. "
-    "Legacy prose state never supplies a typed step. "
-    "A malformed writer continue is refused before sealing or acknowledgements. "
-    "next_step alone does not admit: the host requires a parent snapshot and a "
-    "role-matching validated progress record with at least one selected true `tool`, `code`, "
-    "`decision`, or `insight` signal. An admitted continuation shows that step "
-    "in the published snapshot as the previous unit's proposal, not as an assignment. "
-    "With role-eligible ready work, a wait or blocked finish is accepted and the host "
-    "re-admits from that work; a continue or bounded finish is accepted only with a "
-    "validated next_step handoff or a host-sealed run bound. "
-    "Unknown or truncated evidence refuses finish before sealing or acknowledgements. "
-    "Ready work alone does not create a timed re-admission.")
+def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
+    can_continue = "continue" in outcomes
+    continuation = "a host-sealed bounded outcome"
+    if can_continue:
+        continuation = f"outcome=continue (or {continuation})"
+    parking = " or ".join(outcome for outcome in ("wait", "blocked") if outcome in outcomes)
+    return (
+        f"To propose an immediate writer continuation, finish with {continuation} "
+        "and supply `next_step`, naming a new proposed follow-up. "
+        "The typed step is a 1–4096-character printable value without surrounding whitespace "
+        "or a none/nothing/n/a placeholder, and differ from the typed parent step. "
+        "Legacy prose state never supplies a typed step. "
+        + ("A malformed writer continue is refused before sealing or acknowledgements. " if can_continue else "")
+        + "next_step alone does not admit: the host requires a parent snapshot and a "
+        "role-matching validated progress record with at least one selected true `tool`, `code`, "
+        "`decision`, or `insight` signal. An admitted continuation shows that step "
+        "in the published snapshot as the previous unit's proposal, not as an assignment. "
+        "With role-eligible ready work, "
+        + (f"a {parking} finish is accepted and the host re-admits from that work; " if parking else "")
+        + f"a {'continue or ' if can_continue else ''}bounded finish is accepted only with a "
+        "validated next_step handoff or a host-sealed run bound. "
+        "Unknown or truncated evidence refuses finish before sealing or acknowledgements. "
+        "Ready work alone does not create a timed re-admission.")
+
+
+# Full/delta unit openings retain the shared, unfiltered contract.
+WRITER_CONTINUATION_CONTRACT = _writer_continuation_contract(FINISH_OUTCOMES)
 
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
@@ -147,6 +157,37 @@ INSIGHT_METADATA_SCHEMA = {
     "addressee": {**text(63), "minLength": 1, "pattern": r"^[a-z0-9][a-z0-9_-]{0,62}$"},
     "urgency": {"type": "string", "enum": ["low", "normal", "high"]},
 }
+
+
+def finish_definition(outcomes: tuple[str, ...]) -> tuple[str, dict]:
+    can_wait = "wait" in outcomes
+    description = (
+        _writer_continuation_contract(outcomes)
+        + " Ends this work unit and releases its model slot and workspace lock; later tool calls are refused. "
+        + ("outcome=wait with wait_seconds=N persists a wake deadline instead of keeping a command running; "
+           "independent new work may wake the role earlier. " if can_wait else "")
+        + "With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; "
+        "other consumers are preserved. "
+        + ("outcome=wait with wait_for_check=<id> releases the unit and resumes on check completion or new input. "
+           if can_wait else "")
+        + ("'done' on writable roles requires successful verification. " if "done" in outcomes else "")
+        + "ack_events optionally selects unique delivered operator record, decision or pending-insight event, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. Proposal merge waits share wait_events and require explicit identity-bound ack_events selections. CI wait rows share wait_events and always use explicit, identity-bound ack_tokens under the same successful-finish receipt boundary. CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
+        "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent. Optional review_verdict (approve/changes_requested) may be sealed by any role holding the review_verdict capability. The host binds it to this run and its input snapshot; callers cannot supply review identity or snapshot. Publication consumes only the verdict of the holder selected by [publication].reviewer_role. Findings remain separate insights; summaries never approve.")
+    properties = {
+        "outcome": {"type": "string", "enum": list(outcomes)},
+        "summary": text(12000), "state": text(32000),
+        "review_verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
+        "wait_for_check": text(64),
+        "release_checks": array(text(64), 32),
+        "ack_events": array(text(64), 512),
+        "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS},
+        "next_step": {**text(4096), "minLength": 1},
+        "next_profile": text(63), "next_reason": text(256),
+    }
+    if not can_wait:
+        del properties["wait_for_check"], properties["wait_seconds"]
+    return description, obj(properties, ("outcome", "summary"))
+
 
 DEFINITIONS = {
     "diff": ("Read the bounded difference between this published snapshot and the role's last observed snapshot when that cursor is still retained and ancestral, otherwise the preceding distinct code snapshot. The result names base_snapshot.", obj()),
@@ -336,19 +377,7 @@ DEFINITIONS = {
     "result_read": ("Read the next page of an oversized tool result, as the truncated response's continue field directs.",
                     obj({"cursor": text(32), "offset": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}},
                         ("cursor", "offset"))),
-    "finish": (WRITER_CONTINUATION_CONTRACT + " Ends this work unit and releases its model slot and workspace lock; later tool calls are refused. outcome=wait with wait_seconds=N persists a wake deadline instead of keeping a command running; independent new work may wake the role earlier. With check_job, release_checks optionally lists obsolete subscriptions to cancel at a successful finish; other consumers are preserved. outcome=wait with wait_for_check=<id> releases the unit and resumes on check completion or new input. 'done' on writable roles requires successful verification. "
-               "ack_events optionally selects unique delivered operator record, decision or pending-insight event, terminal work-item, structured insight-wait and obligation ack_token values handled by this role; omitted events stay pending. Tokens bind this role and the exact event payload; foreign, stale or undelivered tokens are refused before finish intent. Proposal merge waits share wait_events and require explicit identity-bound ack_events selections. CI wait rows share wait_events and always use explicit, identity-bound ack_tokens under the same successful-finish receipt boundary. CI/status and check-job behavior is unchanged. next_profile optionally names the recommended profile for the following unit; next_reason needs next_profile. "
-               "The recommendation binds to the finished task inputs and applies only while fresh, per operator selector rules; no extra model call is spent. Optional review_verdict (approve/changes_requested) may be sealed by any role holding the review_verdict capability. The host binds it to this run and its input snapshot; callers cannot supply review identity or snapshot. Publication consumes only the verdict of the holder selected by [publication].reviewer_role. Findings remain separate insights; summaries never approve.",
-               obj({"outcome": {"type": "string", "enum": ["continue", "wait", "blocked", "done"]},
-                    "summary": text(12000), "state": text(32000),
-                    "review_verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
-                    "wait_for_check": text(64),
-                    "release_checks": array(text(64), 32),
-                    "ack_events": array(text(64), 512),
-                    "wait_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS},
-                    "next_step": {**text(4096), "minLength": 1},
-                    "next_profile": text(63), "next_reason": text(256)},
-                   ("outcome", "summary"))),
+    "finish": finish_definition(FINISH_OUTCOMES),
 }
 
 
@@ -372,10 +401,14 @@ def operation_allowed(operation: str, capabilities) -> bool:
     return bool(gates & set(capabilities)) if gates is not None else operation in capabilities
 
 
-def tool_definitions(capabilities: tuple[str, ...]) -> list[dict]:
+def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None) -> list[dict]:
     operations = [name for name in capabilities if name not in MODIFIER_CAPABILITIES]
     operations += [name for name in STATE_READ_CAPABILITIES
                    if name not in capabilities and operation_allowed(name, capabilities)]
-    return [{"name": "mizu_" + name, "operation": name,
-             "description": DEFINITIONS[name][0], "inputSchema": DEFINITIONS[name][1]}
-            for name in operations]
+    tools = []
+    for name in operations:
+        description, schema = (finish_definition(role.finish_outcomes)
+                               if name == "finish" and role is not None else DEFINITIONS[name])
+        tools.append({"name": "mizu_" + name, "operation": name,
+                      "description": description, "inputSchema": schema})
+    return tools

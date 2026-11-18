@@ -200,8 +200,8 @@ class ClaudeDriver:
                                   'requests': 0, 'request_unit': 'query', 'usage': [], 'usage_known': False}
         cwd = (path.parent if settings['session'] == 'persistent' and not context.ephemeral else context.run_dir)/'controller'
         _skill_stage_directory(cwd)
-        with Bridge(context.handle, tool_definitions(context.driver_capabilities), timeout=self.config.limits.model_request_seconds,
-                    on_close=context.cancel_operations) as bridge:
+        with Bridge(context.handle, tool_definitions(context.driver_capabilities, role=context.role),
+                    timeout=self.config.limits.model_request_seconds, on_close=context.cancel_operations) as bridge:
             servers = connected_servers(context, settings)
             servers['mizu'] = mizu_server(bridge.config_file)
             options = dict(settings['options'])

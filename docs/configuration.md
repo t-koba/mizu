@@ -1968,6 +1968,13 @@ one automatic dispatch attempt, not repeated ticks until output is read.
 grants check ownership nor imports acceptance. See [scheduling](scheduling.md#asynchronous-check-result-wakes)
 for the separate one-shot dispatch marker and crash semantics.
 
+`roles.<name>.finish_outcomes` is a nonempty array of unique strings from
+`["continue", "wait", "blocked", "done"]` (the default). `mizu_finish` advertises
+and accepts only the configured outcomes. Omitting `wait` also hides
+`wait_seconds` and `wait_for_check`; it does not disable automatic check-result
+or CI wakes. Existing finish checks, such as successful verification for a
+writer's `done`, still apply.
+
 A role has exactly one of `profile` or `selector`, plus `policy`, `workspace` (`write`, `read`, `none`),
 `capabilities`, `engine_tools` (at most 128 unique, nonempty names of at most
 256 characters), `on_change`,

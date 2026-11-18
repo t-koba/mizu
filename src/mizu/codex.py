@@ -86,8 +86,8 @@ class CodexDriver:
         link = home/'auth.json'
         if source.is_file() and not link.exists():
             os.symlink(source, link)
-        with Bridge(context.handle, tool_definitions(context.driver_capabilities), timeout=self.config.limits.model_request_seconds,
-                    on_close=context.cancel_operations) as bridge:
+        with Bridge(context.handle, tool_definitions(context.driver_capabilities, role=context.role),
+                    timeout=self.config.limits.model_request_seconds, on_close=context.cancel_operations) as bridge:
             options = dict(settings['options'])
             turn_options = options.pop('turn', {})
             if not isinstance(turn_options, dict) or set(turn_options) & {'threadId', 'input', 'model', 'cwd', 'sandboxPolicy', 'approvalPolicy', 'approvalsReviewer'}:

@@ -272,7 +272,7 @@ def _prompt_tool_surface(context: Context) -> dict:
             "restrictions within this same unit. Host tools and enforcement "
             "remain authoritative; this text grants nothing and does not "
             "advertise native engine tools."),
-        "tools": [tool["name"] for tool in tool_definitions(context.role.capabilities)],
+        "tools": [tool["name"] for tool in tool_definitions(context.role.capabilities, role=context.role)],
     }
 
 

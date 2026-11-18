@@ -111,8 +111,8 @@ class PiDriver:
         started = time.monotonic()
         context.model_evidence = {"profile": profile, **model, "engine": "pi", "requests": 0,
                                   "request_unit": "model_request", "usage": [], "usage_known": False}
-        with Bridge(reselection.handle, tool_definitions(context.role.capabilities), timeout=self.config.limits.model_request_seconds,
-                    on_close=context.cancel_operations) as bridge:
+        with Bridge(reselection.handle, tool_definitions(context.role.capabilities, role=context.role),
+                    timeout=self.config.limits.model_request_seconds, on_close=context.cancel_operations) as bridge:
             env = environment(extra={"MIZU_BRIDGE_CONFIG": str(bridge.config_file)})
             env.update(credentials(self.config.file.parent / "credentials.env"))
             bound = startup_bound(self.config, 'pi')

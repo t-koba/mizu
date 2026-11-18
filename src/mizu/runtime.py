@@ -924,7 +924,7 @@ class Context:
         requests_left, tools_left = self._wrap_up_remaining()
         how = f"{max(0, requests_left)} requests and {max(0, tools_left)} wrap-up tools"
         tools = ", ".join(tool["name"] for tool in tool_definitions(
-            tuple(c for c in self.role.capabilities if c in WRAP_UP_OPS))) or "none"
+            tuple(c for c in self.role.capabilities if c in WRAP_UP_OPS), role=self.role)) or "none"
         return (f"For the rest of this work unit only: per-run {self.bound_hit} "
                 f"bound reached; wrap-up only ({tools}) with {how} left")
 
@@ -2069,6 +2069,8 @@ class Context:
         self.ready_work_signature = page["signature"]
 
     def _op_finish(self, args: dict) -> dict:
+        if args["outcome"] not in self.role.finish_outcomes:
+            raise Denied(f"Role {self.role.name} does not allow finish outcome {args['outcome']!r}")
         if not args["summary"].strip():
             raise Denied("A nonempty work summary is required")
         if ("next_step" in args

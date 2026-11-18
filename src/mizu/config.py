@@ -817,6 +817,8 @@ class ServiceSettings:
 EVENT_WAKE_KINDS = ("operator_record", "decision", "work_item", "wait", "ci",
                     "operator", "ready_work", "code")
 
+FINISH_OUTCOMES = ("continue", "wait", "blocked", "done")
+
 
 @dataclasses.dataclass(frozen=True)
 class Role:
@@ -920,6 +922,7 @@ class Role:
     scheduled_inputs: tuple[str, ...] = ()
     #: Opt in to the open-work producer gate; inert for writers/non-producers.
     held_at_capacity: bool = False
+    finish_outcomes: tuple[str, ...] = FINISH_OUTCOMES
 
 
 def role_requests_per_run(config: "Config", role: "Role") -> int:
@@ -1828,7 +1831,7 @@ def load(file: Path) -> Config:
         if name in RESERVED_ROLE_NAMES:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change", "held_at_capacity",
-                    "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
+                    "finish_outcomes", "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
                     "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
@@ -1959,6 +1962,13 @@ def load(file: Path) -> Config:
         ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
         check_result_wake = boolean(role.get("check_result_wake", True),
                                     f"roles.{name}.check_result_wake")
+        finish_outcomes = strings(role.get("finish_outcomes", list(FINISH_OUTCOMES)),
+                                  f"roles.{name}.finish_outcomes")
+        selected_outcomes = set(finish_outcomes)
+        if (not finish_outcomes or len(selected_outcomes) != len(finish_outcomes)
+                or not selected_outcomes.issubset(FINISH_OUTCOMES)):
+            raise ConfigError(f"roles.{name}.finish_outcomes must be a nonempty array of unique values from "
+                              + ", ".join(FINISH_OUTCOMES))
         persistent_exec = boolean(role.get("persistent_exec", False), f"roles.{name}.persistent_exec")
         if persistent_exec and "exec" not in caps:
             raise ConfigError(f"roles.{name}.persistent_exec requires the exec capability")
@@ -2045,7 +2055,7 @@ def load(file: Path) -> Config:
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
                            decision_events=events, work_item_events=work_events, decision_sources=raw_sources,
                            work_item_sources=work_sources, ci_wake=ci_wake,
-                           check_result_wake=check_result_wake,
+                           check_result_wake=check_result_wake, finish_outcomes=finish_outcomes,
                            persistent_exec=persistent_exec,
                            held_at_capacity=boolean(role.get("held_at_capacity", False),
                                                     f"roles.{name}.held_at_capacity"),
