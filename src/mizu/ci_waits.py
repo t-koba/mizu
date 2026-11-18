@@ -166,14 +166,37 @@ def _absence_record(store, path):
         return {}
 
 
+def _absence_generation_path(store):
+    return store.root / "ci-wait-absence-generation.json"
+
+
+def _absence_generation(store):
+    generation = _absence_record(store, _absence_generation_path(store)).get("generation")
+    if (isinstance(generation, str) and len(generation) == 32
+            and all(char in "0123456789abcdef" for char in generation)):
+        return generation
+    return None
+
+
+def _rotate_absence_generation(store):
+    token = uuid.uuid4().hex
+    try:
+        write_json(_absence_generation_path(store), {"generation": token})
+    except (Denied, OSError, ValueError, TypeError):
+        return None
+    return token
+
+
 def _absence_item(item):
     return {"work_item": item["id"], "holder": item["holder"],
             "wait_digest": digest(canonical(item["wait"]))}
 
 
-def _absence_matches(item, record, settings, source, activity):
+def _absence_matches(item, record, settings, source, activity, generation):
     stamp = record.get("observed_at")
-    return (source is not None and activity is not None and item is not None and item["status"] == "blocked"
+    return (generation is not None and isinstance(record.get("generation"), str)
+            and record["generation"] == generation
+            and source is not None and activity is not None and item is not None and item["status"] == "blocked"
             and item["holder"] is not None and record.get("source") == source
             and record.get("activity") == activity
             and type(stamp) in (int, float)
@@ -192,6 +215,9 @@ def _absence_target(store, wait, repository):
 def holder_only(store, item):
     """Read only advisory absence for the supplied current item; unknown is not terminal."""
     try:
+        generation = _absence_generation(store)
+        if generation is None:
+            return False
         record = _absence_record(store, _absence_path(store, item["id"]))
         if not record or store.ci_request_roles is None or store.ci_request_roles() != {item["holder"]}:
             return False
@@ -199,7 +225,7 @@ def holder_only(store, item):
         repository, source = _absence_source(settings)
         requests = CiRequests(store.root)
         activity = requests.activity()
-        if not _absence_matches(item, record, settings, source, activity):
+        if not _absence_matches(item, record, settings, source, activity, generation):
             return False
         wait = _resolved(store, item["wait"])
         target = _absence_target(store, wait, repository) if wait is not None else None
@@ -225,8 +251,10 @@ class _Absences:
             with contextlib.suppress(Denied, LimitExceeded, OSError, ValueError):
                 self.activity = self.requests.activity()
         self.quiet = None  # Lazily certify the ledger once per tick, not once per waiter.
+        self.revocation_failed = False
 
     def prune(self, targets):
+        generation = _absence_generation(self.store)
         directory = _absence_dir(self.store)
         try:
             if not _directory(directory):
@@ -238,6 +266,7 @@ class _Absences:
         except (Denied, OSError, ValueError):
             return
         removed = False
+        stale = False
         for path in paths:
             record = _absence_record(self.store, path)
             target = record.get("target")
@@ -245,7 +274,7 @@ class _Absences:
             if len(pair) == 2 and all(isinstance(part, str) for part in pair) and pair not in targets:
                 try:
                     item = self.store.current(path.stem)
-                    if _absence_matches(item, record, self.settings, self.source, self.activity):
+                    if _absence_matches(item, record, self.settings, self.source, self.activity, generation):
                         continue
                 except (Denied, LimitExceeded, OSError, ValueError, TypeError, OverflowError):
                     pass
@@ -256,11 +285,15 @@ class _Absences:
                 pass  # Not a readable observation.
             except (Denied, OSError):
                 # An undeletable witness must not survive as evidence of absence.
-                with contextlib.suppress(Denied, OSError, ValueError, TypeError):
+                try:
                     write_json(path, {})
+                except (Denied, OSError, ValueError, TypeError):
+                    stale = True
         if removed:
             with contextlib.suppress(Denied, OSError):
                 sync_dir(directory)
+        if stale and _rotate_absence_generation(self.store) is None:
+            self.revocation_failed = True
 
     def remember(self, item, wait, stamp):
         # Failure here is just missing optional absence evidence. It must not
@@ -273,12 +306,19 @@ class _Absences:
                 self.quiet = self.requests.quiet_activity() == self.activity
             if not self.quiet or self.requests.activity() != self.activity:
                 return
+            if self.revocation_failed:
+                return
+            generation = _absence_generation(self.store)
+            if generation is None:
+                generation = _rotate_absence_generation(self.store)
+                if generation is None:
+                    return
             target = _absence_target(self.store, wait, self.repository)
             if target is not None:
                 path = _absence_path(self.store, item["id"])
                 _directory(path.parent)
                 write_json(path, {**_absence_item(item), "target": target, "source": self.source,
-                                  "activity": self.activity, "observed_at": stamp})
+                                  "activity": self.activity, "observed_at": stamp, "generation": generation})
 
     def forget(self, item):
         with contextlib.suppress(Denied, OSError):
