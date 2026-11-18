@@ -24,9 +24,11 @@ result count is configured policy with a fixed ceiling, and discovery remains
 unbounded by that count. Constructor policy defaults include policy supplied by
 `Project`, including history output and the malformed-receipt diagnostic sample;
 literal bound-parameter defaults are
-classified separately below. The `runtime.py` literals are fixed run-local memory, one-row probe and public page
-bounds; its configurable admission and dispatch choices are `Limits` and
-`[dispatch_evidence]` fields, including the run-local queue-observation sample.
+classified separately below. The `runtime.py` literals are fixed run-local
+memory, one-row probe and public page bounds; `decision_idle.py` owns the bounded
+idle-decision cache constant. Runtime's configurable admission and dispatch choices
+are `Limits` and `[dispatch_evidence]` fields, including the run-local
+queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
 The `acceptance.py` retained-evidence ceiling, half-envelope scope cap,
@@ -589,8 +591,10 @@ DECLARATIONS = {
             '4096', 'safety', 'runtime / bounded role cursor state read'),
         'MAX_COVERED_BYTES': (
             '2048', 'safety', 'runtime / bounded serialized CI-request covered-item set'),
+    },
+    'decision_idle.py': {
         '_DECISION_IDLE_CACHE_LIMIT': (
-            '256', 'safety', 'runtime / bounded in-process empty-decision cache entries'),
+            '256', 'safety', 'decision delivery / bounded in-process empty-decision cache entries'),
     },
     'work_item_resolution.py': {
         'MAX_RESOLUTION_BYTES': (
