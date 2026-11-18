@@ -1137,6 +1137,11 @@ DECLARATIONS = {
 # reserves are fixed conservative safety margins, not command bounds, and
 # output/artifact bounds are fixed safety ceilings.
 GATE_DECLARATIONS = {
+    'install.py': {
+        'STAGE_REAP_LIMIT': (
+            '64', 'safety',
+            'install staging / bounded abandoned-directory reaping per run'),
+    },
     'check_unittest.py': {
         'TIMING_SIDECAR_MAX_BYTES': (
             '1000000', 'safety', 'gate timing artifact / bounded sidecar read'),

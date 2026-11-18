@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,7 @@ from mizu.cli import configure
 from mizu.distribution import source_files as inventory
 from mizu.distribution import source_manifest as distribution_manifest
 from mizu.config import load
-from mizu.errors import Denied, MizuError
+from mizu.errors import Busy, Denied, MizuError
 from mizu.fs import canonical, digest, sync_dir, lock, mkdir, now, read_json, reuse_owned_locks, write_json
 
 
@@ -30,6 +31,98 @@ def source_files():
 
 def source_manifest(root=ROOT):
     return distribution_manifest(root)
+
+
+class StagingInterrupted(BaseException):
+    """Raised by a staging signal handler after it removes its temp directory."""
+
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__(f"Staging interrupted by signal {signum}")
+
+
+#: Bound on abandoned staging directories cleaned per staging run.
+STAGE_REAP_LIMIT = 64
+
+
+def _stage_owner_lock(directory: Path) -> Path:
+    """Owner-lock path for a staging directory, kept outside the staged tree."""
+    return directory.parent / ".owner-locks" / (directory.name + ".lock")
+
+
+def _clean_staging_dir(path: Path) -> None:
+    """Remove only a real .stage-* directory; never follow symlinks or raise."""
+    try:
+        if path.name.startswith(".stage-") and path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def stage_ownership(directory: Path):
+    """Hold a kernel lock naming this process as a live stager of directory."""
+    lock_path = _stage_owner_lock(directory)
+    with lock(lock_path, blocking=False):
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+
+
+@contextlib.contextmanager
+def stage_signal_cleanup(directory: Path):
+    """Remove directory on SIGTERM/SIGINT/SIGHUP, then unwind staging.
+
+    Yields the installed handler so tests can simulate a signal in-process.
+    Handlers are restored on normal exit; unsupported signals are skipped.
+    """
+    watched = [sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None),
+                               getattr(signal, "SIGHUP", None)) if sig is not None]
+
+    def handle(signum, _frame):
+        _clean_staging_dir(directory)
+        raise StagingInterrupted(signum)
+
+    previous = {}
+    try:
+        for sig in watched:
+            try:
+                previous[sig] = signal.signal(sig, handle)
+            except (ValueError, OSError):
+                pass  # non-main thread or unsupported signal
+        yield handle
+    finally:
+        for sig, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, handler)
+
+
+def reap_abandoned_staging(release_parent: Path, *, limit: int = STAGE_REAP_LIMIT) -> list:
+    """Remove .stage-* directories with no live owner; return their names.
+
+    A live stager holds a nonblocking kernel lock on its owner-lock path;
+    acquiring that lock means no live process owns the directory. Each
+    candidate is bounded and symlinks are never followed. Reaping runs under
+    the prefix install lock, so no second stager can race in this prefix.
+    """
+    reaped = []
+    for path in sorted(release_parent.glob(".stage-*"))[:limit]:
+        if path.is_symlink() or not path.is_dir():
+            continue
+        lock_path = _stage_owner_lock(path)
+        try:
+            with lock(lock_path, blocking=False):
+                if path.is_symlink() or not path.is_dir():
+                    continue
+                shutil.rmtree(path)
+                reaped.append(path.name)
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+        except (Busy, OSError):
+            continue  # live owner or unsafe candidate: leave it untouched
+    return reaped
 
 
 def verify_release(release: Path, *, expected_manifest=None):
@@ -256,45 +349,47 @@ def stage(args):
         verify_release(release.resolve(), expected_manifest=manifest)
     else:
         mkdir(release.parent)
+        reap_abandoned_staging(release.parent)
         temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=release.parent))
         try:
-            for relative, source in source_files():
-                target = temporary / relative
-                mkdir(target.parent)
-                shutil.copy2(source, target)
-            staged_manifest = source_manifest(temporary)
-            if staged_manifest != manifest:
-                raise Denied("Source changed while staging; retry from a stable candidate copy")
-            pi_lock = None
-            pi_durable_lock = None
-            if not args.core_only:
-                common = ["--engine-strict", "--no-audit", "--no-fund"]
-                # Permit npm's own script policy when opted in; on npm v12 removing
-                # --ignore-scripts still defers to allowScripts default-deny, so the flag
-                # is requested permission, not proof scripts ran. Default stays deny-all.
-                scripts = [] if args.allow_install_scripts else ["--ignore-scripts"]
-                for adapter_name in ("pi", "pi-durable"):
-                    adapter = temporary / f"adapters/{adapter_name}"
-                    if not (adapter / "package-lock.json").exists():
-                        command(["npm", "install", "--package-lock-only", *common, "--ignore-scripts"], cwd=adapter)
-                    command(["npm", "ci", *common, *scripts], cwd=adapter)
-                    if adapter_name == "pi":
-                        pi = adapter / "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
-                        result = subprocess.check_output([node, pi, "--version"], text=True, timeout=30).strip()
-                    command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
-                    if adapter_name == "pi":
-                        pi_lock = digest((adapter / "package-lock.json").read_bytes())
-                    else:
-                        pi_durable_lock = digest((adapter / "package-lock.json").read_bytes())
-            write_json(temporary / "source-manifest.json", manifest)
-            write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
-                        "installed_at": now(), "mode": "core-only" if args.core_only else "pi",
-                        "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
-                        "pi_durable_lock_sha256": pi_durable_lock,
-                        "node": node, "install_scripts_enabled": args.allow_install_scripts,
-                        # Requested permission, not proof scripts ran (npm v12 may still deny via allowScripts).
-                        })
-            os.rename(temporary, release)
+            with stage_ownership(temporary), stage_signal_cleanup(temporary):
+                for relative, source in source_files():
+                    target = temporary / relative
+                    mkdir(target.parent)
+                    shutil.copy2(source, target)
+                staged_manifest = source_manifest(temporary)
+                if staged_manifest != manifest:
+                    raise Denied("Source changed while staging; retry from a stable candidate copy")
+                pi_lock = None
+                pi_durable_lock = None
+                if not args.core_only:
+                    common = ["--engine-strict", "--no-audit", "--no-fund"]
+                    # Permit npm's own script policy when opted in; on npm v12 removing
+                    # --ignore-scripts still defers to allowScripts default-deny, so the flag
+                    # is requested permission, not proof scripts ran. Default stays deny-all.
+                    scripts = [] if args.allow_install_scripts else ["--ignore-scripts"]
+                    for adapter_name in ("pi", "pi-durable"):
+                        adapter = temporary / f"adapters/{adapter_name}"
+                        if not (adapter / "package-lock.json").exists():
+                            command(["npm", "install", "--package-lock-only", *common, "--ignore-scripts"], cwd=adapter)
+                        command(["npm", "ci", *common, *scripts], cwd=adapter)
+                        if adapter_name == "pi":
+                            pi = adapter / "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+                            result = subprocess.check_output([node, pi, "--version"], text=True, timeout=30).strip()
+                        command([node, str(adapter / "launcher.mjs"), "--check-contract"], cwd=adapter)
+                        if adapter_name == "pi":
+                            pi_lock = digest((adapter / "package-lock.json").read_bytes())
+                        else:
+                            pi_durable_lock = digest((adapter / "package-lock.json").read_bytes())
+                write_json(temporary / "source-manifest.json", manifest)
+                write_json(temporary / "installation.json", {"version": __version__, "source_sha256": sha,
+                            "installed_at": now(), "mode": "core-only" if args.core_only else "pi",
+                            "pi_version": None if args.core_only else result, "pi_lock_sha256": pi_lock,
+                            "pi_durable_lock_sha256": pi_durable_lock,
+                            "node": node, "install_scripts_enabled": args.allow_install_scripts,
+                            # Requested permission, not proof scripts ran (npm v12 may still deny via allowScripts).
+                            })
+                os.rename(temporary, release)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
@@ -336,6 +431,9 @@ def main():
                 result = stage(args)
         print(json.dumps(result, indent=2))
         return 0
+    except StagingInterrupted as exc:
+        print(json.dumps({"error": f"Installation interrupted by signal {exc.signum}"}), file=sys.stderr)
+        return 128 + exc.signum
     except (MizuError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return getattr(exc, "code", 1)

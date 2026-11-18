@@ -2978,6 +2978,66 @@ class InstallerStagingTests(unittest.TestCase):
             alias.symlink_to(release.parent, target_is_directory=True)
             INSTALLER.verify_release(alias / release.name)
 
+    def test_staging_signal_removes_the_temporary_directory(self):
+        # A terminating signal during staging must remove the .stage-* dir
+        # instead of leaving hundreds of megabytes behind on abrupt exit.
+        import signal as signal_module
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp) / ".stage-live"
+            staging.mkdir()
+            (staging / "payload.bin").write_bytes(b"x" * 4096)
+            with INSTALLER.stage_signal_cleanup(staging) as handler:
+                self.assertIs(INSTALLER.signal.getsignal(signal_module.SIGTERM), handler)
+                with self.assertRaises(INSTALLER.StagingInterrupted) as caught:
+                    handler(signal_module.SIGTERM, None)
+                self.assertEqual(caught.exception.signum, signal_module.SIGTERM)
+            self.assertFalse(staging.exists())
+            # Handlers are restored when the context exits normally.
+            self.assertIsNot(INSTALLER.signal.getsignal(signal_module.SIGTERM), handler)
+
+    def test_clean_staging_dir_ignores_symlinks_and_unrelated_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / ".stage-real"
+            real.mkdir()
+            unrelated = root / "keep-me"
+            unrelated.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "payload").write_text("keep", encoding="utf-8")
+            link = root / ".stage-link"
+            link.symlink_to(outside, target_is_directory=True)
+            INSTALLER._clean_staging_dir(real)
+            INSTALLER._clean_staging_dir(unrelated)
+            INSTALLER._clean_staging_dir(link)
+            self.assertFalse(real.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(link.is_symlink())
+            self.assertEqual((outside / "payload").read_text(encoding="utf-8"), "keep")
+
+    def test_reap_removes_abandoned_but_not_owned_staging_dirs(self):
+        # An abandoned .stage-* dir is reaped; one with a live owner lock
+        # (held by this process) survives, so reaping cannot race a stager.
+        with tempfile.TemporaryDirectory() as tmp:
+            releases = Path(tmp) / "releases"
+            releases.mkdir()
+            abandoned = releases / ".stage-abandoned"
+            owned = releases / ".stage-owned"
+            for directory in (abandoned, owned):
+                directory.mkdir()
+                (directory / "payload").write_text("x", encoding="utf-8")
+            with INSTALLER.stage_ownership(owned):
+                reaped = INSTALLER.reap_abandoned_staging(releases)
+            self.assertEqual(reaped, [".stage-abandoned"])
+            self.assertFalse(abandoned.exists())
+            self.assertTrue(owned.exists())
+            self.assertEqual((owned / "payload").read_text(encoding="utf-8"), "x")
+            # Reaping the now-abandoned owned dir on a later run succeeds.
+            self.assertEqual(INSTALLER.reap_abandoned_staging(releases), [".stage-owned"])
+            self.assertFalse(owned.exists())
+            # The locks directory is never itself treated as a staging dir.
+            self.assertTrue((releases / ".owner-locks").exists())
+
     def test_ci_installer_lifecycle_has_no_source_gate_wiring(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("run: ./scripts/test-install.sh\n", workflow)
