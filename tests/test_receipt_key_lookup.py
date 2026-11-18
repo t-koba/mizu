@@ -39,6 +39,14 @@ class ReceiptKeyLookupTests(Fixture):
             self.root, branch, code_digest,
             policy=self.policy if policy is None else policy)
 
+    @property
+    def index_path(self):
+        return (self.root / "evidence" / publication.KEY_INDEX_DIR
+                / publication.KEY_INDEX_FILE)
+
+    def index(self):
+        return json.loads(self.index_path.read_text(encoding="utf-8"))
+
     def test_warm_hit_and_miss_do_not_enumerate_receipt_names(self):
         receipt = self.record()
         self.record(code_digest=OTHER_DIGEST)
@@ -46,11 +54,14 @@ class ReceiptKeyLookupTests(Fixture):
         with patch.object(Publication, "_receipt_names",
                           side_effect=AssertionError("directory enumerated")) as names, \
                 patch.object(Publication, "_scan_receipts",
-                             side_effect=AssertionError("strict rescan")) as scans:
+                             side_effect=AssertionError("strict rescan")) as scans, \
+                patch.object(Publication, "_build_key_index",
+                             side_effect=AssertionError("index rebuilt")) as builds:
             self.assertEqual(self.lookup(), receipt["publication_id"])
             self.assertIsNone(self.lookup(code_digest="e" * 64))
         self.assertEqual(names.call_count, 0)
         self.assertEqual(scans.call_count, 0)
+        self.assertEqual(builds.call_count, 0)
 
     def test_zero_matches_and_unrelated_keys_resolve_nothing(self):
         self.assertIsNone(self.lookup())
@@ -71,19 +82,92 @@ class ReceiptKeyLookupTests(Fixture):
         self.assertEqual(page["total"], 2)
         self.assertIsNone(self.lookup())
 
-    def test_corrupt_oversized_or_invalid_candidate_raises_instead_of_absence(self):
+    def test_corrupt_file_blocks_lookup_but_a_writer_still_indexes_its_receipt(self):
         receipt = self.record()
         corrupt = self.directory / ("0" * 64 + ".external.json")
         corrupt.write_text("{}", encoding="utf-8")
         with self.assertRaises(Denied):
             self.lookup()
+        # An unrelated corrupt file cannot block a new valid receipt: the
+        # writer rebuilds, indexes it and records incompleteness instead.
+        newer = self.record(code_digest=OTHER_DIGEST)
+        index = self.index()
+        self.assertTrue(index["incomplete"])
+        self.assertIn(newer["publication_id"],
+                      {row["publication_id"] for row in index["entries"]})
+        with self.assertRaises(Denied):
+            self.lookup()
+        with self.assertRaises(Denied):
+            self.lookup(code_digest=OTHER_DIGEST)
         corrupt.unlink()
-        # A writer replay repairs the stamp and re-establishes keyed evidence.
+        # Removing the file alone leaves a stale stamp; no reader repairs it.
+        with self.assertRaises(Denied):
+            self.lookup()
         self.record()
+        self.assertFalse(self.index()["incomplete"])
         self.assertEqual(self.lookup(), receipt["publication_id"])
+        self.assertEqual(self.lookup(code_digest=OTHER_DIGEST),
+                         newer["publication_id"])
+
+    def test_missing_index_and_corrupt_receipt_does_not_block_first_write(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        corrupt = self.directory / ("0" * 64 + ".external.json")
+        corrupt.write_text("{}", encoding="utf-8")
+        self.assertIsNone(self.lookup())
+        receipt = self.record()
+        index = self.index()
+        self.assertTrue(index["incomplete"])
+        self.assertEqual([row["publication_id"] for row in index["entries"]],
+                         [receipt["publication_id"]])
+        with self.assertRaises(Denied):
+            self.lookup()
+        corrupt.unlink()
+        self.record()
+        self.assertFalse(self.index()["incomplete"])
+        self.assertEqual(self.lookup(), receipt["publication_id"])
+
+    def test_oversized_candidate_is_tolerated_by_writer_and_denies_lookup(self):
+        receipt = self.record()
+        corrupt = self.directory / ("0" * 64 + ".external.json")
         corrupt.write_bytes(b'{"x":' + b" " * 9000 + b"}")
         with self.assertRaises(Denied):
             self.lookup()
+        self.record()
+        self.assertTrue(self.index()["incomplete"])
+        with self.assertRaises(Denied):
+            self.lookup()
+        corrupt.unlink()
+        self.record()
+        self.assertEqual(self.lookup(), receipt["publication_id"])
+
+    def test_incomplete_flag_is_validated_and_denies_lookup(self):
+        receipt = self.record()
+        value = self.index()
+        for invalid in (None, "yes", 1):
+            with self.subTest(invalid=invalid):
+                mutable = dict(value)
+                if invalid is None:
+                    del mutable["incomplete"]
+                else:
+                    mutable["incomplete"] = invalid
+                self.index_path.write_bytes(canonical(mutable))
+                with self.assertRaises(Denied):
+                    self.lookup()
+        value["incomplete"] = True
+        self.index_path.write_bytes(canonical(value))
+        with self.assertRaises(Denied):
+            self.lookup()
+        # Only a writer rebuild, never a plain append, clears the denial.
+        self.record()
+        self.assertFalse(self.index()["incomplete"])
+        self.assertEqual(self.lookup(), receipt["publication_id"])
+
+    def test_malformed_receipt_name_refuses_rebuild(self):
+        self.record()
+        malformed = self.directory / ("e" * 64 + ".external.json.bak")
+        malformed.write_bytes(canonical({}))
+        with self.assertRaises(Denied):
+            self.record()
 
     def test_non_dict_key_index_entry_is_denied(self):
         self.record()
@@ -105,7 +189,13 @@ class ReceiptKeyLookupTests(Fixture):
         # has no writer-built index and therefore cannot claim completeness.
         page = Publication.list_receipts(self.root, code_digest=DIGEST, branch=BRANCH)
         self.assertEqual(page["total"], 1)
-        self.assertIsNone(self.lookup())
+        with patch.object(Publication, "_receipt_names",
+                          side_effect=AssertionError("directory enumerated")) as names, \
+                patch.object(Publication, "_build_key_index",
+                             side_effect=AssertionError("index rebuilt")) as builds:
+            self.assertIsNone(self.lookup())
+        self.assertEqual(names.call_count, 0)
+        self.assertEqual(builds.call_count, 0)
         newer = self.record(code_digest=OTHER_DIGEST)
         self.assertEqual(self.lookup(code_digest=OTHER_DIGEST), newer["publication_id"])
         self.assertEqual(self.lookup(), legacy["publication_id"])
@@ -130,6 +220,12 @@ class ReceiptKeyLookupTests(Fixture):
         self.assertEqual(self.lookup(policy=relaxed), matching["publication_id"])
         outsider = self.directory / ("0" * 64 + ".external.json")
         outsider.write_bytes(canonical({}))
+        with self.assertRaises(Denied):
+            self.lookup(policy=relaxed)
+        # The writer update must rebuild from directory state: refreshing the
+        # stamp on the old view would silently clear this denial.
+        self.record()
+        self.assertTrue(self.index()["incomplete"])
         with self.assertRaises(Denied):
             self.lookup(policy=relaxed)
 

@@ -99,15 +99,20 @@ def _projection_of(record: dict) -> dict | None:
     return None
 #: File names of recorded receipts inside the publications directory.
 RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
+#: A name that looks like a receipt but does not parse cannot be skipped by a
+#: rebuild: a rename must not hide evidence from keyed resolution.
+MALFORMED_RECEIPT_NAME = re.compile(r"(?:external|receipt)\.json")
 
 #: Writer-owned key index. It lives outside the publications directory so a
 #: lookup reads one fixed file and never enumerates receipt names; the receipt
 #: directory stamp detects out-of-band name changes and per-entry content
-#: digests detect same-name edits before any key is resolved.
+#: digests detect same-name edits before any key is resolved. A rebuild from
+#: directory names tolerates unreadable individual receipts by marking the
+#: index incomplete; lookups refuse to resolve such an index.
 KEY_INDEX_DIR = "publication-keys"
 KEY_INDEX_FILE = "receipt-key-index.json"
 KEY_INDEX_LOCK = "receipt-key-index.lock"
-KEY_INDEX_SCHEMA = 1
+KEY_INDEX_SCHEMA = 2
 KEY_INDEX_BYTES = 1 << 20
 #: Maximum characters of an operator approval or run reference.
 REFERENCE_CHARS = 256
@@ -597,8 +602,9 @@ class Publication:
         except (ValueError, UnicodeError, RecursionError) as exc:
             raise Denied("Invalid publication key index") from exc
         if (not isinstance(value, dict)
-                or set(value) != {"schema", "stamp", "entries", "keys"}
-                or value["schema"] != KEY_INDEX_SCHEMA):
+                or set(value) != {"schema", "stamp", "entries", "keys", "incomplete"}
+                or value["schema"] != KEY_INDEX_SCHEMA
+                or type(value["incomplete"]) is not bool):
             raise Denied("Invalid publication key index")
         entries, keys, stamp = value["entries"], value["keys"], value["stamp"]
         if (not isinstance(entries, list) or not isinstance(keys, list)
@@ -641,11 +647,16 @@ class Publication:
 
     @classmethod
     def _build_key_index(cls, store, policy):
-        """Establish a key index from existing receipts at write time.
+        """Rebuild the key index from directory names at write time.
 
         This is the one bounded scan, owned by the receipt writer. A lookup
         never calls it: without a writer-built index, keyed resolution stays
-        unavailable and ordinary listing remains the only reader.
+        unavailable and ordinary listing remains the only reader. An
+        unreadable, oversized or invalid individual receipt is not indexed and
+        marks the result incomplete, so keyed lookups fail closed without
+        blocking the writer that is recording a new receipt. Duplicate
+        identities, malformed receipt names and configured bounds still refuse
+        the whole rebuild.
         """
         try:
             names = sorted(os.listdir(store.root))
@@ -656,36 +667,56 @@ class Publication:
         if len(names) > policy.name_processing_limit:
             raise Denied("Publication evidence scan incomplete")
         entries, keys, seen = [], {}, set()
+        incomplete = False
         for name in names:
             match = RECEIPT_FILE.fullmatch(name)
             if match is None:
+                if MALFORMED_RECEIPT_NAME.search(name):
+                    raise Denied("Malformed publication receipt name")
                 continue
             publication_id, kind = match.groups()
             if publication_id in seen:
                 raise Denied("Multiple publication receipt files for one identity")
             seen.add(publication_id)
-            if len(entries) >= policy.record_limit:
+            if len(seen) > policy.record_limit:
                 raise Denied("Publication evidence scan incomplete")
-            receipt = cls.read_receipt(Path(store.root).parent.parent, publication_id)
-            raw = safe_read(store.root, name, RECORD_BYTES)
+            try:
+                receipt = cls.read_receipt(Path(store.root).parent.parent, publication_id)
+                raw = safe_read(store.root, name, RECORD_BYTES)
+            except (Denied, LimitExceeded, OSError):
+                incomplete = True
+                continue
             entries.append({"publication_id": publication_id, "kind": kind,
                             "sha256": digest(raw)})
             key = (receipt["branch"], receipt["code_digest"])
             keys.setdefault(key, []).append(publication_id)
         return {"schema": KEY_INDEX_SCHEMA, "stamp": _directory_stamp(store.root),
-                "entries": entries,
-                "keys": [{"branch": branch, "code_digest": code_digest,
-                          "publication_ids": ids}
-                         for (branch, code_digest), ids in keys.items()]}
+                "entries": entries, "keys": [
+                    {"branch": branch, "code_digest": code_digest,
+                     "publication_ids": ids}
+                    for (branch, code_digest), ids in keys.items()],
+                "incomplete": incomplete}
 
     @classmethod
     def _update_key_index(cls, store, record, kind, policy):
-        """Maintain the key index in the same operation that writes a receipt."""
+        """Maintain the key index in the same operation that writes a receipt.
+
+        A stamp change or an incomplete/corrupt index forces a bounded rebuild
+        from current directory names; a plain append is only ever applied to
+        an index whose stamp still matches the directory. An append never
+        clears incompleteness -- only a fresh rebuild can.
+        """
         directory, index_path, lock_path = _key_index_paths(store)
         mkdir(directory)
         with kernel_lock(lock_path):
-            index = cls._read_key_index(store, policy)
-            if index is None:
+            try:
+                index = cls._read_key_index(store, policy)
+            except (Denied, LimitExceeded, OSError):
+                # The writer owns this file: replace an unusable index with a
+                # rebuilt one instead of blocking every later receipt write.
+                index = None
+            if (index is None or index["incomplete"]
+                    or index["stamp"] != _directory_stamp(store.root)):
                 index = cls._build_key_index(store, policy)
             publication_id = record["publication_id"]
             raw = safe_read(store.root, _receipt_file_name(publication_id, kind), RECORD_BYTES)
@@ -710,8 +741,9 @@ class Publication:
             else:
                 keys.append({"branch": branch, "code_digest": code_digest,
                              "publication_ids": [publication_id]})
-            value = {"schema": KEY_INDEX_SCHEMA, "stamp": _directory_stamp(store.root),
-                     "entries": entries, "keys": keys}
+            value = {"schema": KEY_INDEX_SCHEMA, "stamp": index["stamp"],
+                     "entries": entries, "keys": keys,
+                     "incomplete": index["incomplete"]}
             write_json(index_path, value)
             sync_dir(directory)
 
@@ -825,9 +857,9 @@ class Publication:
         directory enumeration and no process-local witness.
         Trust: the index is written only by the receipt writer. A missing index
         means completeness cannot be established and resolves nothing. A stamp
-        or content mismatch, a corrupt index or a corrupt candidate is Denied,
-        never treated as absence. An out-of-band receipt name change also
-        fails closed until the writer rebuilds the index.
+        or content mismatch, an incomplete rebuild, a corrupt index or a
+        corrupt candidate is Denied, never treated as absence. An out-of-band
+        receipt name change fails closed until the writer rebuilds the index.
         Failure: ``Denied`` for invalid arguments or invalid evidence.
         """
         policy = policy if policy is not None else PublicationEvidence()
@@ -841,6 +873,8 @@ class Publication:
             return None
         if index["stamp"] != _directory_stamp(store.root):
             raise Denied("Publication evidence changed")
+        if index["incomplete"]:
+            raise Denied("Publication evidence scan incomplete")
         for entry in index["entries"]:
             name = _receipt_file_name(entry["publication_id"], entry["kind"])
             try:

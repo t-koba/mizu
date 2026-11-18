@@ -2908,11 +2908,24 @@ recorded evidence, not permission to publish or the status of a dispatch:
 
 Keyed receipt resolution for exact-snapshot waits reads a writer-owned index
 in `evidence/publication-keys`, not a receipt-directory scan. The index records
-a content digest for every receipt and a stamp of the publications directory;
-a missing, inconsistent, stale or corrupt index resolves no key or raises
-`Denied`, never treating changed evidence as absence. Receipts copied directly
-into the store remain visible to ordinary listings but gain keyed resolution
-only when a receipt writer rebuilds the index.
+a content digest for every receipt, a stamp of the publications directory and
+an `incomplete` flag. A missing index resolves no key; a stamp or content
+mismatch, a corrupt index or an incomplete rebuild raises `Denied`, never
+treating changed evidence as absence.
+
+Every receipt write checks the current directory stamp. If it differs from the
+index stamp (or the index is unusable or incomplete), the writer rebuilds the
+whole index from directory names; an unchanged index is only appended to, so an
+out-of-band name change can never be hidden by refreshing the stamp. A rebuild
+keeps the valid receipts and marks the index `incomplete` when an individual
+receipt file is unreadable, oversized or invalid; duplicate identities,
+malformed receipt names and configured scan bounds refuse the rebuild and the
+write. A valid writer call therefore still records and indexes its receipt
+while an unrelated corrupt file is present, but keyed lookups stay `Denied`
+until that file is removed. Removal alone leaves a stale stamp; the next writer
+call rebuilds cleanly, clears `incomplete` and restores keyed resolution.
+Receipts copied directly into the store remain visible to ordinary listings but
+gain keyed resolution only through such a writer rebuild.
 
 Only `changes_requested` names a `verdict` and `reviewer` (the first rejecting
 holder in configuration order). Its `finding_insights` contains up to 16
