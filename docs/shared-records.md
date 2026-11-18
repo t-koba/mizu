@@ -401,9 +401,10 @@ hyphen), required for uncertain-response retries. Identity is
 are sharded by the record ID's first component under
 `shared-records/<namespace>/` (long namespace components use a bounded digest
 directory; operator records live under `shared-records/operator/`). Runtime
-readers only use this sharded layout; see
-[Migrate flat shared records](operations.md#migrate-flat-shared-records) before
-upgrading a project that still uses the old layout. The generic
+readers only use this sharded layout. Mizu refuses to start a unit if a flat
+`.json` entry remains or the bounded check cannot rule one out. Before upgrading
+an affected project, pause it and run `mizu migrate-records <project> --apply`
+(see [migration steps](operations.md#migrate-flat-shared-records)). The generic
 `records(namespace="operator")` scanner covers only the operator partition;
 dispatch uses the checked metadata projection described below. The kind `answer`
 is single-component; other envelope IDs and writers remain namespaced. An answer

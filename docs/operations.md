@@ -456,7 +456,11 @@ mizu storage demo --apply                   # 未参照マニフェストと孤�
 The runtime no longer reads flat shared records. If an installation still has
 these files, pause each affected project and run
 `mizu migrate-records <project> --apply` before upgrading. Installation does not
-run this migration automatically.
+run this migration automatically. Mizu refuses to start work units when a
+top-level `.json` entry remains in `shared-records/`, and the refusal prints the
+migration command for that project. It also refuses if it cannot check the
+directory or reaches 1,000 entries without confirming absence. An absent
+directory is normal.
 
 ```bash
 mizu migrate-records demo          # read-only preview (default)
@@ -484,8 +488,8 @@ A report with conflicts, errors or truncation exits with status 1; other
 eligible records in the scan can still be converted. After interruption or a
 partial batch, rerun the command: an identical copy left by an interrupted move
 is safe to reuse, and a completed scan followed by a successful apply leaves no
-candidates. If a truncated scan stops making progress, do not treat it as proof
-that all flat files are gone.
+candidates. Resolve scan errors or truncation before resuming the project;
+a truncated scan that stops making progress does not prove all flat files are gone.
 
 ## 人間からの提案 (Insight)
 

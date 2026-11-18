@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from mizu import ci_waits, operator_records, record_migration
 from mizu.cli import main
+from mizu.errors import Denied
 from mizu.fs import canonical, digest
 from mizu.operator_record_index import DIRECTORY, catalog
 from mizu.shared_records import RECORD_BYTES, SharedRecords
@@ -32,6 +33,40 @@ class RecordMigrationTests(Fixture):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(["--config", str(self.file), "migrate-records", self.project.name, *args])
         return code, out.getvalue(), err.getvalue()
+
+    def test_presence_ignores_missing_directory_and_sharded_records(self):
+        self.flat.parent.rmdir()
+        self.assertFalse(record_migration.flat_records_present(self.project))
+        self.shard.parent.mkdir(parents=True)
+        self.shard.write_bytes(self.raw)
+        self.assertFalse(record_migration.flat_records_present(self.project))
+        self.flat.write_bytes(self.raw)
+        self.assertTrue(record_migration.flat_records_present(self.project))
+
+    def test_presence_refuses_unreadable_or_interrupted_scan(self):
+        with patch.object(record_migration.os, "scandir", side_effect=PermissionError):
+            with self.assertRaisesRegex(Denied, "Cannot check shared-records"):
+                record_migration.flat_records_present(self.project)
+
+        def interrupted():
+            yield self.shard.parent
+            raise FileNotFoundError
+
+        with patch.object(record_migration.os, "scandir") as scandir:
+            scandir.return_value.__enter__.return_value = interrupted()
+            with self.assertRaisesRegex(Denied, "Cannot check shared-records"):
+                record_migration.flat_records_present(self.project)
+
+    def test_presence_refuses_an_incomplete_scan_without_reading_past_bound(self):
+        def entries():
+            yield self.shard.parent
+            self.fail("Presence check read past its scan budget")
+
+        with (patch.object(record_migration, "SCAN_ENTRIES", 1),
+              patch.object(record_migration.os, "scandir") as scandir):
+            scandir.return_value.__enter__.return_value = entries()
+            with self.assertRaisesRegex(Denied, "1-entry limit"):
+                record_migration.flat_records_present(self.project)
 
     def test_cli_preview_apply_and_retry(self):
         self.flat.write_bytes(self.raw)

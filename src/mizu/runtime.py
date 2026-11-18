@@ -69,6 +69,7 @@ from .snapshot import (MAX_MISSING_FINISH_STREAK, PROGRESS_SIGNALS,
 from .run_health import (_capture_cause, _clear_missing_finish_streak,
                          _record_health_failure, _record_missing_finish_only)
 from .protocol import DEFINITIONS, operation_allowed, tool_definitions, validate
+from .record_migration import flat_records_present
 from .report import previous as _previous_report, publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
@@ -3092,6 +3093,9 @@ class Engine:
     def run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
                 enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False,
                 scheduled_invocation: bool = False) -> dict:
+        if flat_records_present(project):
+            raise Denied(f"Flat shared records remain; pause the project and run "
+                         f"mizu migrate-records {project.name} --apply before resuming")
         with self.config.runtime_policy(), lock_diagnostics.collect(self.config.limits.lock_diagnostics):
             return self._run(project, role_name, attributes=attributes, retry_busy=retry_busy,
                              enqueue_busy=enqueue_busy, event_trigger=event_trigger,

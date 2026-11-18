@@ -57,9 +57,26 @@ def _move(shared, name, target, raw, expected, existing):
 def _flat_names(shared):
     if not shared._parents(f"{_DIRECTORY}/probe"):
         return []
+    try:
+        scan = os.scandir(shared.root / _DIRECTORY)
+    except FileNotFoundError:
+        return []
     # Freeze only bounded names, before apply can mutate the directory stream.
-    with os.scandir(shared.root / _DIRECTORY) as entries:
+    with scan as entries:
         return [entry.name for entry in islice(entries, SCAN_ENTRIES)]
+
+
+def flat_records_present(project) -> bool:
+    """Detect flat entries without reading records; refuse an inconclusive scan."""
+    try:
+        entries = _flat_names(SharedRecords(project.root))
+    except OSError as exc:
+        raise Denied(f"Cannot check shared-records for flat records: {_error(exc)}") from exc
+    if any(name.endswith(".json") for name in entries):
+        return True
+    if len(entries) == SCAN_ENTRIES:
+        raise Denied(f"Cannot rule out flat shared records: shared-records scan reached its {SCAN_ENTRIES}-entry limit")
+    return False
 
 
 def _validate_flat(shared, name, validators):

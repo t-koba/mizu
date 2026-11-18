@@ -682,6 +682,22 @@ class ContextTests(Fixture):
 
 
 class EngineTests(Fixture):
+    def test_flat_shared_record_refuses_run_until_removed(self):
+        flat = self.project.root / "shared-records" / "legacy.json"
+        flat.parent.mkdir(exist_ok=True)
+        flat.write_bytes(b"{}")  # Presence, not validity, is the guard.
+        driver = ScriptDriver()
+        engine = Engine(self.config, driver=driver)
+        with patch("mizu.workspace_cache.maintain") as maintain:
+            with self.assertRaisesRegex(Denied, f"mizu migrate-records {self.project.name} --apply"):
+                engine.run(self.project, "worker")
+            maintain.assert_not_called()
+        self.assertEqual(driver.calls, [])
+
+        flat.unlink()
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        self.assertEqual(len(driver.calls), 1)
+
     def test_complete_work_unit_publishes(self):
         old = self.project.snapshots.get()["id"]
         result = Engine(self.config, driver=ScriptDriver()).run(self.project, "worker")
