@@ -4,7 +4,7 @@ import json
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from support import Fixture
+from support import Fixture, stored_question_insight
 from mizu.errors import Denied
 from mizu.fs import read_json
 from support import history_write_json as write_json
@@ -14,6 +14,11 @@ from mizu.work_items import WorkItems
 START = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
 CODE = {"kind": "code_change"}
 FUTURE = {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}
+
+
+def _external_wait(project):
+    question = stored_question_insight(project)
+    return {"kind": "insight_decided", "insight": question["id"]}
 
 
 @contextmanager
@@ -90,7 +95,7 @@ class BlockedWaitAgeTests(Fixture):
             baseline = item["wait"]["digest"]
             item = self.change(item, "doing")
         with clock(10**9), patch.object(self.store.snapshots, "get", return_value={"code_digest": baseline}):
-            item = self.change(item, "blocked", wait=FUTURE)
+            item = self.change(item, "blocked", wait=_external_wait(self.project))
             self.assertEqual(item["blocked_since"], start)
             self.assertEqual(self.store.page_ready()["total"], 0)
 
@@ -115,7 +120,9 @@ class BlockedWaitAgeTests(Fixture):
             row = self.store.page_open_readonly()["items"][0]
             self.assertEqual(row["blocked_age_seconds"], 0)
         with clock(10**9):
-            self.assertEqual(self.store.page_ready()["total"], 0)
+            # The holder's own future deadline is deferred work, so it reads as
+            # ready here rather than as blocked backpressure.
+            self.assertEqual(self.store.page_ready()["total"], 1)
             state = self.store.blocked_liveness_readonly()["items"][0]
             self.assertEqual((state["state"], state["blocked_age_seconds"]), ("pending", 10**9))
             item = self.change(item, "doing")

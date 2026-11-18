@@ -2145,6 +2145,8 @@ class WorkItems:
                         ("blocked_since", "blocked_age_seconds")})
             if wait_liveness is not None:
                 row["wait_liveness"] = wait_liveness
+        if "deferred_until" in view:
+            row["deferred_until"] = view["deferred_until"]
         if "description" in item:
             preview, clipped = text_preview(item["description"], 1024)
             row["description_preview"] = preview
@@ -2326,6 +2328,8 @@ class WorkItems:
                     published_snapshot = self.snapshots.get()
                 if holder_only(self, item, published_snapshot, writer_roles=writer_roles,
                                record_question=record_question) is not None:
+                    if isinstance(wait_probe, dict) and wait_probe.get("kind") == "deadline":
+                        view["deferred_until"] = wait_probe.get("at")
                     item = {key: value for key, value in item.items()
                             if key not in ("wait", "blocked_since")}
                     item["status"] = "open"

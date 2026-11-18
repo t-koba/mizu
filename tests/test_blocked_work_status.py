@@ -86,13 +86,16 @@ class BlockedWorkStatusTests(Fixture):
         after = {p.relative_to(self.project.root): p.read_bytes()
                  for p in self.project.root.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
-        # The holder-only code wait reads as ordinary open work in the
-        # unscoped ready set alongside the impossible and due waits.
-        self.assertEqual(self.project.work_items.page_ready()["total"], 3)
+        # The holder-only code wait and the holder's future deadline both read
+        # as open deferred work in the unscoped ready set, alongside the
+        # impossible and due waits.
+        self.assertEqual(self.project.work_items.page_ready()["total"], 4)
 
     def test_projection_rows_bytes_and_unseeded_coverage(self):
+        target = self.target()
+        external = {'kind': 'insight_decided', 'insight': target['id']}
         for key in range(3):
-            self.block(str(key))
+            self.block(str(key), external)
         store = self.project.work_items
         view = store.blocked_liveness_readonly(limit=2)
         self.assertEqual((len(view["items"]), view["total"], view["overflow_count"]), (2, 3, 1))

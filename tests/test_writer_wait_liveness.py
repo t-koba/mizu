@@ -165,7 +165,6 @@ class WriterWaitTests(Fixture):
         other = self.project.insights.submit(
             source='reviewer', title='External proposal', body='Fixture proposal', base_snapshot=None)
         for key, wait in (
-                ('deadline', {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'}),
                 ('dependency', {'kind': 'dependency', 'recipient': 'reviewer',
                                 'requires': {'insight': other['id'], 'rev': 1, 'action': 'accept'}}),
                 ('other insight', {'kind': 'insight_decided', 'insight': other['id']})):
@@ -311,6 +310,43 @@ class HolderOnlyTests(Fixture):
         self.assertEqual(holder_only(store, fresh, snapshot, writer_roles=frozenset({'worker'})),
                          'sole_writer_code_change')
 
+    def test_holder_only_deadline_is_deferred_work_with_its_deadline(self):
+        at = '2099-01-01T00:00:00+00:00'
+        item = self.block('deferred deadline', {'kind': 'deadline', 'at': at})
+        store = self.project.work_items
+        fresh = store.get(item['id'])
+        self.assertEqual(holder_only(store, fresh, self.project.snapshots.get(),
+                                     writer_roles={'worker'}), 'sole_holder_deadline')
+        # Deferred work is the holder's own schedule: visible as open work in
+        # its ready page with the deadline, never as blocked backpressure.
+        ready = store.page_ready(role_name='worker')
+        row = next(row for row in ready['items'] if row['id'] == item['id'])
+        self.assertEqual(row['status'], 'open')
+        self.assertEqual(row['deferred_until'], at)
+        for absent in ('wait', 'wait_liveness', 'blocked_since', 'blocked_age_seconds'):
+            self.assertNotIn(absent, row)
+        blocked_ids = [row['id'] for row in self.project.status()['blocked_work']['items']]
+        self.assertNotIn(item['id'], blocked_ids)
+        # The deadline reaches the model's opening, not just the read page.
+        projected = json.loads(prompt_for(self.context()))['ready_work']['items']
+        shown = next(row for row in projected if row['id'] == item['id'])
+        self.assertEqual(shown['deferred_until'], at)
+        self.assertEqual(store.get(item['id']), item)
+
+    def test_deadline_with_a_second_writer_stays_blocked(self):
+        at = '2099-01-01T00:00:00+00:00'
+        item = self.block('shared deadline', {'kind': 'deadline', 'at': at})
+        store = self.project.work_items
+        fresh = store.get(item['id'])
+        self.assertIsNone(holder_only(store, fresh, self.project.snapshots.get(),
+                                      writer_roles={'worker', 'reviewer'}))
+        page = store._page_open_impl(cursor=None, limit=25, readonly=True,
+                                     writer_roles={'worker', 'reviewer'})
+        row = next(row for row in page['items'] if row['id'] == item['id'])
+        self.assertEqual(row['status'], 'blocked')
+        self.assertEqual(row['wait'], {'kind': 'deadline', 'at': at})
+        self.assertNotIn('deferred_until', row)
+
     def test_holder_only_second_writer_denies(self):
         item = self.block('holder-only shared', {'kind': 'code_change'})
         store = self.project.work_items
@@ -384,8 +420,9 @@ class HolderOnlyTests(Fixture):
         from mizu.work_items import WorkItems
         store = self.project.work_items
         held = self.block('holder-only code', {'kind': 'code_change'})
-        external = self.block('external deadline',
-                              {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
+        question = stored_question_insight(self.project)
+        external = self.block('external insight',
+                              {'kind': 'insight_decided', 'insight': question['id']})
         # Operational effective status in every authority-bearing projection:
         # the holder's ready set carries the item as ordinary held-open work.
         ready = store.page_ready(role_name='worker')
@@ -576,8 +613,9 @@ class WriterParkingTests(Fixture):
         # One completion and one named observable blocker leave a ready item.
         store.transition(items[0]["id"], expected_rev=binding["rev"], actor="worker", status="done",
                          snapshot_id=snapshot["id"])
+        question = stored_question_insight(self.project)
         store.transition(items[1]["id"], expected_rev=1, actor="worker", status="blocked",
-                         wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+                         wait={"kind": "insight_decided", "insight": question["id"]})
         self.assertTrue(self.finish(ctx)["sealed"])
         self.assertEqual(store.get(items[2]["id"])["status"], "open")
         # A handoff-free continue still names the failed ready-set condition.
@@ -591,10 +629,12 @@ class WriterParkingTests(Fixture):
 
     def test_finish_empty_signature_does_not_rewake_for_own_dispositions(self):
         item = self.ready("owned disposition")
+        question = stored_question_insight(self.project)
         def dispose_and_wait(ctx, *_):
             ctx.handle("work_items_transition", {
                 "id": item["id"], "expected_rev": 1, "status": "blocked",
-                "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}})
+                "wait": {"kind": "dependency", "recipient": "reviewer",
+                         "requires": {"insight": question["id"], "rev": 1, "action": "accept"}}})
             self.finish(ctx)
         engine = Engine(self.config, driver=ScriptDriver(dispose_and_wait))
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")

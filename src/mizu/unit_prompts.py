@@ -214,7 +214,9 @@ def _ready_work_projection(page, *, context=None):
                           if "wait_resolution" in row else {}),
                        **({"wait": row["wait"], "wait_liveness": row["wait_liveness"],
                            "wait_satisfied": row["wait_liveness"]["state"] == "due"}
-                          if row["status"] == "blocked" else {})}
+                          if row["status"] == "blocked" else {}),
+                       **({"deferred_until": row["deferred_until"]}
+                          if "deferred_until" in row else {})}
                       for row in page["items"]],
             **{key: page[key] for key in ("total", "overflow_count", "truncated",
                                          "unseeded_decisions", "coverage_complete",

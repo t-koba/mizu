@@ -8,7 +8,8 @@ import unittest
 from threading import Event
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, bind_delivery, without_blocked_age, index_items
+from support import (Fixture, ScriptDriver, bind_delivery, without_blocked_age, index_items,
+                     stored_question_insight)
 from mizu import work_items as work_items_module
 from mizu import work_item_waits as work_item_waits_module
 from mizu.errors import Denied
@@ -19,6 +20,11 @@ from mizu.runtime import (Engine, MAX_READY_WORK_AGE_SECONDS, _ready_work_age,
                           daemon, prompt_delta_for, prompt_for, should_run)
 from mizu.snapshot import PROGRESS_SIGNALS
 
+
+def _external_wait(project):
+    """A blocked wait only an event/another party can end (stays pending)."""
+    question = stored_question_insight(project)
+    return {'kind': 'insight_decided', 'insight': question['id']}
 
 class ReadyWorkTests(Fixture):
     def item(self, key, status="open", wait=None):
@@ -97,7 +103,7 @@ class ReadyWorkTests(Fixture):
 
     def test_blocked_rows_cannot_hide_ready_work_or_wake_on_their_own(self):
         for key in range(3):
-            self.item(str(key), "blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+            self.item(str(key), "blocked", wait=_external_wait(self.project))
         snapshot = self.parked("done")
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
         self.assertEqual(self.project.work_items.page_ready(limit=1)["total"], 0)
@@ -109,7 +115,7 @@ class ReadyWorkTests(Fixture):
         self.assertEqual([row["id"] for row in page["items"]], [ready["id"]])
         self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
         self.project.work_items.transition(ready["id"], expected_rev=1, actor="worker",
-            status="blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+            status="blocked", wait=_external_wait(self.project))
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
 
     def test_store_ready_page_bounds_and_unseeded_coverage(self):
@@ -216,7 +222,7 @@ class ReadyWorkTests(Fixture):
 
     def test_prompt_ready_page_is_independent_bounded_and_shared(self):
         for index in range(3):
-            self.item(f"blocked-{index}", "blocked", wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+            self.item(f"blocked-{index}", "blocked", wait=_external_wait(self.project))
         with patch("mizu.work_items.now", return_value="2026-01-01T01:00:00+01:00"):
             ready = [self.item(f"ready-{index}") for index in range(3)]
         ctx = self.context()
@@ -306,7 +312,7 @@ class SatisfiedWorkWaitTests(Fixture):
         self.assertEqual(ready['wait']['kind'], 'deadline')
 
     def test_unexpired_block_stays_out_of_ready_page(self):
-        self.item('future', 'blocked', {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
+        self.item('future', 'blocked', _external_wait(self.project))
         self.assertEqual(self.project.work_items.page_ready()['total'], 0)
 
     def test_holder_only_code_wait_is_ready_until_published_change_makes_it_due(self):
@@ -343,7 +349,7 @@ class ReadyProjectionTests(Fixture):
         other = work_items_module.WorkItems(store.root, store.snapshots, store.insights)
         before = store.page_ready()
         other.transition(item["id"], expected_rev=1, actor="worker", status="blocked",
-                         wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+                         wait=_external_wait(self.project))
         self.assertEqual(store.page_ready()["total"], 0)
         other.transition(item["id"], expected_rev=2, actor="worker", status="open")
         self.assertEqual(store.page_ready()["signature"], before["signature"])
@@ -473,7 +479,7 @@ class ReadySetChangeTests(Fixture):
         self.delivered_ready_base()
         self.project.work_items.transition(item['id'], expected_rev=1, actor='worker',
                                            status='blocked', reason='Needs reassessment',
-                                           wait={'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
+                                           wait=_external_wait(self.project))
         self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
         engine.run(self.project, 'worker', event_trigger=True)
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
@@ -500,8 +506,7 @@ class ReadySetChangeTests(Fixture):
         self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name='worker'))
 
     def test_blocked_wait_satisfaction_changes_membership_without_transition(self):
-        blocked = self.item('waiting', 'blocked',
-                            {'kind': 'deadline', 'at': '2099-01-01T00:00:00+00:00'})
+        blocked = self.item('waiting', 'blocked', _external_wait(self.project))
         engine = self.engine()
         engine.run(self.project, 'worker')
         snapshot = self.project.snapshots.get()

@@ -244,12 +244,14 @@ run-level wait expiry and scheduled dispatch remain independent. Historical `wai
 remain valid snapshot evidence and status fields, but are no longer emitted or
 timer authority. No FIFO, affinity, CI-red or check-job policy changes here.
 
-A held `code_change` wait is holder-only when its holder is the only
-project-assigned `workspace = "write"` role with an independent dispatch route
-(`event_wakes`, `daemon`, `interval_seconds` or `calendar`). A delegated-only
-second writer does not make the wait external. Holder-only waits are open
-role-eligible work in the ready set; this projection does not transition the
-stored item or grant timer re-admission. Held CI waits use a separate
+A held `code_change` or `deadline` wait is holder-only when its holder is the
+only project-assigned `workspace = "write"` role with an independent dispatch
+route (`event_wakes`, `daemon`, `interval_seconds` or `calendar`). A
+delegated-only second writer does not make the wait external. Holder-only waits
+are open role-eligible work in the ready set; this projection does not transition
+the stored item or grant timer re-admission. A holder-only `deadline` keeps its
+bound visible as `deferred_until` in the ready row, so the holder sees work it
+deferred rather than blocked backpressure. Held CI waits use a separate
 [exact absence and requester test](#exact-sha-work-item-ci-waits).
 
 A role asks the operator through a

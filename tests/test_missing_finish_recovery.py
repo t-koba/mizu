@@ -13,6 +13,14 @@ from mizu.runtime import Engine
 FINISH = {"outcome": "wait", "summary": "Exact saved work", "state": "Next step is explicit.", "wait_seconds": 13}
 
 
+def external_wait(project):
+    """A blocked wait only an event/another party can end (stays pending)."""
+    question = project.insights.submit(
+        source="reviewer", title="External gate", body="Pending", base_snapshot=None)
+    return {"kind": "dependency", "recipient": "reviewer",
+            "requires": {"insight": question["id"], "rev": 1, "action": "accept"}}
+
+
 class NoFinishDriver:
     requires_sandbox = False
 
@@ -44,7 +52,7 @@ def block_open_work(context, _prompt, _profile):
         if item["status"] == "open":
             context.handle("work_items_transition", {
                 "id": item["id"], "expected_rev": item["rev"], "status": "blocked",
-                "wait": {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"},
+                "wait": external_wait(context.project),
             })
 
 
@@ -157,7 +165,7 @@ class MissingFinishRecoveryTests(Fixture):
             item_id = decision["work_item"]["id"]
             self.project.work_items.transition(
                 item_id, expected_rev=1, status="blocked", actor="worker",
-                wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+                wait=external_wait(self.project))
         ready_proposal = self.project.insights.submit(
             source="worker", title="Later actionable work",
             body="Ready work beyond the blocked page", base_snapshot=None)
@@ -190,7 +198,7 @@ class MissingFinishRecoveryTests(Fixture):
         item_id = seed_open_work(self.project)
         self.project.work_items.transition(
             item_id, expected_rev=1, status="blocked", actor="worker",
-                wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+                wait=external_wait(self.project))
         page = self.project.work_items.page_open(limit=100)
         self.assertTrue(page["total"] >= 1)
         self.assertTrue(all(row["status"] == "blocked" for row in page["items"]))

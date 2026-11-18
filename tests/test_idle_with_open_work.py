@@ -1,7 +1,7 @@
 """Idle-with-open-work diagnostic: recorded-at-finish observation, never live-joined."""
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, stored_question_insight
 from mizu.errors import Denied
 from mizu.fs import now
 from mizu.project import IDLE_NO_PROGRESS_OUTCOMES, idle_with_open_work
@@ -360,7 +360,8 @@ class IdleWithOpenWorkTests(Fixture):
         self.assertEqual(self.status_idle()["reason"], "has_progress")
 
     def test_blocked_without_due_at_finish_records_not_ready(self):
-        self.item("blocked-plain", "blocked", {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+        question = stored_question_insight(self.project)
+        self.item("blocked-plain", "blocked", {"kind": "insight_decided", "insight": question["id"]})
         snap = self.run_writer("wait")
         self.assertIs(snap["progress"]["ready_work"], False)
         self.assertEqual(self.status_idle()["reason"], "no_ready_work")

@@ -228,6 +228,8 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
                           "record_closed" if closed else "record_answer_pending")
         if kind == "deadline":
             due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])
+            if holder is not None and writer_roles == {holder}:
+                self_resolvable = "sole_holder_deadline"
         elif kind == "code_change":
             if snapshot is None:
                 snapshot = store.snapshots.get()
