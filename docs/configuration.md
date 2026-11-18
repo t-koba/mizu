@@ -2900,7 +2900,7 @@ recorded evidence, not permission to publish or the status of a dispatch:
 
 | Cause | Meaning |
 |---|---|
-| `published` | A recorded publication receipt matches the exact code digest of the opening tree. The local `published_snapshot` pin is not publication evidence. An empty page, stopped scan, or read error falls back to review state. |
+| `published` | A validated recorded publication receipt matches the exact code digest of the opening tree, conclusive even when the receipt scan stopped. The local `published_snapshot` pin is not publication evidence. An empty page or read error falls back to review state. |
 | `changes_requested` | The approval threshold is unmet and a selected holder requested changes for this exact snapshot. |
 | `approved_queued` | Valid typed approvals for this exact snapshot meet the threshold; other publication gates still apply. This does not imply a dispatch has been queued. |
 | `awaiting_review` | Review is configured, but the current exact-snapshot receipts show neither enough approvals nor a changes request. |

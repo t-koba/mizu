@@ -111,13 +111,18 @@ class ReviewVerdictTests(PublishFixture):
         record(ctx.snapshot["code_digest"])
         check(published)
 
-    def test_publication_state_falls_back_when_receipt_read_cannot_prove_publication(self):
+    def test_publication_state_matched_receipt_is_conclusive_even_if_scan_stops(self):
         self.review("changes_requested")
         with patch.object(Publication, "list_receipts", side_effect=LimitExceeded("Bounded read")):
             self.assertEqual(self.publication_state()["cause"], "changes_requested")
+        # A validated exact-digest match is conclusive even when the scan bound
+        # stopped; only an absent or unreadable match falls back to review state.
         with patch.object(Publication, "list_receipts", return_value={
                 "publications": [{"code_digest": self.project.snapshots.get()["code_digest"]}],
                 "scan_stopped": True}):
+            self.assertEqual(self.publication_state()["cause"], "published")
+        with patch.object(Publication, "list_receipts", return_value={
+                "publications": [], "scan_stopped": True}):
             self.assertEqual(self.publication_state()["cause"], "changes_requested")
 
     def test_publication_state_uses_current_exact_approval_quorum(self):

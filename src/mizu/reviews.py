@@ -142,7 +142,10 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
         try:
             page = Publication.list_receipts(context.project.root, code_digest=code_digest,
                                              limit=1, policy=context.config.publication_evidence)
-            if page["publications"] and not page["scan_stopped"]:
+            # list_receipts filters by exact digest and returns only validated
+            # receipts, so a match is conclusive; scan_stopped means only that
+            # more may exist beyond the bound, never that a match is invalid.
+            if page["publications"]:
                 return {**state, "cause": "published"}
         except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded):
             pass  # An unavailable receipt is not proof of publication.
