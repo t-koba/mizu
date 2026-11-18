@@ -534,7 +534,8 @@ class ContextTests(Fixture):
                 with patch("mizu.runtime.operator_records.validate") as validate, \
                         patch("mizu.runtime.structured_wait_events.received") as received, \
                         patch.object(ctx, "close_exec") as close_exec:
-                    with self.assertRaisesRegex(Denied, "next_step"):
+                    diagnostic = "next_step requires 1–4096 printable characters" if step is None else "next_step"
+                    with self.assertRaisesRegex(Denied, diagnostic):
                         ctx.handle("finish", args)
                     validate.assert_not_called()
                     received.assert_not_called()
@@ -946,13 +947,14 @@ class PromptProjectionTests(Fixture):
 
     def test_prompts_open_with_the_fixed_new_unit_statement(self):
         import json
-        from mizu.runtime import prompt_for, prompt_delta_for, UNIT_BEGINS_STATEMENT
-        self.assertTrue(UNIT_BEGINS_STATEMENT)
+        from mizu.runtime import prompt_for, prompt_delta_for
         worker = self.context("worker")
-        for prompt in (prompt_for(worker), prompt_delta_for(worker, [])):
+        full = prompt_for(worker)
+        opening = json.loads(full)["unit"]
+        for prompt in (full, prompt_delta_for(worker, [])):
             decoded = json.loads(prompt)
             self.assertEqual(list(decoded)[0], "unit")
-            self.assertEqual(decoded["unit"], UNIT_BEGINS_STATEMENT)
+            self.assertEqual(decoded["unit"], opening)
             self.assertEqual(decoded["run"], {"id": worker.run_dir.name})
         worker_dir = worker.run_dir
         (worker_dir / "started.json").write_text(

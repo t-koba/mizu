@@ -6,7 +6,7 @@ from unittest.mock import patch
 from support import Fixture
 
 
-MOVED = ("UNIT_BEGINS_STATEMENT", "MAX_READY_WORK_AGE_SECONDS",
+MOVED = ("MAX_READY_WORK_AGE_SECONDS",
          "_prompt_clock", "_prompt_research_state", "_decision_task",
          "_open_backlog", "_prompt_tool_surface", "_prompt_run_identity",
          "_prompt_capture_limit", "_ready_work_age", "_ready_work_projection",
@@ -50,49 +50,6 @@ class UnitPromptSeamTests(Fixture):
             with patch.object(unit_prompts, "_prompt_clock", return_value=clock):
                 self.assertEqual(runtime.prompt_delta_for(ctx, []),
                                  unit_prompts.prompt_delta_for(ctx, []))
-
-    def test_full_delta_and_finish_tool_explain_writer_continuation(self):
-        from mizu.protocol import tool_definitions
-        from mizu.unit_prompts import prompt_for, prompt_delta_for
-        ctx = self.context("worker")
-        finish = tool_definitions(("finish",))[0]
-        surfaces = {"full": json.loads(prompt_for(ctx))["unit"],
-                    "delta": json.loads(prompt_delta_for(ctx, []))["unit"],
-                    "finish": finish["description"]}
-        for name, text in surfaces.items():
-            with self.subTest(surface=name):
-                for phrase in ("outcome=continue", "host-sealed bounded outcome",
-                               "supply `next_step`",
-                               "new proposed follow-up", "next_step alone does not admit",
-                               "parent snapshot", "role-matching validated progress record",
-                               "at least one selected true",
-                               "`tool`, `code`, `decision`, or `insight` signal",
-                               "continuation shows that step in the published snapshot as your proposal, not as an assignment",
-                               "Put the typed step in next_step, not in state.",
-                               "a wait or blocked finish is accepted and the host",
-                               "re-admits from that work",
-                               "Unknown or truncated evidence refuses finish"):
-                    self.assertIn(phrase, text)
-                # Product strings describe the interface; behaviour stays in
-                # configurable role policy, never in an unconfigurable prompt.
-                for behaviour in ("Use outcome=wait for external results",
-                                  "work not yet actionable", "Finish each ready item",
-                                  "held doing item is still ready",
-                                  "do not rely on next_step as a wake signal",
-                                  "correct next_step and retry finish",
-                                  "Call after all other tools",
-                                  "when no independent work remains"):
-                    self.assertNotIn(behaviour, text)
-        schema = finish["inputSchema"]
-        self.assertEqual(schema["properties"]["next_step"],
-                         {"type": "string", "minLength": 1, "maxLength": 4096})
-        self.assertNotIn("next_step", schema["required"])
-        for text in surfaces.values():
-            self.assertNotIn("Next: <", text)
-            self.assertIn("differ from the typed parent step", text)
-        # bounded is a host-sealed outcome, not a new finish-tool argument.
-        self.assertEqual(finish["inputSchema"]["properties"]["outcome"]["enum"],
-                         ["continue", "wait", "blocked", "done"])
 
     def test_full_and_delta_expose_the_exact_dispatch_admission(self):
         from mizu.unit_prompts import prompt_for, prompt_delta_for

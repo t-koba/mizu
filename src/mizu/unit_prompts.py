@@ -3,7 +3,7 @@
 This module owns one model-facing contract: the full unit prompt
 (:func:`prompt_for`) and the resumed-session delta (:func:`prompt_delta_for`)
 plus their tightly coupled bounded projection helpers and exact
-unit-opening literal. Snapshot proof and its diagnostic are projected together
+unit-opening statement. Snapshot proof and its diagnostic are projected together
 for both prompt variants.
 
 Session selection, rotation/recovery/fallback policy (:func:`runtime.session_prompt`
@@ -24,7 +24,7 @@ from . import acceptance, check_jobs, prompt_sections, reviews
 from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact, ci_summary_facts
 from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
-from .protocol import WRITER_CONTINUATION_CONTRACT, tool_definitions
+from .protocol import _writer_continuation_contract, tool_definitions
 from .report import previous as _previous_report
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, never a runtime cycle.
@@ -167,15 +167,11 @@ def _open_backlog(context: Context, caps: set) -> dict:
         return stated
 
 
-#: Fixed statement opening every dispatch prompt, full and delta alike.
-#: A resumed session's delta is otherwise bare data; without this a model
-#: can read it as an acknowledgement of the previous seal ("sealed
-#: successfully") instead of a new unit that must do work and finish.
-#: Constant text in a fixed first position, so prompt caches stay warm.
-UNIT_BEGINS_STATEMENT = (
-    "A new work unit begins. This is not an acknowledgement of a previous "
-    "seal: do useful work within your role and capabilities, then finish "
-    "with mizu_finish and a short state. " + WRITER_CONTINUATION_CONTRACT)
+def _unit_begins_statement(outcomes: tuple[str, ...]) -> str:
+    # Keep the opening first and stable for a given role across full and delta prompts.
+    return ("A new work unit begins. This is not an acknowledgement of a previous "
+            "seal: do useful work within your role and capabilities, then finish "
+            "with mizu_finish and a short state. " + _writer_continuation_contract(outcomes))
 
 
 # Saturating display bound, not an admission/aging policy.
@@ -578,7 +574,8 @@ def prompt_for(context: Context) -> str:
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in set(context.role.capabilities):
         ci_branch = None
-    return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps(_validate_opening(prompt_sections.shape(context, {
+                       "unit": _unit_begins_statement(context.role.finish_outcomes),
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        "admission": context.admission,
@@ -683,7 +680,8 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     open_backlog = opening["open_backlog"]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
-    return json.dumps(_validate_opening(prompt_sections.shape(context, {"unit": UNIT_BEGINS_STATEMENT,
+    return json.dumps(_validate_opening(prompt_sections.shape(context, {
+                       "unit": _unit_begins_statement(context.role.finish_outcomes),
                        "unit_tool_surface": _prompt_tool_surface(context),
                        "goal_digest": context.goal_digest,
                        **(grant_transition or {}),

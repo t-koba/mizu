@@ -102,7 +102,7 @@ from .ci_polling import (_merge_ci_success_maps, _merge_ci_success_rows,
 from .vcs_proposal_poll import _valid_proposal_cursor, poll_proposals
 from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
 from .vcs_upstream_poll import poll_upstream, refresh_upstream
-from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS, UNIT_BEGINS_STATEMENT,
+from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             _decision_task, _open_backlog, _prompt_capture_limit,
                             _prompt_clock, _prompt_research_state, _prompt_run_identity,
                             _prompt_tool_surface, _ready_work_age,

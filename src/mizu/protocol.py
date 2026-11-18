@@ -11,34 +11,16 @@ from .work_item_seed import MAX_DECISION_TASKS
 from .prompt_sections import WORK_CAPABILITIES
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 
+
 def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
-    can_continue = "continue" in outcomes
-    continuation = "a host-sealed bounded outcome"
-    if can_continue:
-        continuation = f"outcome=continue (or {continuation})"
-    parking = " or ".join(outcome for outcome in ("wait", "blocked") if outcome in outcomes)
-    return (
-        f"To propose an immediate writer continuation, finish with {continuation} "
-        "and supply `next_step`, naming a new proposed follow-up. "
-        "The typed step is a 1–4096-character printable value without surrounding whitespace "
-        "or a none/nothing/n/a placeholder, and it needs to differ from the typed parent step. "
-        "Put the typed step in next_step, not in state. "
-        + ("A malformed writer continue is refused before sealing or acknowledgements. " if can_continue else "")
-        + "next_step alone does not admit: the host requires a parent snapshot and a "
-        "role-matching validated progress record with at least one selected true `tool`, `code`, "
-        "`decision`, or `insight` signal. An admitted continuation shows that step "
-        "in the published snapshot as your proposal, not as an assignment. "
-        + (("With role-eligible ready work, "
-            f"a {parking} finish is accepted and the host re-admits from that work"
-            + ("; a continue or bounded finish is accepted only with a validated next_step "
-               "handoff or a host-sealed run bound. " if can_continue else ". "))
-           if parking else "")
-        + "Unknown or truncated evidence refuses finish before sealing or acknowledgements. "
-        "Ready work alone does not create a timed re-admission.")
-
-
-# Full/delta unit openings retain the shared, unfiltered contract.
-WRITER_CONTINUATION_CONTRACT = _writer_continuation_contract(FINISH_OUTCOMES)
+    purposes = (
+        ("continue", "Use outcome=continue as the ordinary finish; a writable role must supply "
+                     "a typed `next_step` naming a new proposed follow-up."),
+        ("wait", "Use outcome=wait to pause until a wake event."),
+        ("blocked", "Use outcome=blocked to report what prevents further work."),
+        ("done", "Use outcome=done to mark the work complete."),
+    )
+    return " ".join(purpose for outcome, purpose in purposes if outcome in outcomes)
 
 
 #: MCP protocol versions accepted by the capsule and bridge servers.
