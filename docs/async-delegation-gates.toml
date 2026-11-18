@@ -47,6 +47,8 @@ parent_denied = [
   "exec", "experiment", "verify", "check_job", "sync", "vcs_publish",
   "vcs_request", "vcs_retire", "vcs_dispose", "materialize", "delegate",
   "report", "record_write", "feed_updates", "ready_work_read", "work_order_read", "report_read",
+  # Kernel object/event tools are not proven safe for a reserved parent yet; fail closed.
+  "objects_create", "objects_transition", "objects_read", "objects_list", "events_read", "events_ack",
 ]
 
 [parameterized.vcs_read]
