@@ -451,6 +451,38 @@ mizu storage demo --apply                   # 未参照マニフェストと孤�
 
 `mizu storage` は履歴・run・成果物・提案が参照するスナップショットと、未参照マニフェストおよび孤立オブジェクトの件数・バイト数・ bounded sample を報告します。あわせて共有 web-cache（件数・バイト・`cache_seconds` に対する期限切れ）の容量、および durable なセッション証跡（`session.json` 件数・ファイル数・バイト数、削除対象外）の容量を報告します。既定（`--apply` なし）は何も削除・移動・書換えしないため、writer 実行中でも安全に再試行できます。`--apply` は pause したプロジェクトでのみ実行でき、未参照マニフェストと孤立オブジェクトだけを削除します（履歴世代・run・成果物・セッション・判断・提案は保持）。存在するが読めない・壊れた・1 MiB 超・形不正の参照、走査失敗、または `host_record_reference_scan_entries`（既定 5,000）の走査予算到達は `reference_records_skipped` に数え、既存の `snapshots.skipped`（マニフェスト）および `work_item_events_skipped` と同様に `--apply` を削除前に拒否します（予算ちょうどで EOF の場合も不完全とし、参照不在の証明にしない）。`reference_records_skipped` は一意のレコード/走査パス数です（active 履歴世代の重複計上なし）。プレビューは `reference_records_skipped_sample` に root からの相対パスを最大 100 件ソートして示し、`reference_records_skipped_truncated` で打切りを表します。`--apply` の拒否メッセージは先頭数件のパスを示すため、不完全な参照元を特定できます。`snapshots.skipped` も `skipped_sample`/`skipped_truncated` を、`work_item_events_skipped` も `work_item_events_skipped_sample`/`work_item_events_skipped_truncated` を持ち、reclaim プレビューでは `manifest_skipped_sample`/`manifest_skipped_truncated` と同名の work-item 項目として示します。各件数はパス集合から導出するため件数とサンプルは食い違わず、各拒否メッセージも先頭数件のパスを示します。JSON `null` レコード、不正な非 null スナップショット ID、履歴の名前・要素・ダイジェスト・公開先との終端不一致も不完全とします。公開ポインターと履歴の読取りにも 1 MiB 上限と symlink 非追従を適用し、読めた有効な ID はプレビューに残します。任意の run 記録や `artifacts/latest.json` が存在しないことは正常で数えませんが、成果物ディレクトリに `evidence.json` がない場合は不完全として数えます。削除内容は `maintenance/storage-*.json` に記録され、バックアップ対象となります。2 回目の実行で新規の孤立オブジェクトまで収束します。
 
+### Migrate flat shared records
+
+```bash
+mizu migrate-records demo          # read-only preview (default)
+mizu pause demo
+mizu migrate-records demo --apply  # requires a paused, quiescent project
+```
+
+This operator command inspects only top-level `shared-records/*.json` in the
+project's private data directory. It examines at most 1,000 directory entries
+(including non-JSON entries), never recurses, and reports `truncated: true`
+when it reaches the budget. It uses the store's byte bound and current kind
+and writer validators. Runtime readers still accept flat files; removing that
+support is a separate change. Installation does not run this migration.
+
+The JSON report gives `entries_examined`, `candidates` and `converted` counts,
+`records` with project-relative flat and canonical paths and the SHA-256 of
+candidate bytes, plus `conflicts` and `errors`. `--apply` recomputes the preview
+under nonblocking maintenance locks. Each new canonical copy is published
+atomically without overwriting another file. An identical existing copy is
+reused; the flat file is removed only after the canonical digest is verified.
+Different bytes, malformed or oversized files, and failed verification leave
+the flat file in place. Moving a non-operator record also drops any disposable
+operator lookup entry that referred to its flat location; no receipts are changed.
+
+A report with conflicts, errors or truncation exits with status 1; other
+eligible records in the scan can still be converted. After interruption or a
+partial batch, rerun the command: an identical copy left by an interrupted move
+is safe to reuse, and a completed scan followed by a successful apply leaves no
+candidates. If a truncated scan stops making progress, do not treat it as proof
+that all flat files are gone.
+
 ## 人間からの提案 (Insight)
 
 確定した事実は `mizu status`・`mizu usage`・`mizu insight list/read`・`mizu report` と run 記録から読み取ります（外部チャットツール非依存）。表示は各プロジェクト側で作ります。

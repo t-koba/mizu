@@ -208,6 +208,9 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
+    p = sub.add_parser("migrate-records", help="Preview flat shared record migration; dry-run unless --apply")
+    p.add_argument("project", help="Managed project name")
+    p.add_argument("--apply", action="store_true", help="Move verified records under quiescence")
     p = sub.add_parser("prune", help="Preview (or apply) retention of completed runs, inputs, artifacts, logs and web cache")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
@@ -484,6 +487,11 @@ def _cmd_storage(config, project, args):
     return audit(project)
 
 
+def _cmd_migrate_records(config, project, args):
+    from .record_migration import apply, plan
+    return apply(project) if args.apply else plan(project)
+
+
 def _cmd_publication_record(config, project, args):
     """Record one operator-run publication as a durable receipt.
 
@@ -595,7 +603,7 @@ _PROJECT_COMMANDS = {
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
     "usage": _cmd_usage, "backup": _cmd_backup,
-    "prune": _cmd_prune, "storage": _cmd_storage,
+    "prune": _cmd_prune, "storage": _cmd_storage, "migrate-records": _cmd_migrate_records,
 }
 
 
@@ -779,7 +787,7 @@ def _execute(config, args):
                   if args.target_id is not None else None)
         return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
                      addressee=args.role, subject=subject, action=args.action, target=target)
-    project = Project(config, args.project)
+    project = Project(config, args.project, read_only=args.command == "migrate-records")
     if args.command == "ci-acceptance":
         from .ci_acceptance import retain
         return retain(project, snapshot_id=args.snapshot, publication_id=args.publication_id,

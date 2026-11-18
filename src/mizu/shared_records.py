@@ -186,6 +186,10 @@ class SharedRecords:
         namespace = _partition(_namespace(record_id))
         return f"shared-records/{namespace}/{digest(_name(record_id).encode())}.json"
 
+    def record_name(self, record_id: str) -> str:
+        """Return the canonical, root-relative name for a record ID."""
+        return self._record_name(record_id)
+
     def _legacy_record_name(self, record_id: str) -> str:
         return f"shared-records/{digest(_name(record_id).encode())}.json"
 
