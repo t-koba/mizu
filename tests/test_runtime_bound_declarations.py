@@ -600,6 +600,17 @@ DECLARATIONS = {
         'MAX_RESOLUTION_BYTES': (
             '521', 'format', 'work items / exact maximum canonical wait-resolution member growth'),
     },
+    'record_migration.py': {
+        'SCAN_ENTRIES': (
+            '1000', 'safety',
+            'record migration / fixed maximum flat shared-record entries inspected by one operator command'),
+    },
+    'work_item_migration.py': {
+        'DEFAULT_SCAN_LIMIT': (
+            '10000', 'configured policy',
+            'work-item migration / default per-directory scan budget when --scan-limit is omitted; '
+            'an explicit CLI value wins'),
+    },
     'work_items.py': {
         'MAX_EVENT_BYTES': (
             'PREVIEW_BYTES + MAX_RESOLUTION_BYTES', 'mechanism',
@@ -4340,6 +4351,22 @@ def no_defaults(limit, /, count, *, size):
         self.assertNotIn('MAX_RUNS_SCANNED', {target.id for node in storage.body
                          if isinstance(node, ast.Assign) for target in node.targets
                          if isinstance(target, ast.Name)})
+
+    def test_migration_scan_budget_declarations(self):
+        for name, module, (expression, category, rationale) in (
+                ('SCAN_ENTRIES', 'record_migration.py', DECLARATIONS['record_migration.py']['SCAN_ENTRIES']),
+                ('DEFAULT_SCAN_LIMIT', 'work_item_migration.py',
+                 DECLARATIONS['work_item_migration.py']['DEFAULT_SCAN_LIMIT'])):
+            with self.subTest(bound=name):
+                tree = ast.parse((ROOT / module).read_text(encoding='utf-8'))
+                node = next(node for node in tree.body
+                            if isinstance(node, ast.Assign)
+                            and any(isinstance(target, ast.Name) and target.id == name
+                                    for target in node.targets))
+                self.assertEqual(ast.unparse(node.value), expression)
+                self.assertTrue(rationale.strip())
+        self.assertEqual(DECLARATIONS['record_migration.py']['SCAN_ENTRIES'][1], 'safety')
+        self.assertEqual(DECLARATIONS['work_item_migration.py']['DEFAULT_SCAN_LIMIT'][1], 'configured policy')
 
     def test_smoke_retention_scan_budget_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
