@@ -117,4 +117,11 @@ class ToolDescriptionTests(unittest.TestCase):
                 self.assertNotRegex(description, HISTORY_WORDING)
 
     def test_description_byte_budget(self):
-        self.assertLessEqual(sum(len(d.encode("utf-8")) for d, _ in DEFINITIONS.values()), 34_510)
+        # The rewritten manual was 26,379 bytes before legacy-only tools and
+        # wording were retired; it must stay at or below that measured size.
+        self.assertLessEqual(sum(len(d.encode("utf-8")) for d, _ in DEFINITIONS.values()), 26_379)
+
+    def test_legacy_only_operations_are_not_advertised(self):
+        for operation in ("work_items_legacy_read", "work_items_reconcile"):
+            with self.subTest(operation=operation):
+                self.assertNotIn(operation, DEFINITIONS)
