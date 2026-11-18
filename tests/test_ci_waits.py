@@ -1076,15 +1076,20 @@ class PublicationCiWaitTests(CiWaitFixture):
         item = self.block()
         self.receipt_for()
         wait = item["wait"]
-        # The fixture also has a nonmatching receipt. Even finding the only
-        # match in a bounded prefix cannot establish exact uniqueness.
-        for policy in (PublicationEvidence(name_processing_limit=1),
-                       PublicationEvidence(record_limit=1)):
-            with self.subTest(policy=policy):
-                config = dataclasses.replace(self.config, publication_evidence=policy)
-                store = Project(config, "sample").work_items
-                self.assertEqual(store.publication_evidence, policy)
-                self.assertIsNone(ci_waits._resolved(store, wait))
+        # Keyed lookup reads a writer-owned index, not a bounded scan, so a
+        # small name-processing budget no longer weakens its evidence.
+        narrow_names = PublicationEvidence(name_processing_limit=1)
+        config = dataclasses.replace(self.config, publication_evidence=narrow_names)
+        store = Project(config, "sample").work_items
+        self.assertEqual(store.publication_evidence, narrow_names)
+        self.assertEqual(ci_waits._resolved(store, wait)["sha"], SHA)
+        # A budget below the indexed receipt count cannot establish the whole
+        # store's validity and fails closed.
+        narrow_records = PublicationEvidence(record_limit=1)
+        config = dataclasses.replace(self.config, publication_evidence=narrow_records)
+        store = Project(config, "sample").work_items
+        with self.assertRaises(Denied):
+            ci_waits._resolved(store, wait)
         policy = PublicationEvidence(name_processing_limit=10001, record_limit=1001)
         store = Project(dataclasses.replace(self.config, publication_evidence=policy), "sample").work_items
         with patch.object(Publication, "receipt_for_key",

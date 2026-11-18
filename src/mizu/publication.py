@@ -30,15 +30,13 @@ import datetime as dt
 import os
 import re
 import stat
-import threading
-from collections import OrderedDict
 from pathlib import Path
 
 from . import lineage, process
 from .config import PublicationEvidence
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, canonical, digest, identifier, loads_finite,
-                 lock as kernel_lock, now, safe_read, sync_dir, write_json)
+                 lock as kernel_lock, mkdir, now, safe_read, sync_dir, write_json)
 
 SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 RECORD_BYTES = 8192
@@ -102,16 +100,45 @@ def _projection_of(record: dict) -> dict | None:
 #: File names of recorded receipts inside the publications directory.
 RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
 
-#: Process-local witness index: (root, witness) -> (key map, scan_stopped).
-#: A witness covers the sorted directory names and the configured scan bounds;
-#: every write changes a name, so legacy files need no separate on-disk index.
-_RECEIPT_KEY_CACHE: OrderedDict[tuple[str, str], tuple[dict, bool]] = OrderedDict()
-_RECEIPT_KEY_CACHE_LOCK = threading.Lock()
-_RECEIPT_KEY_CACHE_MAX = PublicationEvidence().record_limit
-#: More than one validated receipt for one (branch, code digest) is never resolved.
-_AMBIGUOUS_RECEIPT = object()
+#: Writer-owned key index. It lives outside the publications directory so a
+#: lookup reads one fixed file and never enumerates receipt names; the receipt
+#: directory stamp detects out-of-band name changes and per-entry content
+#: digests detect same-name edits before any key is resolved.
+KEY_INDEX_DIR = "publication-keys"
+KEY_INDEX_FILE = "receipt-key-index.json"
+KEY_INDEX_LOCK = "receipt-key-index.lock"
+KEY_INDEX_SCHEMA = 1
+KEY_INDEX_BYTES = 1 << 20
 #: Maximum characters of an operator approval or run reference.
 REFERENCE_CHARS = 256
+
+
+def _key_index_paths(store):
+    """Return the screened sibling directory holding the writer-owned index."""
+    evidence = Path(store.root).parent
+    for path in (evidence, evidence / KEY_INDEX_DIR):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISDIR(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400):
+            raise Denied("Unsafe publication evidence directory")
+    directory = evidence / KEY_INDEX_DIR
+    return directory, directory / KEY_INDEX_FILE, directory / KEY_INDEX_LOCK
+
+
+def _directory_stamp(path):
+    """Observe receipt-directory name changes without enumerating its names."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return [info.st_mtime_ns, info.st_size]
+
+
+def _receipt_file_name(publication_id, kind):
+    return f"{publication_id}.{kind}.json"
 
 
 def _reference(value, label: str) -> str:
@@ -537,8 +564,10 @@ class Publication:
                 stored = _external_record(existing, publication_id)
                 if any(stored.get(key) != record.get(key) for key in compared):
                     raise Denied(f"Conflicting external publication receipt: {publication_id}")
+                cls._update_key_index(store, stored, "external", PublicationEvidence())
                 return stored
             store._write("external", record)
+        cls._update_key_index(store, record, "external", PublicationEvidence())
         return record
 
     @classmethod
@@ -550,6 +579,139 @@ class Publication:
         store.identity = None
         store._check_directories()
         return store
+
+    @classmethod
+    def _read_key_index(cls, store, policy):
+        """Read and structurally validate the writer-owned key index."""
+        _, path, _ = _key_index_paths(store)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            raw = safe_read(path.parent, path.name, KEY_INDEX_BYTES)
+        except LimitExceeded as exc:
+            raise Denied("Invalid publication key index") from exc
+        try:
+            value = loads_finite(raw)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise Denied("Invalid publication key index") from exc
+        if (not isinstance(value, dict)
+                or set(value) != {"schema", "stamp", "entries", "keys"}
+                or value["schema"] != KEY_INDEX_SCHEMA):
+            raise Denied("Invalid publication key index")
+        entries, keys, stamp = value["entries"], value["keys"], value["stamp"]
+        if (not isinstance(entries, list) or not isinstance(keys, list)
+                or len(entries) > policy.record_limit or len(keys) > policy.record_limit):
+            raise Denied("Invalid publication key index")
+        if stamp is not None and (not isinstance(stamp, list) or len(stamp) != 2
+                                  or any(type(part) is not int for part in stamp)):
+            raise Denied("Invalid publication key index")
+        from .vcs import check_branch
+        for entry in entries:
+            if (not isinstance(entry, dict)
+                    or set(entry) != {"publication_id", "kind", "sha256"}
+                    or not isinstance(entry["publication_id"], str)
+                    or not DIGEST.fullmatch(entry["publication_id"])
+                    or entry["kind"] not in ("external", "receipt")
+                    or not isinstance(entry["sha256"], str)
+                    or not DIGEST.fullmatch(entry["sha256"])):
+                raise Denied("Invalid publication key index")
+        indexed_ids = set()
+        for key in keys:
+            ids = key.get("publication_ids") if isinstance(key, dict) else None
+            if (set(key) != {"branch", "code_digest", "publication_ids"}
+                    or not isinstance(key["code_digest"], str)
+                    or not DIGEST.fullmatch(key["code_digest"])
+                    or not isinstance(ids, list) or not ids
+                    or len(ids) > policy.record_limit):
+                raise Denied("Invalid publication key index")
+            check_branch(key["branch"])
+            for publication_id in ids:
+                if (not isinstance(publication_id, str)
+                        or not DIGEST.fullmatch(publication_id)
+                        or publication_id in indexed_ids):
+                    raise Denied("Invalid publication key index")
+                indexed_ids.add(publication_id)
+        if indexed_ids != {entry["publication_id"] for entry in entries}:
+            raise Denied("Invalid publication key index")
+        return value
+
+    @classmethod
+    def _build_key_index(cls, store, policy):
+        """Establish a key index from existing receipts at write time.
+
+        This is the one bounded scan, owned by the receipt writer. A lookup
+        never calls it: without a writer-built index, keyed resolution stays
+        unavailable and ordinary listing remains the only reader.
+        """
+        try:
+            names = sorted(os.listdir(store.root))
+        except (FileNotFoundError, NotADirectoryError):
+            names = []
+        except OSError as exc:
+            raise Denied("Publication evidence is unavailable") from exc
+        if len(names) > policy.name_processing_limit:
+            raise Denied("Publication evidence scan incomplete")
+        entries, keys, seen = [], {}, set()
+        for name in names:
+            match = RECEIPT_FILE.fullmatch(name)
+            if match is None:
+                continue
+            publication_id, kind = match.groups()
+            if publication_id in seen:
+                raise Denied("Multiple publication receipt files for one identity")
+            seen.add(publication_id)
+            if len(entries) >= policy.record_limit:
+                raise Denied("Publication evidence scan incomplete")
+            receipt = cls.read_receipt(Path(store.root).parent.parent, publication_id)
+            raw = safe_read(store.root, name, RECORD_BYTES)
+            entries.append({"publication_id": publication_id, "kind": kind,
+                            "sha256": digest(raw)})
+            key = (receipt["branch"], receipt["code_digest"])
+            keys.setdefault(key, []).append(publication_id)
+        return {"schema": KEY_INDEX_SCHEMA, "stamp": _directory_stamp(store.root),
+                "entries": entries,
+                "keys": [{"branch": branch, "code_digest": code_digest,
+                          "publication_ids": ids}
+                         for (branch, code_digest), ids in keys.items()]}
+
+    @classmethod
+    def _update_key_index(cls, store, record, kind, policy):
+        """Maintain the key index in the same operation that writes a receipt."""
+        directory, index_path, lock_path = _key_index_paths(store)
+        mkdir(directory)
+        with kernel_lock(lock_path):
+            index = cls._read_key_index(store, policy)
+            if index is None:
+                index = cls._build_key_index(store, policy)
+            publication_id = record["publication_id"]
+            raw = safe_read(store.root, _receipt_file_name(publication_id, kind), RECORD_BYTES)
+            entry = {"publication_id": publication_id, "kind": kind,
+                     "sha256": digest(raw)}
+            entries = [item for item in index["entries"]
+                       if not (item["publication_id"] == publication_id and item["kind"] == kind)]
+            entries.append(entry)
+            if len(entries) > policy.record_limit:
+                raise Denied("Publication evidence scan incomplete")
+            branch, code_digest = record["branch"], record["code_digest"]
+            keys = []
+            for key in index["keys"]:
+                ids = [item for item in key["publication_ids"] if item != publication_id]
+                if ids:
+                    keys.append({**key, "publication_ids": ids})
+            for key in keys:
+                if key["branch"] == branch and key["code_digest"] == code_digest:
+                    if publication_id not in key["publication_ids"]:
+                        key["publication_ids"].append(publication_id)
+                    break
+            else:
+                keys.append({"branch": branch, "code_digest": code_digest,
+                             "publication_ids": [publication_id]})
+            value = {"schema": KEY_INDEX_SCHEMA, "stamp": _directory_stamp(store.root),
+                     "entries": entries, "keys": keys}
+            write_json(index_path, value)
+            sync_dir(directory)
 
     @classmethod
     def _receipt_names(cls, project_root) -> list[str]:
@@ -654,51 +816,42 @@ class Publication:
                         policy: PublicationEvidence) -> str | None:
         """Resolve the one receipt bound to a branch and whole-capture digest.
 
-        Schema: a publication ID, or ``None`` for zero, ambiguous or incomplete
-        evidence. Bounds: the same name-processing and record budgets as a
-        strict ``list_receipts`` scan; a witness miss rebuilds once from the
-        real directory and caches the whole key map process-locally (LRU bound
-        shared with the receipt-candidate budget). The witness hashes the sorted
-        directory names and both bounds, so a write, a legacy receipt or a
-        policy change invalidates it without an on-disk index to synchronize.
-        Trust: every candidate is strictly validated on rebuild; a stopped scan
-        refuses every key, and a resolved ID is re-read and rechecked here.
-        Failure: ``Denied`` for invalid arguments or any corrupt candidate,
-        just as in a strict listing; a missing directory resolves nothing.
+        Schema: a publication ID, or ``None`` for zero or ambiguous evidence.
+        Bounds: the writer-owned index is one bounded fixed-path read; every
+        indexed receipt is re-read with its create-only bound and the receipt
+        directory stamp is compared before any key is resolved. There is no
+        directory enumeration and no process-local witness.
+        Trust: the index is written only by the receipt writer. A missing index
+        means completeness cannot be established and resolves nothing. A stamp
+        or content mismatch, a corrupt index or a corrupt candidate is Denied,
+        never treated as absence. An out-of-band receipt name change also
+        fails closed until the writer rebuilds the index.
+        Failure: ``Denied`` for invalid arguments or invalid evidence.
         """
         policy = policy if policy is not None else PublicationEvidence()
         from .vcs import check_branch
         check_branch(branch)
         if not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest):
             raise Denied("Invalid code digest for publication listing")
-        names = cls._receipt_names(project_root)
-        witness = digest(canonical([policy.name_processing_limit,
-                                    policy.record_limit, names]))
-        cache_key = (str(project_root), witness)
-        with _RECEIPT_KEY_CACHE_LOCK:
-            cached = _RECEIPT_KEY_CACHE.get(cache_key)
-            if cached is None:
-                records, scan_stopped = cls._scan_receipts(
-                    project_root, names, strict=True, policy=policy)
-                index = {}
-                for record in records:
-                    key = (record["branch"], record["code_digest"])
-                    if key in index:
-                        index[key] = _AMBIGUOUS_RECEIPT
-                    else:
-                        index[key] = record["publication_id"]
-                cached = (index, scan_stopped)
-                _RECEIPT_KEY_CACHE[cache_key] = cached
-                while len(_RECEIPT_KEY_CACHE) > _RECEIPT_KEY_CACHE_MAX:
-                    _RECEIPT_KEY_CACHE.popitem(last=False)
-            else:
-                _RECEIPT_KEY_CACHE.move_to_end(cache_key)
-        index, scan_stopped = cached
-        if scan_stopped:
+        store = cls._receipt_store(project_root)
+        index = cls._read_key_index(store, policy)
+        if index is None:
             return None
-        publication_id = index.get((branch, code_digest))
-        if publication_id is None or publication_id is _AMBIGUOUS_RECEIPT:
+        if index["stamp"] != _directory_stamp(store.root):
+            raise Denied("Publication evidence changed")
+        for entry in index["entries"]:
+            name = _receipt_file_name(entry["publication_id"], entry["kind"])
+            try:
+                raw = safe_read(store.root, name, RECORD_BYTES)
+            except FileNotFoundError as exc:
+                raise Denied("Publication evidence changed") from exc
+            if digest(raw) != entry["sha256"]:
+                raise Denied("Publication evidence changed")
+        keys = [key for key in index["keys"]
+                if key["branch"] == branch and key["code_digest"] == code_digest]
+        if len(keys) != 1 or len(keys[0]["publication_ids"]) != 1:
             return None
+        publication_id = keys[0]["publication_ids"][0]
         receipt = cls.read_receipt(project_root, publication_id)
         if receipt["code_digest"] != code_digest or receipt["branch"] != branch:
             return None
@@ -711,4 +864,5 @@ class Publication:
         if lineage.validate(observation, published_sha) is not None:
             receipt["lineage"] = observation
         self._write("receipt", receipt)
+        self._update_key_index(self, receipt, "receipt", PublicationEvidence())
         return receipt

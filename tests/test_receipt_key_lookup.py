@@ -1,4 +1,4 @@
-"""Keyed publication-receipt lookup: strict, witness-validated and legacy-safe.
+"""Keyed publication-receipt lookup: writer-indexed and fail-closed.
 
 Offline only: no adapter, no network, no real publication.
 """
@@ -8,7 +8,7 @@ from support import Fixture
 from mizu import ci_waits, publication
 from mizu.config import PublicationEvidence
 from mizu.distribution import public_source_identity
-from mizu.errors import Denied, LimitExceeded
+from mizu.errors import Denied
 from mizu.fs import canonical
 from mizu.publication import Publication
 
@@ -26,7 +26,6 @@ class ReceiptKeyLookupTests(Fixture):
         self.root = self.project.root
         self.directory = self.root / "evidence" / "publications"
         self.policy = PublicationEvidence()
-        publication._RECEIPT_KEY_CACHE.clear()
 
     def record(self, **overrides):
         arguments = {"branch": BRANCH, "published_sha": SHA, "code_digest": DIGEST,
@@ -39,17 +38,18 @@ class ReceiptKeyLookupTests(Fixture):
             self.root, branch, code_digest,
             policy=self.policy if policy is None else policy)
 
-    def test_hit_reuses_the_witness_without_rescannning_every_receipt(self):
+    def test_warm_hit_and_miss_do_not_enumerate_receipt_names(self):
         receipt = self.record()
+        self.record(code_digest=OTHER_DIGEST)
         self.assertEqual(self.lookup(), receipt["publication_id"])
-        with patch.object(Publication, "_scan_receipts",
-                          wraps=Publication._scan_receipts) as scans, \
-                patch.object(Publication, "read_receipt",
-                             wraps=Publication.read_receipt) as reads:
+        with patch.object(Publication, "_receipt_names",
+                          side_effect=AssertionError("directory enumerated")) as names, \
+                patch.object(Publication, "_scan_receipts",
+                             side_effect=AssertionError("strict rescan")) as scans:
             self.assertEqual(self.lookup(), receipt["publication_id"])
+            self.assertIsNone(self.lookup(code_digest="e" * 64))
+        self.assertEqual(names.call_count, 0)
         self.assertEqual(scans.call_count, 0)
-        self.assertEqual(reads.call_count, 1)
-        self.assertEqual(reads.call_args.args[1], receipt["publication_id"])
 
     def test_zero_matches_and_unrelated_keys_resolve_nothing(self):
         self.assertIsNone(self.lookup())
@@ -77,33 +77,51 @@ class ReceiptKeyLookupTests(Fixture):
         with self.assertRaises(Denied):
             self.lookup()
         corrupt.unlink()
+        # A writer replay repairs the stamp and re-establishes keyed evidence.
+        self.record()
         self.assertEqual(self.lookup(), receipt["publication_id"])
         corrupt.write_bytes(b'{"x":' + b" " * 9000 + b"}")
-        with self.assertRaises(LimitExceeded):
+        with self.assertRaises(Denied):
             self.lookup()
 
-    def test_legacy_file_and_a_later_write_are_both_found_by_the_witness(self):
+    def test_unindexed_legacy_file_is_not_used_as_keyed_evidence(self):
         legacy = self.record()
         path = self.directory / (legacy["publication_id"] + ".external.json")
         path.unlink()
-        # No index, no warm cache: the only copy is the file written directly.
-        publication._RECEIPT_KEY_CACHE.clear()
+        index = self.root / "evidence" / publication.KEY_INDEX_DIR / publication.KEY_INDEX_FILE
+        index.unlink()
         path.write_bytes(canonical(legacy))
-        self.assertEqual(self.lookup(), legacy["publication_id"])
+        # Ordinary listing still sees the legacy file, but keyed resolution
+        # has no writer-built index and therefore cannot claim completeness.
+        page = Publication.list_receipts(self.root, code_digest=DIGEST, branch=BRANCH)
+        self.assertEqual(page["total"], 1)
+        self.assertIsNone(self.lookup())
         newer = self.record(code_digest=OTHER_DIGEST)
         self.assertEqual(self.lookup(code_digest=OTHER_DIGEST), newer["publication_id"])
         self.assertEqual(self.lookup(), legacy["publication_id"])
 
-    def test_stopped_scan_refuses_every_key_even_a_matching_one(self):
+    def test_same_name_corruption_of_an_unrelated_receipt_fails_closed(self):
+        matching = self.record()
+        unrelated = self.record(code_digest=OTHER_DIGEST)
+        self.assertEqual(self.lookup(), matching["publication_id"])
+        path = self.directory / (unrelated["publication_id"] + ".external.json")
+        path.write_bytes(b"{}")
+        with self.assertRaises(Denied):
+            self.lookup()
+        with self.assertRaises(Denied):
+            Publication.list_receipts(self.root, strict=True)
+
+    def test_key_bounds_and_name_changes_fail_closed(self):
         matching = self.record()
         self.record(code_digest=OTHER_DIGEST)
-        for policy in (PublicationEvidence(name_processing_limit=1),
-                       PublicationEvidence(record_limit=1)):
-            with self.subTest(policy=policy):
-                self.assertIsNone(self.lookup(policy=policy))
-                self.assertIsNone(self.lookup(code_digest=OTHER_DIGEST, policy=policy))
+        with self.assertRaises(Denied):
+            self.lookup(policy=PublicationEvidence(record_limit=1))
         relaxed = PublicationEvidence(name_processing_limit=100, record_limit=100)
         self.assertEqual(self.lookup(policy=relaxed), matching["publication_id"])
+        outsider = self.directory / ("0" * 64 + ".external.json")
+        outsider.write_bytes(canonical({}))
+        with self.assertRaises(Denied):
+            self.lookup(policy=relaxed)
 
     def test_resolved_wait_revalidates_digest_and_branch(self):
         snapshot = self.project.snapshots.get()

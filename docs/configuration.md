@@ -2906,6 +2906,14 @@ recorded evidence, not permission to publish or the status of a dispatch:
 | `awaiting_review` | Review is configured, but the current exact-snapshot receipts show neither enough approvals nor a changes request. |
 | `review_not_configured` | No publication review requirement is configured. |
 
+Keyed receipt resolution for exact-snapshot waits reads a writer-owned index
+in `evidence/publication-keys`, not a receipt-directory scan. The index records
+a content digest for every receipt and a stamp of the publications directory;
+a missing, inconsistent, stale or corrupt index resolves no key or raises
+`Denied`, never treating changed evidence as absence. Receipts copied directly
+into the store remain visible to ordinary listings but gain keyed resolution
+only when a receipt writer rebuilds the index.
+
 Only `changes_requested` names a `verdict` and `reviewer` (the first rejecting
 holder in configuration order). Its `finding_insights` contains up to 16
 unique IDs matched from insights already in the opening by exact reviewer
