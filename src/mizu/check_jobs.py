@@ -639,6 +639,9 @@ def _subscribe(context, original, *, purpose=None, request=None, request_id=None
     job = {**original, 'id': job_id, 'shared_job': original['id'], 'role': owner,
            'producer_role': context.role.name, 'run': context.run_dir.name,
            'created_at': now(), 'acknowledged': already_delivered}
+    owner_role = context.project.config.roles.get(owner)
+    if owner_role is not None:
+        job['finish_outcomes'] = list(owner_role.finish_outcomes)
     job.pop('cache_request', None)
     job.pop('request_sequence', None)
     if request is not None:
@@ -1025,6 +1028,9 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                        'commands': job_commands, 'status': 'queued', 'created_at': now(),
                        'acknowledged': False, 'environment': env, 'shared_key': shared_key,
                        'inputs_bound_required': context.config.sandbox.check_reuse}
+                owner_role = context.config.roles.get(owner)
+                if owner_role is not None:
+                    job['finish_outcomes'] = list(owner_role.finish_outcomes)
                 if cache_configured:
                     job['cache_request'] = cache_request
                     job['request_sequence'] = request_sequence
@@ -1070,6 +1076,18 @@ def _retire_superseded(project, role, purpose, *, keep=frozenset(), replaced_by=
         _withdraw_locked(project, record['id'], role=role, replaced_by=replaced_by)
 
 
+def _wait_outcome_allowed(job):
+    """Whether the job owner can use the ``wait`` finish outcome.
+
+    The value is frozen into the job at creation from the owner role's
+    configured outcomes, so a result never advertises an outcome that role
+    cannot take. Legacy records predate restricted finish outcomes and keep
+    the historical behaviour of offering the continuation.
+    """
+    outcomes = job.get('finish_outcomes')
+    return outcomes is None or (isinstance(outcomes, (list, tuple)) and 'wait' in outcomes)
+
+
 def summary(job):
     if 'cache_diagnostics' in job:
         from .acceptance import valid_cache_diagnostics
@@ -1079,7 +1097,8 @@ def summary(job):
                              'arguments': {'outcome': 'wait', 'wait_for_check': job['id']},
                              'supply': ['summary', 'state'],
                              'resumes_on': 'check completion or new input'}}
-                    if job.get('status') in ('queued', 'running') else {})
+                    if _wait_outcome_allowed(job) and job.get('status') in ('queued', 'running')
+                    else {})
     return {
         **continuation,
         **({'accepted_for_current_source': False}
