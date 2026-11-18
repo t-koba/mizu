@@ -2,6 +2,7 @@
 
 Offline only: no adapter, no network, no real publication.
 """
+import json
 from unittest.mock import patch
 
 from support import Fixture
@@ -81,6 +82,15 @@ class ReceiptKeyLookupTests(Fixture):
         self.record()
         self.assertEqual(self.lookup(), receipt["publication_id"])
         corrupt.write_bytes(b'{"x":' + b" " * 9000 + b"}")
+        with self.assertRaises(Denied):
+            self.lookup()
+
+    def test_non_dict_key_index_entry_is_denied(self):
+        self.record()
+        index = self.root / "evidence" / publication.KEY_INDEX_DIR / publication.KEY_INDEX_FILE
+        value = json.loads(index.read_text(encoding="utf-8"))
+        value["keys"] = [123]
+        index.write_bytes(canonical(value))
         with self.assertRaises(Denied):
             self.lookup()
 

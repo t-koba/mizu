@@ -619,7 +619,9 @@ class Publication:
                 raise Denied("Invalid publication key index")
         indexed_ids = set()
         for key in keys:
-            ids = key.get("publication_ids") if isinstance(key, dict) else None
+            if not isinstance(key, dict):
+                raise Denied("Invalid publication key index")
+            ids = key.get("publication_ids")
             if (set(key) != {"branch", "code_digest", "publication_ids"}
                     or not isinstance(key["code_digest"], str)
                     or not DIGEST.fullmatch(key["code_digest"])
