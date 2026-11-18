@@ -523,6 +523,9 @@ DECLARATIONS = {
         'RECORD_BYTES': ('4096', 'safety', 'typed review / bounded cursor and immutable run receipt reads'),
     },
     'publication.py': {
+        'KEY_INDEX_BYTES': (
+            '1 << 20', 'safety',
+            'publication / bounded writer-owned receipt key index read'),
         'RECORD_BYTES': ('8192', 'safety', 'publication / bounded evidence-record read'),
         'LINEAGE_JSON_BYTES': ('4096', 'safety', 'publication / bounded caller-supplied lineage JSON'),
         'REFERENCE_CHARS': (
