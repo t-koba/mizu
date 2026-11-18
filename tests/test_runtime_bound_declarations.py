@@ -2508,6 +2508,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_waits.py', '_change_page', 1, 0): (
         '2', 'format',
         'CI change page / durable pending target frontier is an exact branch and SHA pair'),
+    ('ci_waits.py', '_Absences.prune', 1, 0): (
+        '2', 'format',
+        'CI absence prune / durable target is an exact branch and SHA pair'),
     ('ci_waits.py', 'poll', 1, 1): (
         '32', 'format',
         'CI change observation / enrollment epoch is a 32-hex UUID-4 token'),
