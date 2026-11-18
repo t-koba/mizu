@@ -134,7 +134,7 @@ def _key_index_paths(store):
 
 
 def _directory_stamp(path):
-    """Observe receipt-directory name changes without enumerating its names."""
+    """Observe receipt-directory changes without reading its contents."""
     try:
         info = path.stat()
     except FileNotFoundError:
@@ -144,6 +144,34 @@ def _directory_stamp(path):
 
 def _receipt_file_name(publication_id, kind):
     return f"{publication_id}.{kind}.json"
+
+
+def _receipt_names_differ(store, policy, index, own_name):
+    """Compare receipt-like directory names with the names the index implies.
+
+    The stamp is a cheap change detector, not proof: an out-of-band change
+    could share its value. Only receipt-like names matter; other evidence is
+    owned by other writers. A malformed receipt-like name is reported as a
+    change so the rebuild refuses it exactly as it would on any other write.
+    """
+    try:
+        names = os.listdir(store.root)
+    except (FileNotFoundError, NotADirectoryError):
+        names = []
+    except OSError as exc:
+        raise Denied("Publication evidence is unavailable") from exc
+    if len(names) > policy.name_processing_limit:
+        return True
+    current = set()
+    for name in names:
+        if RECEIPT_FILE.fullmatch(name):
+            current.add(name)
+        elif MALFORMED_RECEIPT_NAME.search(name):
+            return True
+    expected = {_receipt_file_name(entry["publication_id"], entry["kind"])
+                for entry in index["entries"]}
+    expected.add(own_name)
+    return current != expected
 
 
 def _reference(value, label: str) -> str:
@@ -558,6 +586,10 @@ class Publication:
                       "code_digest": code_digest, "approval": approval,
                       "source_commit": source_commit, "run": run, "recorded_at": now(),
                       **extra}
+        # Observe the directory before this writer creates its lock or
+        # receipt file; the index must describe exactly this state. It also
+        # covers the replay path, which writes no receipt at all.
+        before_stamp = _directory_stamp(store.root)
         with kernel_lock(store.lock):
             try:
                 existing = store._read("external")
@@ -569,10 +601,12 @@ class Publication:
                 stored = _external_record(existing, publication_id)
                 if any(stored.get(key) != record.get(key) for key in compared):
                     raise Denied(f"Conflicting external publication receipt: {publication_id}")
-                cls._update_key_index(store, stored, "external", PublicationEvidence())
+                cls._update_key_index(store, stored, "external", PublicationEvidence(),
+                                      before_stamp)
                 return stored
             store._write("external", record)
-        cls._update_key_index(store, record, "external", PublicationEvidence())
+        cls._update_key_index(store, record, "external", PublicationEvidence(),
+                              before_stamp)
         return record
 
     @classmethod
@@ -698,16 +732,19 @@ class Publication:
                 "incomplete": incomplete}
 
     @classmethod
-    def _update_key_index(cls, store, record, kind, policy):
+    def _update_key_index(cls, store, record, kind, policy, before_stamp):
         """Maintain the key index in the same operation that writes a receipt.
 
-        A stamp change or an incomplete/corrupt index forces a bounded rebuild
-        from current directory names; a plain append is only ever applied to
-        an index whose stamp still matches the directory. An append never
-        clears incompleteness -- only a fresh rebuild can.
+        ``before_stamp`` is the directory stamp observed before the writer's
+        own receipt write (or, for a replay, around its read). A changed stamp,
+        a receipt-like name the index does not imply, or an
+        incomplete/corrupt index forces a bounded rebuild from current
+        directory names; only an unchanged view is ever appended to. An append
+        never clears incompleteness -- only a fresh rebuild can.
         """
         directory, index_path, lock_path = _key_index_paths(store)
         mkdir(directory)
+        own_name = _receipt_file_name(record["publication_id"], kind)
         with kernel_lock(lock_path):
             try:
                 index = cls._read_key_index(store, policy)
@@ -716,10 +753,11 @@ class Publication:
                 # rebuilt one instead of blocking every later receipt write.
                 index = None
             if (index is None or index["incomplete"]
-                    or index["stamp"] != _directory_stamp(store.root)):
+                    or index["stamp"] != before_stamp
+                    or _receipt_names_differ(store, policy, index, own_name)):
                 index = cls._build_key_index(store, policy)
             publication_id = record["publication_id"]
-            raw = safe_read(store.root, _receipt_file_name(publication_id, kind), RECORD_BYTES)
+            raw = safe_read(store.root, own_name, RECORD_BYTES)
             entry = {"publication_id": publication_id, "kind": kind,
                      "sha256": digest(raw)}
             entries = [item for item in index["entries"]
@@ -741,7 +779,8 @@ class Publication:
             else:
                 keys.append({"branch": branch, "code_digest": code_digest,
                              "publication_ids": [publication_id]})
-            value = {"schema": KEY_INDEX_SCHEMA, "stamp": index["stamp"],
+            value = {"schema": KEY_INDEX_SCHEMA,
+                     "stamp": _directory_stamp(store.root),
                      "entries": entries, "keys": keys,
                      "incomplete": index["incomplete"]}
             write_json(index_path, value)
@@ -899,6 +938,8 @@ class Publication:
         receipt = {**intent, "published_sha": published_sha}
         if lineage.validate(observation, published_sha) is not None:
             receipt["lineage"] = observation
+        before_stamp = _directory_stamp(self.root)
         self._write("receipt", receipt)
-        self._update_key_index(self, receipt, "receipt", PublicationEvidence())
+        self._update_key_index(self, receipt, "receipt", PublicationEvidence(),
+                               before_stamp)
         return receipt

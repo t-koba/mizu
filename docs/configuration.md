@@ -2913,19 +2913,22 @@ an `incomplete` flag. A missing index resolves no key; a stamp or content
 mismatch, a corrupt index or an incomplete rebuild raises `Denied`, never
 treating changed evidence as absence.
 
-Every receipt write checks the current directory stamp. If it differs from the
-index stamp (or the index is unusable or incomplete), the writer rebuilds the
-whole index from directory names; an unchanged index is only appended to, so an
-out-of-band name change can never be hidden by refreshing the stamp. A rebuild
-keeps the valid receipts and marks the index `incomplete` when an individual
-receipt file is unreadable, oversized or invalid; duplicate identities,
-malformed receipt names and configured scan bounds refuse the rebuild and the
-write. A valid writer call therefore still records and indexes its receipt
-while an unrelated corrupt file is present, but keyed lookups stay `Denied`
-until that file is removed. Removal alone leaves a stale stamp; the next writer
-call rebuilds cleanly, clears `incomplete` and restores keyed resolution.
-Receipts copied directly into the store remain visible to ordinary listings but
-gain keyed resolution only through such a writer rebuild.
+Every receipt write compares the index with the directory as observed before
+the writer's own file was written (for an identical replay, before the replay
+read). A changed stamp, an extra or missing receipt-like name, or an unusable
+or incomplete index forces a bounded rebuild from directory names; only an
+unchanged view is appended to, and the written stamp is observed after the
+write. Neither check can be satisfied by refreshing the old index stamp, so an
+out-of-band name change can never be hidden. A rebuild keeps the valid receipts
+and marks the index `incomplete` when an individual receipt file is unreadable,
+oversized or invalid; duplicate identities, malformed receipt names and
+configured scan bounds refuse the rebuild and the write. A valid writer call
+therefore still records and indexes its receipt while an unrelated corrupt file
+is present, but keyed lookups stay `Denied` until that file is removed. Removal
+alone leaves a stale stamp; the next writer call rebuilds cleanly, clears
+`incomplete` and restores keyed resolution. Receipts copied directly into the
+store remain visible to ordinary listings but gain keyed resolution only
+through such a writer rebuild.
 
 Only `changes_requested` names a `verdict` and `reviewer` (the first rejecting
 holder in configuration order). Its `finding_insights` contains up to 16

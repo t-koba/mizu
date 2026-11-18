@@ -10,7 +10,7 @@ from mizu import ci_waits, publication
 from mizu.config import PublicationEvidence
 from mizu.distribution import public_source_identity
 from mizu.errors import Denied
-from mizu.fs import canonical
+from mizu.fs import canonical, digest
 from mizu.publication import Publication
 
 SHA = "a" * 40
@@ -81,6 +81,90 @@ class ReceiptKeyLookupTests(Fixture):
         page = Publication.list_receipts(self.root, code_digest=DIGEST, branch=BRANCH)
         self.assertEqual(page["total"], 2)
         self.assertIsNone(self.lookup())
+
+    def counted_rebuilds(self):
+        """Count bounded rebuilds while leaving their result unchanged."""
+        rebuilds = []
+        real_build = Publication._build_key_index
+
+        def counted(store, policy):
+            rebuilds.append(1)
+            return real_build(store, policy)
+
+        return patch.object(Publication, "_build_key_index",
+                            side_effect=counted), rebuilds
+
+    def test_sequential_writer_calls_only_rebuild_once(self):
+        # Product intent and dispatch files precede the first build; the
+        # later receipt they authorize is the writer's own file.
+        product = Publication(self.root, "e" * 40, "f" * 64, BRANCH, "push",
+                              projection=public_source_identity({}))
+        intent, _ = product.prepare("approval", "run")
+        product.mark_dispatch()
+        builds, rebuilds = self.counted_rebuilds()
+        with builds:
+            first = self.record()
+            second = self.record(code_digest=OTHER_DIGEST)
+            replay = self.record()  # An identical replay writes no receipt.
+            product.complete(intent, "1" * 40)
+        self.assertEqual(len(rebuilds), 1)
+        self.assertEqual(replay, first)
+        self.assertEqual(len(self.index()["entries"]), 3)
+        # The appended index carries a current stamp, so warmed lookups work.
+        self.assertEqual(self.lookup(), first["publication_id"])
+        self.assertEqual(self.lookup(code_digest=OTHER_DIGEST), second["publication_id"])
+
+    def test_copied_in_receipt_forces_a_rebuild_and_denies_until_clean_rebuild(self):
+        receipt = self.record()
+        copied = self.directory / ("0" * 64 + ".external.json")
+        copied.write_bytes(canonical(receipt))
+        # Neutralize the stamp change so only the name-set check can detect the
+        # out-of-band file: refreshing the old stamp must never index it.
+        value = self.index()
+        value["stamp"] = publication._directory_stamp(self.directory)
+        self.index_path.write_bytes(canonical(value))
+        builds, rebuilds = self.counted_rebuilds()
+        with builds:
+            self.record()  # Replay of the writer's own receipt.
+            self.assertEqual(len(rebuilds), 1)
+            self.assertTrue(self.index()["incomplete"])
+            with self.assertRaises(Denied):
+                self.lookup()
+            copied.unlink()
+            self.record()
+            self.assertEqual(len(rebuilds), 2)
+        self.assertFalse(self.index()["incomplete"])
+        self.assertEqual(self.lookup(), receipt["publication_id"])
+
+    def test_same_name_edit_stays_denied_through_an_append(self):
+        matching = self.record()
+        edited = self.record(code_digest=OTHER_DIGEST)
+        path = self.directory / (edited["publication_id"] + ".external.json")
+        original = canonical(edited)
+        path.write_bytes(canonical({"approval": "out-of-band"}))
+        with self.assertRaises(Denied):
+            self.lookup(code_digest=OTHER_DIGEST)
+        # A content-only edit leaves the directory stamp and name set intact;
+        # appending another receipt must not adopt the changed content.
+        builds, rebuilds = self.counted_rebuilds()
+        with builds:
+            self.record(code_digest="e" * 64)
+            self.assertEqual(rebuilds, [])
+        with self.assertRaises(Denied):
+            self.lookup(code_digest=OTHER_DIGEST)
+        entry = next(row for row in self.index()["entries"]
+                     if row["publication_id"] == edited["publication_id"])
+        self.assertEqual(entry["sha256"], digest(original))
+        # Only a fresh writer rebuild clears the denial.
+        path.write_bytes(original)
+        self.index_path.write_bytes(b"{}")
+        builds, rebuilds = self.counted_rebuilds()
+        with builds:
+            self.record(code_digest="f" * 64)
+            self.assertEqual(len(rebuilds), 1)
+        self.assertFalse(self.index()["incomplete"])
+        self.assertEqual(self.lookup(), matching["publication_id"])
+        self.assertEqual(self.lookup(code_digest=OTHER_DIGEST), edited["publication_id"])
 
     def test_corrupt_file_blocks_lookup_but_a_writer_still_indexes_its_receipt(self):
         receipt = self.record()
