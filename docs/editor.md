@@ -91,8 +91,14 @@ cursor. All configured defaults and the query schema remain unchanged.
 
 There is no `write_file`, shell, patch, commit, deploy, pause, budget-change or
 harness-update tool. JSON-RPC writes only protocol records to stdout. MCP
-lifecycle negotiation supports the declared 2025-06-18 protocol and compatible
-older revisions; it does not implement HTTP/OAuth or every optional MCP feature.
+lifecycle negotiation requires the legacy `initialize` handshake and accepts the
+exact protocol versions `2024-11-05`, `2025-03-26` and `2025-06-18`. An unknown
+offered version is downgraded to `2025-06-18`, and a request before `initialize`
+is refused. These are local stdio servers for the pinned Codex and Claude
+engines; they do not implement HTTP/OAuth or every optional MCP feature. A
+future engine that sends protocol version or capabilities only in `_meta`, or
+expects `server/discover`, is an explicit compatibility revisit trigger: it must
+be pinned and tested before this handshake or its version list is changed.
 
 After submission, the Worker daemon ingests proposals even while idling.
 Explicit ingestion is also available:

@@ -38,7 +38,7 @@ Claudeは専用環境の公式Python Agent SDKを使います。権限コール�
 
 利用量集計の正本は各子runのconsultation.jsonです。親は子run IDだけを参照します。同じrunのresult/errorを重複加算しません。受付直後の保存失敗でも、Contextへ登録した受付数を残します。予算同期の結果を確定できない場合はrequests_known=falseとunknown_request_runsを記録し、既知の0回と区別します。`request_unit` はPiのmodel_request、Codexのturn、Claudeのqueryを区別します。`requests` の合計を料金とは扱いません。未認識または不正な利用量形状も `usage_known=false` とunknown_usage_runsに含め、認識できた部分量は別途残し、未知の数値をトークンへ変換しません。input/output/cache_read/cache_writeを分離し、cacheがinputの部分集合の場合は追加して総トークンを作りません。Claudeはmodel_usageの再開前との差分を使い、messageやsubagent内訳を重複加算しません。レコードの不正JSON、読取エラー、非有限値は個別に隔離します。最新runの選択は5000、表示は200に制限し、切り詰めを明示します。decisionはUTCへ正規化した時刻から最新10を選びます。時差付きISO-8601を文字列順に比較しません。pendingには表示件数・総件数・切り詰めを持たせ、利用量保持は実際の日付で判定します。
 
-両MCPサーバーは共通JSON-RPCループを使用します。要求IDは256 UTF-8バイト以下の文字列または符号付き64ビット整数（bool/null不可）、paramsはオブジェクト、非有限JSONは拒否します。IDのないtools/callは実行しません。要求・応答はLFを含め1MiBです。Python/JavaScriptのブリッジはloopbackと整数ポート、booleanのok、objectのresultを検査します。通信失敗を成功へ変換せず、副作用要求を再送しません。
+両MCPサーバーは共通JSON-RPCループを使用します。要求IDは256 UTF-8バイト以下の文字列または符号付き64ビット整数（bool/null不可）、paramsはオブジェクト、非有限JSONは拒否します。IDのないtools/callは実行しません。要求・応答はLFを含め1MiBです。Python/JavaScriptのブリッジはloopbackと整数ポート、booleanのok、objectのresultを検査します。通信失敗を成功へ変換せず、副作用要求を再送しません。共通ループはレガシーの `initialize` ハンドシェイクを要求し、`2024-11-05`、`2025-03-26`、`2025-06-18` の3版のみを受け付けます。未知の提示版は `2025-06-18` に下げ、初期化前の要求は拒否します。固定されたCodex/Claude用のローカルstdioサーバーであり、HTTP/OAuthや全ての任意機能を実装しません。ステートレス化した将来のエンジンを固定する前に、ハンドシェイクと版一覧を明示的に再検討します。
 
 files/list_filesの省略時はoffset=0/limit=1000。offsetは0..2147483647、limitは1..1000。結果は決定的な順序、offset/next_offset/truncatedを持ち、ページをUTF-8 JSONバイト上限に収めます。変更されるWriterの一覧はページ間の不変性を保証しません。長い読取結果は追加の小さいページを要求します。書込み応答は既存の小さい固定形または64KiB以下のInsight契約を用い、送信側もJSONエスケープ後のフレームを検査します。
 
