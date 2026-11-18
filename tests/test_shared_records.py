@@ -59,12 +59,17 @@ class SharedRecordsTests(unittest.TestCase):
         # Retention is permanent until a source owner proves an exact release
         # condition; any new public method needs explicit review against that
         # invariant (docs/shared-records.md).
+        allowed = {"acknowledge", "freeze", "get", "put", "read_page", "received",
+                   "record_name", "records"}
+        # dir() includes inherited and dynamically exposed callables, not only
+        # the immediate class/instance dicts; both must match the allowlist.
         self.assertEqual(
-            {name for name in vars(SharedRecords) if not name.startswith("_")},
-            {"acknowledge", "freeze", "get", "put", "read_page", "received",
-             "record_name", "records"})
-        self.assertFalse({name for name, value in vars(self.store).items()
-                          if not name.startswith("_") and callable(value)})
+            {name for name in dir(SharedRecords) if not name.startswith("_")},
+            allowed)
+        self.assertFalse(
+            {name for name in dir(self.store)
+             if not name.startswith("_") and callable(getattr(self.store, name))}
+            - allowed)
 
     def test_exact_replay_and_digest_recomputation(self):
         record, computed = self.put()
