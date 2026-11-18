@@ -2405,10 +2405,10 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('runtime.py', 'Context._covered_waits', 1, 0): (
         '16', 'format',
         'VCS request / covered work-item count follows the public request protocol'),
-    ('runtime.py', 'Context._op_finish', 1, 0): (
+    ('unit_finish.py', 'ContextFinishMixin._op_finish', 1, 0): (
         '512', 'format',
         'finish / acknowledgement-token count follows the public maxItems contract'),
-    ('runtime.py', 'Context._op_finish', 1, 1): (
+    ('unit_finish.py', 'ContextFinishMixin._op_finish', 1, 1): (
         '64', 'format',
         'finish / acknowledgement-token length follows the public maxLength contract'),
     ('producer_admission.py', '_producer_limit', 2, 0): (
@@ -3602,7 +3602,7 @@ def sibling():
                 'pi_durable.py', 'platform.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py',
-                'usage.py', 'config.py', 'runtime.py',
+                'usage.py', 'config.py', 'runtime.py', 'unit_finish.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'producer_admission.py',
                 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
@@ -3610,7 +3610,7 @@ def sibling():
                 'budget.py', 'fs.py', 'role_state.py', 'snapshot.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
-                'bridge.py', 'pi_durable.py', 'work_item_seed.py',
+                'bridge.py', 'pi_durable.py', 'unit_finish.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py', 'fs.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
