@@ -2220,6 +2220,11 @@ def load(file: Path) -> Config:
         number(mat[k], f"materialize.{k}", 1, 16777216)
     number(mat["diagnostic_bytes"], "materialize.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
     tool_effects = data.get("tool_effects", {})
+    # Validate the table shape before enumerating keys: set(tool_effects) is
+    # evaluated first and a scalar or array of tables otherwise raises
+    # TypeError instead of the intended ConfigError.
+    if not isinstance(tool_effects, dict):
+        raise ConfigError("tool_effects must be a table")
     keys(tool_effects, set(tool_effects), "tool_effects")
     for name, statement in tool_effects.items():
         if not isinstance(name, str) or not name:

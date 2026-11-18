@@ -45,7 +45,9 @@ class ToolEffectTests(Fixture):
 
     def test_invalid_tool_effects_are_rejected_on_load(self):
         original = self.file.read_text(encoding='utf-8')
-        invalid = ['tool_effects = []\n', '[tool_effects]\n"" = "text"\n']
+        invalid = ['tool_effects = []\n', 'tool_effects = 1\n',
+                   'tool_effects = [{ materialize = "text" }]\n',
+                   '[tool_effects]\n"" = "text"\n']
         invalid += [f'[tool_effects]\nmaterialize = {json.dumps(value)}\n'
                     for value in (False, [], {}, '', 'x' * 1025, '\0', '\t', '\n', '\x1b', '\x7f', '\x9b')]
         for snippet in invalid:
