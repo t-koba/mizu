@@ -2,9 +2,9 @@
 
 **ミズ（水） — 小さな機構、明示的な方針、継続する仕事。**
 
-Mizu is a model-configurable autonomous work harness for Linux, macOS and Windows.
+Mizu is an operating system for autonomous model roles on Linux, macOS and Windows.
 
-Worker が継続的に目標に取り組み、Searcher・Reviewer・Editor がそれぞれ独立して情報を供給し、Reporter が根拠のある成果物を生成します。Maintainer は別の候補コピー上で改善を行いますが、稼働中のバージョンを直接更新することはありません。
+Mizu のカーネルが提供するのは、作業単位の実行、スケジューリング、型付きの記録とその移り変わり、出来事の配送、資源の計量、外部システムのドライバ、それらを操作するツールだけです（[カーネル仕様](docs/kernel.md)）。どんな役割を置くか、どんな記録の種類と状態を持つか、何をもって完了とするか、レビューや監査をするかは、運用側の設定と方針です。現在のコードには一つの開発の進め方がまだ組み込まれており、[移行計画](docs/os-migration.md) に沿って取り除いています。以下の役割の説明は、その開発の進め方を設定として表した例です。
 
 本システムは Python 標準ライブラリ、推論エンジン（Pi / Codex / Claude）、Git、OCI コンテナランタイム（Podman / Docker）、OS 標準のサービス管理機能（systemd / launchd / タスクスケジューラ）で構成されており、外部データベースやメッセージブローカー、常時稼働するWebアプリケーションなどは使用しません。
 

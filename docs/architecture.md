@@ -11,9 +11,15 @@ behavioral constraints, heuristics, or assumptions into code. Ask whether a
 change provides a capability or enforces a behavior; behavioral rules belong in
 operator policy, not mechanism.
 
-Role names are configuration, not a class hierarchy. The Python runtime executes
-capability-bearing work units. A Markdown policy explains which work to choose;
-it cannot grant capabilities or change limits.
+Mizu is an operating system for model roles. The kernel ([kernel.md](kernel.md))
+provides units, scheduling, objects, events, accounting, drivers and tools; it
+names no role, record kind, state, event or workflow. Roles, record kinds and
+their lifecycles, what completion or publication requires, and what models are
+told are deployment configuration and policy. Parts of the current code still
+embed one development workflow; [os-migration.md](os-migration.md) is the plan
+that removes them, and the component table below describes the code as it is
+during that migration. A Markdown policy explains which work to choose; it
+cannot grant capabilities or change limits.
 
 The trusted computing base consists of the host OS kernel, the operator account,
 Python, the Mizu release, Node/Pi/CLIs and their installed dependencies, the

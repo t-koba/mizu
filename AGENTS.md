@@ -7,9 +7,13 @@ capability without prescribing behavior. Keep mechanism minimal (KISS): do not
 add code to enforce behavior, heuristics, or decisions that belong in operator
 policy. When considering a restriction, ask: *does this provide a capability, or
 enforce a behavior?* Never burden mechanism with unnecessary constraints.
-Preserve the single-writer publication contract. As a contributor, do not add
-automatic deployment, secret access, host command execution, or model-specific
-defaults.
+Mizu is an operating system for model roles: the kernel is specified in
+`docs/kernel.md` and the move to it in `docs/os-migration.md`. Kernel code names
+no role, record kind, state, event, branch or workflow; those are deployment
+configuration (the example userland lives in `examples/`). New work extends a
+kernel part or the example userland, never a workflow inside the kernel. As a
+contributor, do not add automatic deployment, secret access, host command
+execution, or model-specific defaults.
 
 Run the offline checks and add focused regression tests. Keep test-only drivers
 out of production configuration. Do not change a failing test into a passing
@@ -22,9 +26,8 @@ and failure behavior. New policy is Markdown/TOML; new mechanism belongs behind
 explicit grants. Work in the current development source; do not stage, promote,
 or deploy a release from a contributor change.
 
-No external publication without recorded human approval: pushes and PRs require
-an accepted `GO <branch>` proposal bound to the exact code digest
-(see `docs/configuration.md`).
+No external publication without the approval the deployment's configuration
+requires (see `docs/configuration.md`).
 
 Operator tasks — deployment, credentials, scheduling, promotion — are out of
 scope for this file. See `docs/setup.md`, `docs/operations.md`,
