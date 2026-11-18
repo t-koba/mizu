@@ -1647,6 +1647,10 @@ CALLS = {
         ('_resolved', 'Publication.list_receipts', 'limit', 0): (
             '2', 'mechanism', 'CI wait / strict uniqueness check reads one extra receipt'),
     },
+    'reviews.py': {
+        ('publication_state', 'Publication.list_receipts', 'limit', 0): (
+            '1', 'mechanism', 'reviews / exact code-digest receipt lookup reads one row'),
+    },
     'cli.py': {
         ('_cmd_insight', 'project.insights.list', 'limit', 0): (
             '1000', 'mechanism', 'CLI / fixed legacy insight-list page bound'),
@@ -2356,6 +2360,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('config.py', 'load', 2, 0): (
         '1000000', 'configured policy',
         'limits / session_max_cost_usd is an operator-selected session-rotation threshold, not a bill'),
+    ('config.py', 'load', 2, 1): (
+        '1024', 'safety',
+        'tool effects / cap the canonical per-operation statement before advertising it to a role'),
     ('config.py', 'load', 1, 0): (
         '32', 'safety',
         'sandbox / bound runner argv count passed into the configured container'),
@@ -2596,6 +2603,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('work_items.py', '_open_cursor_key', 1, 0): (
         '4', 'format',
         'work items / cursor token has version, status, timestamp and item-identity fields'),
+    ('work_items.py', '_resolution_name', 1, 0): (
+        '1', 'mechanism',
+        'work items / more than one canonical resolution filename is ambiguous and fails closed'),
     ('work_items.py', 'WorkItems.__init__', 2, 0): (
         '31536000', 'configured policy',
         'work items / documented one-year ceiling for the operator-selected, visibility-only stale threshold'),
