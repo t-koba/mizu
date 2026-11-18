@@ -588,8 +588,7 @@ class OperationsTests(Fixture):
             manifest = install.source_manifest(release)
             write_json(release / "source-manifest.json", manifest)
             write_json(release / "installation.json", {"version": "0.1.0",
-                         "source_sha256": digest(canonical(manifest)), "mode": mode,
-                         "validation": "local-install-checks-passed"})
+                         "source_sha256": digest(canonical(manifest)), "mode": mode})
             return release
         first = stage_release("r1", "pi")
         self.assertEqual(install.promote(args, first)["status"], "promoted")

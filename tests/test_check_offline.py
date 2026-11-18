@@ -52,14 +52,87 @@ def write_adapter(base: Path, deps, installed: dict):
     return base
 
 
-class InstallerStagingWaiverTests(unittest.TestCase):
-    def test_core_only_waives_all_unprovisioned_adapter_gates(self):
-        self.assertEqual(INSTALLER.staging_not_run_checks(core_only=True),
-                         'node-durable-contract-tests,node-pi-sdk-contract-tests,'
-                         'node-pi-reasoning-replay-tests')
+def _absolute_bash():
+    """Resolve an absolute shell; a PATH entry can be a shim, not bash."""
+    system = '/bin/bash'
+    if os.path.isfile(system) and os.access(system, os.X_OK):
+        return system
+    found = shutil.which('bash')
+    return os.path.abspath(found) if found else None
 
-    def test_pi_staging_provisions_both_adapters_and_runs_all_gates_unwaived(self):
-        self.assertEqual(INSTALLER.staging_not_run_checks(core_only=False), '')
+
+
+
+class WrapperTraceDiagnosticFixture:
+    """Bounded diagnostic producer for the offline failure-summary test.
+
+    The synthetic test ID is intentionally unchanged: check.py and
+    check_unittest.py allow this one closed-schema diagnostic by exact ID.
+    """
+
+    @staticmethod
+    def _hermetic_wrapper_env():
+        # Non-interactive bash sources BASH_ENV before the script body.
+        return {k: v for k, v in os.environ.items() if k not in ('BASH_ENV', 'ENV')}
+
+    def _bash_control(self, env=None):
+        if env is None:
+            env = self._hermetic_wrapper_env()
+        try:
+            probe = subprocess.run([_absolute_bash(), '-c', 'printf mizu-control'],
+                capture_output=True, timeout=10, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, False
+        return (probe.returncode == 0 and probe.stdout == b'mizu-control',
+                len(probe.stderr) == 0)
+
+    def read_wrapper_trace(self, root, mode_index, returncode, *, stdout='', stderr=''):
+        trace = root / 'trace.jsonl'
+        try:
+            return trace.read_text()
+        except OSError as error:
+            # Only fixed, relative identities may leave this disposable fixture.
+            stage_paths = {'prefix': 'prefix with spaces', 'bin': 'bin with spaces',
+                           'config': 'private configuration/config.toml'}
+            try:
+                observed = json.loads((root / 'setup.invoked.json').read_text())
+            except (OSError, ValueError):
+                observed = None
+            wrapper_path = root / 'scripts' / 'test-install.sh'
+            try:
+                wrapper_bytes = wrapper_path.stat().st_size if wrapper_path.is_file() else None
+            except OSError:
+                wrapper_bytes = None
+            try:
+                with open(wrapper_path, 'rb') as handle:
+                    file_digest = hashlib.sha256()
+                    for chunk in iter(lambda: handle.read(1048576), b''):
+                        file_digest.update(chunk)
+                    wrapper_sha256 = file_digest.hexdigest()
+            except OSError:
+                wrapper_sha256 = None
+            control_ok, control_stderr_empty = self._bash_control()
+            stderr_bytes = stderr.encode('utf-8')
+            error.add_note('wrapper trace diagnostic: ' + json.dumps({
+                'mode_index': mode_index, 'wrapper_returncode': returncode,
+                'root_exists': root.exists(), 'trace_exists': trace.exists(),
+                'setup_invoked': (root / 'setup.invoked.json').exists(),
+                'cli_invoked': (root / 'cli.invoked').exists(),
+                'fixture_paths': {'root': '.', 'trace': 'trace.jsonl',
+                    'wrapper': 'scripts/test-install.sh',
+                    'setup': 'scripts/fake-setup.py', 'cli': 'scripts/fake-cli.py'},
+                'stage_paths': stage_paths if observed == stage_paths else None,
+                'errno': error.errno,
+                'wrapper_stdout_empty': stdout == '',
+                'wrapper_stderr_empty': stderr == '',
+                'wrapper_bytes': wrapper_bytes,
+                'wrapper_sha256': wrapper_sha256,
+                'wrapper_stderr_bytes': len(stderr_bytes),
+                'wrapper_stderr_sha256': hashlib.sha256(stderr_bytes).hexdigest(),
+                'bash_control_ok': control_ok,
+                'bash_control_stderr_empty': control_stderr_empty,
+            }, sort_keys=True))
+            raise
 
 
 class CheckTimeoutTests(unittest.TestCase):
@@ -200,19 +273,16 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertGreaterEqual(scopes['posix'] * 60,
                                 CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds()))
 
-    def test_core_installer_cell_scope_holds_the_gate_path_and_the_installers_call(self):
-        # The Linux cell runs the gate once: the installer reuses the source
-        # gate's receipt and the idempotence reinstall finds the release the
-        # cell already staged. Its scope must hold the source gate's bounded
-        # path, the installer's own bounded staging call, and the separate
-        # OCI step's bounded 600 s cap: 3246 + 3300 + 600 = 7146 s inside the
-        # 7200 s cell, leaving 54 s.
+    def test_core_installer_cell_scope_holds_the_gate_path_and_oci_step(self):
+        # The Linux cell runs the source gate as its own separate step; the
+        # installer stages without it, so its contribution is zero. The scope
+        # holds the gate's bounded path plus the separate OCI step's 600 s cap:
+        # 3246 + 600 = 3846 s inside the 7200 s cell.
         scopes = self._core_cell_scopes()
-        staging = self._installer_staging_timeout()
         oci = self._oci_step_timeout()
-        required = (CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds(), staging)
+        required = (CHECK.core_cell_scope_seconds(CHECK._unittest_timeout_seconds(), 0)
                     + oci)
-        self.assertEqual(required, 3246 + 3300 + 600)
+        self.assertEqual(required, 3246 + 600)
         self.assertGreaterEqual(scopes['linux_installer'] * 60, required)
 
     def test_later_phase_counts_the_children_the_gate_actually_runs(self):
@@ -387,13 +457,6 @@ class CheckTimeoutTests(unittest.TestCase):
         self.assertEqual(len(minutes), 3)
         return {'windows': minutes[0], 'linux_installer': minutes[1], 'posix': minutes[2]}
 
-    def _installer_staging_timeout(self) -> int:
-        """Read the installer's own bound on the staged gate it runs."""
-        source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
-        match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
-        self.assertIsNotNone(match)
-        return int(match.group(1))
-
     def _oci_step_timeout(self) -> int:
         """Read the separate OCI integration step's own workflow cap."""
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -429,26 +492,6 @@ class CheckTimeoutTests(unittest.TestCase):
         match = re.search(r'durable-contract:.*?timeout-minutes: (\d+)', workflow, re.S)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(int(match.group(1)) * 60, required)
-
-    def test_installer_staging_gate_outlives_the_modelled_gate_path(self):
-        # The staged gate runs the same child; a staging timeout shorter than
-        # the gate's modelled path would cut the gate off before its bounded
-        # cleanup and receipt.
-        source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
-        match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
-        self.assertIsNotNone(match)
-        required = CHECK.modelled_gate_seconds(CHECK._unittest_timeout_seconds())
-        self.assertEqual(required, 3246)
-        self.assertGreaterEqual(int(match.group(1)), required)
-
-    def test_installer_staging_gate_outlives_the_suite_child_bound(self):
-        # The staged gate runs the same child; a staging timeout that does not
-        # outlive the child's own bound would cut the gate off before its
-        # bounded cleanup and receipt.
-        source = (ROOT / 'scripts' / 'install.py').read_text(encoding='utf-8')
-        match = re.search(r'"scripts/check\.py".*?timeout=(\d+)', source, re.S)
-        self.assertIsNotNone(match)
-        self.assertGreater(int(match.group(1)), CHECK._unittest_timeout_seconds())
 
     def test_ci_provisions_both_pi_adapters_for_unwaived_contract_gates(self):
         workflow = (ROOT / '.github' / 'workflows' / 'ci.yml').read_text(encoding='utf-8')
@@ -805,9 +848,8 @@ class UnittestFailureSummaryTests(unittest.TestCase):
                 self.assertNotIn(value, text)
 
     def test_wrapper_trace_diagnostic_survives_real_runner_and_summary(self):
-        spec = importlib.util.spec_from_file_location('wrapper_fixture', ROOT / 'tests/test_install_ci.py')
-        fixture = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(fixture)
+        fixture = WrapperTraceDiagnosticFixture()
+        # Stable synthetic ID: the gate's diagnostic allowlist is keyed by it.
         identifier = ('test_install_ci.InstallWrapperCITests.'
                       'test_all_modes_reach_same_bounded_smoke_flow_with_mock_setup_and_cli')
         sentinel = 'SYNTHETIC-CREDENTIAL-DO-NOT-EMIT'
@@ -823,7 +865,7 @@ class UnittestFailureSummaryTests(unittest.TestCase):
 
                 def test_trace(self):
                     try:
-                        fixture.InstallWrapperCITests().read_wrapper_trace(root, 2, 0)
+                        fixture.read_wrapper_trace(root, 2, 0)
                     except FileNotFoundError as error:
                         error.add_note(f'arbitrary note {temporary} {sentinel}')
                         raise
@@ -831,7 +873,7 @@ class UnittestFailureSummaryTests(unittest.TestCase):
             for observed in (stage, {'config': str(root / sentinel)}):
                 with self.subTest(normalized=observed == stage):
                     (root / 'setup.invoked.json').write_text(json.dumps(observed))
-                    with mock.patch.object(fixture.InstallWrapperCITests, '_bash_control',
+                    with mock.patch.object(fixture, '_bash_control',
                                             return_value=(True, True)):
                         result, output, data, summary = self.run_case(MissingTrace)
                     self.assertEqual(len(result.errors), 1)
@@ -2534,7 +2576,7 @@ class UnittestTimingEvidenceTests(unittest.TestCase):
         self.assertIn("format('--test-shard {0}', matrix.shard)", compatibility)
         self.assertIn('--allow-not-run node-durable-contract-tests,node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests', workflow)
         self.assertIn("- name: Core installer and CLI lifecycle\n        if: runner.os == 'Linux' && matrix.python == '3.13'", workflow)
-        self.assertIn('run: ./scripts/test-install.sh private-validation/offline.json', workflow)
+        self.assertIn('run: ./scripts/test-install.sh\n', workflow)
         self.assertIn('  durable-contract:', workflow)
         self.assertIn('run: python scripts/check.py --report private-validation/durable.json', workflow)
         self.assertIn('  delegation-recovery-smoke:', workflow)
@@ -2818,195 +2860,8 @@ class SdkGateEntryTests(unittest.TestCase):
 
 
 
-class ReusedSourceReportTests(unittest.TestCase):
-    """Explicit content-bound reuse for core-only staging."""
-
-    def valid_report(self):
-        from mizu.distribution import OFFLINE_REPORT_VERSION, source_manifest_sha
-        sha = source_manifest_sha(ROOT)
-        bash_available = INSTALLER.functional_bash_available()
-        return {
-            "suite": "offline",
-            "report_version": OFFLINE_REPORT_VERSION,
-            "mizu_version": CHECK.__version__ if hasattr(CHECK, "__version__") else __import__("mizu").__version__,
-            "source_sha256": sha,
-            "allowed_not_run": sorted(INSTALLER.staging_not_run_checks(core_only=True).split(",")),
-            "bash_available": bash_available,
-            "node_version": INSTALLER.current_node_version(),
-            "ok": True,
-            "python": sys.version.split()[0],
-            "os": sys.platform,
-            "checks": [
-                {"name": "python-syntax", "status": "pass"},
-                {"name": "python-unit-and-contract-tests", "status": "pass"},
-                {"name": "node-transport-and-extension-tests", "status": "pass"},
-                {"name": "source-manifest-stable", "status": "pass"},
-                {"name": "node-durable-contract-tests", "status": "not_run"},
-                {"name": "node-pi-sdk-contract-tests", "status": "not_run"},
-                {"name": "node-pi-reasoning-replay-tests", "status": "not_run"},
-            ] + ([{"name": "shell-syntax:" + path.name, "status": "pass"}
-                  for path in (ROOT / "scripts").glob("*.sh")]
-                 if bash_available else
-                 [{"name": "shell-syntax", "status": "not_run"}])
-              + [{"name": "javascript-syntax:" + path.relative_to(ROOT).as_posix(), "status": "pass"}
-                 for directory in ("adapters/pi", "adapters/pi-durable", "scripts")
-                 for path in (ROOT / directory).glob("*.mjs")],
-        }
-
-    def test_receipt_identity_uses_shared_manifest(self):
-        from mizu.distribution import OFFLINE_REPORT_VERSION as expected_version
-        from mizu.distribution import source_manifest as shared_manifest
-        from mizu.distribution import source_manifest_sha
-        self.assertEqual(shared_manifest(ROOT), INSTALLER.source_manifest())
-        self.assertEqual(INSTALLER.OFFLINE_REPORT_VERSION if hasattr(INSTALLER, "OFFLINE_REPORT_VERSION") else expected_version,
-                         expected_version)
-        self.assertEqual(CHECK.OFFLINE_REPORT_VERSION, expected_version)
-        report = self.valid_report()
-        self.assertEqual(report["source_sha256"], source_manifest_sha(ROOT))
-        entries = INSTALLER.validate_reused_source_checks(report, expected_sha=report["source_sha256"])
-        self.assertEqual(entries, report["checks"])
-
-    def test_valid_reuse_succeeds(self):
-        report = self.valid_report()
-        entries = INSTALLER.validate_reused_source_checks(report, expected_sha=report["source_sha256"])
-        self.assertEqual(entries, report["checks"])
-
-    def test_malformed_reports_rejected(self):
-        report = self.valid_report()
-        sha = report["source_sha256"]
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks([], expected_sha=sha)
-        bad = dict(report, suite="other")
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(bad, expected_sha=sha)
-        bad = dict(report, checks=[{"name": "python-syntax"}])
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(bad, expected_sha=sha)
-
-    def test_stale_schema_version_and_source_rejected(self):
-        report = self.valid_report()
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, report_version=999),
-                                                    expected_sha=report["source_sha256"])
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, mizu_version="0.0.0-stale"),
-                                                    expected_sha=report["source_sha256"])
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, source_sha256="0" * 64),
-                                                    expected_sha=report["source_sha256"])
-
-    def test_failed_and_incomplete_reports_rejected(self):
-        report = self.valid_report()
-        sha = report["source_sha256"]
-        failed = dict(report, ok=False)
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(failed, expected_sha=sha)
-        with_fail = dict(report, ok=True,
-                          checks=[{**entry, "status": "fail"} if entry["name"] == "python-syntax" else entry
-                                  for entry in report["checks"]])
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(with_fail, expected_sha=sha)
-        missing_required = dict(report, checks=[e for e in report["checks"]
-                                                if e["name"] != "python-unit-and-contract-tests"])
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(missing_required, expected_sha=sha)
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, checks=[]), expected_sha=sha)
-
-    def test_wrong_environment_rejected(self):
-        report = self.valid_report()
-        sha = report["source_sha256"]
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, python="0.0.0"), expected_sha=sha)
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, os="mismatched-os"), expected_sha=sha)
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(dict(report, node_version="v0.0.0"), expected_sha=sha)
-        with mock.patch.object(INSTALLER, "functional_bash_available", return_value=not report["bash_available"]):
-            with self.assertRaises(INSTALLER.Denied):
-                INSTALLER.validate_reused_source_checks(report, expected_sha=sha)
-
-    def test_undeclared_or_malformed_waivers_rejected(self):
-        report = self.valid_report()
-        expected = report["allowed_not_run"]
-        for allowed in (None, [], expected[:-1], expected + ["other"],
-                        list(reversed(expected)), expected + [expected[0]], ",".join(expected)):
-            with self.subTest(allowed=allowed), self.assertRaises(INSTALLER.Denied):
-                INSTALLER.validate_reused_source_checks(dict(report, allowed_not_run=allowed),
-                                                        expected_sha=report["source_sha256"])
-
-    def test_fully_passing_unwaived_report_can_be_reused(self):
-        report = self.valid_report()
-        report['allowed_not_run'] = []
-        report['checks'] = [{**e, 'status': 'pass'} if e['name'] in INSTALLER.SDK_WAIVABLE_GATE_NAMES else e
-                            for e in report['checks']]
-        self.assertEqual(INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256']),
-                         report['checks'])
-
-    def test_partial_waivers_require_all_other_sdk_gates_to_pass(self):
-        report = self.valid_report()
-        waived = report['allowed_not_run'][0]
-        report['allowed_not_run'] = [waived]
-        report['checks'] = [{**e, 'status': 'pass'}
-                           if e['name'] in INSTALLER.SDK_WAIVABLE_GATE_NAMES and e['name'] != waived else e
-                           for e in report['checks']]
-        self.assertEqual(INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256']),
-                         report['checks'])
-        report['allowed_not_run'] = []
-        with self.assertRaises(INSTALLER.Denied):
-            INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256'])
-
-    def test_passing_sdk_gates_accepted_with_same_requested_waivers(self):
-        report = self.valid_report()
-        for gate in INSTALLER.SDK_WAIVABLE_GATE_NAMES:
-            with self.subTest(gate=gate):
-                passing = dict(report, checks=[{**e, "status": "pass"} if e["name"] == gate else e
-                                               for e in report["checks"]])
-                self.assertEqual(INSTALLER.validate_reused_source_checks(
-                    passing, expected_sha=report["source_sha256"]), passing["checks"])
-
-    def test_missing_duplicate_or_nonpassing_required_gates_rejected(self):
-        report = self.valid_report()
-        for entry in report["checks"]:
-            name = entry["name"]
-            for checks in ([e for e in report["checks"] if e["name"] != name],
-                           report["checks"] + [entry],
-                           [{**e, "status": "not_run"} if e["name"] == name else e
-                            for e in report["checks"]] if entry["status"] == "pass" else []):
-                with self.subTest(name=name, checks=checks), self.assertRaises(INSTALLER.Denied):
-                    INSTALLER.validate_reused_source_checks(dict(report, checks=checks),
-                                                            expected_sha=report["source_sha256"])
-
-    def test_unsupported_not_run_rejected(self):
-        report = self.valid_report()
-        for name in ("node-extra-sdk-tests", "other-check", "javascript-syntax:extra.mjs"):
-            with self.subTest(name=name), self.assertRaises(INSTALLER.Denied):
-                INSTALLER.validate_reused_source_checks(
-                    dict(report, checks=report["checks"] + [{"name": name, "status": "not_run"}]),
-                    expected_sha=report["source_sha256"])
-
-    def test_shell_syntax_inventory_requires_functional_bash_status(self):
-        report = self.valid_report()
-        other_status = not report["bash_available"]
-        with mock.patch.object(INSTALLER, "functional_bash_available", return_value=other_status):
-            with self.assertRaises(INSTALLER.Denied):
-                INSTALLER.validate_reused_source_checks(report, expected_sha=report["source_sha256"])
-        if report["bash_available"]:
-            report["checks"] = [entry for entry in report["checks"]
-                                 if not entry["name"].startswith("shell-syntax:")]
-            with self.assertRaises(INSTALLER.Denied):
-                INSTALLER.validate_reused_source_checks(report, expected_sha=report["source_sha256"])
-        else:
-            report["bash_available"] = True
-            report["checks"] = [entry for entry in report["checks"] if entry["name"] != "shell-syntax"] + [
-                {"name": "shell-syntax:" + path.name, "status": "pass"}
-                for path in (ROOT / "scripts").glob("*.sh")]
-            with mock.patch.object(INSTALLER, "functional_bash_available", return_value=True):
-                self.assertEqual(INSTALLER.validate_reused_source_checks(
-                    report, expected_sha=report["source_sha256"]), report["checks"])
-                report["checks"].pop()
-                with self.assertRaises(INSTALLER.Denied):
-                    INSTALLER.validate_reused_source_checks(report, expected_sha=report["source_sha256"])
+class SourceManifestStabilityTests(unittest.TestCase):
+    """check.py owns the source-manifest-stability gate."""
 
     def test_source_manifest_stability_and_canonical_waivers(self):
         # Fake passing subprocesses isolate the real manifest/check/report path.
@@ -3035,14 +2890,14 @@ class ReusedSourceReportTests(unittest.TestCase):
                         source.write_text("after", encoding="utf-8")
                     return mock.Mock(stdout=io.StringIO(""), wait=mock.Mock(return_value=0))
 
-                waivers = sorted(INSTALLER.staging_not_run_checks(core_only=True).split(","))
+                waivers = sorted(("node-durable-contract-tests",
+                                  "node-pi-sdk-contract-tests",
+                                  "node-pi-reasoning-replay-tests"))
                 with mock.patch.object(CHECK, "ROOT", root), \
-                        mock.patch.object(INSTALLER, "ROOT", root), \
-                        mock.patch.object(CHECK.sys, "argv", ["check.py", "--report", str(report_path),
+                                mock.patch.object(CHECK.sys, "argv", ["check.py", "--report", str(report_path),
                             "--allow-not-run", ", ".join(reversed(waivers)) + "," + waivers[0]]), \
                         mock.patch.object(CHECK, "source_manifest_sha", side_effect=manifest_sha), \
-                        mock.patch.object(CHECK, "node_version", return_value=INSTALLER.current_node_version()), \
-                        mock.patch.object(INSTALLER, "functional_bash_available", return_value=False), \
+                        mock.patch.object(CHECK, "node_version", return_value="v22.0.0"), \
                         mock.patch.object(CHECK, "spawn", side_effect=spawn), \
                         mock.patch.object(CHECK, "terminate_process"), \
                         mock.patch.object(CHECK.shutil, "which", return_value="node"), \
@@ -3057,35 +2912,15 @@ class ReusedSourceReportTests(unittest.TestCase):
                     stable = next(e for e in report["checks"] if e["name"] == "source-manifest-stable")
                     self.assertEqual(stable["status"], "pass" if change == "stable" else "fail")
                     self.assertEqual(report["ok"], change == "stable")
-                    if change == "stable":
-                        INSTALLER.validate_reused_source_checks(report, expected_sha=initial_sha)
-                    else:
-                        with self.assertRaises(INSTALLER.Denied):
-                            INSTALLER.validate_reused_source_checks(report, expected_sha=initial_sha)
-                        # Even a forged top-level ok cannot hide the failed stability check.
-                        with self.assertRaises(INSTALLER.Denied):
-                            INSTALLER.validate_reused_source_checks(dict(report, ok=True), expected_sha=initial_sha)
 
-    def test_reuse_requires_core_only(self):
-        import argparse
-        report = self.valid_report()
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "offline.json"
-            path.write_text(json.dumps(report), encoding="utf-8")
-            args = argparse.Namespace(core_only=False, reuse_source_checks=path,
-                                      prefix=Path(temporary) / "prefix",
-                                      bin_dir=Path(temporary) / "bin",
-                                      config=Path(temporary) / "config.toml",
-                                      allow_install_scripts=False, stage_only=True,
-                                      activate=False, allow_mode_change=False)
-            with mock.patch.object(INSTALLER._platform, "is_root", return_value=False):
-                with self.assertRaises(INSTALLER.Denied):
-                    INSTALLER.stage(args)
 
-    def _stage_with_fake_gate(self, *, reuse_path=None):
+class InstallerStagingTests(unittest.TestCase):
+    """Staging verifies installation-owned state only."""
+
+    def test_reinstall_of_an_existing_release_restages_nothing(self):
         import argparse
         manifest = {"a.py": {"sha256": "0" * 64, "executable": False}}
-        args = argparse.Namespace(core_only=True, reuse_source_checks=reuse_path,
+        args = argparse.Namespace(core_only=True,
                                   prefix=Path(tempfile.mkdtemp()),
                                   bin_dir=Path(tempfile.mkdtemp()),
                                   config=Path(tempfile.mkdtemp()) / "config.toml",
@@ -3093,103 +2928,29 @@ class ReusedSourceReportTests(unittest.TestCase):
                                   activate=False, allow_mode_change=False)
         for directory in (args.prefix, args.bin_dir, args.config.parent):
             self.addCleanup(shutil.rmtree, directory)
-        calls = []
-
-        def fake_command(argv, *, cwd=None, timeout=None):
-            calls.append(list(map(str, argv)))
-            target = Path(cwd) / "installation-checks.json"
-            target.write_text(json.dumps({"checks": self.valid_report()["checks"]}), encoding="utf-8")
-
         with mock.patch.object(INSTALLER._platform, "is_root", return_value=False), \
                 mock.patch.object(INSTALLER, "source_manifest", return_value=manifest), \
                 mock.patch.object(INSTALLER, "source_files", return_value=[]), \
-                mock.patch.object(INSTALLER, "command", side_effect=fake_command):
-            result = INSTALLER.stage(args)
-        release = Path(result["release"])
-        receipt = json.loads((release / "installation.json").read_text(encoding="utf-8"))
-        return calls, receipt
-
-    def test_standalone_path_still_runs_staged_gate(self):
-        calls, receipt = self._stage_with_fake_gate(reuse_path=None)
-        self.assertTrue(any("scripts/check.py" in part for command in calls for part in command),
-                        "standalone staging must run the full staged gate")
-        self.assertEqual(receipt["checks_provenance"], "staged-gate")
-        self.assertEqual(receipt["validation"], "local-install-checks-passed")
-
-    def test_explicit_report_read_fails_closed(self):
-        for kind in ("missing", "directory", "malformed", "encoding", "oversize", "read-error"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
-                path = Path(temporary) / "offline.json"
-                if kind == "directory":
-                    path.mkdir()
-                elif kind != "missing":
-                    path.write_bytes({"malformed": b"{", "encoding": b"\xff",
-                                      "oversize": b" " * (1024 * 1024 + 1)}.get(kind, b"{}"))
-                patch = (mock.patch.object(Path, "open", side_effect=OSError("fixture read error"))
-                         if kind == "read-error" else nullcontext())
-                with patch, self.assertRaises(INSTALLER.Denied):
-                    self._stage_with_fake_gate(reuse_path=path)
-
-    def test_reuse_path_skips_staged_gate_and_records_provenance(self):
-        import argparse
-        report = self.valid_report()
-        # Bind the fabricated report to the fake staged manifest used below.
-        manifest = {"a.py": {"sha256": "0" * 64, "executable": False}}
-        from mizu.fs import canonical, digest
-        sha = digest(canonical(manifest))
-        report = {**report, "source_sha256": sha}
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "offline.json"
-            path.write_text(json.dumps(report), encoding="utf-8")
-            calls, receipt = self._stage_with_fake_gate(reuse_path=path)
-        self.assertEqual(calls, [], "reuse must not run the nested staged gate")
-        self.assertEqual(receipt["checks_provenance"], "reused-source-gate")
-        self.assertEqual(receipt["checks"], report["checks"])
-        self.assertEqual(receipt["validation"], "local-install-checks-passed")
-
-    def test_reinstall_of_an_existing_release_runs_no_second_gate(self):
-        # The CI cell that installs runs the installer twice: the install and
-        # the idempotence reinstall. The reinstall finds the release the
-        # first install staged and does not stage again, so that cell runs
-        # the gate once.
-        import argparse
-        manifest = {"a.py": {"sha256": "0" * 64, "executable": False}}
-        args = argparse.Namespace(core_only=True, reuse_source_checks=None,
-                                  prefix=Path(tempfile.mkdtemp()),
-                                  bin_dir=Path(tempfile.mkdtemp()),
-                                  config=Path(tempfile.mkdtemp()) / "config.toml",
-                                  allow_install_scripts=False, stage_only=True,
-                                  activate=False, allow_mode_change=False)
-        for directory in (args.prefix, args.bin_dir, args.config.parent):
-            self.addCleanup(shutil.rmtree, directory)
-        calls = []
-
-        def fake_command(argv, *, cwd=None, timeout=None):
-            calls.append(list(map(str, argv)))
-            (Path(cwd) / "installation-checks.json").write_text(
-                json.dumps({"checks": self.valid_report()["checks"]}), encoding="utf-8")
-
-        with mock.patch.object(INSTALLER._platform, "is_root", return_value=False), \
-                mock.patch.object(INSTALLER, "source_manifest", return_value=manifest), \
-                mock.patch.object(INSTALLER, "source_files", return_value=[]), \
-                mock.patch.object(INSTALLER, "command", side_effect=fake_command):
+                mock.patch.object(INSTALLER, "command", side_effect=AssertionError("no command")) as command:
             first = INSTALLER.stage(args)
             second = INSTALLER.stage(args)
         self.assertEqual(first["release"], second["release"])
-        gates = [call for call in calls if any("scripts/check.py" in part for part in call)]
-        self.assertEqual(len(gates), 1, "the reinstall must not run a second gate")
+        command.assert_not_called()
+        receipt = json.loads((Path(first["release"]) / "installation.json").read_text())
+        self.assertNotIn("checks", receipt)
+        self.assertNotIn("checks_provenance", receipt)
+        self.assertNotIn("validation", receipt)
 
-    def test_ci_passes_prior_report_explicitly_and_default_stays_staged(self):
+    def test_ci_installer_lifecycle_has_no_source_gate_wiring(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn("./scripts/test-install.sh private-validation/offline.json", workflow)
+        self.assertIn("run: ./scripts/test-install.sh\n", workflow)
+        self.assertNotIn("test-install.sh private-validation/offline.json", workflow)
         script = (ROOT / "scripts" / "test-install.sh").read_text(encoding="utf-8")
-        self.assertIn('EXPECTED_PROVENANCE="staged-gate"', script)
-        self.assertIn('EXPECTED_PROVENANCE="reused-source-gate"', script)
-        self.assertIn("--reuse-source-checks", script)
-        # No implicit default: the installer only reuses with the explicit flag.
-        self.assertNotIn(":-private-validation", script)
-        self.assertNotIn("=private-validation", script)
-        self.assertNotIn('REUSE_ARGS=("private', script)
+        self.assertIn("usage: test-install.sh", script)
+        self.assertNotIn("--reuse-source-checks", script)
+        self.assertNotIn("--reuse-ci-checks", script)
+        self.assertNotIn("EXPECTED_PROVENANCE", script)
+
 
 if __name__ == "__main__":
     unittest.main()

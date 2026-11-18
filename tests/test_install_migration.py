@@ -34,8 +34,8 @@ class InstallMigrationTests(Fixture):
     def promote(self):
         manifest = INSTALLER.source_manifest(self.release)
         write_json(self.release / 'source-manifest.json', manifest)
-        write_json(self.release / 'installation.json', dict(validation='local-install-checks-passed',
-                   mode='core-only', source_sha256=digest(canonical(manifest))))
+        write_json(self.release / 'installation.json',
+                   dict(mode='core-only', source_sha256=digest(canonical(manifest))))
         with (patch.object(INSTALLER, 'command'),
               patch.object(INSTALLER, 'active_service_units', return_value=[])):
             return INSTALLER.promote(self.args, self.release)

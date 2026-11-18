@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from test_check_offline import CHECK, CHILD, INSTALLER, ROOT
+from test_check_offline import CHECK, CHILD, ROOT
 
 
 class TestIdShardTests(unittest.TestCase):
@@ -120,14 +120,15 @@ class TestIdShardTests(unittest.TestCase):
             self.assertFalse(observed[0] & observed[1])
             self.assertEqual(observed[0] | observed[1], expected)
 
-    def test_gate_default_is_full_and_shards_cannot_supply_reusable_receipts(self):
+    def test_gate_default_is_full_and_shards_are_separate_suites(self):
         # Fake subprocesses test argv forwarding and report identity, not gates.
         for shard in (None, 0, 1):
             with self.subTest(shard=shard), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 report_path = root / 'report.json'
                 argv = ['check.py', '--no-provision', '--report', str(report_path),
-                        '--allow-not-run', INSTALLER.staging_not_run_checks(core_only=True)]
+                        '--allow-not-run', 'node-durable-contract-tests,'
+                        'node-pi-sdk-contract-tests,node-pi-reasoning-replay-tests']
                 if shard is not None:
                     argv += ['--test-shard', str(shard)]
                 with mock.patch.object(CHECK, 'ROOT', root), \
@@ -153,8 +154,6 @@ class TestIdShardTests(unittest.TestCase):
                     self.assertEqual(child[-2:], ['--test-shard', str(shard)])
                     self.assertEqual(report['suite'], 'offline-shard')
                     self.assertEqual(report['test_shard'], shard)
-                    with self.assertRaises(INSTALLER.Denied):
-                        INSTALLER.validate_reused_source_checks(report, expected_sha=report['source_sha256'])
 
 
 class WindowsShardWorkflowTests(unittest.TestCase):

@@ -1673,7 +1673,7 @@ bounded to 4096 IDs of at most 512 UTF-16 code units and 768 KiB serialized rows
 No automatic retry is made after failure/cancellation; temporary control input
 is removed and no run/session/publication evidence is created. An operator may
 explicitly inspect/refresh again after an uncertain outcome. Deterministic offline
-SDK/launcher tests cover the source gate, cache and exact-model resolution; they
+SDK/launcher tests cover the source suite, cache and exact-model resolution; they
 do not prove an actual provider endpoint or new OS confinement.
 
 `resources` are reviewed local files or directory trees with `{kind, path, sha256}` (maximum 64).

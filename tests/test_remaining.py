@@ -784,7 +784,7 @@ else:
         for release in (old, new):
             (release / 'bin').mkdir(parents=True)
             (release / 'bin/mizu').write_text('source')
-            write_json(release / 'installation.json', {'validation': 'local-install-checks-passed', 'mode': 'core-only'})
+            write_json(release / 'installation.json', {'mode': 'core-only'})
         (prefix / 'current').symlink_to(old, target_is_directory=True)
         args = SimpleNamespace(prefix=prefix, bin_dir=self.root / 'bin', config=self.file)
         with patch.object(installer, 'verify_release'), patch.object(installer, 'command'), patch.object(installer, 'stopped', return_value=contextlib.nullcontext()):

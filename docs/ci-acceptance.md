@@ -244,81 +244,19 @@ automatically. The CLI does not grant current-workspace acceptance or allow a
 writer `finish(done)` without its normal verification authority.
 
 
-## Explicit reuse for staged installation
+## Installer does not consume CI acceptance
 
-The installer still runs the **full local staged source suite by default**.
-After the operator has configured equivalence and ingested trusted schema-2
-proof as above, an explicit selection can replace only that source-suite gate:
+CI acceptance produces retained completion evidence for operator and role
+workflow decisions. `scripts/install.py` no longer reads, selects or records
+it: staging copies exactly the tree it is given, checks only installation-owned
+state (staged manifest equality, pinned locks, adapter contract/version
+checks), and verifies an existing release by manifest and locks. There is no
+`--reuse-ci-checks` option, no CI receipt identifier or provenance in
+`installation.json`, and no installer claim that CI checks ran locally. The
+offline suite remains a separate command, `python3 scripts/check.py`, and a CI
+acceptance receipt never replaces or waives it. `./scripts/test-install.sh`
+takes no arguments.
 
-```sh
-python3 scripts/install.py --stage-only --reuse-ci-checks /path/to/operator-config.toml PROJECT SNAPSHOT
-# Core-only disposable install and the same installed-release CLI smoke:
-./scripts/test-install.sh --reuse-ci-checks /path/to/operator-config.toml PROJECT SNAPSHOT
-```
-
-`CONFIG PROJECT SNAPSHOT` are selectors, not verdicts: CONFIG is an existing
-operator configuration, PROJECT identifies its retained evidence store, and
-SNAPSHOT is the exact 64-hex published Mizu snapshot ID (not a Git SHA or latest
-alias). The installer opens the project read-only and selects only the immutable
-CI index/receipt for that snapshot under the **current** configured acceptance
-scope and CI equivalence policy. A local receipt, even a green one, cannot win
-this selection. The receipt is capped at the existing 1 MiB acceptance bound;
-all configured checks must be present one-to-one with `success`, with exact
-coverage, environment, workflow, repository, run/attempt and publication bindings.
-The selector never calls a provider/adapter, dispatches CI, reads credentials,
-ingests evidence, or repairs an index. Missing, ineligible, stale, partial,
-non-green, tampered or mismatched evidence refuses without local fallback.
-Retry only after the operator has corrected the source/configuration or retained
-appropriate trusted evidence. There is no background job or cancellation state.
-
-Before reuse, staging captures the current source without persisting it. It
-requires zero capture skips and reserved paths, the exact snapshot/receipt whole
-`code_digest`, and a current local Git HEAD equal to the publication receipt's
-non-null `source_commit` (which need not equal the provider's `published_sha`).
-The captured public projection must equal the distribution `source_manifest`;
-the copied staged manifest must still equal that same manifest. A versioned
-publication projection, when carried/required by the publication schema, must
-match the supported projection schema, algorithm and digest. A legacy receipt
-without projection fields still needs every other binding, including a known
-source commit. The whole-capture code digest is never treated as a distribution
-manifest digest. These checks also apply when the release directory already
-exists: staging rechecks its complete distribution inventory and file hashes
-against the current manifest before reusing it. An existing candidate is not
-permission to bypass missing CI proof.
-
-Freshness is **local exact-input freshness**, not a live provider recheck.
-`current_attempt` was authenticated at ingestion; it does not mean the run is
-still the provider's latest attempt now. Selection reads only the exact immutable
-receipt and its scope index. A second run/attempt for the same scope is refused
-rather than replacing the first-writer receipt, and this selector has no supported
-local provider-invalidation/supersession record to consult. A later provider
-rerun or invalidation is therefore not detectable here. If a trusted later
-observation says the retained attempt was superseded or invalidated, do not use
-that older receipt for staging: this feature cannot consume that observation and
-no stronger revocation-aware or latest-provider mode is supported. Do not add a
-TTL or infer freshness from an unrelated status read. Changed source, Git HEAD,
-snapshot, acceptance inputs, adapter configuration or policy cannot reuse the
-old index. No shipped configuration enables CI equivalence implicitly.
-
-For operator review, CI-mode CLI output and newly staged `installation.json`
-record `ci_acceptance_provenance`: `evidence_kind` (`retained-ci-acceptance`),
-`receipt_schema`, the content-addressed `receipt_id` (the ingestion identity),
-`publication_id`, exact provider `run` and `attempt`, and
-`current_attempt_at_ingestion`. The last field is explicitly historical, not a
-claim about provider state at install time. Reusing an already existing release
-does not rewrite its original installation metadata; the invocation output still
-shows the exact receipt selected for that staging request.
-
-`--reuse-ci-checks` and the separate existing core-only
-`--reuse-source-checks REPORT` option are mutually exclusive. The local-report
-validator and its environment/schema/waiver checks are unchanged. CI reuse works
-for core-only or Pi staging; full Pi staging still provisions both pinned adapters
-and runs their installed contract/version checks and the durable/replay gates. It does not waive
-the installed-release smoke: the test-install wrapper forwards CI selection to
-both installs and then executes the same version, idempotence, manifest and
-CLI import/report/editor/backup/restore checks as the default path. It does not
-satisfy live Pi, isolation, deployment or promotion acceptance. Installation
-metadata records `checks_provenance: retained-ci-acceptance`, the exact
-`ci_acceptance_receipt_id`, `ci_acceptance_provenance`, and retained CI check
-rows. It never claims those checks ran inside the staged release and retains
-`live_validation: not_run`.
+Retained receipts, scope indices and the trust and freshness bounds above
+still apply to the acceptance record itself; they are simply not an installer
+input.
