@@ -4,7 +4,7 @@ Layout under the project root:
   objects/<kind>/<id>/<rev:08d>.json   create-only revisions; the highest is current
   objects/intent.json                  the one in-flight write (crash recovery)
   timers/<kind>.<id>.<field>.json      pending instants that emit an event when due
-  timers/.declared/<...>.json          one marker per instant value ever declared
+  timers/.declared/<...>.json          one marker per instant value and its fired state
   timers/.firing.json                  the one in-flight instant firing (crash recovery)
   locks/kernel.lock                    serialises object writes and event appends
 
@@ -12,10 +12,13 @@ A write validates fully, records an intent, publishes the revision, appends its
 event, schedules instants and clears the intent, all under the kernel lock. A
 process that finds an intent on acquiring the lock completes it (appending the
 event only if the revision exists and the event does not), so an event is never
-lost or duplicated. An instant firing likewise records its reserved event before
-appending it and clearing the timer; recovery repeats that exact event instead of
-appending a second one. Reads take no lock. Listing scans one kind directory and is
-bounded per page; an index is a later optimisation, not a semantic change.
+lost or duplicated. An instant is declared by its value: a later revision that
+carries that value forward leaves its pending timer alone, while a fired value
+stays consumed. Firing marks the exact value consumed while the firing intent
+still guarantees publication; recovery repeats that exact event instead of
+appending a second one and clears any stale timer. Reads take no lock. Listing
+scans one kind directory and is bounded per page; an index is a later
+optimisation, not a semantic change.
 """
 from __future__ import annotations
 
@@ -37,7 +40,7 @@ REVISION_MAX = 10 ** 8 - 1
 PAGE_MAX = 512
 _ID = re.compile(r"[0-9a-f]{32}\Z")
 _FIRING = ".firing.json"
-#: Hidden ledger of instant values already declared, so none is armed twice.
+#: Hidden ledger of instant values: whether each was declared and then fired.
 _DECLARED = ".declared"
 
 
@@ -184,6 +187,12 @@ class Objects:
         with self._locked():
             for row in self._timers():
                 if dt.datetime.fromisoformat(row["at"]) <= at:
+                    _, ledger = self._ledger(row["kind"], row["id"], row["field"], row["at"])
+                    if ledger and ledger.get("fired") is True:
+                        # The value was consumed; this timer is stale after an
+                        # interrupted clear and must not publish a second event.
+                        self._clear_timer(row["path"])
+                        continue
                     seq = self.events.head() + 1
                     # The intent pins the whole event, including its timestamp, before
                     # it is published, so an interrupted firing can be repeated exactly.
@@ -191,9 +200,11 @@ class Objects:
                              "field": row["field"], "due": row["at"], "actor": "host", "at": now()}
                     atomic_write(self.root / "timers" / _FIRING, canonical({"seq": seq, "event": event}),
                                  exclusive=True)
+                    # Mark consumption while the intent still guarantees publication; a
+                    # crash between the two is repaired by _recover_firing.
+                    self._mark_fired(row["kind"], row["id"], row["field"], row["at"])
                     fired.append(self.events.append_at(event))
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(row["path"])
+                    self._clear_timer(row["path"])
                     os.unlink(self.root / "timers" / _FIRING)
         return fired
 
@@ -304,33 +315,87 @@ class Objects:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.root / "objects" / "intent.json")
 
-    def _schedule_instants(self, kind: Kind, record: Mapping[str, Any]) -> None:
-        """Arm a newly declared instant once; each later revision supersedes the old one.
+    @staticmethod
+    def _clear_timer(path: Path) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
 
-        The value, not just the field, is part of a declaration's identity: a
-        consumed or superseded instant must not be armed again by a later write
-        that still carries the field. The declaring revision is kept with the
-        value so recovery of the same write restores a timer lost mid-publish.
+    @staticmethod
+    def _arm(timer: Path, kind: str, object_id: str, field: str, at: str, event: str) -> None:
+        atomic_write(timer, canonical({"kind": kind, "id": object_id, "field": field,
+                                       "at": at, "event": event}))
+
+    @staticmethod
+    def _write_ledger(path: Path, row: Mapping[str, Any]) -> None:
+        mkdir(path.parent)
+        atomic_write(path, canonical(row))
+
+    def _ledger(self, kind: str, object_id: str, field: str, at: str) -> tuple[Path, dict | None]:
+        """Locate and validate the bounded marker of one declared instant value."""
+        name = f"{kind}.{object_id}.{field}.{digest(at.encode())}.json"
+        path = self.root / "timers" / _DECLARED / name
+        if not path.exists():
+            return path, None
+        row = loads_finite(safe_read(self.root, f"timers/{_DECLARED}/{name}", 4096))
+        if (not isinstance(row, Mapping) or row.get("kind") != kind or row.get("id") != object_id
+                or row.get("field") != field or row.get("at") != at
+                or ("fired" in row and type(row["fired"]) is not bool)
+                or ("rev" in row and type(row["rev"]) is not int)):
+            raise Denied("Invalid instant ledger")
+        # An older marker has no fired field: it proves the value was declared,
+        # not that a consumed timer may be restored from it.
+        return path, row
+
+    def _mark_fired(self, kind: str, object_id: str, field: str, at: str) -> None:
+        """Record consumption of the exact value, on firing and on recovery too."""
+        path, row = self._ledger(kind, object_id, field, at)
+        if row is None:
+            row = {"kind": kind, "id": object_id, "field": field, "at": at,
+                   "rev": self.read(kind, object_id)["rev"]}  # provenance only
+        if not row.get("fired"):
+            self._write_ledger(path, {**row, "fired": True})
+
+    def _schedule_instants(self, kind: Kind, record: Mapping[str, Any]) -> None:
+        """Arm each value when declared; keep pending values and consume fired ones.
+
+        The previous revision decides whether this write declares a value anew:
+        an unchanged value keeps its timer across unrelated writes, while a
+        changed or re-declared value replaces a superseded timer. A value that
+        already fired is never armed again, even when declared anew.
         """
-        for field, at, event in kind.instant_events(record["fields"]):
-            stem = f"{record['kind']}.{record['id']}.{field}"
-            name = f"{stem}.{digest(at.encode())}.json"
-            ledger = self.root / "timers" / _DECLARED / name
-            timer = self.root / "timers" / f"{stem}.json"
-            mkdir(ledger.parent)
-            if ledger.exists():
-                declared = loads_finite(safe_read(self.root, f"timers/{_DECLARED}/{name}", 4096))
-                arm = declared.get("rev") == record["rev"]
-            else:
-                atomic_write(ledger, canonical({"kind": record["kind"], "id": record["id"],
-                                                "field": field, "at": at, "rev": record["rev"]}))
-                arm = True
-            if arm:
-                atomic_write(timer, canonical({"kind": record["kind"], "id": record["id"], "field": field,
-                                               "at": at, "event": event}))
-            else:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(timer)
+        kind_name, object_id, rev = record["kind"], record["id"], record["rev"]
+        current = {field: (at, event) for field, at, event in kind.instant_events(record["fields"])}
+        previous: dict[str, str] = {}
+        if rev > 1:
+            before = self.read(kind_name, object_id, rev - 1)
+            previous = {field: at for field, at, _ in kind.instant_events(before["fields"])}
+        for field in current.keys() | previous.keys():
+            timer = self.root / "timers" / f"{kind_name}.{object_id}.{field}.json"
+            if field not in current:
+                self._clear_timer(timer)  # the field's last value was superseded or removed
+                continue
+            at, event = current[field]
+            path, row = self._ledger(kind_name, object_id, field, at)
+            new_value = field not in previous or previous[field] != at
+            if new_value:
+                if row is None:
+                    row = {"kind": kind_name, "id": object_id, "field": field, "at": at, "rev": rev,
+                           "fired": False}
+                    self._write_ledger(path, row)
+                elif not row.get("fired") and row.get("rev") != rev:
+                    row = {**row, "rev": rev, "fired": False}
+                    self._write_ledger(path, row)
+                if row.get("fired"):
+                    self._clear_timer(timer)
+                else:
+                    self._arm(timer, kind_name, object_id, field, at, event)
+            elif row is not None and row.get("fired") is True:
+                self._clear_timer(timer)  # the value was consumed
+            elif row is not None and row.get("fired") is False and not timer.exists():
+                # Recovery of a write whose timer was not published yet.
+                self._arm(timer, kind_name, object_id, field, at, event)
+            # A marker without a fired field carries no permission to restore a
+            # lost timer; keep any timer it already has and arm nothing new.
 
     def _recover_firing(self) -> None:
         """Finish a firing whose timer removal or intent removal was interrupted."""
@@ -348,9 +413,9 @@ class Objects:
                 or not _ID.fullmatch(object_id) or not isinstance(field, str) or not NAME.fullmatch(field)
                 or not isinstance(event.get("due"), str)):
             raise Denied("Invalid firing intent")
+        self._mark_fired(kind, object_id, field, event["due"])
         self.events.append_at(event)
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self.root / "timers" / f"{kind}.{object_id}.{field}.json")
+        self._clear_timer(self.root / "timers" / f"{kind}.{object_id}.{field}.json")
         os.unlink(path)
 
     def _recover(self) -> None:

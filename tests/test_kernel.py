@@ -43,6 +43,12 @@ to = "open"
 by = ["role:alpha", "role:beta"]
 fields = ["holder"]
 [[kinds.task.transitions]]
+name = "reschedule"
+from = ["open"]
+to = "open"
+by = ["host"]
+fields = ["due"]
+[[kinds.task.transitions]]
 name = "close"
 from = ["open"]
 to = "closed"
@@ -153,6 +159,96 @@ class Kernel(unittest.TestCase):
         self.assertFalse(timer.exists())
         self.assertIsNone(self.objects.next_instant())
         self.assertEqual(self.objects.fire_due(later), [])
+
+    def test_unrelated_transition_preserves_a_pending_instant(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        timer = self.root / "timers" / f"task.{task['id']}.due.json"
+        self.assertTrue(timer.exists())
+        self.objects.transition("task", task["id"], "claim", expected_rev=1,
+                                fields={"holder": "role:beta"}, actor="role:beta")
+        self.assertTrue(timer.exists())
+        self.assertEqual(self.objects.next_instant(), soon)
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        fired = self.objects.fire_due(later)
+        self.assertEqual([(e["name"], e["id"], e["field"]) for e in fired],
+                         [("task.due", task["id"], "due")])
+        self.assertFalse(timer.exists())
+
+    def test_consumed_value_carried_forward_is_not_rearmed(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual([e["name"] for e in self.objects.fire_due(later)], ["task.due"])
+        rescheduled = self.objects.transition("task", task["id"], "reschedule", expected_rev=1,
+                                              fields={"due": soon}, actor="host")
+        self.assertEqual(rescheduled["fields"]["due"], soon)
+        self.assertIsNone(self.objects.next_instant())
+        self.objects.transition("task", task["id"], "claim", expected_rev=2,
+                                fields={"holder": "role:beta"}, actor="role:beta")
+        self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(self.objects.fire_due(later), [])
+        self.assertEqual([e["name"] for e in self.log.pending("delta")["events"]], ["task.due"])
+        self.assertEqual([e["name"] for e in
+                          (self.log.read(seq) for seq in range(1, self.log.head() + 1))],
+                         ["task.created", "task.due", "task.reschedule", "task.claim"])
+
+    def test_redeclaring_an_unused_value_arms_it_once(self):
+        base = dt.datetime.now(dt.timezone.utc)
+        first = (base + dt.timedelta(minutes=1)).isoformat()
+        second = (base + dt.timedelta(minutes=2)).isoformat()
+        third = (base + dt.timedelta(minutes=3)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": first}, "operator")
+        self.assertEqual(self.objects.next_instant(), first)
+        for rev, value in ((1, second), (2, third), (3, second)):
+            self.objects.transition("task", task["id"], "reschedule", expected_rev=rev,
+                                    fields={"due": value}, actor="host")
+            self.assertEqual(self.objects.next_instant(), value)
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=4)
+        self.assertEqual([(e["name"], e["due"]) for e in self.objects.fire_due(later)],
+                         [("task.due", second)])
+        self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(self.objects.fire_due(later), [])
+        self.assertEqual([e["name"] for e in self.log.pending("delta")["events"]], ["task.due"])
+
+    def test_repeated_fire_due_emits_the_event_once(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        first = self.objects.fire_due(later)
+        self.assertEqual([(e["seq"], e["name"]) for e in first], [(2, "task.due")])
+        for _ in range(3):
+            self.assertEqual(self.objects.fire_due(later + dt.timedelta(hours=1)), [])
+        self.assertEqual(self.log.head(), 2)
+        self.assertEqual([e["name"] for e in self.log.pending("delta")["events"]], ["task.due"])
+
+    def test_stale_timer_for_a_consumed_value_is_cleared_without_an_event(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        timer = self.root / "timers" / f"task.{task['id']}.due.json"
+        declared = next((self.root / "timers" / ".declared").glob(f"task.{task['id']}.due.*.json"))
+        row = json.loads(declared.read_text(encoding="utf-8"))
+        declared.write_text(json.dumps({**row, "fired": True}), encoding="utf-8")
+        self.assertEqual(self.objects.fire_due(dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)), [])
+        self.assertFalse(timer.exists())
+        self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(self.log.head(), 1)
+
+    def test_legacy_marker_without_a_timer_is_not_restored(self):
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+        task = self.objects.create("task", {"title": "t", "due": soon}, "operator")
+        timer = self.root / "timers" / f"task.{task['id']}.due.json"
+        declared = next((self.root / "timers" / ".declared").glob(f"task.{task['id']}.due.*.json"))
+        row = json.loads(declared.read_text(encoding="utf-8"))
+        del row["fired"]  # a marker written before consumption was recorded
+        declared.write_text(json.dumps(row), encoding="utf-8")
+        timer.unlink()
+        self.objects.transition("task", task["id"], "claim", expected_rev=1,
+                                fields={"holder": "role:beta"}, actor="role:beta")
+        self.assertFalse(timer.exists())
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual(self.objects.fire_due(later), [])
+        self.assertEqual(self.log.head(), 2)  # creation and the claim only
 
     def test_reserved_event_write_is_idempotent_and_fails_closed(self):
         event = self.log.append("task.created", {"title": "t"}, "operator")
@@ -414,7 +510,7 @@ class ExampleInsightLifecycle(unittest.TestCase):
         self.assertEqual(self.objects.fire_due(later), [])
         self.assertEqual([e["name"] for e in self.log.pending("author")["events"]], ["insight.revisit"])
 
-    def test_accepting_a_deferral_clears_its_pending_instant(self):
+    def test_accepting_a_deferral_keeps_an_unchanged_pending_instant(self):
         soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
         insight = self.submit()
         deferred = self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
@@ -423,10 +519,12 @@ class ExampleInsightLifecycle(unittest.TestCase):
         accepted = self.objects.transition("insight", insight["id"], "accept", expected_rev=deferred["rev"],
                                            fields={}, actor="role:reviewer")
         self.assertEqual(accepted["state"], "accepted")
-        self.assertIsNone(self.objects.next_instant())
+        self.assertEqual(self.objects.next_instant(), soon)  # the terminal write carries the value forward
         later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=6)
+        self.assertEqual([(e["name"], e["field"]) for e in self.objects.fire_due(later)],
+                         [("insight.revisit", "revisit_at")])
         self.assertEqual(self.objects.fire_due(later), [])
-        self.assertEqual(self.log.pending("author")["events"], [])
+        self.assertEqual([e["name"] for e in self.log.pending("author")["events"]], ["insight.revisit"])
 
     def test_a_new_instant_value_still_fires_after_a_revision(self):
         first = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()

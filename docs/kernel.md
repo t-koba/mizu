@@ -162,11 +162,16 @@ subscribe = ["note.closed", "check.*"]
 
 A field of type `instant` with an `event` name schedules that event for that
 instant. The scheduler keeps the earliest pending instant and sleeps until it,
-or until the next event, whichever comes first. When the instant passes the
-kernel appends the event once and then treats the field as consumed for that
-value. The firing reserves its sequence and full event (including the timestamp)
-before appending it; if the process stops or clearing the timer fails, recovery
-repeats that exact event without duplicating it and then clears the timer.
+or until the next event, whichever comes first. A value is armed when first
+declared: a later revision carrying the same value leaves its pending timer
+alone, while a changed or removed value cancels that timer. When the instant
+passes, the kernel appends the event once and treats the value as consumed;
+later revisions carrying it forward do not arm it again. An unused value that is
+deliberately declared again is armed anew. The firing records consumption of
+that exact value while its reserved sequence and full event (including the
+timestamp) still guarantee publication; if the process stops or clearing the
+timer fails, recovery repeats that exact event without duplicating it, marks the
+value consumed and clears any stale timer.
 
 ## Finishing a unit
 
