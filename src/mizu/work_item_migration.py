@@ -158,8 +158,8 @@ def _plan(project, scan_limit, *, moves=None, locked=False) -> dict:
         report["candidates"] = len(moves)
     report["ok"] = report["scan_complete"] and not (report["ambiguous_or_corrupt"] or report["unresolved"])
     if not report["ok"]:
-        report["action"] = ("Before upgrading, resolve unresolved events with the existing writer "
-                            "tool mizu_work_items_reconcile. Restore or repair ambiguous or corrupt "
+        report["action"] = ("List events with mizu work-items <project> --legacy and resolve unresolved "
+                            "events with mizu work-items reconcile-legacy. Restore or repair ambiguous or corrupt "
                             "sources and retry on a paused project; raise --scan-limit if truncated.")
     return report
 

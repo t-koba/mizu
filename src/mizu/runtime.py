@@ -218,7 +218,7 @@ WRAP_UP_OPS = frozenset({"finish", "research", "submit_insight", "attach_evidenc
 #: Reads of existing state are useful observation, not harness-observable progress.
 OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
-    "command_evidence_read", "experiment_evidence_read", "work_items_read", "work_items_legacy_read",
+    "command_evidence_read", "experiment_evidence_read", "work_items_read",
     "result_read", "ready_work_read", "work_order_read", "report_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
@@ -368,7 +368,7 @@ def is_deferred(exc: BaseException, context=None) -> bool:
 CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
                                "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
                                "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen", "work_items_reconcile",
+                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen",
                                "work_order", "record_write", "review_verdict"})
 
 
@@ -382,7 +382,7 @@ CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
 DELEGATE_FORBIDDEN = frozenset({"decide", "submit_insight", "revise_insight",
                                 "withdraw_insight", "withdraw_decided", "attach_evidence", "delegate",
                                 "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                                "work_items_create", "work_items_transition", "work_items_reopen", "work_items_reconcile",
+                                "work_items_create", "work_items_transition", "work_items_reopen",
                                 "work_order", "record_write", "review_verdict"})
 
 
@@ -1156,7 +1156,7 @@ class Context:
                                   count="tool_call:" + operation)
             try:
                 result = self.dispatch(operation, arguments)
-                idempotent_replay = (operation in ("work_items_create", "work_items_reconcile")
+                idempotent_replay = (operation == "work_items_create"
                                      and isinstance(result, dict)
                                      and result.get("created") is False)
                 if (operation != "finish" and not _is_observational_operation(operation, arguments, result)
@@ -1342,12 +1342,6 @@ class Context:
 
     def _op_work_items_read(self, args: dict) -> dict:
         return work_item_operations.read(self, args)
-
-    def _op_work_items_legacy_read(self, args: dict) -> dict:
-        return work_item_operations.legacy_read(self, args)
-
-    def _op_work_items_reconcile(self, args: dict) -> dict:
-        return work_item_operations.reconcile(self, args)
 
     def _op_work_items_create(self, args: dict) -> dict:
         return work_item_operations.create(self, args)
@@ -2202,8 +2196,6 @@ class Context:
         "work_order_read": _op_work_order_read,
         "report_read": _op_report_read,
         "work_items_read": _op_work_items_read,
-        "work_items_legacy_read": _op_work_items_legacy_read,
-        "work_items_reconcile": _op_work_items_reconcile,
         "work_items_create": _op_work_items_create,
         "work_items_transition": _op_work_items_transition,
         "work_items_reopen": _op_work_items_reopen,

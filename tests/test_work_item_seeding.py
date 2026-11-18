@@ -103,4 +103,4 @@ class WorkItemSeedingTests(Fixture):
         self.assertIsNone(self.insights.read(proposal).get("decision"))
         self.assertFalse((self.project.root / "work-items" /
                           self.store._create_id("worker", "extra") / "create.json").exists())
-        self.assertFalse((self.project.root / "work-items" / f"wi_{legacy}" / "legacy.json").exists())
+        self.assertFalse((self.project.root / "work-items" / f"wi_{legacy}" / "decision-resolution.json").exists())

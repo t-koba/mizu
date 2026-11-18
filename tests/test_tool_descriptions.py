@@ -41,11 +41,6 @@ PURPOSE_PREFIXES = {
     "report_read": "Read the latest published report preview without staging or publishing a report.",
     "work_items_read": (
         "Inspect open work or trace one item's revisions without changing status or ownership."),
-    "work_items_legacy_read": (
-        "Audit accept/modify decisions that do not seed work directly, without reconciling them."),
-    "work_items_reconcile": (
-        "Resolve one unseeded accept/modify event by creating an open work item or recording a "
-        "drop."),
     "work_items_create": "Create self-directed or split-off work without assigning or scheduling it.",
     "work_items_reopen": "Challenge a done item by reopening it so it can be claimed and closed again.",
     "work_items_transition": (
@@ -102,7 +97,9 @@ HISTORY_WORDING = re.compile(
 
 class ToolDescriptionTests(unittest.TestCase):
     def test_definition_inventory(self):
-        self.assertEqual(len(DEFINITIONS), 46)
+        self.assertEqual(len(DEFINITIONS), 44)
+        for retired in ("work_items_legacy_read", "work_items_reconcile"):
+            self.assertNotIn(retired, DEFINITIONS)
         for tool, (description, _) in DEFINITIONS.items():
             with self.subTest(tool=tool):
                 self.assertTrue(description.strip())

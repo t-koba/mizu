@@ -16,18 +16,6 @@ def read(context, args: dict) -> dict:
                                                 limit=args.get("limit", 25))
 
 
-def legacy_read(context, args: dict) -> dict:
-    return context.project.work_items.page_legacy(cursor=args.get("cursor"),
-                                                  limit=args.get("limit", 25))
-
-
-def reconcile(context, args: dict) -> dict:
-    return context.project.work_items.reconcile(
-        args["event_id"], expected_action=args["expected_action"],
-        expected_rev=args.get("expected_rev"), outcome=args["outcome"],
-        reason=args["reason"], title=args.get("title"), actor=context.role.name)
-
-
 def create(context, args: dict) -> dict:
     return context.project.work_items.create(
         idempotency_key=args["idempotency_key"], title=args["title"],

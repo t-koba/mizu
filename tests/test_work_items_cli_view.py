@@ -41,7 +41,7 @@ class WorkItemsCliViewTests(Fixture):
     def test_parser_defaults(self):
         args = parser().parse_args(["work-items", "sample"])
         self.assertEqual(args.project, "sample")
-        self.assertEqual(args.limit, 25)
+        self.assertIsNone(args.limit)  # The store owns the default page size.
         self.assertIsNone(args.cursor)
         self.assertIsNone(args.closed)
         self.assertFalse(args.audit)

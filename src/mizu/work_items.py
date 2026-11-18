@@ -666,30 +666,40 @@ class WorkItems:
         resolution = self._legacy_resolution(event_id, event, history_revisions=[])
         return resolution is not None and resolution["outcome"] == "drop"
 
-    def reconcile(self, event_id, *, expected_action, outcome, reason, actor,
+    def reconcile(self, event_id, *, outcome, reason, actor, expected_action=None,
                   expected_rev=None, title=None) -> dict:
         """Resolve exactly one unseeded event, exclusively and retry-idempotently."""
         if (not isinstance(event_id, str) or len(event_id) != 32
                 or _DECISION_EVENT_NAME.fullmatch(event_id + ".json") is None):
             raise Denied("Invalid legacy event ID")
-        if (expected_action not in ("accept", "modify") or outcome not in ("open", "drop")
-                or (expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1))
-                or not isinstance(reason, str) or not reason.strip() or len(reason) > 4000
-                or (outcome == "drop" and title is not None)):
-            raise Denied("Invalid legacy reconciliation request")
+        if (expected_action not in (None, "accept", "modify") or outcome not in ("open", "drop")
+                or (expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1))):
+            raise Denied("Invalid legacy reconciliation outcome or expectation")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
+            raise Denied("Legacy reconciliation requires a nonblank reason of 1-4000 characters")
+        if outcome == "drop" and title is not None:
+            raise Denied("A legacy drop must not include a title")
         identifier(actor)
         with lock_diagnostics.operation("write"), record_lock(self.root):
             self._recover_decision_history_temporaries(self.root / "decision-history")
             event = self._read(f"decision-history/{event_id}.json")
-            if (event.get("action") != expected_action or "work_item" in event
-                    or "work_item_intent" in event
+            if "work_item" in event or "work_items" in event:
+                raise Denied("Decision is already seeded; inspect its existing work with mizu work-items PROJECT")
+            if "work_item_intent" in event or "work_item_specs" in event:
+                raise Denied("Decision has explicit work-item intent; leave its disposition unchanged")
+            action = event.get("action")
+            if action not in ("accept", "modify"):
+                raise Denied("Only unseeded accept or modify decisions can be reconciled")
+            if ((expected_action is not None and action != expected_action)
                     or (expected_rev is not None
                         and (type(event.get("rev")) is not int or event["rev"] != expected_rev))):
-                raise Denied("Legacy decision changed, already seeded, or has explicit work-item intent")
+                raise Denied("Decision action or revision does not match; verify the event with mizu work-items PROJECT --legacy")
+            item_id = f"wi_{event_id}"
+            self._direct_record(item_id)  # Refuse colliding direct creation before committing.
             existing = self._legacy_resolution(event_id, event, recover=True)
             record = {"event_id": event_id,
                       "event_sha256": hashlib.sha256(canonical(event)).hexdigest(),
-                      "action": expected_action, "revision": self._legacy_source(event)["rev"],
+                      "action": action, "revision": self._legacy_source(event)["rev"],
                       "outcome": outcome, "actor": actor, "reason": reason,
                       "created_at": existing["created_at"] if existing else now()}
             if outcome == "open":
@@ -701,8 +711,8 @@ class WorkItems:
                 return {"record": existing, "created": False}
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Legacy reconciliation exceeds byte bound")
-            with self.committing([f"wi_{event_id}"]):
-                write_json(self.root / "work-items" / f"wi_{event_id}" / _LEGACY_RESOLUTION_NAME,
+            with self.committing([item_id]):
+                write_json(self.root / "work-items" / item_id / _CURRENT_RESOLUTION_NAME,
                            record, exclusive=True)
             return {"record": record, "created": True}
 

@@ -491,13 +491,36 @@ is safe to reuse, and a completed scan followed by a successful apply leaves no
 candidates. Resolve scan errors or truncation before resuming the project;
 a truncated scan that stops making progress does not prove all flat files are gone.
 
-### Convert legacy work-item resolutions
+### Reconcile and convert legacy work-item resolutions
 
 ```sh
 mizu pause demo
-mizu migrate-work-items demo          # host-only; dry run
+mizu migrate-work-items demo   # bounded counts; dry run
+mizu work-items demo --legacy  # exact event IDs, disposition and reason previews
+mizu work-items reconcile-legacy demo "$event_id" --outcome open \
+  --expected-action accept --expected-rev 1 --title "Finish the retained work" \
+  --reason "The accepted change is still needed"
 mizu migrate-work-items demo --apply  # rename validated resolutions
 ```
+
+Set `event_id` from the listing before reconciling. `--legacy` is a live page
+with no proposal bodies; `--limit` defaults to 25 (range 1–100). Pass
+`next_cursor` back as `--cursor` to continue. The listing scans history under
+the record lock and can recover recognized temporary files; use the migration
+preview for a bounded scan that never recovers or writes anything.
+
+Only the host operator can reconcile. Specify the exact 32-character lowercase
+hex event ID and a nonblank `--reason` of 1–4000 characters, stored verbatim.
+`--expected-action accept|modify` and `--expected-rev N` are optional exact
+checks. For `--outcome open`, supply a 1–200 character `--title`; for
+`--outcome drop`, omit it. Drop records the disposition without creating an
+item. Seeded decisions already have work to inspect, and explicit work-item
+intent cannot be overridden. The command does not rewrite decisions, schedule
+work, or accept an actor argument. It returns `{record, created: true}` after
+an exclusive commit; retry the same request after interruption to get the
+unchanged record with `created: false`. Conflicts are refused. Remove retired
+legacy inventory and reconciliation grants from private role configuration;
+there are no replacement model tools.
 
 Keep the project paused and do not restore or edit its data directory during
 these commands. The preview takes the work-item record lock if it exists,
@@ -516,14 +539,14 @@ The JSON report gives `project`, `dry_run`, `scan_limit`, and counts for
 include event bodies or paths. `--scan-limit` defaults to 10,000 entries per
 pass over `decision-history/` and `work-items/`, including non-record entries;
 the store's file and per-item bounds still apply. If `scan_complete` is false,
-the counts are partial. If `truncated` is true, raise the limit and retry. Use
-`mizu_work_items_reconcile` to resolve unresolved events and repair or restore
+the counts are partial. If `truncated` is true, raise the limit and retry.
+Reconcile unresolved events with the host command above; repair or restore
 corrupt or ambiguous sources before applying.
 
 Apply renames each eligible `legacy.json` to `decision-resolution.json` without
 replacing a file or changing the bytes. Readers validate either name against
 the immutable decision but reject two names in one item directory or an unsafe
-link. The reconciliation writer still uses `legacy.json` for new resolutions.
+link. Host reconciliation writes new records directly to `decision-resolution.json`.
 The apply report includes `candidates` (legacy names in the plan),
 `already_current`, `renamed` (successful renames), and `converted` (renames
 verified by read-back and followed by directory sync where supported). Apply
@@ -769,8 +792,8 @@ rebuilds the index when every history validates. Writers wait for the audit.
   malformed receipts, unsafe origins or excess bytes, rather than omitting
   matching roles. Rows including the map are at most 8192 canonical bytes and
   the response at most 1 MiB.
-  Drop-only legacy sidecars without a seed stay in the `work_items_legacy_read`
-  audit, not here.
+  Drop-only legacy resolutions have no seed and appear only in the host
+  disposition inventory, not here.
 - `event_delivery` reports up to 100 roles subscribed to `work_item_events`
   (non-subscribers are omitted), in name order. Each has `role`, `subscribed`
   terminal types, `sources` (effective `work_item_sources`, not decision routing),
@@ -815,9 +838,8 @@ rebuilds the index when every history validates. Writers wait for the audit.
   creates the lock file, and never removes atomic-write leftovers. Validated
   `.new-*` orphans/aliases are ignored (never promoted); unsafe or unexpected
   names, malformed records, incomplete chains and bound violations fail closed.
-  Runtime prompt projection and the `work_items_read` / `work_items_legacy_read`
-  operations keep their existing locked, recovering `page_open` / `page_legacy`
-  behavior.
+  Runtime prompt projection and `work_items_read` keep their locked, recovering
+  `page_open` behavior. The separate host `--legacy` inventory uses `page_legacy`.
 
 #### Incremental current projections
 

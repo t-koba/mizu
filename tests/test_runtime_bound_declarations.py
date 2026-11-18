@@ -1642,9 +1642,6 @@ CALLS = {
         ('_cmd_insight', 'project.insights.list_page', 'limit', 0): (
             'args.limit if args.limit is not None else 30', 'policy',
             'CLI / insight page default; callers may select --limit'),
-        ('_cmd_work_items', 'store.page_open_readonly', 'limit', 0): (
-            'args.limit if args.limit is not None else 25', 'policy',
-            'CLI / open work-item page default; callers may select --limit'),
         ('_cmd_work_items', 'closed_page', 'limit', 0): (
             'args.closed if args.closed is not None else 10', 'policy',
             'CLI / closed work-item page default; callers may select --closed'),
@@ -1725,9 +1722,6 @@ CALLS = {
         ('read', 'context.project.work_items.page_open', 'limit', 0): (
             "args.get('limit', 25)", 'policy',
             'work items / open-page default; caller may select limit'),
-        ('legacy_read', 'context.project.work_items.page_legacy', 'limit', 0): (
-            "args.get('limit', 25)", 'policy',
-            'work items / legacy-page default; caller may select limit'),
     },
     'sandbox.py': {
         ('remove_leftover', 'run', 'maximum', 0): (

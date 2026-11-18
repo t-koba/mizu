@@ -1206,45 +1206,34 @@ malformed/unsafe records.
 **Free-text Tasks in writer state are still needed until legacy reconciliation
 is complete.**
 
-The separate `work_items_legacy_read` grant exposes
-`page_legacy(cursor=None, limit=25)`: a live read-only audit inventory of **all**
-accept/modify history events without an embedded `work_item`: legacy
-unresolved/reconciled events and new explicit no-work dispositions. It returns `items`, `total`, `cursor`, `next_cursor`,
-`overflow_count`, `truncated`, `unseeded_decisions`, and `coverage_complete`.
-Rows contain `event_id`, `action`, valid source `insight_id`/`rev`/`created_at`
-(or null for invalid/missing fields), a decision `reason_preview` (1024 UTF-8
-bytes) with `reason_truncated`, `openable`, and `resolution`. `openable` means
-unresolved with all origin fields needed for opening; it does not imply a
-model-supplied title has been validated. Explicit no-work rows have
-`work_item_intent: "none"`, `openable: false`, and
-`resolution: {outcome: "none"}`. For legacy rows, resolution is null or contains
-`outcome`, runtime `actor`, reconciliation `created_at`, `event_sha256`, a
-bounded reason preview/truncation flag, and `work_item_id` for open. Proposal
-bodies are never copied. The same 1–100 row, 8192-byte row, 1-MiB response and
-128-character cursor bounds apply. An opaque versioned last-event-ID cursor
-orders events lexicographically, exclusively; selection retains O(limit) rows
-while scanning all committed history. Resolution does not remove audit rows.
-Each page validates committed records even beyond its cursor, under
-`insights.lock`, with the same recognized temporary recovery and fail-closed
-behavior as `page_open`. Pages are live, not frozen multi-page snapshots.
+Legacy disposition inventory and reconciliation belong to the operator CLI,
+not to a role or its progress signals. `mizu migrate-work-items PROJECT`
+reports bounded counts without event IDs, bodies, or paths. For exact event
+IDs, `mizu work-items PROJECT --legacy [--cursor TOKEN] [--limit N]` calls
+`page_legacy`. It lists unseeded accept/modify events, including open/drop
+resolutions and explicit `none` decisions. Rows carry the exact event ID,
+action, source origin/revision/timestamp (null if invalid), `openable`, and
+resolution metadata; decision and resolution reasons are 1024-byte previews.
+Proposal bodies are omitted. The 1–100 row, 8192-byte row, 1-MiB response and
+128-character cursor bounds apply. The exclusive event-ID cursor is opaque;
+pages are live, not a frozen snapshot. Each page scans committed history
+under `insights.lock`, including beyond the cursor, and may recover recognized
+temporary writes. Unsafe records fail closed.
 
-`work_items_reconcile` explicitly resolves **one exact event**. Required
-arguments are its 32-character lowercase hex `event_id`, `expected_action`
-(`accept` or `modify`), `outcome` (`open` or `drop`), and nonblank `reason`
-(1–4000 characters). Optional positive integer `expected_rev` must match the
-source if supplied. `open` requires a 1–200 character `title` and valid source
-insight ID, positive exact integer revision, and timezone-aware decision
-timestamp. `drop` requires no title and works even with missing/invalid legacy
-origin fields. It creates no active item or seed. Seeded and non-accept/modify
-events, and events with explicit work-item intent, are refused. The runtime binds actor to the role and rejects a
-model-supplied actor; only the example worker holds either legacy grant.
-Consultation and delegation children cannot hold reconciliation authority.
-Legacy reads are observational; reconciliation is not. Neither grant widens
-writer admission or receives a wrap-up/tool-budget exception.
+`mizu work-items reconcile-legacy PROJECT EVENT_ID` resolves exactly one
+32-character lowercase hex event ID. The host binds the actor to `operator`.
+`--outcome open|drop` and a nonblank, verbatim `--reason` of 1–4000 characters
+are required. The action must be accept or modify; optional `--expected-action`
+and positive integer `--expected-rev` must match the source under the same
+lock. `open` requires a 1–200 character `--title`, valid source insight ID,
+positive exact integer revision, and timezone-aware timestamp. `drop` takes no
+title, creates no active item or seed, and can cover incomplete origin fields.
+Seeded events and explicit work-item intent are refused without changing the
+disposition.
 
-Under the shared insights lock, reconciliation exclusively atomically creates
-`work-items/wi_<event-id>/legacy.json`. Readers also accept
-`decision-resolution.json` in that slot with the same envelope, but refuse
+Under the shared insights lock, reconciliation exclusively creates
+`work-items/wi_<event-id>/decision-resolution.json`. Readers also accept
+`legacy.json` in that slot with the same envelope, but refuse
 both names coexisting. The immutable fields are `event_id`,
 `event_sha256` (SHA-256 of the **canonical JSON** source event), `action`,
 `revision` (valid source revision or null), `outcome`, `actor`, `reason`, and
@@ -1253,7 +1242,7 @@ both names coexisting. The immutable fields are `event_id`,
 origin `{insight_id, rev}`, status `open`, rev 1, holder null, and both timestamps
 from the original decision. No current or historical decision is rewritten.
 An exact retry returns `{record, created: false}`, preserving the original
-sidecar timestamp and not counting as progress; the first write returns
+sidecar timestamp; the first write returns
 `created: true`. A conflicting reason/title/outcome/actor or stale expectation
 is denied.
 After interruption, re-read/retry the same event: uncommitted temporaries are

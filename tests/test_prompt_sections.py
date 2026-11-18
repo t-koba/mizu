@@ -9,7 +9,7 @@ from mizu.errors import ConfigError
 from mizu.unit_prompts import prompt_for, prompt_delta_for
 
 WORK = ("work_items_read", "work_items_create", "work_items_transition",
-        "work_items_legacy_read", "work_items_reconcile", "work_order")
+        "work_items_reopen", "work_order")
 
 
 class PromptSectionTests(Fixture):
@@ -32,6 +32,14 @@ class PromptSectionTests(Fixture):
         with_inventory = self.context("reviewer")
         full = len(prompt_for(with_inventory))
         self.assertLess(len(prompt_for(ctx)), full)
+
+    def test_retired_grants_do_not_enable_work_projections(self):
+        retired = ("work_items_legacy_read", "work_items_reconcile")
+        ctx = self.judge()
+        ctx.role = dataclasses.replace(ctx.role, capabilities=("finish", *retired))
+        self.assertTrue(set(retired).isdisjoint(prompt_sections.WORK_CAPABILITIES))
+        for builder in (prompt_for, prompt_delta_for):
+            self.assertTrue({"open_work_items", "ready_work"}.isdisjoint(self.keys(ctx, builder)))
 
     def test_producers_deciders_and_writer_receive_bounded_work_load(self):
         from mizu.config import load

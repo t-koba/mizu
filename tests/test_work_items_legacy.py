@@ -11,7 +11,7 @@ from unittest.mock import patch
 from support import Fixture, forget_ledger
 from mizu import work_item_migration as migration, work_items as work_items_module
 from mizu.cli import main
-from mizu.errors import Denied, LimitExceeded
+from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import PREVIEW_BYTES, canonical, held, lock, rename_exclusive, sync_dir
 from mizu.storage import audit as storage_audit
 from support import history_write_json as write_json
@@ -53,16 +53,27 @@ class LegacyWorkItemTests(Fixture):
             "title": "Implement the retained slice", "actor": "worker", **changes})["record"]
 
     def sidecar(self, event_id):
-        return self.project.root / "work-items" / f"wi_{event_id}" / "legacy.json"
+        return self.project.root / "work-items" / f"wi_{event_id}" / "decision-resolution.json"
 
-    def current_sidecar(self, event_id):
-        return self.sidecar(event_id).with_name("decision-resolution.json")
+    def old_sidecar(self, event_id):
+        return self.sidecar(event_id).with_name("legacy.json")
 
-    def migration_cli(self, *args):
+    def resolve_old(self, event_id, **changes):
+        record = self.resolve(event_id, **changes)
+        self.sidecar(event_id).rename(self.old_sidecar(event_id))
+        return record
+
+    def cli(self, *args):
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = main(["--config", str(self.file), "migrate-work-items", self.project.name, *args])
+            code = main(["--config", str(self.file), *args])
         return code, output.getvalue(), errors.getvalue()
+
+    def migration_cli(self, *args):
+        return self.cli("migrate-work-items", self.project.name, *args)
+
+    def reconcile_cli(self, event_id, *args):
+        return self.cli("work-items", "reconcile-legacy", self.project.name, event_id, *args)
 
     def migration_apply(self, *args):
         code, output, errors = self.migration_cli("--apply", *args)
@@ -75,15 +86,89 @@ class LegacyWorkItemTests(Fixture):
         self.assertEqual(code, 0 if report["ok"] else 1)
         return report
 
+    def test_host_reconcile_and_list_legacy_dispositions(self):
+        opened, _, open_source = self.legacy(action="modify", rev=2, body="NEVER PRINT EVENT BODY")
+        dropped, _, drop_source = self.legacy(rev=None)
+        sources = {path: path.read_bytes() for path in (open_source, drop_source)}
+        reason = " " + "理" * 3998 + " "
+        requests = (
+            (opened, "open", reason, ("--expected-action", "modify", "--expected-rev", "2", "--title", "Retain")),
+            (dropped, "drop", "x", ()),
+        )
+        for event_id, outcome, text, options in requests:
+            with self.subTest(outcome=outcome):
+                args = ("--outcome", outcome, "--reason", text, *options)
+                code, output, errors = self.reconcile_cli(event_id, *args)
+                self.assertEqual((code, errors), (0, ""))
+                result = json.loads(output)
+                self.assertTrue(result["created"])
+                record = result["record"]
+                self.assertEqual((record["actor"], record["reason"], record["outcome"]), ("operator", text, outcome))
+                raw = self.sidecar(event_id).read_bytes()
+                self.assertFalse(self.old_sidecar(event_id).exists())
+                code, output, errors = self.reconcile_cli(event_id, *args)
+                self.assertEqual((code, json.loads(output), errors), (0, {"created": False, "record": record}, ""))
+                self.assertEqual(self.sidecar(event_id).read_bytes(), raw)
+                self.assertEqual("work_item" in record, outcome == "open")
+        self.assertEqual({path: path.read_bytes() for path in sources}, sources)
+
+        listing = ("work-items", self.project.name, "--legacy", "--limit", "1")
+        code, output, errors = self.cli(*listing)
+        self.assertEqual((code, errors), (0, ""))
+        self.assertNotIn("NEVER PRINT EVENT BODY", output)
+        first = json.loads(output)
+        self.assertEqual([(r["event_id"], r["resolution"]["outcome"]) for r in first["items"]], [(opened, "open")])
+        code, output, errors = self.cli(*listing, "--cursor", first["next_cursor"])
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual([(r["event_id"], r["resolution"]["outcome"]) for r in json.loads(output)["items"]], [(dropped, "drop")])
+
+        ctx = self.context("worker")
+        page = ctx.handle("work_items_read", {})
+        self.assertTrue(page["coverage_complete"])
+        self.assertEqual([row["id"] for row in page["items"]], [f"wi_{opened}"])
+        changed = ctx.handle("work_items_transition", {"id": f"wi_{opened}", "expected_rev": 1, "status": "doing"})
+        self.assertEqual(changed["rev"], 2)
+
+    def test_host_reconcile_refusals_are_actionable_and_do_not_create_sidecars(self):
+        event_id, _, _ = self.legacy()
+        cases = [
+            ("../unsafe", "drop", "Reason", (), "Invalid legacy event ID"),
+            (event_id, "drop", "Reason", ("--expected-action", "modify"), "does not match"),
+            (event_id, "drop", "Reason", ("--expected-rev", "2"), "does not match"),
+            (event_id, "drop", "Reason", ("--title", "Not allowed"), "must not include a title"),
+            (event_id, "open", "Reason", (), "1-200 character title"),
+            (event_id, "drop", " ", (), "1-4000 characters"),
+            (event_id, "drop", "r" * 4001, (), "1-4000 characters"),
+        ]
+        for intent in ("create", "none"):
+            proposal = self.project.insights.submit(source="worker", title=intent, body="Synthetic", base_snapshot=None)
+            decision = self.project.insights.decide(proposal["id"], "accept", "Reviewed", "", "run",
+                                                    expected_rev=1, work_item_intent=intent)
+            message = "already seeded; inspect" if intent == "create" else "explicit work-item intent; leave"
+            cases.append((decision["decision_key"], "drop", "Reason", (), message))
+        for target, outcome, reason, flags, message in cases:
+            with self.subTest(target=target, message=message):
+                code, output, errors = self.reconcile_cli(target, "--outcome", outcome, "--reason", reason, *flags)
+                self.assertEqual((code, output), (Denied.code, ""))
+                self.assertIn(message, json.loads(errors)["error"])
+                self.assertFalse(self.sidecar(target).exists())
+        code, output, errors = self.reconcile_cli(event_id, "--outcome", "drop", "--reason", "Reason", "--limit", "25")
+        self.assertEqual((code, output), (ConfigError.code, ""))
+        self.assertIn("cannot be combined", json.loads(errors)["error"])
+        with self.assertRaises(SystemExit) as error:
+            self.reconcile_cli(event_id, "--outcome", "drop", "--reason", "Reason", "--actor", "worker")
+        self.assertEqual(error.exception.code, 2)
+        self.assertFalse(self.sidecar(event_id).exists())
+
     def test_current_resolution_filename_preserves_open_cas_history(self):
         event_id, event, source = self.legacy()
         current = self.project.root / "decisions" / f"{event['id']}.json"
         write_json(current, event)
         source_bytes = source.read_bytes()
         item_id = f"wi_{event_id}"
-        record = self.resolve(event_id)
+        record = self.resolve_old(event_id)
         doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
-        old, new = self.sidecar(event_id), self.current_sidecar(event_id)
+        old, new = self.old_sidecar(event_id), self.sidecar(event_id)
         raw = old.read_bytes()
         old.rename(new)
         forget_ledger(self.project.root)
@@ -104,7 +189,6 @@ class LegacyWorkItemTests(Fixture):
     def test_current_resolution_filename_preserves_drop_storage_coverage(self):
         event_id, _, _ = self.legacy()
         self.resolve(event_id, outcome="drop", title=None)
-        self.sidecar(event_id).rename(self.current_sidecar(event_id))
         forget_ledger(self.project.root)
 
         self.assertTrue(self.store.page_open()["coverage_complete"])
@@ -115,10 +199,10 @@ class LegacyWorkItemTests(Fixture):
 
     def test_coexisting_resolution_filenames_fail_closed(self):
         other, _, _ = self.legacy()
-        self.resolve(other, outcome="drop", title=None)
+        self.resolve_old(other, outcome="drop", title=None)
         event_id, _, _ = self.legacy()
-        self.resolve(event_id, outcome="drop", title=None)
-        old, new = self.sidecar(event_id), self.current_sidecar(event_id)
+        self.resolve_old(event_id, outcome="drop", title=None)
+        old, new = self.old_sidecar(event_id), self.sidecar(event_id)
         new.write_bytes(old.read_bytes())
         forget_ledger(self.project.root)
 
@@ -132,11 +216,11 @@ class LegacyWorkItemTests(Fixture):
         code, output, _ = self.migration_cli()
         report = json.loads(output)
         self.assertEqual((code, report["ambiguous_or_corrupt"], report["resolved_drop"]), (1, 1, 1))
-        before = {p: p.read_bytes() for p in (old, new, self.sidecar(other))}
+        before = {p: p.read_bytes() for p in (old, new, self.old_sidecar(other))}
         applied = self.migration_apply()
         self.assertEqual((applied["ok"], applied["ambiguous_or_corrupt"], applied["converted"]), (False, 1, 0))
         self.assertEqual({p: p.read_bytes() for p in before}, before)
-        self.assertFalse(self.current_sidecar(other).exists())
+        self.assertFalse(self.sidecar(other).exists())
 
     def test_migration_preview_refuses_unresolved_without_creating_lock_or_recovering(self):
         _, _, source = self.legacy()
@@ -152,7 +236,7 @@ class LegacyWorkItemTests(Fixture):
         self.assertTrue(report["dry_run"])
         self.assertTrue(report["scan_complete"])
         self.assertEqual(report["unresolved"], 1)
-        self.assertIn("mizu_work_items_reconcile", report["action"])
+        self.assertIn("mizu work-items reconcile-legacy", report["action"])
         self.assertFalse(lock_path.exists())
         self.assertEqual(leftover.read_bytes(), b"uncommitted")
         applied = self.migration_apply()
@@ -162,10 +246,9 @@ class LegacyWorkItemTests(Fixture):
 
     def test_migration_preview_counts_dispositions_and_respects_scan_bound(self):
         opened, _, _ = self.legacy()
-        self.resolve(opened)
+        self.resolve_old(opened)
         dropped, _, _ = self.legacy(action="modify")
         self.resolve(dropped, expected_action="modify", outcome="drop", title=None)
-        self.sidecar(dropped).rename(self.current_sidecar(dropped))
         proposal = self.project.insights.submit(source="worker", title="No work", body="Synthetic", base_snapshot=None)
         self.project.insights.decide(proposal["id"], "accept", "No action", "", "run", expected_rev=1,
                                      work_item_intent="none")
@@ -199,7 +282,7 @@ class LegacyWorkItemTests(Fixture):
         # Exhaust the work-items bound after already validating the legacy
         # candidates. A partial plan must still authorize no renames.
         for i in range(2):
-            (self.sidecar(opened).parent.parent / f"wi_{10 + i:032x}").mkdir()
+            (self.old_sidecar(opened).parent.parent / f"wi_{10 + i:032x}").mkdir()
         before = inventory()
         applied = self.migration_apply("--scan-limit", "3")
         self.assertEqual((applied["truncated"], applied["scan_complete"], applied["candidates"],
@@ -212,12 +295,11 @@ class LegacyWorkItemTests(Fixture):
         current = self.project.root / "decisions" / f"{event['id']}.json"
         write_json(current, event)
         item_id = f"wi_{opened}"
-        seed = self.resolve(opened)["work_item"]
+        seed = self.resolve_old(opened)["work_item"]
         doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
-        self.resolve(dropped, expected_action="modify", outcome="drop", title=None)
+        self.resolve_old(dropped, expected_action="modify", outcome="drop", title=None)
         already, _, _ = self.legacy(id="synthetic-already")
         self.resolve(already, outcome="drop", title=None)
-        rename_exclusive(self.sidecar(already), self.current_sidecar(already))
         proposal = self.project.insights.submit(source="worker", title="No work", body="Synthetic", base_snapshot=None)
         self.project.insights.decide(proposal["id"], "accept", "No action", "", "run", expected_rev=1,
                                      work_item_intent="none")
@@ -226,10 +308,10 @@ class LegacyWorkItemTests(Fixture):
         # Make the existing JSON deliberately noncanonical so a reserialization
         # or even a byte-exact copy cannot pass the bytes/inode checks.
         for event_id in (opened, dropped):
-            path = self.sidecar(event_id)
+            path = self.old_sidecar(event_id)
             path.write_bytes((json.dumps(json.loads(path.read_bytes()), indent=2) + "\n").encode())
-        immutable = [source, drop_source, current, self.current_sidecar(already),
-                     *(p for p in self.sidecar(opened).parent.glob("*.json") if p != self.sidecar(opened))]
+        immutable = [source, drop_source, current, self.sidecar(already),
+                     *(p for p in self.old_sidecar(opened).parent.glob("*.json") if p != self.old_sidecar(opened))]
 
         def identity(path):
             info = path.stat()
@@ -238,7 +320,7 @@ class LegacyWorkItemTests(Fixture):
         before = {p: (p.read_bytes(), identity(p)) for p in immutable}
         record_lock = self.project.root / "locks" / "insights.lock"
         lock_identity = identity(record_lock)
-        moved = {event_id: (self.sidecar(event_id).read_bytes(), identity(self.sidecar(event_id)))
+        moved = {event_id: (self.old_sidecar(event_id).read_bytes(), identity(self.old_sidecar(event_id)))
                  for event_id in (opened, dropped)}
 
         def under_exclusion(old, new):
@@ -252,8 +334,8 @@ class LegacyWorkItemTests(Fixture):
                                                   "resolved_open", "resolved_drop", "explicit_no_work")],
                          [True, 2, 2, 2, 1, 1, 2, 1])
         for event_id, expected in moved.items():
-            self.assertFalse(self.sidecar(event_id).exists())
-            new = self.current_sidecar(event_id)
+            self.assertFalse(self.old_sidecar(event_id).exists())
+            new = self.sidecar(event_id)
             self.assertEqual((new.read_bytes(), identity(new)), expected)
         self.assertEqual({p: (p.read_bytes(), identity(p)) for p in before}, before)
         self.assertEqual(identity(record_lock), lock_identity)
@@ -272,7 +354,7 @@ class LegacyWorkItemTests(Fixture):
 
     def test_apply_replans_under_quiescence(self):
         opened, _, _ = self.legacy()
-        self.resolve(opened)
+        self.resolve_old(opened)
         self.project.set_control(paused=True)
         quiescent = migration.quiescent
 
@@ -288,12 +370,12 @@ class LegacyWorkItemTests(Fixture):
         rename.assert_not_called()
         self.assertEqual((report["ok"], report["scan_complete"], report["unresolved"], report["converted"]),
                          (False, True, 1, 0))
-        self.assertTrue(self.sidecar(opened).is_file())
-        self.assertFalse(self.current_sidecar(opened).exists())
+        self.assertTrue(self.old_sidecar(opened).is_file())
+        self.assertFalse(self.sidecar(opened).exists())
 
     def test_apply_stops_on_directory_sync_failure_and_retry_converges(self):
         opened = [self.legacy(id=f"synthetic-{i}")[0] for i in range(3)]
-        records = {f"wi_{event_id}": self.resolve(event_id)["work_item"] for event_id in opened}
+        records = {f"wi_{event_id}": self.resolve_old(event_id)["work_item"] for event_id in opened}
         self.project.set_control(paused=True)
         attempts = []
 
@@ -309,7 +391,7 @@ class LegacyWorkItemTests(Fixture):
                          (False, 3, 2, 1))
         self.assertEqual(report["errors"], [{"stage": "sync_directory", "type": "OSError", "errno": errno.EIO}])
         for event_id in opened:
-            old, new = self.sidecar(event_id), self.current_sidecar(event_id)
+            old, new = self.old_sidecar(event_id), self.sidecar(event_id)
             self.assertEqual((old.exists(), new.exists()), (old.parent not in attempts, old.parent in attempts))
         forget_ledger(self.project.root)
         self.assertEqual({item_id: self.store.get(item_id) for item_id in records}, records)
@@ -455,7 +537,7 @@ class LegacyWorkItemTests(Fixture):
         self.assertEqual(resolve(), results[0])
         with self.assertRaises(Denied):
             self.resolve(event_id)
-        self.assertEqual([p.name for p in self.sidecar(event_id).parent.iterdir()], ["legacy.json"])
+        self.assertEqual([p.name for p in self.sidecar(event_id).parent.iterdir()], ["decision-resolution.json"])
 
     def test_expectations_validation_and_seeded_nonaccept_refusal(self):
         event_id, _, _ = self.legacy()
@@ -533,8 +615,8 @@ class LegacyWorkItemTests(Fixture):
 
     def test_temporary_recovery_is_bounded_and_unsafe_links_fail_closed(self):
         event_id, _, _ = self.legacy()
-        self.resolve(event_id)
-        sidecar = self.sidecar(event_id)
+        self.resolve_old(event_id)
+        sidecar = self.old_sidecar(event_id)
         outside = self.project.root / "unrecognized-link"
         self.hardlink(sidecar, outside)
         forget_ledger(self.project.root)
@@ -544,7 +626,7 @@ class LegacyWorkItemTests(Fixture):
         applied = self.migration_apply()
         self.assertEqual((applied["ok"], applied["ambiguous_or_corrupt"], applied["renamed"]), (False, 1, 0))
         self.assertTrue(os.path.samefile(sidecar, outside))
-        self.assertFalse(self.current_sidecar(event_id).exists())
+        self.assertFalse(self.sidecar(event_id).exists())
         outside.unlink()
         outside.write_text("uncommitted")
         self.hardlink(outside, sidecar.parent / ".new-abcdefgh")
@@ -566,8 +648,8 @@ class LegacyWorkItemTests(Fixture):
 
     def test_symlink_sidecar_and_parent_refused_without_writes(self):
         event_id, _, _ = self.legacy()
-        self.resolve(event_id)
-        sidecar = self.sidecar(event_id)
+        self.resolve_old(event_id)
+        sidecar = self.old_sidecar(event_id)
         content = sidecar.read_bytes()
         sidecar.unlink()
         target = self.project.root / "sidecar-target"
@@ -576,7 +658,7 @@ class LegacyWorkItemTests(Fixture):
         forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_open()
-        current = self.current_sidecar(event_id)
+        current = self.sidecar(event_id)
         sidecar.rename(current)
         self.project.set_control(paused=True)
         applied = self.migration_apply()

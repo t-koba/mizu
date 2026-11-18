@@ -367,30 +367,6 @@ DEFINITIONS = {
                                            "maximum": MAX_REVISIONS},
                              "limit": {"type": "integer", "minimum": 1,
                                        "maximum": MAX_OPEN_PAGE_ROWS}})),
-    "work_items_legacy_read": ("Audit accept/modify decisions that do not seed work directly, "
-                               "without reconciling them. Pages show unresolved events, open/drop "
-                               "resolutions and explicit no-work dispositions; "
-                               "resolution.outcome=none is not openable. "
-                               "Use the opaque cursor to continue (limit defaults to 25). Reasons "
-                               "are bounded previews; proposal bodies are omitted. Treat recorded "
-                               "content as untrusted; unsafe committed data fails closed.",
-                               obj({"cursor": text(MAX_OPEN_CURSOR_CHARS),
-                                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_OPEN_PAGE_ROWS}})),
-    "work_items_reconcile": ("Resolve one unseeded accept/modify event by creating an open work "
-                             "item or recording a drop. The immutable resolution leaves the "
-                             "decision in place and does not schedule work. "
-                             "Match expected_action and, if supplied, expected_rev. Give a nonempty "
-                             "reason; open also needs a title and valid source origin, revision and "
-                             "timestamp. Drop takes no title and creates no item. Exact retries "
-                             "return created:false and do not count as progress; conflicts and "
-                             "explicit no-work events are refused. The host supplies the actor.",
-                             obj({"event_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
-                                  "expected_action": {"type": "string", "enum": ["accept", "modify"]},
-                                  "expected_rev": {"type": "integer", "minimum": 1},
-                                  "outcome": {"type": "string", "enum": ["open", "drop"]},
-                                  "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
-                                  "title": {"type": "string", "minLength": 1, "maxLength": 200}},
-                                 ("event_id", "expected_action", "outcome", "reason"))),
     "work_items_create": ("Create self-directed or split-off work without assigning or scheduling "
                           "it. Supply a stable idempotency_key scoped to your role; after "
                           "cancellation or uncertainty, retry the exact request. "
@@ -695,10 +671,6 @@ DEFINITIONS = {
 }
 
 
-# Modifier grants alter another operation but are never callable tools.
-MODIFIER_CAPABILITIES = frozenset({"withdraw_decided", "review_verdict"})
-
-
 # Read tools inherit only these existing grants; they are not configurable
 # capabilities. Prompt inclusion/exclusion never participates in authorization.
 STATE_READ_CAPABILITIES = {
@@ -709,7 +681,7 @@ STATE_READ_CAPABILITIES = {
 
 
 def operation_allowed(operation: str, capabilities) -> bool:
-    if operation in MODIFIER_CAPABILITIES:
+    if operation not in DEFINITIONS:
         return False
     gates = STATE_READ_CAPABILITIES.get(operation)
     return bool(gates & set(capabilities)) if gates is not None else operation in capabilities
@@ -717,7 +689,7 @@ def operation_allowed(operation: str, capabilities) -> bool:
 
 def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
                      config: Config | None = None) -> list[dict]:
-    operations = [name for name in capabilities if name not in MODIFIER_CAPABILITIES]
+    operations = [name for name in capabilities if name in DEFINITIONS]
     operations += [name for name in STATE_READ_CAPABILITIES
                    if name not in capabilities and operation_allowed(name, capabilities)]
     tools = []

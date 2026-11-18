@@ -220,93 +220,21 @@ class ContextTests(Fixture):
         return self.project.insights.decide(proposal["id"], "accept", "reviewed", "",
                                             "runtime-test", expected_rev=1)["work_item"]
 
-    def test_legacy_work_item_grants_schema_and_observation(self):
+    def test_retired_work_item_operations_have_no_runtime_surface(self):
         from mizu.config import CAPABILITIES
-        from mizu.protocol import DEFINITIONS, validate
-        from mizu.runtime import _is_observational_operation, WRAP_UP_OPS
+        from mizu.protocol import DEFINITIONS, operation_allowed
+        from mizu.runtime import OBSERVATIONAL_OPS, WRAP_UP_OPS
+        ctx = self.context("worker")
         for operation in ("work_items_legacy_read", "work_items_reconcile"):
-            self.assertIn(operation, CAPABILITIES)
-            self.assertIn(operation, self.config.roles["worker"].capabilities)
-            self.assertNotIn(operation, WRAP_UP_OPS)
-            for name, role in self.config.roles.items():
-                if name != "worker":
+            with self.subTest(operation=operation):
+                for registry in (CAPABILITIES, DEFINITIONS, OBSERVATIONAL_OPS, WRAP_UP_OPS,
+                                 CONSULT_FORBIDDEN, DELEGATE_FORBIDDEN):
+                    self.assertNotIn(operation, registry)
+                for role in self.config.roles.values():
                     self.assertNotIn(operation, role.capabilities)
-        self.assertTrue(_is_observational_operation("work_items_legacy_read", {}))
-        self.assertFalse(_is_observational_operation("work_items_reconcile", {}))
-        schema = DEFINITIONS["work_items_reconcile"][1]
-        args = {"event_id": "a" * 32, "expected_action": "accept", "outcome": "drop", "reason": "Duplicate"}
-        validate(args, schema)
-        validate({**args, "outcome": "open", "title": "Retained work", "expected_rev": 1}, schema)
-        for changes in ({"actor": "model"}, {"event_id": "../event"}, {"event_id": "a" * 31},
-                        {"expected_action": "reject"}, {"expected_rev": True}, {"expected_rev": 0},
-                        {"outcome": "other"}, {"reason": ""}, {"reason": "r" * 4001},
-                        {"title": ""}, {"title": "t" * 201}):
-            with self.subTest(changes=changes), self.assertRaises(Denied):
-                validate({**args, **changes}, schema)
-        read_schema = DEFINITIONS["work_items_legacy_read"][1]
-        validate({}, read_schema)
-        for args in ({"limit": True}, {"limit": 0}, {"limit": 101}, {"cursor": "a" * 129}, {"actor": "x"}):
-            with self.assertRaises(Denied):
-                validate(args, read_schema)
-
-    def test_legacy_runtime_inventory_reconcile_actor_and_transition(self):
-        from support import history_write_json as write_json
-        event_id = "a" * 32
-        source = {"id": "synthetic-origin", "rev": 1, "action": "modify",
-                  "created_at": "2024-01-01T00:00:00+00:00", "reason": "Synthetic legacy decision"}
-        event_path = self.project.root / "decision-history" / f"{event_id}.json"
-        write_json(event_path, source)
-        original = event_path.read_bytes()
-        ctx = self.context("worker")
-        row = ctx.handle("work_items_legacy_read", {"limit": 1})["items"][0]
-        args = {"event_id": row["event_id"], "expected_action": row["action"],
-                "expected_rev": row["rev"], "outcome": "open", "reason": "Retain", "title": "Retained work"}
-        with self.assertRaises(Denied):
-            ctx.handle("work_items_reconcile", {**args, "actor": "model"})
-        result = ctx.handle("work_items_reconcile", args)
-        self.assertTrue(result["created"])
-        self.assertEqual(result["record"]["actor"], "worker")
-        self.assertTrue(ctx.progress_tool)
-        ctx.progress_tool = False
-        replay = ctx.handle("work_items_reconcile", args)
-        self.assertEqual(replay, {"record": result["record"], "created": False})
-        self.assertFalse(ctx.progress_tool)
-        projection = ctx.handle("work_items_read", {})
-        self.assertTrue(projection["coverage_complete"])
-        item = projection["items"][0]
-        changed = ctx.handle("work_items_transition", {"id": item["id"], "expected_rev": item["rev"], "status": "doing"})
-        self.assertEqual(changed["rev"], 2)
-        self.assertEqual(event_path.read_bytes(), original)
-
-    def test_legacy_runtime_explicit_denial_and_child_exclusion(self):
-        import dataclasses
-        from mizu.runtime import check_consult_role, check_delegate_role
-        ctx = self.context("worker")
-        ctx.role = dataclasses.replace(ctx.role, capabilities=tuple(
-            cap for cap in ctx.role.capabilities if cap not in ("work_items_legacy_read", "work_items_reconcile")))
-        for op, args in (("work_items_legacy_read", {}), ("work_items_reconcile", {
-                "event_id": "a" * 32, "expected_action": "accept", "outcome": "drop", "reason": "Audited"})):
-            with self.assertRaisesRegex(Denied, f"no capability: {op}"):
-                ctx.handle(op, args)
-        self.assertFalse((self.project.root / "work-items").exists())
-        for check, role_name in ((check_consult_role, "consult"), (check_delegate_role, "searcher")):
-            role = dataclasses.replace(self.config.roles[role_name], capabilities=("files", "read", "finish"))
-            # Read grant is not forbidden; reconciliation never belongs to children.
-            check(role_name, dataclasses.replace(role, capabilities=(*role.capabilities, "work_items_legacy_read")))
-            with self.assertRaises(ConfigError):
-                check(role_name, dataclasses.replace(role, capabilities=(*role.capabilities, "work_items_reconcile")))
-
-    def test_legacy_runtime_preserves_store_error_classifications(self):
-        from unittest.mock import patch
-        args = {"event_id": "a" * 32, "expected_action": "accept", "outcome": "drop", "reason": "Audited"}
-        ctx = self.context("worker")
-        for op, method, arguments in (("work_items_legacy_read", "page_legacy", {}),
-                                      ("work_items_reconcile", "reconcile", args)):
-            for failure in (Denied("Unsafe record"), LimitExceeded("Byte bound"), OSError("Local I/O")):
-                with patch.object(self.project.work_items, method, side_effect=failure):
-                    with self.assertRaises(type(failure)) as caught:
-                        ctx.handle(op, arguments)
-                    self.assertIs(caught.exception, failure)
+                self.assertFalse(operation_allowed(operation, (operation,)))
+                with self.assertRaisesRegex(Denied, "Unknown operation"):
+                    ctx.dispatch(operation, {})
 
     def test_work_items_transition_protocol_schema_and_configured_grant(self):
         from mizu.config import CAPABILITIES
@@ -682,6 +610,37 @@ class ContextTests(Fixture):
 
 
 class EngineTests(Fixture):
+    def test_retired_work_item_grants_are_rejected_in_config_and_inaccessible_in_engine(self):
+        retired = ("work_items_legacy_read", "work_items_reconcile")
+        original = self.file.read_text()
+        head, worker = original.split("[roles.worker]", 1)
+        for operation in retired:
+            with self.subTest(operation=operation):
+                self.file.write_text(head + "[roles.worker]" + worker.replace(
+                    'capabilities = [', f'capabilities = ["{operation}", ', 1))
+                with self.assertRaisesRegex(ConfigError, "Invalid or duplicate capability in role worker"):
+                    load(self.file)
+        self.file.write_text(original)
+
+        # Simulate stale in-memory grants, bypassing config validation to check both
+        # Engine advertisement and the call boundary independently.
+        role = self.config.roles["worker"]
+        self.config.roles["worker"] = dataclasses.replace(role, capabilities=(*role.capabilities, *retired))
+
+        def attempt(ctx, prompt, _profile):
+            self.assertTrue(set(retired) <= set(ctx.role.capabilities))
+            shown = json.loads(prompt)["unit_tool_surface"]["tools"]
+            self.assertIn("mizu_work_items_read", shown)
+            for operation in retired:
+                self.assertNotIn(f"mizu_{operation}", shown)
+                with self.assertRaisesRegex(Denied, f"no capability: {operation}"):
+                    ctx.handle(operation, {})
+
+        driver = ScriptDriver(attempt)
+        self.assertEqual(Engine(self.config, driver=driver).run(self.project, "worker")["status"], "completed")
+        self.assertEqual(len(driver.calls), 1)
+        self.assertFalse((self.project.root / "work-items").exists())
+
     def test_flat_shared_record_refuses_run_until_removed(self):
         flat = self.project.root / "shared-records" / "legacy.json"
         flat.parent.mkdir(exist_ok=True)

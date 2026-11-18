@@ -164,11 +164,16 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
     listing.add_argument("--branch", default=None, help="Filter by exact branch name")
     listing.add_argument("--published-sha", default=None, help="Filter by exact published SHA (40 or 64 hex)")
-    p = sub.add_parser("work-items", help="Read bounded work-item inventory or changes; read-only unless --audit is given")
+    p = sub.add_parser("work-items", help="Inspect work items or reconcile one legacy decision",
+                       usage="mizu work-items PROJECT [inventory options]\n"
+                             "       mizu work-items reconcile-legacy PROJECT EVENT_ID --outcome {open,drop}"
+                             " --reason TEXT [--expected-action {accept,modify}] [--expected-rev N] [--title TEXT]")
     p.add_argument("project", help="Managed project name")
-    p.add_argument("--limit", type=int, default=25, help="Items per open/change page (1-100; default: 25)")
+    p.add_argument("reconcile_project", nargs="?", metavar="PROJECT", help="Managed project for reconcile-legacy")
+    p.add_argument("event_id", nargs="?", metavar="EVENT_ID", help="Exact decision-history ID for reconcile-legacy")
+    p.add_argument("--limit", type=int, help="Items per inventory page (1-100; default: 25)")
     mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--cursor", default=None, help="Opaque open-page continuation from a previous call")
+    mode.add_argument("--cursor", default=None, help="Opaque open or legacy page continuation from a previous call")
     mode.add_argument("--changes", action="store_true", help="Start a bounded current-projection change scan")
     mode.add_argument("--change-cursor", default=None, help="Resume or poll from an opaque change cursor")
     p.add_argument("--closed", type=int, default=None, help="Closed items to include, newest first (0-100; default: 10)")
@@ -176,6 +181,13 @@ def parser() -> argparse.ArgumentParser:
                    help="Under the record lock, replay every work-item history with full validation and compare it with the current-state index")
     p.add_argument("--repair", action="store_true",
                    help="With --audit, rebuild the current-state index from the history when they diverge")
+    p.add_argument("--legacy", action="store_true", help="List legacy decision dispositions instead of current work items")
+    legacy = p.add_argument_group("reconcile-legacy options")
+    legacy.add_argument("--outcome", choices=("open", "drop"), help="Required disposition")
+    legacy.add_argument("--reason", help="Required nonblank reason (1-4000 characters); preserved verbatim")
+    legacy.add_argument("--expected-action", choices=("accept", "modify"), help="Require this exact decision action")
+    legacy.add_argument("--expected-rev", type=int, metavar="N", help="Require this exact positive decision revision")
+    legacy.add_argument("--title", help="Required for open (1-200 characters); not allowed for drop")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -565,7 +577,7 @@ def _cmd_publication_list(config, project, args):
 
 
 def _cmd_work_items(config, project, args):
-    """Read-only inventory or incremental current records; no locks or recovery.
+    """Inventory or incremental current records. Only legacy pages can recover.
 
     Change mode returns only the persistent-index change page; it never
     computes inventory totals, event delivery, origin staleness or live waits.
@@ -579,13 +591,15 @@ def _cmd_work_items(config, project, args):
     opened read-only by the caller.
     """
     store = project.work_items
+    page_size = {"limit": args.limit} if args.limit is not None else {}
+    if args.legacy:
+        return store.page_legacy(cursor=args.cursor, **page_size)
     if args.changes or args.change_cursor is not None:
-        return store.page_changes_readonly(cursor=args.change_cursor, limit=args.limit)
+        return store.page_changes_readonly(cursor=args.change_cursor, **page_size)
     from .work_item_events import closed_page, progress
     roles = {name: config.roles[name] for name in project.roles}
     event_delivery = progress(store, roles)
-    open_page = store.page_open_readonly(
-        cursor=args.cursor, limit=args.limit if args.limit is not None else 25)
+    open_page = store.page_open_readonly(cursor=args.cursor, **page_size)
     closed = closed_page(store, roles,
                          limit=args.closed if args.closed is not None else 10)
     return {"open": open_page, "closed": closed,
@@ -752,15 +766,28 @@ def _execute(config, args):
         project = Project(config, args.project)
         return _cmd_editor_export(config, project, args)
     if args.command == "work-items":
-        from .project import Project as _ReadOnlyProject
-        if ((args.changes or args.change_cursor is not None)
-                and (args.audit or args.repair or args.closed is not None)):
+        changes = args.changes or args.change_cursor is not None
+        reconcile_args = (args.reconcile_project, args.event_id, args.outcome, args.reason,
+                          args.expected_action, args.expected_rev, args.title)
+        if any(value is not None for value in reconcile_args):
+            if (args.project != "reconcile-legacy" or not args.reconcile_project
+                    or args.event_id is None or args.outcome is None or args.reason is None):
+                raise ConfigError("Use mizu work-items reconcile-legacy PROJECT EVENT_ID --outcome open|drop --reason TEXT")
+            if (changes or args.audit or args.repair or args.legacy or args.cursor is not None
+                    or args.closed is not None or args.limit is not None):
+                raise ConfigError("reconcile-legacy cannot be combined with inventory options")
+            return Project(config, args.reconcile_project).work_items.reconcile(
+                args.event_id, outcome=args.outcome, reason=args.reason, expected_action=args.expected_action,
+                expected_rev=args.expected_rev, title=args.title, actor="operator")
+        if args.legacy and (changes or args.audit or args.repair or args.closed is not None):
+            raise ConfigError("--legacy only accepts --cursor and --limit as inventory options")
+        if changes and (args.audit or args.repair or args.closed is not None):
             raise ConfigError("Change reads cannot be combined with --audit, --repair or --closed")
         if args.repair and not args.audit:
             raise ConfigError("--repair requires --audit")
         if args.audit:
-            return _ReadOnlyProject(config, args.project).work_items.audit(repair=args.repair)
-        return _cmd_work_items(config, _ReadOnlyProject(config, args.project, read_only=True), args)
+            return Project(config, args.project).work_items.audit(repair=args.repair)
+        return _cmd_work_items(config, Project(config, args.project, read_only=True), args)
     if args.command == "publication":
         from .project import Project
         if args.publication_command == "list":

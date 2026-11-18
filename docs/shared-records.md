@@ -1077,6 +1077,12 @@ still require the integrated pilot evidence.
 
 ## Shadow-only exact legacy receipt reconciliation
 
+This reconciles delivery acknowledgements, not work-item dispositions. For
+unseeded accept/modify events, the host-only [work-item reconciliation and
+migration commands](operations.md#reconcile-and-convert-legacy-work-item-resolutions)
+operate on the work-item store and do not create SharedRecords receipts or
+activate delivery.
+
 `mizu.decision_reconciliation` provides trusted host Python functions, **not
 model tools**, with no runtime caller or default route:
 

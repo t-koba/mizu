@@ -22,13 +22,20 @@ class PolicyContractTests(unittest.TestCase):
             "When you finish `blocked`",
             "Parked items must not stop runnable work",
             "mizu_work_items_read",
-            "mizu_work_items_legacy_read",
-            "mizu_work_items_reconcile",
             "mizu_work_items_transition",
             "coverage_complete",
         ):
             with self.subTest(removed=removed):
                 self.assertNotIn(removed, text)
+
+    def test_retired_work_item_grants_are_absent_from_config_and_policies(self):
+        paths = [ROOT / "config/config.example.toml", ROOT / "docs/async-delegation-gates.toml",
+                 *(ROOT / "policies").glob("*.md")]
+        for path in paths:
+            with self.subTest(fixture=path.name):
+                text = path.read_text()
+                for retired in ("work_items_legacy_read", "work_items_reconcile"):
+                    self.assertNotIn(retired, text)
 
     def test_configured_and_commented_policies_compose_shared_first(self):
         config = tomllib.loads((ROOT / "config/config.example.toml").read_text())
