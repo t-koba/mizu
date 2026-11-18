@@ -24,8 +24,10 @@ PATTERN = re.compile(
     rf"|{_COMPONENT}(?:\.{_COMPONENT}){{0,7}})\Z"
 )
 PRINCIPAL = re.compile(r"(?:role:[a-z][a-z0-9_-]{0,62}|host|operator)\Z")
+#: A content digest is exact, lowercase SHA-256 hex text; no length option applies.
+DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 OBJECT_REFS = ("author", "holder")
-TYPES = ("string", "integer", "boolean", "instant", "ref", "principal", "list")
+TYPES = ("string", "integer", "boolean", "instant", "ref", "principal", "list", "digest")
 STRING_MAX = 1024 * 1024
 LIST_MAX = 1024
 INTEGER_LIMIT = 2 ** 63 - 1
@@ -113,6 +115,9 @@ class Field:
         elif self.type == "principal":
             if not isinstance(value, str) or not PRINCIPAL.fullmatch(value):
                 raise Denied(f"{where} must be a principal")
+        elif self.type == "digest":
+            if not isinstance(value, str) or not DIGEST.fullmatch(value):
+                raise Denied(f"{where} must be 64 lowercase hex characters")
         elif self.type == "list":
             if not isinstance(value, list) or len(value) > self.max_items:
                 raise Denied(f"{where} must be a list of at most {self.max_items} items")
@@ -181,6 +186,8 @@ def _field(name: str, raw: Any, where: str, *, nested: bool = False) -> Field:
         raise ConfigError(f"{where}.required must be a boolean")
     spec: dict[str, Any] = {"name": name, "type": kind, "required": required}
     if "max" in raw:
+        if kind not in ("string", "integer"):
+            raise ConfigError(f"{where}.max applies to strings and integers only")
         spec["max"] = _bound(raw["max"], f"{where}.max", -INTEGER_LIMIT if kind == "integer" else 1,
                               INTEGER_LIMIT if kind == "integer" else STRING_MAX)
     if "min" in raw:

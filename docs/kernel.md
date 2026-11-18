@@ -84,9 +84,10 @@ emits = "note.closed"                       # default: "<kind>.<name>"
 - Field types: `string` (with `max`, and optionally `values`, a non-empty list
   of unique lowercase names; every stored value must be one of them), `integer` (with
   `min`/`max`), `boolean`, `instant` (aware ISO time), `ref` (an object id,
-  optionally restricted to `kinds`), `list` of one of these (with `max_items`),
-  and `principal`. `required` fields must be present at creation. An option
-  that does not apply to a field's type refuses the configuration.
+  optionally restricted to `kinds`), `digest` (exactly 64 lowercase hex
+  characters), `list` of one of these (with `max_items`), and `principal`.
+  `required` fields must be present at creation. An option that does not apply
+  to a field's type refuses the configuration.
 - On creation, a `ref` field declaring `kinds` must name an existing object of
   one of those kinds; a missing, wrong-kind or corrupt target is denied. This
   check applies to creation only; transition requirements are evaluated when a

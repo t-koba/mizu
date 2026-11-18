@@ -121,6 +121,31 @@ class Kernel(unittest.TestCase):
             self.objects.create("task", {"title": "t", "priority": "urgent"}, "role:alpha")
         self.assertEqual(self.kinds["task"].fields["priority"].validate("low"), "low")
 
+    def test_digest_field_accepts_only_exact_lowercase_hex(self):
+        raw = tomllib.loads('''
+[kinds.sealed]
+states = ["recorded"]
+initial = "recorded"
+create = ["host"]
+fields.value = {type = "digest", required = true}
+''')["kinds"]
+        kinds = parse_kinds(raw)
+        field = kinds["sealed"].fields["value"]
+        valid = "ab" * 32
+        self.assertEqual(field.validate(valid), valid)
+        for bad in ("ab" * 31, valid + "ab", "AB" * 32, "gg" * 32, valid[:63] + "z", None, 1):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                field.validate(bad)
+        objects = Objects(self.root, kinds, self.log)
+        made = objects.create("sealed", {"value": valid}, "host")
+        self.assertEqual(made["fields"]["value"], valid)
+        with self.assertRaises(Denied):
+            objects.create("sealed", {"value": "AB" * 32}, "host")
+        self.assertEqual(self.log.head(), 1)  # a denied write publishes nothing
+        with self.assertRaises(ConfigError):  # digest has no length option
+            parse_kinds({"sealed": {"states": ["recorded"], "initial": "recorded", "create": ["host"],
+                                    "fields": {"value": {"type": "digest", "max": 64}}}})
+
     def test_cursor_ack_and_paging(self):
         for index in range(5):
             self.objects.create("task", {"title": str(index)}, "operator")
@@ -418,7 +443,11 @@ class ExampleUserland(unittest.TestCase):
     def test_example_kinds_parse(self):
         root = Path(__file__).resolve().parents[1] / "examples/development/kinds.toml"
         kinds = parse_kinds(tomllib.loads(root.read_text())["kinds"])
-        self.assertIn("proposal", kinds)
+        for name in ("proposal", "insight", "decision", "question", "answer", "notice"):
+            self.assertIn(name, kinds)
+        self.assertEqual(kinds["question"].created_event, "question.created")
+        self.assertEqual(kinds["answer"].created_event, "answer.recorded")
+        self.assertEqual(kinds["notice"].created_event, "notice.recorded")
 
 
 class ExampleInsightLifecycle(unittest.TestCase):
@@ -604,3 +633,125 @@ class ExampleInsightLifecycle(unittest.TestCase):
             for field in kind.fields.values():
                 if field.event:
                     self.assertIsNotNone(EVENT.fullmatch(field.event))
+
+
+class ExampleQuestionAnswerNotice(unittest.TestCase):
+    """The declared question/answer/notice kinds over the example userland."""
+
+    def setUp(self):
+        source = Path(__file__).resolve().parents[1] / "examples/development/kinds.toml"
+        self.kinds = parse_kinds(tomllib.loads(source.read_text(encoding="utf-8"))["kinds"])
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log = EventLog(self.root, {
+            "observer": parse_subscriptions(
+                ["question.*", "answer.*", "notice.*", "insight.*"], "roles.observer.subscribe"),
+            "idle": parse_subscriptions(["work.*"], "roles.idle.subscribe"),
+        })
+        self.objects = Objects(self.root, self.kinds, self.log)
+        self.digest = "ab" * 32
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def question(self, **extra):
+        fields = {"subject_type": "record", "record_kind": "check", "record_id": "snap-1",
+                  "record_digest": self.digest, "body": "why?", **extra}
+        return self.objects.create("question", fields, "role:writer")
+
+    def events(self):
+        return [e["name"] for e in self.log.pending("observer")["events"]]
+
+    def test_record_subject_question_and_notice_emit_declared_events(self):
+        question = self.question(urgency="high")
+        self.assertEqual((question["state"], question["rev"], question["author"]),
+                         ("pending", 1, "role:writer"))
+        self.assertEqual(question["fields"]["record_digest"], self.digest)
+        with self.assertRaises(Denied):  # not a configured creator
+            self.objects.create("question", {"subject_type": "record", "body": "why?"}, "role:stranger")
+        notice = self.objects.create("notice", {"subject_digest": self.digest, "kind": "check",
+                                                "body": "b", "urgency": "low"}, "host")
+        self.assertEqual(notice["fields"]["subject_digest"], self.digest)
+        self.assertEqual(self.kinds["notice"].transitions, {})
+        self.assertEqual(self.events(), ["question.created", "notice.recorded"])
+        self.assertEqual(self.log.pending("idle")["events"], [])
+
+    def test_insight_ref_subject_names_a_real_insight(self):
+        insight = self.objects.create("insight", {"title": "t", "body": "b",
+                                                  "holder": "role:reviewer"}, "role:writer")
+        made = self.objects.create("question", {"subject_type": "insight", "subject_ref": insight["id"],
+                                                "subject_rev": insight["rev"], "body": "why?"}, "operator")
+        self.assertEqual((made["fields"]["subject_ref"], made["fields"]["subject_rev"]),
+                         (insight["id"], insight["rev"]))
+        with self.assertRaises(Denied):  # no such insight
+            self.objects.create("question", {"subject_type": "insight", "subject_ref": "0" * 32,
+                                             "body": "why?"}, "operator")
+        proposal = self.objects.create("proposal", {"title": "p", "body": "b",
+                                                    "holder": "role:reviewer"}, "operator")
+        with self.assertRaises(Denied):  # a proposal is not an insight
+            self.objects.create("question", {"subject_type": "insight", "subject_ref": proposal["id"],
+                                             "body": "why?"}, "operator")
+        self.assertEqual(self.events(), ["insight.created", "question.created"])
+
+    def test_answer_record_binds_question_and_action(self):
+        question = self.question()
+        answered = self.objects.transition("question", question["id"], "answer",
+                                           expected_rev=question["rev"], fields={}, actor="operator")
+        answer = self.objects.create("answer", {"question": question["id"], "revision": answered["rev"],
+                                                "action": "publish", "body": "ok",
+                                                "reference": "ref-1"}, "host")
+        self.assertEqual((answer["state"], answer["fields"]["action"]), ("recorded", "publish"))
+        self.assertEqual(self.kinds["answer"].transitions, {})  # create-only record
+        self.assertEqual(self.events(), ["question.created", "question.answer", "answer.recorded"])
+        record = {"question": question["id"], "revision": answered["rev"], "action": "withdraw", "body": "ok"}
+        proposal = self.objects.create("proposal", {"title": "p", "body": "b",
+                                                    "holder": "role:reviewer"}, "operator")
+        head = self.log.head()
+        for bad in ("0" * 32, proposal["id"]):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                self.objects.create("answer", {**record, "question": bad}, "host")
+        with self.assertRaisesRegex(Denied, "action"):
+            self.objects.create("answer", {**record, "action": "accept"}, "host")
+        self.assertEqual(self.log.head(), head)  # denied writes publish nothing
+
+    def test_invalid_digests_are_denied_for_notice_and_question(self):
+        for bad in ("ab" * 31, self.digest + "ab", "AB" * 32, "gg" * 32):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Denied):
+                    self.objects.create("notice", {"subject_digest": bad, "kind": "check", "body": "b"}, "host")
+                with self.assertRaises(Denied):
+                    self.objects.create("question", {"subject_type": "record", "record_digest": bad,
+                                                     "body": "why?"}, "host")
+        notice = self.objects.create("notice", {"subject_digest": self.digest, "kind": "check",
+                                                "body": "b"}, "operator")
+        self.assertEqual(notice["fields"]["subject_digest"], self.digest)
+        self.assertEqual(self.events(), ["notice.recorded"])
+
+    def test_answer_and_withdraw_follow_declared_principals(self):
+        pending = self.question()
+        with self.assertRaises(Denied):  # the author cannot answer its own question
+            self.objects.transition("question", pending["id"], "answer", expected_rev=1,
+                                    fields={}, actor="role:writer")
+        for actor in ("role:stranger", "host", "operator"):
+            with self.assertRaises(Denied):  # only the author may withdraw
+                self.objects.transition("question", pending["id"], "withdraw", expected_rev=1,
+                                        fields={}, actor=actor)
+        for actor in ("host", "operator"):
+            made = self.objects.create("question", {"subject_type": "record", "body": "why?"}, actor)
+            answered = self.objects.transition("question", made["id"], "answer", expected_rev=1,
+                                               fields={}, actor=actor)
+            self.assertEqual((answered["state"], answered["rev"]), ("answered", 2))
+            with self.assertRaises(Denied):  # answered is terminal
+                self.objects.transition("question", made["id"], "withdraw", expected_rev=2,
+                                        fields={}, actor="role:writer")
+        for actor in ("host", "operator", "role:stranger"):
+            made = self.question()
+            with self.assertRaises(Denied):
+                self.objects.transition("question", made["id"], "withdraw", expected_rev=1,
+                                        fields={}, actor=actor)
+        withdrawn = self.objects.transition("question", pending["id"], "withdraw", expected_rev=1,
+                                            fields={}, actor="role:writer")
+        self.assertEqual((withdrawn["state"], withdrawn["rev"]), ("withdrawn", 2))
+        self.assertEqual(sorted(self.events()), sorted(["question.created"] * 6
+                                                       + ["question.answer"] * 2
+                                                       + ["question.withdraw"]))

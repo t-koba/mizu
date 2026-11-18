@@ -146,3 +146,61 @@ fields.action = {type = "string", max = 32, required = true, values = ["accept",
 fields.reason = {type = "string", max = 8192, required = true}
 fields.scope = {type = "string", max = 65536}
 fields.revisit = {type = "instant", event = "decision.revisit"}
+
+# Stage-2 userland declarations for the kernel migration. These kinds prove the
+# declared mechanism in tests; no production role routes questions, answers or
+# notices through them yet.
+
+# A question may carry either an insight ref or a record subject (kind, id and
+# content digest). Choosing the applicable shape, and the meaning of an answer,
+# is userland policy: the kernel only checks types, refs and transitions.
+[kinds.question]
+states = ["pending", "answered", "withdrawn"]
+initial = "pending"
+create = ["role:writer", "role:reviewer", "role:auditor", "role:searcher", "operator", "host"]
+created_event = "question.created"
+fields.subject_type = {type = "string", max = 64, required = true, values = ["insight", "record"]}
+fields.subject_ref = {type = "ref", kinds = ["insight"]}
+fields.subject_rev = {type = "integer", min = 1}
+fields.record_kind = {type = "string", max = 64}
+fields.record_id = {type = "string", max = 256}
+fields.record_digest = {type = "digest"}
+fields.body = {type = "string", max = 65536, required = true}
+fields.urgency = {type = "string", max = 16}
+[[kinds.question.transitions]]
+name = "answer"
+from = ["pending"]
+to = "answered"
+by = ["host", "operator"]
+[[kinds.question.transitions]]
+name = "withdraw"
+from = ["pending"]
+to = "withdrawn"
+by = ["author"]
+
+# An answer is a separate, create-only record for one question revision. The
+# kernel checks the ref, positive revision and action vocabulary; the host or
+# operator decides what action to record.
+[kinds.answer]
+states = ["recorded"]
+initial = "recorded"
+create = ["host", "operator"]
+created_event = "answer.recorded"
+fields.question = {type = "ref", kinds = ["question"], required = true}
+fields.revision = {type = "integer", min = 1, required = true}
+fields.action = {type = "string", required = true, values = ["publish", "withdraw", "supersede"]}
+fields.body = {type = "string", max = 65536, required = true}
+fields.reference = {type = "string", max = 256}
+
+# A create-only notification about a content digest; the kind and urgency
+# vocabularies belong to the declaring userland, not to kernel code.
+[kinds.notice]
+states = ["recorded"]
+initial = "recorded"
+create = ["host", "operator"]
+created_event = "notice.recorded"
+fields.subject_digest = {type = "digest", required = true}
+fields.kind = {type = "string", max = 64, required = true}
+fields.body = {type = "string", max = 65536, required = true}
+fields.urgency = {type = "string", max = 16}
+fields.reference = {type = "string", max = 256}
