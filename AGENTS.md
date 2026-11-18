@@ -26,8 +26,9 @@ and failure behavior. New policy is Markdown/TOML; new mechanism belongs behind
 explicit grants. Work in the current development source; do not stage, promote,
 or deploy a release from a contributor change.
 
-No external publication without the approval the deployment's configuration
-requires (see `docs/configuration.md`).
+No external publication without recorded human approval: pushes and PRs require
+an accepted `GO <branch>` approval bound to the exact code digest
+(see `docs/configuration.md`).
 
 Operator tasks — deployment, credentials, scheduling, promotion — are out of
 scope for this file. See `docs/setup.md`, `docs/operations.md`,
