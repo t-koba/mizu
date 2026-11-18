@@ -122,12 +122,14 @@ Full and resumed/delta inputs capture that scan's signature when the ready
 projection is built. Writer snapshots normally store it in validated progress
 schema 3, or schema 4/5 with resolution-delivery receipts; observer completion
 cursors store it in schema 3 as `ready_work_signature` (64 lowercase hex, or
-null for no delivered input). A writer parking finish reanchors its signature
-to the validated complete empty finish-time inventory, so dispositions made in
-that unit do not cause a redundant self-wake. Any ready work remaining at that
-check refuses the finish; work becoming ready after it remains new input.
-Finish-time `ready_work` remains the separate True/False/null idle diagnostic,
-not an admission cursor.
+null for no delivered input). A writer `continue`/`bounded` finish that parks
+reanchors its signature to the validated complete empty finish-time inventory,
+so dispositions made in that unit do not cause a redundant self-wake. Any ready
+work remaining at that check refuses those finishes; work becoming ready after
+it remains new input. A writer-selected `wait` or `blocked` finish instead
+leaves the signature unanchored so the ready-work observation re-admits the
+role; it does not anchor a new set. Finish-time `ready_work` remains the separate
+True/False/null idle diagnostic, not an admission cursor.
 
 A writable role with both `work_order` and `work_items_transition` also records
 progress schema 5's resolution-delivery receipts. `wait_resolution_tokens` holds
@@ -214,19 +216,23 @@ or corrupt progress evidence, or an unavailable parent, fails closed. This reads
 one parent, adds no store or task lifecycle, and
 never changes WorkItems eligibility or any wait/event routing.
 
-Before a writable writer parks with `wait`, `blocked`, or a `continue`/`bounded`
-finish without a validated immediate next-step handoff, the host requires a complete,
-empty role-scoped ready inventory. It reads `page_ready` under its 100-row
+Before a writable writer parks with a `continue`/`bounded` finish without a
+validated immediate next-step handoff, the host requires a complete, empty
+role-scoped ready inventory. It reads `page_ready` under its 100-row
 API maximum before sealing or applying acknowledgements; inventories larger
 than that bound fail closed.
 Unreadable evidence, false `coverage_complete`, truncation/overflow, or any ready
-item refuses the finish with a bounded actionable diagnostic. Resolve evidence
+item refuses those finishes with a bounded actionable diagnostic. Resolve evidence
 gaps and retry in the same unit. Every ready item needs a durable disposition:
 finish it with the existing completion evidence, block it on a supported named
 observable wait, or drop it with a reason. Holding it as `doing` is not a
 disposition. Unheld open work and this role's held work count; other holders'
 work does not block the role. A progress-backed new `next_step` may instead hand off
-immediately under the existing validation rules.
+immediately under the existing validation rules. A writer-selected `wait` or
+`blocked` finish is instead accepted with role-eligible ready work: the host leaves
+the progress ready-set signature unanchored so the existing ready-work observation
+re-admits the role, without requiring any item transition. A host-imposed bounded
+yield may likewise retain ready work.
 
 Ready-work presence alone never authorizes a timed re-admission, for either
 `wait` or no-progress `continue`/`bounded` records. Ready-set changes still wake
