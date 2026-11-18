@@ -396,7 +396,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import", "doctor", "completion_evidence"})
+    "project_import", "doctor", "completion_evidence", "kinds"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -917,6 +917,8 @@ class Role:
     #: Optional context sections restored/removed against the capability
     #: default (see prompt_sections); validated at load.
     context_include: tuple[str, ...] = ()
+    #: Kernel event-name patterns this role subscribes to (docs/kernel.md).
+    subscribe: tuple[str, ...] = ()
     context_exclude: tuple[str, ...] = ()
     #: Opt-in input gate for platform timers only; empty keeps open-ended runs.
     scheduled_inputs: tuple[str, ...] = ()
@@ -1281,6 +1283,16 @@ def publication_policy(raw: dict) -> PublicationPolicy:
         reviewer_role=reviewer_role, reviewers=reviewers, required_approvals=required)
 
 
+def _kernel_kinds(raw):
+    from .kernel import parse_kinds
+    return parse_kinds(raw)
+
+
+def _kernel_subscriptions(raw, where):
+    from .kernel import parse_subscriptions
+    return parse_subscriptions(raw, where)
+
+
 def publication_review_requirement(policy: PublicationPolicy) -> tuple[tuple[str, ...], int]:
     if policy.reviewers:
         return policy.reviewers, policy.required_approvals
@@ -1501,6 +1513,8 @@ class Config:
 
     operator_records: dict = dataclasses.field(default_factory=dict)
     record_kinds: dict = dataclasses.field(default_factory=dict)
+    #: Kernel object kinds declared by the deployment (docs/kernel.md).
+    kinds: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
@@ -1833,7 +1847,7 @@ def load(file: Path) -> Config:
             raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
         keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change", "held_at_capacity",
                     "finish_outcomes", "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
+                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections", "subscribe"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -2075,6 +2089,7 @@ def load(file: Path) -> Config:
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing,
                            scheduled_inputs=scheduled_inputs, context_include=context_include,
+                           subscribe=_kernel_subscriptions(role.get("subscribe"), f"roles.{name}.subscribe"),
                            context_exclude=context_exclude, **evidence_sources)
     if not roles:
         raise ConfigError("At least one role is required")
@@ -2238,6 +2253,7 @@ def load(file: Path) -> Config:
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records, record_kinds=kinds,
+                  kinds=_kernel_kinds(data.get("kinds", {})),
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),

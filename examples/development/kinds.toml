@@ -1,0 +1,78 @@
+# Example userland kinds. Include from a deployment configuration:
+#   include = ["<path>/examples/development/kinds.toml"]
+# Principals: role:<name>, host, operator; author and holder resolve per object.
+
+# A check run by the host's check runner; its result is evidence for other kinds.
+[kinds.check]
+states = ["running", "passed", "failed", "cancelled"]
+initial = "running"
+create = ["host"]
+fields.snapshot = {type = "string", max = 64, required = true}
+fields.commands = {type = "list", item = {type = "string", max = 4096}, max_items = 32}
+[[kinds.check.transitions]]
+name = "pass"
+from = ["running"]
+to = "passed"
+by = ["host"]
+[[kinds.check.transitions]]
+name = "fail"
+from = ["running"]
+to = "failed"
+by = ["host"]
+[[kinds.check.transitions]]
+name = "cancel"
+from = ["running"]
+to = "cancelled"
+by = ["host"]
+
+# A proposal addressed to a holder, decided by that holder, and closed by the
+# holder when its end state holds (or is abandoned/superseded).
+[kinds.proposal]
+states = ["pending", "accepted", "deferred", "rejected", "fulfilled", "superseded", "withdrawn"]
+initial = "pending"
+create = ["role:writer", "role:reviewer", "role:auditor", "role:searcher", "operator"]
+fields.title = {type = "string", max = 240, required = true}
+fields.body = {type = "string", max = 65536, required = true}
+fields.holder = {type = "principal", required = true}
+fields.reason = {type = "string", max = 8192}
+fields.revisit = {type = "instant", event = "proposal.revisit"}
+[[kinds.proposal.transitions]]
+name = "accept"
+from = ["pending", "deferred"]
+to = "accepted"
+by = ["holder"]
+fields = ["reason"]
+requires = [{field = "reason", present = true}]
+[[kinds.proposal.transitions]]
+name = "defer"
+from = ["pending"]
+to = "deferred"
+by = ["holder"]
+fields = ["reason", "revisit"]
+requires = [{field = "reason", present = true}]
+[[kinds.proposal.transitions]]
+name = "reject"
+from = ["pending", "deferred"]
+to = "rejected"
+by = ["holder"]
+fields = ["reason"]
+requires = [{field = "reason", present = true}]
+[[kinds.proposal.transitions]]
+name = "fulfil"
+from = ["accepted"]
+to = "fulfilled"
+by = ["holder"]
+fields = ["reason"]
+requires = [{field = "reason", present = true}]
+[[kinds.proposal.transitions]]
+name = "supersede"
+from = ["pending", "accepted", "deferred"]
+to = "superseded"
+by = ["holder", "author"]
+fields = ["reason"]
+[[kinds.proposal.transitions]]
+name = "withdraw"
+from = ["pending", "deferred"]
+to = "withdrawn"
+by = ["author"]
+fields = ["reason"]

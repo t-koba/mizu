@@ -87,6 +87,15 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # clone_timeout_seconds = 300
 # local_timeout_seconds = 15
 
+# Kernel object kinds (see docs/kernel.md): fields, states, transitions, requirements
+# and events, all declared by the deployment. None by default; examples/development/
+# shows a complete userland.
+# [kinds.note]
+# states = ["open", "closed"]
+# initial = "open"
+# create = ["operator"]
+# fields.title = {type = "string", max = 200, required = true}
+
 # Named dynamic-model selectors (see docs/model-selection.md). Empty by default;
 # a role's selector key replaces its profile with one of these tables.
 # [selectors]
