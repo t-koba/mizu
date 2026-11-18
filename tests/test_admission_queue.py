@@ -1506,7 +1506,7 @@ class QueueTests(Fixture):
                     seen['resources'] = tuple(resources)
                     return contextlib.nullcontext(0.0)
 
-                with contextlib.ExitStack() as stack, patch('mizu.runtime.admission', side_effect=fake_admission):
+                with contextlib.ExitStack() as stack, patch('mizu.engine_admission.admission', side_effect=fake_admission):
                     self.assertEqual(engine._admit(self.project, role_name, role, stack, wait=False), 0.0)
                 names = tuple(path.name for path in seen['resources'])
                 self.assertEqual(names, expected)

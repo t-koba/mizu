@@ -210,7 +210,7 @@ class WaitReceiptTests(Fixture):
                 raise OSError("result persistence failed")
             return real_write(path, value, **kwargs)
         for failure in (patch.object(self.project.snapshots, "publish", side_effect=OSError("publication failed")),
-                        patch("mizu.runtime.write_json", side_effect=fail_intent),
+                        patch("mizu.unit_finish.write_json", side_effect=fail_intent),
                         patch("mizu.runtime.write_json", side_effect=fail_result)):
             self.project.set_control(armed=True, paused=False, wake_generation="retry-failure")
             with failure, self.assertRaises(OSError):

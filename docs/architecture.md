@@ -29,6 +29,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `drivers.py` | Engine routing by profile, shared logical admission | Model/provider selection |
 | `runtime.py` | Admission, locks, capability dispatch, publication | Which algorithm is best |
 | `unit_finish.py` | Unit finish validation, acknowledgement selection, writer-parking evidence and progress records; runtime re-exports its helpers | Which work is ready, which events were delivered, or which finish outcome is desirable |
+| `engine_admission.py` | Fresh Engine authority, budget and disk guards plus FIFO dispatch lock admission | Which role should run, request priority, or configured limit values |
 | `unit_prompts.py` | Full unit prompt, resumed-session delta, and bounded display projections for ready work, decisions, research, CI, and the writer work order | Session selection/rotation/recovery, admission, scheduling, or lifecycle policy |
 | `workspace_reads.py` | Role-scoped workspace file listing, paged reads, and snapshot diff projections, including virtual upstream refs | Role grants, workspace write policy, or publication semantics |
 | `evidence_records.py` | Exact role-bound retained-evidence reads and durable per-invocation/mutation evidence records | Adapter retries, reconciliation, or evidence truth |

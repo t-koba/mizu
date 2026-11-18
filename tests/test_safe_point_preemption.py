@@ -361,7 +361,7 @@ class SafePointPreemptionTests(Fixture):
             finally:
                 admitted.append("exit")
 
-        with patch("mizu.runtime.admission", fake_admission):
+        with patch("mizu.engine_admission.admission", fake_admission):
             with self.assertRaisesRegex(Denied, "Malformed safe-point"):
                 other.run(project, "other", event_trigger=True)
         self.assertEqual(admitted, ["enter", "exit"])
@@ -391,7 +391,7 @@ class SafePointPreemptionTests(Fixture):
                 yield 0
             finally:
                 admitted.append('exit')
-        with patch('mizu.runtime.admission', fake_admission):
+        with patch('mizu.engine_admission.admission', fake_admission):
             with self.assertRaisesRegex(Denied, 'Workspace fenced'):
                 other.run(project, 'other')
         self.assertEqual(admitted, ['enter', 'exit'])

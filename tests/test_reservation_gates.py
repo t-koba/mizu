@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from support import Fixture, bind_delegation_fixture, seed_terminal_delegation_fixture
-from mizu import runtime, storage, workspace_cache
+from mizu import engine_admission, runtime, storage, workspace_cache
 from mizu.config import WorkspaceCache
 from mizu.delegation_jobs import DelegationJobs
 from mizu.errors import Busy, Denied
@@ -132,7 +132,7 @@ class ReservationGateTests(Fixture):
         store = DelegationJobs(self.project.root)
         DelegationJobs.guard(self.project.root)  # Engine.run's early read is clear.
         entered = threading.Event()
-        real_admission = runtime.admission
+        real_admission = engine_admission.admission
 
         @contextlib.contextmanager
         def observed_admission(*args, **kwargs):
@@ -148,7 +148,7 @@ class ReservationGateTests(Fixture):
             with contextlib.ExitStack() as stack:
                 Engine(config)._admit(self.project, 'worker', config.roles['worker'], stack, wait=True)
 
-        with patch('mizu.runtime.admission', observed_admission), \
+        with patch('mizu.engine_admission.admission', observed_admission), \
              patch('mizu.runtime.safe_point.guard') as safe_point, \
              ThreadPoolExecutor(max_workers=1) as pool:
             with lock(self.project.root / 'locks/workspace.lock'):

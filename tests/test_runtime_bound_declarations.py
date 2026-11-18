@@ -3602,7 +3602,7 @@ def sibling():
                 'pi_durable.py', 'platform.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py',
-                'usage.py', 'config.py', 'runtime.py', 'unit_finish.py',
+                'usage.py', 'config.py', 'runtime.py', 'engine_admission.py', 'unit_finish.py',
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'producer_admission.py',
                 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
@@ -3610,7 +3610,7 @@ def sibling():
                 'budget.py', 'fs.py', 'role_state.py', 'snapshot.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
             minimum = (1 if filename in {
-                'bridge.py', 'pi_durable.py', 'unit_finish.py', 'work_item_seed.py',
+                'bridge.py', 'pi_durable.py', 'engine_admission.py', 'unit_finish.py', 'work_item_seed.py',
                 'work_item_retirement.py', 'work_item_waits.py',
                 'work_item_resolution.py', 'work_item_events.py', 'work_items.py', 'fs.py',
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
@@ -4072,7 +4072,7 @@ def no_defaults(limit, /, count, *, size):
         fields = {"free_disk_mb", "memory_mb", "file_mb"}
         counts = {field: 0 for field in fields}
         for filename in ("storage.py", "probes.py", "doctor.py", "check_jobs.py",
-                         "runtime.py", "sandbox.py"):
+                         "runtime.py", "engine_admission.py", "sandbox.py"):
             tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):

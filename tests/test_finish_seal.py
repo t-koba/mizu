@@ -377,7 +377,7 @@ class FinishSealTests(Fixture):
                     if persisted:
                         write_json(path, value)
                     raise OSError(errno.EIO, "injected finish persistence fault")
-                with patch("mizu.runtime.write_json", side_effect=failing_write):
+                with patch("mizu.unit_finish.write_json", side_effect=failing_write):
                     with self.assertRaises(OSError):
                         ctx.handle("finish", FINISH)
                 self.assertIsNone(ctx.finished)
@@ -561,7 +561,8 @@ class FinishSealTests(Fixture):
                         raise fault
                     write_json(path, value)
                 driver = ScriptDriver(work)
-                with patch("mizu.runtime.write_json", side_effect=failing_write):
+                with (patch("mizu.runtime.write_json", side_effect=failing_write),
+                      patch("mizu.unit_finish.write_json", side_effect=failing_write)):
                     with self.assertRaises(OSError) as raised:
                         Engine(self.config, driver=driver).run(self.project, "worker")
                 self.assertIs(raised.exception, fault)

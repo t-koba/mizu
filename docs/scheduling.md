@@ -1105,7 +1105,7 @@ lose; its proposals remain durable, but submission creates no wake path.
 
 ## Workspace and lock isolation
 
-`Engine._admit` (`src/mizu/runtime.py`, lock resources asserted in
+`Engine._admit` (`src/mizu/engine_admission.py`, lock resources asserted in
 `tests/test_admission_queue.py`) holds dispatch locks for the whole run:
 every role takes `locks/run-<role>.lock`; `write` roles additionally take
 the project `locks/workspace.lock`. FIFO slot admission itself lives in
