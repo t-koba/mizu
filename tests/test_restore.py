@@ -104,6 +104,27 @@ class RestoreTests(Fixture):
         with self.assertRaises(Denied):
             restore(self.config, 'restored', archive)
 
+    def test_preflight_uses_restore_member_contract_without_extracting(self):
+        content = b'{}'
+        archive = self.root / 'saved.tar.gz'
+        with tarfile.open(archive, 'w:gz') as tar:
+            info = tarfile.TarInfo('sessions/worker/weird/a\\b.json')
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        with self.assertRaisesRegex(Denied, 'Invalid relative path'):
+            storage.validate_backup_archive(archive)
+        clean = self.root / 'clean.tar.gz'
+        with tarfile.open(clean, 'w:gz') as tar:
+            info = tarfile.TarInfo('sessions/worker/weird/a.json')
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        self.assertEqual(storage.validate_backup_archive(clean), {'members': 1, 'bytes': 2})
+        with self.assertRaisesRegex(Denied, 'Backup exceeds restore limits'):
+            storage.validate_backup_archive(clean, max_bytes=1)
+        with self.assertRaisesRegex(Denied, 'Restore member limit must be positive'):
+            storage.validate_backup_archive(clean, max_members=0)
+        self.assertEqual([p for p in (self.config.data / 'projects').iterdir()], [self.project.root])
+
     def test_restore_stage_is_invisible_to_active_retention(self):
         self.project.set_control(paused=True)
         archive = self.root / 'saved.tar.gz'

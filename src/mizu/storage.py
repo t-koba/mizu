@@ -1633,6 +1633,60 @@ def artifact_candidates(project: Project, keep: int) -> list[Path]:
     return [child for _, child in dated[:drop]]
 
 
+def _validated_backup_member(member, allowed, seen):
+    """Apply the restore reader's member contract to one archive member.
+
+    Restore and backup preflights share this owner so an archive accepted as
+    verified can never contain a member restore would refuse.
+    """
+    relative = Path(member.name)
+    parts = relative_parts(member.name.rstrip("/") if member.isdir() else member.name)
+    if (relative.is_absolute() or not parts or any(p in ("", ".", "..") for p in parts)
+            or "\\" in member.name or parts[0] not in allowed
+            or not (member.isfile() or member.isdir()) or member.name in seen):
+        raise Denied("Unsafe or duplicate backup member")
+    if parts[0] == "role-state":
+        if len(parts) == 1 and member.isdir():
+            pass
+        elif (len(parts) == 2 and member.isfile()
+              and parts[1].endswith(".json")):
+            from .role_state import MAX_RECORD_BYTES
+            if member.size > MAX_RECORD_BYTES:
+                raise Denied("Role research state backup member exceeds its supported byte bound")
+            try:
+                identifier(parts[1][:-5])
+            except Denied:
+                raise Denied("Unsafe role research state backup member") from None
+        else:
+            raise Denied("Unsafe role research state backup member")
+    seen.add(member.name)
+    return relative, parts
+
+
+def validate_backup_archive(archive_path: Path, *, max_bytes: int = 1073741824,
+                            max_members: int = DEFAULT_RESTORE_MEMBER_COUNT) -> dict:
+    """Preflight an archive against restore's contract without extracting it.
+
+    Structural check only: no staging directory, project or snapshot is
+    created. Returns the validated member count and total member bytes.
+    """
+    if max_bytes < 1:
+        raise Denied("Restore byte limit must be positive")
+    if max_members < 1:
+        raise Denied("Restore member limit must be positive")
+    total = count = 0
+    seen = set()
+    allowed = set(MEMBERS) | {"backup.json"}
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive:
+            _validated_backup_member(member, allowed, seen)
+            count += 1
+            total += member.size
+            if count > max_members or member.size < 0 or total > max_bytes:
+                raise Denied("Backup exceeds restore limits")
+    return {"members": count, "bytes": total}
+
+
 def restore(config, name: str, archive_path: Path, *, max_bytes: int = 1073741824,
             max_members: int = DEFAULT_RESTORE_MEMBER_COUNT) -> dict:
     """Restore a checkpoint into a NEW, unarmed project without extracting links.
@@ -1660,27 +1714,7 @@ def restore(config, name: str, archive_path: Path, *, max_bytes: int = 107374182
             seen = set()
             with tarfile.open(archive_path, "r:gz") as archive:
                 for member in archive:
-                    relative = Path(member.name)
-                    parts = relative_parts(member.name.rstrip("/") if member.isdir() else member.name)
-                    if (relative.is_absolute() or not parts or any(p in ("", ".", "..") for p in parts)
-                            or "\\" in member.name or parts[0] not in allowed
-                            or not (member.isfile() or member.isdir()) or member.name in seen):
-                        raise Denied("Unsafe or duplicate backup member")
-                    if parts[0] == "role-state":
-                        if len(parts) == 1 and member.isdir():
-                            pass
-                        elif (len(parts) == 2 and member.isfile()
-                              and parts[1].endswith(".json")):
-                            from .role_state import MAX_RECORD_BYTES
-                            if member.size > MAX_RECORD_BYTES:
-                                raise Denied("Role research state backup member exceeds its supported byte bound")
-                            try:
-                                identifier(parts[1][:-5])
-                            except Denied:
-                                raise Denied("Unsafe role research state backup member") from None
-                        else:
-                            raise Denied("Unsafe role research state backup member")
-                    seen.add(member.name)
+                    relative, _ = _validated_backup_member(member, allowed, seen)
                     count += 1
                     total += member.size
                     if count > max_members or member.size < 0 or total > max_bytes:
