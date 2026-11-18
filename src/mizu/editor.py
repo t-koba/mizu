@@ -17,7 +17,7 @@ from .errors import ConfigError, Denied
 from .fs import (MAX_FRAME, PREVIEW_BYTES, loads_finite, atomic_write, canonical,
                  digest, mkdir, relative_parts, safe_read, write_json, page, lock)
 from .project import Project
-from .protocol import DEFINITIONS, MCP_VERSIONS, PAGE_FIELDS, obj, text, validate
+from .protocol import MCP_VERSIONS, PAGE_FIELDS, obj, text, validate
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
 
 #: Exported-bundle framing: whole-manifest reads vs recent-summary reads.
@@ -38,10 +38,9 @@ TOOLS = {
     "search_files": (
         "Search literal text in the exported snapshot.",
         obj({"query": text(1000)}, ("query",))),
-    # Input schema shared with the runtime submit_insight; outbox files are
-    # additionally framed by PREVIEW_BYTES at ingest.
+    # Outbox ingest accepts only title, body, and the capsule-supplied base_snapshot.
     "submit_insight": ("Propose an idea to the Worker; no editing or control authority.",
-                       DEFINITIONS["submit_insight"][1]),
+                       obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
 }
 
 

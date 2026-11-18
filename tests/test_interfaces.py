@@ -132,6 +132,21 @@ class EditorTests(Fixture):
         self.assertEqual(self.project.insights.read(result["id"])["source"], "editor")
         self.assertEqual((self.project.workspace / "app.py").read_bytes(), before)
 
+    def test_editor_submit_insight_refuses_metadata_fields(self):
+        # The outbox ingest accepts exactly title/body/base_snapshot. The editor
+        # tool must not advertise metadata it cannot deliver: a schema-valid
+        # metadata call would be quarantined at ingest after a success reply.
+        for extra in ({"kind": "proposal"}, {"addressee": "worker"},
+                      {"urgency": "high"}, {"kind": "proposal", "addressee": "worker"}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(Denied):
+                    self.capsule.call("submit_insight",
+                                      {"title": "Idea", "body": "Body", **extra})
+        # A plain proposal still works end to end.
+        result = self.capsule.call("submit_insight", {"title": "Plain", "body": "Body"})
+        self.assertEqual(self.project.insights.ingest_editor()["accepted"], 1)
+        self.assertEqual(self.project.insights.read(result["id"])["source"], "editor")
+
     def test_tampered_bundle_file_is_refused(self):
         (self.bundle / "code/app.py").write_text("tamper")
         with self.assertRaises(Denied):
