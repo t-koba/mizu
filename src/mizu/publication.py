@@ -30,6 +30,8 @@ import datetime as dt
 import os
 import re
 import stat
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from . import lineage, process
@@ -99,6 +101,15 @@ def _projection_of(record: dict) -> dict | None:
     return None
 #: File names of recorded receipts inside the publications directory.
 RECEIPT_FILE = re.compile(r"([0-9a-f]{64})\.(external|receipt)\.json\Z")
+
+#: Process-local witness index: (root, witness) -> (key map, scan_stopped).
+#: A witness covers the sorted directory names and the configured scan bounds;
+#: every write changes a name, so legacy files need no separate on-disk index.
+_RECEIPT_KEY_CACHE: OrderedDict[tuple[str, str], tuple[dict, bool]] = OrderedDict()
+_RECEIPT_KEY_CACHE_LOCK = threading.Lock()
+_RECEIPT_KEY_CACHE_MAX = PublicationEvidence().record_limit
+#: More than one validated receipt for one (branch, code digest) is never resolved.
+_AMBIGUOUS_RECEIPT = object()
 #: Maximum characters of an operator approval or run reference.
 REFERENCE_CHARS = 256
 
@@ -531,6 +542,62 @@ class Publication:
         return record
 
     @classmethod
+    def _receipt_store(cls, project_root):
+        """Build the bounded, directory-checked store shared by receipt scans."""
+        store = cls.__new__(cls)
+        store.id = ""
+        store.root = Path(project_root) / "evidence" / "publications"
+        store.identity = None
+        store._check_directories()
+        return store
+
+    @classmethod
+    def _receipt_names(cls, project_root) -> list[str]:
+        """Enumerate receipt-directory names without reading or validating files."""
+        store = cls._receipt_store(project_root)
+        try:
+            return sorted(os.listdir(store.root))
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        except OSError as exc:
+            raise Denied("Publication evidence is unavailable") from exc
+
+    @classmethod
+    def _scan_receipts(cls, project_root, names, *, strict: bool,
+                       policy: PublicationEvidence) -> tuple[list[dict], bool]:
+        """Validate one bounded directory scan into summaries plus completeness.
+
+        The name-processing and record bounds, duplicate-ID refusal, strict
+        validation and ``scan_stopped`` meaning are the ones ``list_receipts``
+        publishes. Every candidate is validated before filtering so corrupt
+        evidence cannot be mistaken for absence or uniqueness.
+        """
+        scan_stopped = len(names) > policy.name_processing_limit
+        records = []
+        seen = set()
+        for name in names[:policy.name_processing_limit]:
+            match = RECEIPT_FILE.fullmatch(name)
+            if match is None:
+                continue
+            publication_id = match.group(1)
+            if publication_id in seen:
+                if strict:
+                    raise Denied("Multiple publication receipt files for one identity")
+                continue
+            seen.add(publication_id)
+            if len(seen) > policy.record_limit:
+                scan_stopped = True
+                break
+            try:
+                records.append(_summary(cls.read_receipt(project_root, publication_id)))
+            except (Denied, LimitExceeded, OSError):
+                if strict:
+                    raise
+                # An unreadable, oversized or invalid record is never listed
+                # unvalidated, and it never denies the records beside it.
+        return records, scan_stopped
+
+    @classmethod
     def list_receipts(cls, project_root: Path, *, code_digest: str | None = None,
                       branch: str | None = None, published_sha: str | None = None,
                       limit: int = 100, strict: bool = False,
@@ -570,52 +637,72 @@ class Publication:
         if branch is not None:
             from .vcs import check_branch
             check_branch(branch)
-        store = cls.__new__(cls)
-        store.id = ""
-        store.root = Path(project_root) / "evidence" / "publications"
-        store.identity = None
-        store._check_directories()
-        try:
-            names = sorted(os.listdir(store.root))
-        except (FileNotFoundError, NotADirectoryError):
-            return {"publications": [], "total": 0, "truncated": False, "scan_stopped": False}
-        except OSError as exc:
-            raise Denied("Publication evidence is unavailable") from exc
-        records = []
-        seen = set()
-        scan_stopped = len(names) > policy.name_processing_limit
-        for name in names[:policy.name_processing_limit]:
-            match = RECEIPT_FILE.fullmatch(name)
-            if match is None:
-                continue
-            publication_id = match.group(1)
-            if publication_id in seen:
-                if strict:
-                    raise Denied("Multiple publication receipt files for one identity")
-                continue
-            seen.add(publication_id)
-            if len(seen) > policy.record_limit:
-                scan_stopped = True
-                break
-            try:
-                record = cls.read_receipt(project_root, publication_id)
-            except (Denied, LimitExceeded, OSError):
-                if strict:
-                    raise
-                # An unreadable, oversized or invalid record is never listed
-                # unvalidated, and it never denies the records beside it.
-                continue
-            if code_digest is not None and record.get("code_digest") != code_digest:
-                continue
-            if branch is not None and record.get("branch") != branch:
-                continue
-            if published_sha is not None and record.get("published_sha") != published_sha:
-                continue
-            records.append(_summary(record))
-        records.sort(key=lambda item: item["publication_id"])
-        page = records[:limit]
-        return {"publications": page, "total": len(records),
-                "truncated": len(records) > len(page), "scan_stopped": scan_stopped}
+        names = cls._receipt_names(project_root)
+        records, scan_stopped = cls._scan_receipts(
+            project_root, names, strict=strict, policy=policy)
+        matches = [record for record in records
+                   if (code_digest is None or record["code_digest"] == code_digest)
+                   and (branch is None or record["branch"] == branch)
+                   and (published_sha is None or record["published_sha"] == published_sha)]
+        matches.sort(key=lambda item: item["publication_id"])
+        page = matches[:limit]
+        return {"publications": page, "total": len(matches),
+                "truncated": len(matches) > len(page), "scan_stopped": scan_stopped}
+
+    @classmethod
+    def receipt_for_key(cls, project_root: Path, branch: str, code_digest: str, *,
+                        policy: PublicationEvidence) -> str | None:
+        """Resolve the one receipt bound to a branch and whole-capture digest.
+
+        Schema: a publication ID, or ``None`` for zero, ambiguous or incomplete
+        evidence. Bounds: the same name-processing and record budgets as a
+        strict ``list_receipts`` scan; a witness miss rebuilds once from the
+        real directory and caches the whole key map process-locally (LRU bound
+        shared with the receipt-candidate budget). The witness hashes the sorted
+        directory names and both bounds, so a write, a legacy receipt or a
+        policy change invalidates it without an on-disk index to synchronize.
+        Trust: every candidate is strictly validated on rebuild; a stopped scan
+        refuses every key, and a resolved ID is re-read and rechecked here.
+        Failure: ``Denied`` for invalid arguments or any corrupt candidate,
+        just as in a strict listing; a missing directory resolves nothing.
+        """
+        policy = policy if policy is not None else PublicationEvidence()
+        from .vcs import check_branch
+        check_branch(branch)
+        if not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest):
+            raise Denied("Invalid code digest for publication listing")
+        names = cls._receipt_names(project_root)
+        witness = digest(canonical([policy.name_processing_limit,
+                                    policy.record_limit, names]))
+        cache_key = (str(project_root), witness)
+        with _RECEIPT_KEY_CACHE_LOCK:
+            cached = _RECEIPT_KEY_CACHE.get(cache_key)
+            if cached is None:
+                records, scan_stopped = cls._scan_receipts(
+                    project_root, names, strict=True, policy=policy)
+                index = {}
+                for record in records:
+                    key = (record["branch"], record["code_digest"])
+                    if key in index:
+                        index[key] = _AMBIGUOUS_RECEIPT
+                    else:
+                        index[key] = record["publication_id"]
+                cached = (index, scan_stopped)
+                _RECEIPT_KEY_CACHE[cache_key] = cached
+                while len(_RECEIPT_KEY_CACHE) > _RECEIPT_KEY_CACHE_MAX:
+                    _RECEIPT_KEY_CACHE.popitem(last=False)
+            else:
+                _RECEIPT_KEY_CACHE.move_to_end(cache_key)
+        index, scan_stopped = cached
+        if scan_stopped:
+            return None
+        publication_id = index.get((branch, code_digest))
+        if publication_id is None or publication_id is _AMBIGUOUS_RECEIPT:
+            return None
+        receipt = cls.read_receipt(project_root, publication_id)
+        if receipt["code_digest"] != code_digest or receipt["branch"] != branch:
+            return None
+        return publication_id
 
     def complete(self, intent: dict, published_sha: str, observation=None) -> dict:
         if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):

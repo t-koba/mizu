@@ -639,12 +639,12 @@ class WaitResolutionTests(Fixture):
         # More pending waiters than the page limit: all are scanned, none resolve.
         # A second reconciliation must start with an empty advisory cache.
         for _ in range(2):
-            with patch.object(Publication, 'list_receipts',
-                              wraps=Publication.list_receipts) as listings:
+            with patch.object(Publication, 'receipt_for_key',
+                              wraps=Publication.receipt_for_key) as lookups:
                 self.reconcile(limit=2)
-            self.assertEqual(listings.call_count, len(expected))
-            self.assertEqual({(call.kwargs['branch'], call.kwargs['code_digest'])
-                              for call in listings.call_args_list}, expected)
+            self.assertEqual(lookups.call_count, len(expected))
+            self.assertEqual({(call.args[1], call.args[2])
+                              for call in lookups.call_args_list}, expected)
             for item in items:
                 self.assertEqual(self.store.get(item['id']), item)
 
@@ -658,13 +658,13 @@ class WaitResolutionTests(Fixture):
             with patch.object(snapshots, '_descendant_distance_from',
                               wraps=snapshots._descendant_distance_from) as checkers, \
                     patch.object(snapshots, 'get', wraps=snapshots.get) as manifests, \
-                    patch.object(Publication, 'list_receipts',
-                                 wraps=Publication.list_receipts) as listings:
+                    patch.object(Publication, 'receipt_for_key',
+                                 wraps=Publication.receipt_for_key) as lookups:
                 self.assertIsNone(resolution.observe(self.store, item))
             self.assertEqual(checkers.call_args_list, [
                 unittest.mock.call(item['wait']['snapshot_id']),
                 unittest.mock.call(item['delivery']['snapshot_id'])])
-            self.assertEqual([call.kwargs['code_digest'] for call in listings.call_args_list],
+            self.assertEqual([call.args[2] for call in lookups.call_args_list],
                              [row['code_digest'] for row in reversed(descendants)])
             # Even cached ancestry never substitutes for candidate manifests.
             for row in descendants:
@@ -677,22 +677,23 @@ class WaitResolutionTests(Fixture):
         newer = self.snapshot()
         observed = {'snapshot_id': newer['id'], 'code_digest': newer['code_digest']}
         cache = {}
-        with patch.object(Publication, 'list_receipts', side_effect=Denied('Uncertain evidence')):
+        with patch.object(Publication, 'receipt_for_key', side_effect=Denied('Uncertain evidence')):
             with self.assertRaises(Denied):
                 _resolved(self.store, item['wait'], observed, receipt_cache=cache)
         self.assertEqual(cache, {})
         with patch.object(self.store.snapshots, 'history_index', 1), \
-                patch.object(Publication, 'list_receipts', wraps=Publication.list_receipts) as listings:
+                patch.object(Publication, 'receipt_for_key',
+                             wraps=Publication.receipt_for_key) as lookups:
             for _ in range(2):
                 self.assertIsNone(_resolved(self.store, item['wait'], observed, receipt_cache=cache))
-            self.assertEqual(listings.call_count, 1)
+            self.assertEqual(lookups.call_count, 1)
             self.assertEqual(cache, {(item['wait']['branch'], newer['code_digest']): None})
             # Neither a different pinned branch nor a different digest can hit
             # that entry, and a full cache does not grow or authorize anything.
             self.assertIsNone(_resolved(self.store, {**item['wait'], 'branch': 'other'},
                                         observed, receipt_cache=cache))
             self.assertIsNone(_resolved(self.store, item['wait'], receipt_cache=cache))
-            self.assertEqual(listings.call_count, 3)
+            self.assertEqual(lookups.call_count, 3)
             self.assertEqual(len(cache), 1)
 
     def test_locked_transition_rejects_new_ambiguity_after_advisory_cache_fill(self):
@@ -706,9 +707,10 @@ class WaitResolutionTests(Fixture):
             return transition(item_id, **kwargs)
 
         with patch.object(self.store, 'transition', side_effect=race), \
-                patch.object(Publication, 'list_receipts', wraps=Publication.list_receipts) as listings:
+                patch.object(Publication, 'receipt_for_key',
+                             wraps=Publication.receipt_for_key) as lookups:
             self.reconcile()
-        self.assertEqual(listings.call_count, 2)
+        self.assertEqual(lookups.call_count, 2)
         self.assertEqual(self.store.get(item['id']), item)
 
     def test_supersession_lists_only_newest_receipt_per_observation(self):
@@ -716,15 +718,15 @@ class WaitResolutionTests(Fixture):
         for n in range(6):
             newest = self.snapshot(f'descendant-{n}')
         receipt = self.receipt(newest)
-        with patch.object(Publication, 'list_receipts',
-                          wraps=Publication.list_receipts) as listings:
+        with patch.object(Publication, 'receipt_for_key',
+                          wraps=Publication.receipt_for_key) as lookups:
             self.reconcile()
         # Advisory discovery and the locked transition each need one exact
-        # listing, not a listing for every older unpublished descendant.
-        self.assertEqual(listings.call_count, 2)
-        for call in listings.call_args_list:
-            self.assertEqual(call.kwargs['code_digest'], newest['code_digest'])
-            self.assertEqual(call.kwargs['branch'], item['wait']['branch'])
+        # lookup, not a lookup for every older unpublished descendant.
+        self.assertEqual(lookups.call_count, 2)
+        for call in lookups.call_args_list:
+            self.assertEqual(call.args[2], newest['code_digest'])
+            self.assertEqual(call.args[1], item['wait']['branch'])
         opened = self.store.get(item['id'])
         self.assertEqual(opened['status'], 'open')
         self.assertEqual(opened['wait_resolution']['evidence'], {
@@ -949,8 +951,7 @@ class WaitResolutionTests(Fixture):
         path.write_text('{}')
         self.reconcile()
         self.assertEqual(self.store.get(item['id']), item)
-        with patch.object(Publication, 'list_receipts', return_value={
-                'publications': [], 'total': 0, 'truncated': True, 'scan_stopped': True}):
+        with patch.object(Publication, 'receipt_for_key', return_value=None):
             self.reconcile()
         self.assertEqual(self.store.get(item['id']), item)
 

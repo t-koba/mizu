@@ -1648,10 +1648,6 @@ CALLS = {
         ('Bridge.__exit__', 'self.thread.join', 'timeout', 0): (
             '2', 'safety', 'bridge / bounded listener-thread join during shutdown'),
     },
-    'ci_waits.py': {
-        ('_resolved', 'Publication.list_receipts', 'limit', 0): (
-            '2', 'mechanism', 'CI wait / strict uniqueness check reads one extra receipt'),
-    },
     'reviews.py': {
         ('publication_state', 'Publication.list_receipts', 'limit', 0): (
             '1', 'mechanism', 'reviews / exact code-digest receipt lookup reads one row'),
@@ -2503,12 +2499,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_waits.py', 'diagnose', 1, 0): (
         '1', 'safety',
         'CI wait diagnostics / one exact-name row is required to avoid duplicate attribution'),
-    ('ci_waits.py', '_resolved', 1, 0): (
-        '1', 'safety',
-        'publication CI wait / exactly one complete receipt must match the pinned branch and digest'),
-    ('ci_waits.py', '_resolved', 1, 1): (
-        '1', 'safety',
-        'publication CI wait / exactly one complete receipt row must support the unique-match total'),
     ('ci_waits.py', '_check_names', 0, 0): (
         '1', 'format',
         'CI wait / each wait names at least one exact check under the public schema'),

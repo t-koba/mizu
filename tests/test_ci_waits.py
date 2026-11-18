@@ -1087,11 +1087,11 @@ class PublicationCiWaitTests(CiWaitFixture):
                 self.assertIsNone(ci_waits._resolved(store, wait))
         policy = PublicationEvidence(name_processing_limit=10001, record_limit=1001)
         store = Project(dataclasses.replace(self.config, publication_evidence=policy), "sample").work_items
-        with patch.object(Publication, "list_receipts", wraps=Publication.list_receipts) as listing:
+        with patch.object(Publication, "receipt_for_key",
+                          wraps=Publication.receipt_for_key) as lookup:
             self.assertEqual(ci_waits._resolved(store, wait)["sha"], SHA)
-        self.assertEqual(listing.call_args.kwargs["policy"], policy)
-        self.assertTrue(listing.call_args.kwargs["strict"])
-        self.assertEqual(listing.call_args.kwargs["limit"], 2)
+        lookup.assert_called_once_with(store.root, "published", self.snapshot["code_digest"],
+                                       policy=policy)
         # Standalone construction retains safe, independent defaults.
         from mizu.work_items import WorkItems
         standalone = WorkItems(store.root, store.snapshots, store.insights)
@@ -1105,12 +1105,13 @@ class PublicationCiWaitTests(CiWaitFixture):
         result, reader = self.poll()
         self.assertEqual(result["observed"], 0)
         reader.assert_not_called()
-        receipt = self.receipt_for()
-        for page in (
-            {"publications": [receipt], "total": 1, "truncated": True, "scan_stopped": False},
-            {"publications": [receipt], "total": 1, "truncated": False, "scan_stopped": True},
-        ):
-            with patch.object(Publication, "list_receipts", return_value=page):
+        self.receipt_for()
+        # Truncated and stopped scans cannot prove uniqueness. That refusal is
+        # now decided inside the keyed lookup (tested in test_receipt_key_lookup);
+        # here an unresolved key must still keep the wait pending.
+        for reason in ("truncated", "scan_stopped"):
+            with self.subTest(reason=reason), \
+                    patch.object(Publication, "receipt_for_key", return_value=None):
                 result, reader = self.poll()
             self.assertEqual(result["observed"], 0)
             reader.assert_not_called()
@@ -1346,8 +1347,8 @@ class PublicationCiWaitTests(CiWaitFixture):
                 receipt = self.publish_descendant(future, sha=new_sha)
             adapter = Mock(side_effect=lambda settings, op, params: {
                 "checks": self.rows("pending", sha=params["sha"])})
-            with (patch.object(Publication, "list_receipts",
-                               wraps=Publication.list_receipts) as listings,
+            with (patch.object(Publication, "receipt_for_key",
+                               wraps=Publication.receipt_for_key) as lookups,
                   patch.object(snapshots, "_descendant_distance_from",
                                wraps=snapshots._descendant_distance_from) as distances,
                   patch.object(ci_waits, "_candidates", wraps=ci_waits._candidates) as discovery):
@@ -1362,12 +1363,11 @@ class PublicationCiWaitTests(CiWaitFixture):
             self.assertEqual(discovery.call_count, 2 * len(items))
             self.assertTrue(all(call.args == (self.snapshot["id"],)
                                 for call in distances.call_args_list))
-            counts = {"receipt_lists": dict(Counter(
-                (call.kwargs["code_digest"], call.kwargs["branch"])
-                for call in listings.call_args_list)),
+            counts = {"key_lookups": dict(Counter(
+                (call.args[2], call.args[1]) for call in lookups.call_args_list)),
                       "resolution_closures": distances.call_count - discovery.call_count}
             with self.subTest(tick=tick):
-                self.assertEqual(counts, {"receipt_lists": expected_lists,
+                self.assertEqual(counts, {"key_lookups": expected_lists,
                                           "resolution_closures": 1})
             self.assertTrue(all(ci_waits._read(self.store, item) is None for item in items))
 

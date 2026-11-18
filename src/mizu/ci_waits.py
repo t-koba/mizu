@@ -100,14 +100,12 @@ def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_d
     if receipt_cache is not None and key in receipt_cache:
         publication_id = receipt_cache[key]
     else:
-        # The ordinary listing skips corrupt records; uniqueness needs strict
-        # evidence. Exceptions escape without creating a cache entry.
-        page = Publication.list_receipts(store.root, code_digest=target["code_digest"],
-                                         branch=wait["branch"], limit=2, strict=True,
-                                         policy=store.publication_evidence)
-        publication_id = (page["publications"][0]["publication_id"]
-                          if not page["truncated"] and not page["scan_stopped"]
-                          and page["total"] == 1 and len(page["publications"]) == 1 else None)
+        # The keyed lookup shares one strict, witness-validated scan across
+        # candidates; zero, ambiguous and stopped scans resolve nothing.
+        # Exceptions escape without creating a cache entry.
+        publication_id = Publication.receipt_for_key(
+            store.root, wait["branch"], target["code_digest"],
+            policy=store.publication_evidence)
     if publication_id is not None:
         receipt = Publication.read_receipt(store.root, publication_id)
         if receipt["code_digest"] != target["code_digest"] or receipt["branch"] != wait["branch"]:

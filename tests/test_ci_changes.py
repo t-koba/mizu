@@ -388,8 +388,8 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         changes = Mock(return_value={"subjects": [], "next_cursor": "stationary"})
         reader = Mock()
         self.clock += 30
-        with patch.object(Publication, "list_receipts",
-                          wraps=Publication.list_receipts) as listings:
+        with patch.object(Publication, "receipt_for_key",
+                          wraps=Publication.receipt_for_key) as lookups:
             result = ci_waits.poll(self.config, self.project, self.state, now=self.clock,
                                   interval=15, reader=reader, changes_reader=changes)
         self.assertTrue(result["ok"])
@@ -397,10 +397,10 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         changes.assert_called_once()
         reader.assert_not_called()
         self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
-        self.assertEqual(listings.call_count, 1)
-        listings.assert_called_once_with(self.store.root, code_digest=self.snapshot["code_digest"],
-                                         branch="published", limit=2, strict=True,
-                                         policy=self.store.publication_evidence)
+        self.assertEqual(lookups.call_count, 1)
+        lookups.assert_called_once_with(self.store.root, "published",
+                                        self.snapshot["code_digest"],
+                                        policy=self.store.publication_evidence)
 
     def test_new_descendant_after_empty_page_is_enrolled(self):
         item = self.block()
