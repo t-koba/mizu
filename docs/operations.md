@@ -491,6 +491,38 @@ is safe to reuse, and a completed scan followed by a successful apply leaves no
 candidates. Resolve scan errors or truncation before resuming the project;
 a truncated scan that stops making progress does not prove all flat files are gone.
 
+### Preview legacy work-item conversion
+
+```sh
+mizu pause demo
+mizu migrate-work-items demo            # host-only; always a dry run
+```
+
+Keep the project paused, and do not restore or edit its data directory during
+this command. The preview takes the existing work-item record lock without
+waiting or creating it; for a restored project without a lock it refuses the
+result if a writer creates one during the scan. It reads authoritative files,
+not the ledger index, and never recovers temporaries or renames files. Readers
+accept a single `legacy.json` or `decision-resolution.json` in the same item
+slot and validate it against the immutable decision. The writer still writes
+`legacy.json`. There is no `--apply` option.
+
+The JSON report gives `project`, `dry_run`, `scan_limit`, and counts for
+`resolved_open` (an open disposition, even if the item later closed),
+`resolved_drop`, `explicit_no_work`, `unresolved`, and `ambiguous_or_corrupt`
+(invalid source events, item directories, or current legacy links). No event
+bodies or paths are printed. The default `--scan-limit` is 10,000 entries per
+pass over `decision-history/` and `work-items/`, including non-record entries;
+the store's file and per-item revision bounds still apply. `truncated` means
+an entry limit was exceeded. If `scan_complete` is false, the counts are
+partial and do not prove readiness.
+
+`ok: false` exits with status 1. Before upgrading, have the writer resolve
+unresolved events with `mizu_work_items_reconcile`, address corrupt or
+ambiguous sources, and rerun the preview. Increase `--scan-limit` if the scan
+was truncated. A busy lock fails immediately; retry after the writer has
+stopped. Cancelling or rerunning the preview leaves no state to clean up.
+
 ## 人間からの提案 (Insight)
 
 確定した事実は `mizu status`・`mizu usage`・`mizu insight list/read`・`mizu report` と run 記録から読み取ります（外部チャットツール非依存）。表示は各プロジェクト側で作ります。

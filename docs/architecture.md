@@ -1243,7 +1243,9 @@ Legacy reads are observational; reconciliation is not. Neither grant widens
 writer admission or receives a wrap-up/tool-budget exception.
 
 Under the shared insights lock, reconciliation exclusively atomically creates
-`work-items/wi_<event-id>/legacy.json`. Its immutable fields are `event_id`,
+`work-items/wi_<event-id>/legacy.json`. Readers also accept
+`decision-resolution.json` in that slot with the same envelope, but refuse
+both names coexisting. The immutable fields are `event_id`,
 `event_sha256` (SHA-256 of the **canonical JSON** source event), `action`,
 `revision` (valid source revision or null), `outcome`, `actor`, `reason`, and
 `created_at` (reconciliation timestamp). An open sidecar additionally contains

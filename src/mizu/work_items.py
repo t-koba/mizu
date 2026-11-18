@@ -80,6 +80,9 @@ _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 _HISTORY_UNSET = object()
+_LEGACY_RESOLUTION_NAME = "legacy.json"
+_RESOLUTION_NAMES = (_LEGACY_RESOLUTION_NAME, "decision-resolution.json")
+_AMBIGUOUS_RESOLUTION_NAMES = "Ambiguous work-item decision resolution filenames"
 _ORIGIN_COLUMNS = "n.id, n.valid, n.rev, d.insight_id, d.rev, d.action, d.linked"
 _ORIGIN_SELECT = "SELECT " + _ORIGIN_COLUMNS
 _ORIGIN_JOIN = ("LEFT JOIN insights n ON n.id = {key} "
@@ -202,6 +205,23 @@ def _directory(path: Path) -> bool:
     return True
 
 
+def _present(path: Path) -> bool:
+    """A directory entry is present even if it is a dangling symlink."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _resolution_name(directory: Path) -> str | None:
+    """Find the sole resolution entry without following the leaf or reading it."""
+    names = [name for name in _RESOLUTION_NAMES if _present(directory / name)]
+    if len(names) > 1:
+        raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
+    return names[0] if names else None
+
+
 class WorkItems:
     def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
@@ -297,25 +317,13 @@ class WorkItems:
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
             return None
-        create = directory / "create.json"
-        try:
-            create.lstat()
-        except FileNotFoundError:
+        if not _present(directory / "create.json"):
             return None
-        try:
-            (directory / "legacy.json").lstat()
-        except FileNotFoundError:
-            pass
-        else:
+        if _resolution_name(directory) is not None:
             raise Denied("Direct work item carries legacy reconciliation")
         decision = self.root / "decision-history" / f"{item_id[3:]}.json"
-        if _directory(decision.parent):
-            try:
-                decision.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                raise Denied("Direct work-item ID collides with a decision event")
+        if _directory(decision.parent) and _present(decision):
+            raise Denied("Direct work-item ID collides with a decision event")
         record = self._read(f"work-items/{item_id}/create.json")
         if set(record) - {"requested_smoke_refs"} != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
             raise Denied("Invalid direct work-item creation record")
@@ -378,15 +386,8 @@ class WorkItems:
         directory = self.root / "work-items" / item_id
         if _directory(directory.parent) and _directory(directory):
             revisions = self._history_revisions(item_id, recover=True)
-            if revisions:
+            if revisions or _present(directory / "create.json") or _resolution_name(directory) is not None:
                 raise Denied("Work-item creation has pre-existing history")
-            for name in ("create.json", "legacy.json"):
-                try:
-                    (directory / name).lstat()
-                except FileNotFoundError:
-                    continue
-                else:
-                    raise Denied("Work-item creation has pre-existing history")
             # _history_revisions already rejected unknown names and
             # unsafe/ambiguous temporaries; a recovered orphan leaves an empty
             # slot that may proceed to commit.
@@ -513,7 +514,7 @@ class WorkItems:
                         revisions = self._history_revisions(entry.name, recover=recover)
                         if entry.name in task_sources:
                             continue
-                        if revisions or (directory / entry.name / "legacy.json").exists():
+                        if revisions or _resolution_name(directory / entry.name) is not None:
                             raise Denied("Work-item history has no immutable seed")
                     continue
                 revisions = self._history_revisions(entry.name, recover=recover)
@@ -573,7 +574,7 @@ class WorkItems:
 
     def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
                            history_revisions=_HISTORY_UNSET) -> dict | None:
-        """Validate the immutable sidecar against the exact canonical source."""
+        """Validate either filename's bounded envelope against the canonical source."""
         self._validate_decision_key(event_id, event)
         if "work_items" in event or "work_item_specs" in event:
             task_seeds(event)
@@ -597,16 +598,14 @@ class WorkItems:
         if revisions is _HISTORY_UNSET:
             if not _directory(directory.parent) or not _directory(directory):
                 return None
-        path = directory / "legacy.json"
-        try:
-            path.lstat()
-        except FileNotFoundError:
+        name = _resolution_name(directory)
+        if name is None:
             if revisions is not _HISTORY_UNSET and revisions and "work_item" not in event:
                 raise Denied("Unresolved legacy event carries active history")
             return None
         if intent == "none":
             raise Denied("Explicit no-work decision cannot carry legacy reconciliation")
-        record = self._read(f"work-items/{item_id}/legacy.json")
+        record = self._read(f"work-items/{item_id}/{name}")
         fields = {"event_id", "event_sha256", "action", "revision", "outcome",
                   "actor", "reason", "created_at"}
         if record.get("outcome") == "open":
@@ -636,7 +635,7 @@ class WorkItems:
     def _audit_drop_only(self, item_id: str) -> bool:
         """Recognize a valid legacy drop sidecar without recovery or writes.
 
-        Only a directory containing exactly one ordinary ``legacy.json`` can
+        Only a directory containing exactly one ordinary resolution file can
         be covered here. The shared resolution validator binds that bounded,
         non-hardlinked sidecar to its immutable decision event. Open records
         deliberately fall through to the regular seed/history reader.
@@ -647,13 +646,12 @@ class WorkItems:
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
             return False
-        try:
-            (directory / "legacy.json").lstat()
-        except FileNotFoundError:
+        name = _resolution_name(directory)
+        if name is None:
             return False
         with os.scandir(directory) as entries:
             first = next(entries, None)
-            if first is None or first.name != "legacy.json":
+            if first is None or first.name != name:
                 return False
             info = _entry_stat(first)
             if (not stat.S_ISREG(info.st_mode) or first.is_symlink()
@@ -703,7 +701,7 @@ class WorkItems:
             if len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Legacy reconciliation exceeds byte bound")
             with self.committing([f"wi_{event_id}"]):
-                write_json(self.root / "work-items" / f"wi_{event_id}" / "legacy.json",
+                write_json(self.root / "work-items" / f"wi_{event_id}" / _LEGACY_RESOLUTION_NAME,
                            record, exclusive=True)
             return {"record": record, "created": True}
 
@@ -793,15 +791,19 @@ class WorkItems:
                         continue
                     # Locked recovery removed every validated temporary above.
                     raise Denied("Invalid committed decision-history filename")
-                if _DECISION_EVENT_NAME.fullmatch(name) is None:
-                    raise Denied("Invalid committed decision-history filename")
-                event = self._read(f"decision-history/{name}")
-                if event.get("action") not in ("accept", "modify", "defer", "reject", "withdraw"):
-                    raise Denied("Malformed committed decision-history action")
-                if event["action"] not in ("accept", "modify") and "work_item" in event:
-                    raise Denied("Non-accept decision carries a work-item seed")
-                self._validate_decision_key(name[:-5], event)
-                yield name[:-5], event
+                yield self._read_decision_event(name)
+
+    def _read_decision_event(self, name: str) -> tuple[str, dict]:
+        if _DECISION_EVENT_NAME.fullmatch(name) is None:
+            raise Denied("Invalid committed decision-history filename")
+        event = self._read(f"decision-history/{name}")
+        if event.get("action") not in ("accept", "modify", "defer", "reject", "withdraw"):
+            raise Denied("Malformed committed decision-history action")
+        if event["action"] not in ("accept", "modify") and "work_item" in event:
+            raise Denied("Non-accept decision carries a work-item seed")
+        event_id = name[:-5]
+        self._validate_decision_key(event_id, event)
+        return event_id, event
 
     def _decision_events(self):
         yield from self._iter_decision_events(recover=True)
@@ -850,11 +852,7 @@ class WorkItems:
             seeds = task_seeds(event)
             for seed in seeds:
                 if seed["id"] == item_id:
-                    try:
-                        (self.root / "work-items" / item_id / "legacy.json").lstat()
-                    except FileNotFoundError:
-                        pass
-                    else:
+                    if _resolution_name(self.root / "work-items" / item_id) is not None:
                         raise Denied("Task seed cannot carry legacy reconciliation")
                     if self._direct_record(item_id) is not None:
                         raise Denied("Conflicting task seed sources")
@@ -1064,6 +1062,7 @@ class WorkItems:
         temporary_entries = []
         revision_inodes = []
         revisions = set()
+        resolution_seen = False
         with os.scandir(directory) as entries:
             for count, entry in enumerate(entry for entry in entries if entry.name != "retirement.json"):
                 if count >= MAX_REVISIONS + 1:
@@ -1071,7 +1070,11 @@ class WorkItems:
                 if _TEMP_NAME.fullmatch(entry.name):
                     temporary_entries.append(entry)
                     continue
-                if entry.name in ("legacy.json", "create.json"):
+                if entry.name == "create.json" or entry.name in _RESOLUTION_NAMES:
+                    if entry.name in _RESOLUTION_NAMES:
+                        if resolution_seen:
+                            raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
+                        resolution_seen = True
                     info = _entry_stat(entry)
                     if (not stat.S_ISREG(info.st_mode)
                             or getattr(info, "st_file_attributes", 0) & 0x400):
@@ -1862,7 +1865,7 @@ class WorkItems:
         with lock(self.root / "locks" / "insights.lock"):
             return self._projection_unlocked(item_id)
 
-    def _prepare_decision_history(self, history: Path, *, recover: bool) -> bool:
+    def _prepare_decision_history(self, history: Path, *, recover: bool, scan=None) -> bool:
         """Validate decision-history temporaries, optionally removing safe ones.
 
         Single scan shared by locked and read-only readers. With
@@ -1871,14 +1874,16 @@ class WorkItems:
         only validated and ignored, never deleted. A lone regular temporary
         is uncommitted. A post-link alias is accepted only when exactly one
         regular event filename identifies the same inode. Recovery state is
-        bounded independently of the append-only history. Returns False when
-        the history directory is absent.
+        bounded independently of the append-only history. The host preview
+        supplies a bounded directory scan. Returns False when the history
+        directory is absent.
         """
         if not _directory(history):
             return False
+        scan = os.scandir if scan is None else scan
         temporary_info = []
         aliases = {}
-        with os.scandir(history) as entries:
+        with scan(history) as entries:
             for entry in entries:
                 if not _TEMP_NAME.fullmatch(entry.name):
                     continue
@@ -1903,7 +1908,7 @@ class WorkItems:
 
         if aliases:
             matches = {key: [] for key in aliases}
-            with os.scandir(history) as entries:
+            with scan(history) as entries:
                 for entry in entries:
                     if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
                         continue

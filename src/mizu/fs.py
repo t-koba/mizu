@@ -471,12 +471,13 @@ def _acquire_local(key: str, *, blocking: bool, timeout: float) -> threading.Loc
 
 
 @contextlib.contextmanager
-def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
+def lock(path: Path, *, blocking: bool = True, create: bool = True) -> Iterator[None]:
     """Kernel releases the lock on death. Never unlink a lock inode.
 
     Each acquisition half uses the execution's lock policy (default 30 s).
     Capture it once so the local guard and kernel retries cannot disagree.
     Contention fails as Busy; nonblocking acquires never wait (ADR-026).
+    With create=False, a missing lock raises FileNotFoundError without writes.
     """
     timeout = _lock_timeout.get()
     if timeout is None:
@@ -484,7 +485,7 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     retry_interval_ms = _lock_retry_interval_ms.get()
     observation = lock_diagnostics.begin(path.name)
     try:
-        with _lock(path, blocking=blocking, timeout=timeout,
+        with _lock(path, blocking=blocking, create=create, timeout=timeout,
                    retry_interval_ms=retry_interval_ms, observation=observation):
             yield
     except BaseException as exc:
@@ -497,9 +498,10 @@ def lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _lock(path: Path, *, blocking: bool, timeout: float,
+def _lock(path: Path, *, blocking: bool, create: bool, timeout: float,
           retry_interval_ms: int, observation) -> Iterator[None]:
-    mkdir(path.parent)
+    if create:
+        mkdir(path.parent)
     key = _local_key(path)
     if observation is not None:
         observation.advance("local-acquire")
@@ -512,7 +514,7 @@ def _lock(path: Path, *, blocking: bool, timeout: float,
         raise Busy(f"Already running: {path.stem}") from None
     if observation is not None:
         observation.advance("open")
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    flags = (os.O_CREAT if create else 0) | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
