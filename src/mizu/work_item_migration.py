@@ -1,4 +1,4 @@
-"""Host-only, read-only readiness scan for legacy work-item conversion."""
+"""Host-only readiness scan and filename conversion for legacy work items."""
 from __future__ import annotations
 
 import contextlib
@@ -6,8 +6,10 @@ import os
 import stat
 
 from .errors import Busy, ConfigError, Denied, LimitExceeded, MizuError
-from .fs import lock
-from .work_items import ITEM_ID, _TEMP_NAME, _directory, _present, _resolution_name
+from .fs import PREVIEW_BYTES, lock, rename_exclusive, safe_read, sync_dir
+from .storage import quiescent
+from .work_items import (ITEM_ID, _CURRENT_RESOLUTION_NAME, _LEGACY_RESOLUTION_NAME,
+                         _TEMP_NAME, _directory, _present, _resolution_name)
 
 DEFAULT_SCAN_LIMIT = 10_000
 _SOURCE_ERRORS = (MizuError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError)
@@ -15,6 +17,12 @@ _SOURCE_ERRORS = (MizuError, OSError, ValueError, TypeError, KeyError, Attribute
 
 class _ScanLimit(LimitExceeded):
     pass
+
+
+def _require_paused(project, operation):
+    if (_present(project.root / "control.json")
+            and project.work_items._read("control.json").get("paused") is not True):
+        raise Denied(f"Pause the project before {operation} work-item migration")
 
 
 @contextlib.contextmanager
@@ -34,9 +42,7 @@ def _record_snapshot(project):
                 locked = True
             except FileNotFoundError:
                 pass
-        if (_present(root / "control.json")
-                and project.work_items._read("control.json").get("paused") is not True):
-            raise Denied("Pause the project before previewing work-item migration")
+        _require_paused(project, "previewing")
         yield
         # A restored project may lack locks. The first cooperating writer
         # must create this inode before changing records and never unlinks it.
@@ -49,7 +55,7 @@ def _candidate(event):
             and not {"work_item", "work_items", "work_item_specs"}.intersection(event))
 
 
-def _scan(project, scan_limit, report):
+def _scan(project, scan_limit, report, moves):
     store = project.work_items
     history = project.root / "decision-history"
     items = project.root / "work-items"
@@ -94,6 +100,14 @@ def _scan(project, scan_limit, report):
                         result = "resolved_drop"
                     else:
                         raise Denied("Legacy drop is not the only work-item record")
+                    if moves is not None and resolution is not None:
+                        name = _resolution_name(items / item_id)
+                        if name == _LEGACY_RESOLUTION_NAME:
+                            moves.append(item_id)
+                        elif name == _CURRENT_RESOLUTION_NAME:
+                            report["already_current"] += 1
+                        else:
+                            raise Denied("Missing validated work-item resolution")
                     report[result] += 1
                 except _SOURCE_ERRORS:
                     report["ambiguous_or_corrupt"] += 1
@@ -125,23 +139,72 @@ def _scan(project, scan_limit, report):
             report["ambiguous_or_corrupt"] += 1
 
 
-def plan(project, *, scan_limit=DEFAULT_SCAN_LIMIT) -> dict:
-    """Return only counts from bounded, authoritative file readers, not the index."""
+def _plan(project, scan_limit, *, moves=None, locked=False) -> dict:
     if type(scan_limit) is not int or scan_limit < 1:
         raise ConfigError("Work-item migration scan limit must be a positive integer")
     report = dict(project=project.name, dry_run=True, scan_limit=scan_limit,
                   resolved_open=0, resolved_drop=0, explicit_no_work=0, unresolved=0,
                   ambiguous_or_corrupt=0, truncated=False, scan_complete=True)
-    with _record_snapshot(project):
+    if moves is not None:
+        report.update(dry_run=False, already_current=0, renamed=0, converted=0, errors=[])
+    with contextlib.nullcontext() if locked else _record_snapshot(project):
         try:
-            _scan(project, scan_limit, report)
+            _scan(project, scan_limit, report, moves)
         except _ScanLimit:
             report.update(truncated=True, scan_complete=False)
         except _SOURCE_ERRORS:
             report.update(ambiguous_or_corrupt=report["ambiguous_or_corrupt"] + 1, scan_complete=False)
-    report["ok"] = not (report["truncated"] or report["ambiguous_or_corrupt"] or report["unresolved"])
+    if moves is not None:
+        report["candidates"] = len(moves)
+    report["ok"] = report["scan_complete"] and not (report["ambiguous_or_corrupt"] or report["unresolved"])
     if not report["ok"]:
         report["action"] = ("Before upgrading, resolve unresolved events with the existing writer "
                             "tool mizu_work_items_reconcile. Restore or repair ambiguous or corrupt "
                             "sources and retry on a paused project; raise --scan-limit if truncated.")
+    return report
+
+
+def plan(project, *, scan_limit=DEFAULT_SCAN_LIMIT) -> dict:
+    """Return only counts from bounded, authoritative file readers, not the index."""
+    return _plan(project, scan_limit)
+
+
+def apply(project, *, scan_limit=DEFAULT_SCAN_LIMIT) -> dict:
+    """Convert only after a fresh, complete scan under storage exclusion."""
+    moves = []
+    # Refuse an unready project before taking maintenance locks, which can
+    # initialize missing lock inodes. This scan never authorizes a rename.
+    report = _plan(project, scan_limit, moves=moves)
+    if not (report["ok"] and report["scan_complete"]):
+        return report
+
+    with quiescent(project, snapshot_gc=True):  # Includes insights.lock.
+        _require_paused(project, "applying")
+        moves.clear()
+        report = _plan(project, scan_limit, moves=moves, locked=True)
+        if not (report["ok"] and report["scan_complete"]):
+            return report
+        for item_id in moves:
+            relative = f"work-items/{item_id}"
+            old = f"{relative}/{_LEGACY_RESOLUTION_NAME}"
+            new = f"{relative}/{_CURRENT_RESOLUTION_NAME}"
+            stage = "read_source"
+            try:
+                raw = safe_read(project.root, old, PREVIEW_BYTES)
+                stage = "rename"
+                rename_exclusive(project.root / old, project.root / new)
+                report["renamed"] += 1
+                stage = "verify"
+                if safe_read(project.root, new, PREVIEW_BYTES) != raw or _present(project.root / old):
+                    raise Denied("Work-item resolution rename failed read-back verification")
+                stage = "sync_directory"
+                sync_dir(project.root / relative)
+            except _SOURCE_ERRORS as exc:
+                error = dict(stage=stage, type=type(exc).__name__)
+                if isinstance(exc, OSError) and exc.errno is not None:
+                    error["errno"] = exc.errno
+                report["errors"].append(error)
+                report.update(ok=False, action="Check the failure and rerun on a paused project.")
+                break
+            report["converted"] += 1
     return report

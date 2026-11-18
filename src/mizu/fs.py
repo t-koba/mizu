@@ -185,13 +185,7 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
             os.fsync(stream.fileno())
         if exclusive:
             try:
-                if _platform.IS_WINDOWS:
-                    # Windows rename is atomic and fails if the destination
-                    # exists; unlike a hard link, it leaves no second name if
-                    # cleanup of the temporary path is delayed by the host.
-                    os.rename(temporary, path)
-                else:
-                    _rename_exclusive_posix(temporary, path)
+                rename_exclusive(temporary, path)
             except FileExistsError:
                 if path.is_symlink() or _read_bytes(path) != data:
                     raise Denied(f"Immutable object conflict: {path.name}") from None
@@ -205,7 +199,15 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False,
             os.unlink(temporary)
 
 
-def _rename_exclusive_posix(source: str, destination: Path) -> None:
+def rename_exclusive(source: str | Path, destination: Path) -> None:
+    """Atomically rename without replacing the destination; no fallback."""
+    if _platform.IS_WINDOWS:
+        os.rename(source, destination)  # Windows rename fails if the target exists.
+    else:
+        _rename_exclusive_posix(source, destination)
+
+
+def _rename_exclusive_posix(source: str | Path, destination: Path) -> None:
     """Move a complete file without replacing any destination or adding a link.
 
     Linux renameat2(RENAME_NOREPLACE) and macOS renamex_np(RENAME_EXCL)

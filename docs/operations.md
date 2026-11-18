@@ -491,37 +491,51 @@ is safe to reuse, and a completed scan followed by a successful apply leaves no
 candidates. Resolve scan errors or truncation before resuming the project;
 a truncated scan that stops making progress does not prove all flat files are gone.
 
-### Preview legacy work-item conversion
+### Convert legacy work-item resolutions
 
 ```sh
 mizu pause demo
-mizu migrate-work-items demo            # host-only; always a dry run
+mizu migrate-work-items demo          # host-only; dry run
+mizu migrate-work-items demo --apply  # rename validated resolutions
 ```
 
-Keep the project paused, and do not restore or edit its data directory during
-this command. The preview takes the existing work-item record lock without
-waiting or creating it; for a restored project without a lock it refuses the
-result if a writer creates one during the scan. It reads authoritative files,
-not the ledger index, and never recovers temporaries or renames files. Readers
-accept a single `legacy.json` or `decision-resolution.json` in the same item
-slot and validate it against the immutable decision. The writer still writes
-`legacy.json`. There is no `--apply` option.
+Keep the project paused and do not restore or edit its data directory during
+these commands. The preview takes the work-item record lock if it exists,
+without waiting or creating it. If a writer creates an absent lock during the
+scan, the preview refuses the result. Both modes read authoritative files, not
+the ledger index, and never recover temporaries. `--apply` checks readiness
+read-only, then recomputes the complete plan under storage maintenance locks
+(which may initialize missing coordination locks). If the locked plan shows
+unresolved or corrupt records, or does not finish, nothing is renamed. A busy
+lock fails immediately; retry after active work has stopped.
 
 The JSON report gives `project`, `dry_run`, `scan_limit`, and counts for
-`resolved_open` (an open disposition, even if the item later closed),
+`resolved_open` (an open disposition even if the item later closed),
 `resolved_drop`, `explicit_no_work`, `unresolved`, and `ambiguous_or_corrupt`
-(invalid source events, item directories, or current legacy links). No event
-bodies or paths are printed. The default `--scan-limit` is 10,000 entries per
+(invalid source events, item directories, or current legacy links). It does not
+include event bodies or paths. `--scan-limit` defaults to 10,000 entries per
 pass over `decision-history/` and `work-items/`, including non-record entries;
-the store's file and per-item revision bounds still apply. `truncated` means
-an entry limit was exceeded. If `scan_complete` is false, the counts are
-partial and do not prove readiness.
+the store's file and per-item bounds still apply. If `scan_complete` is false,
+the counts are partial. If `truncated` is true, raise the limit and retry. Use
+`mizu_work_items_reconcile` to resolve unresolved events and repair or restore
+corrupt or ambiguous sources before applying.
 
-`ok: false` exits with status 1. Before upgrading, have the writer resolve
-unresolved events with `mizu_work_items_reconcile`, address corrupt or
-ambiguous sources, and rerun the preview. Increase `--scan-limit` if the scan
-was truncated. A busy lock fails immediately; retry after the writer has
-stopped. Cancelling or rerunning the preview leaves no state to clean up.
+Apply renames each eligible `legacy.json` to `decision-resolution.json` without
+replacing a file or changing the bytes. Readers validate either name against
+the immutable decision but reject two names in one item directory or an unsafe
+link. The reconciliation writer still uses `legacy.json` for new resolutions.
+The apply report includes `candidates` (legacy names in the plan),
+`already_current`, `renamed` (successful renames), and `converted` (renames
+verified by read-back and followed by directory sync where supported). Apply
+stops on the first per-item failure; `errors` identifies the stage and error
+class (and OS error number if available). `ok: false` exits with status 1; a
+failed verification or sync can leave `renamed` greater than `converted`.
+
+No rollback is needed after an interruption. Each item still has one atomic
+name, and readers accept a mix of converted and unconverted items. Run preview
+again to check readiness, then rerun apply: it counts valid current names as
+`already_current` and renames only those still using the old name. A successful
+retry with no remaining legacy names reports zero conversions.
 
 ## 人間からの提案 (Insight)
 

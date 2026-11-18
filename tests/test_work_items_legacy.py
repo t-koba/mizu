@@ -1,6 +1,7 @@
 """Synthetic legacy history only: explicit reconciliation never migrates decisions."""
 import concurrent.futures
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -8,10 +9,10 @@ import os
 from unittest.mock import patch
 
 from support import Fixture, forget_ledger
-from mizu import work_items as work_items_module
+from mizu import work_item_migration as migration, work_items as work_items_module
 from mizu.cli import main
 from mizu.errors import Denied, LimitExceeded
-from mizu.fs import PREVIEW_BYTES, canonical, lock
+from mizu.fs import PREVIEW_BYTES, canonical, held, lock, rename_exclusive, sync_dir
 from mizu.storage import audit as storage_audit
 from support import history_write_json as write_json
 
@@ -57,11 +58,22 @@ class LegacyWorkItemTests(Fixture):
     def current_sidecar(self, event_id):
         return self.sidecar(event_id).with_name("decision-resolution.json")
 
-    def migration_preview(self, *args):
+    def migration_cli(self, *args):
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main(["--config", str(self.file), "migrate-work-items", self.project.name, *args])
         return code, output.getvalue(), errors.getvalue()
+
+    def migration_apply(self, *args):
+        code, output, errors = self.migration_cli("--apply", *args)
+        self.assertEqual(errors, "")
+        report = json.loads(output)
+        self.assertNotIn("wi_", output)
+        self.assertNotIn("NEVER PRINT EVENT BODY", output)
+        self.assertNotIn(str(self.project.root), output)
+        self.assertFalse(report["dry_run"])
+        self.assertEqual(code, 0 if report["ok"] else 1)
+        return report
 
     def test_current_resolution_filename_preserves_open_cas_history(self):
         event_id, event, source = self.legacy()
@@ -102,6 +114,8 @@ class LegacyWorkItemTests(Fixture):
             self.store.get(f"wi_{event_id}")
 
     def test_coexisting_resolution_filenames_fail_closed(self):
+        other, _, _ = self.legacy()
+        self.resolve(other, outcome="drop", title=None)
         event_id, _, _ = self.legacy()
         self.resolve(event_id, outcome="drop", title=None)
         old, new = self.sidecar(event_id), self.current_sidecar(event_id)
@@ -115,10 +129,14 @@ class LegacyWorkItemTests(Fixture):
                 read()
         self.assertEqual(storage_audit(self.project)["work_item_events_skipped"], 1)
         self.project.set_control(paused=True)
-        code, output, _ = self.migration_preview()
+        code, output, _ = self.migration_cli()
         report = json.loads(output)
-        self.assertEqual((code, report["ambiguous_or_corrupt"], report["resolved_drop"]), (1, 1, 0))
-        self.assertEqual(old.read_bytes(), new.read_bytes())
+        self.assertEqual((code, report["ambiguous_or_corrupt"], report["resolved_drop"]), (1, 1, 1))
+        before = {p: p.read_bytes() for p in (old, new, self.sidecar(other))}
+        applied = self.migration_apply()
+        self.assertEqual((applied["ok"], applied["ambiguous_or_corrupt"], applied["converted"]), (False, 1, 0))
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+        self.assertFalse(self.current_sidecar(other).exists())
 
     def test_migration_preview_refuses_unresolved_without_creating_lock_or_recovering(self):
         _, _, source = self.legacy()
@@ -128,13 +146,17 @@ class LegacyWorkItemTests(Fixture):
         lock_path = self.project.root / "locks" / "insights.lock"
         self.assertFalse(lock_path.exists())
 
-        code, output, errors = self.migration_preview()
+        code, output, errors = self.migration_cli()
         report = json.loads(output)
         self.assertEqual((code, errors), (1, ""))
         self.assertTrue(report["dry_run"])
         self.assertTrue(report["scan_complete"])
         self.assertEqual(report["unresolved"], 1)
         self.assertIn("mizu_work_items_reconcile", report["action"])
+        self.assertFalse(lock_path.exists())
+        self.assertEqual(leftover.read_bytes(), b"uncommitted")
+        applied = self.migration_apply()
+        self.assertEqual((applied["ok"], applied["unresolved"], applied["converted"]), (False, 1, 0))
         self.assertFalse(lock_path.exists())
         self.assertEqual(leftover.read_bytes(), b"uncommitted")
 
@@ -149,12 +171,12 @@ class LegacyWorkItemTests(Fixture):
                                      work_item_intent="none")
         self.project.set_control(paused=True)
         with lock(self.project.root / "locks" / "insights.lock"):
-            code, _, errors = self.migration_preview()
+            code, _, errors = self.migration_cli()
             self.assertEqual(code, 75)
             self.assertIn("Already running", errors)
 
         with patch.object(work_items_module.WorkItems, "_read_decision_event") as read:
-            code, output, errors = self.migration_preview("--scan-limit", "2")
+            code, output, errors = self.migration_cli("--scan-limit", "2")
             read.assert_not_called()
         self.assertEqual((code, errors), (1, ""))
         self.assertLess(len(output.encode()), 1024)
@@ -166,13 +188,134 @@ class LegacyWorkItemTests(Fixture):
             return {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in self.project.root.rglob("*")}
 
         before = inventory()
-        code, output, errors = self.migration_preview("--scan-limit", "3")
+        code, output, errors = self.migration_cli("--scan-limit", "3")
         self.assertEqual((code, errors), (0, ""))
         report = json.loads(output)
         self.assertEqual([report[name] for name in ("resolved_open", "resolved_drop", "explicit_no_work",
                                                     "unresolved", "ambiguous_or_corrupt")], [1, 1, 1, 0, 0])
         self.assertFalse(report["truncated"])
         self.assertEqual(inventory(), before)
+
+        # Exhaust the work-items bound after already validating the legacy
+        # candidates. A partial plan must still authorize no renames.
+        for i in range(2):
+            (self.sidecar(opened).parent.parent / f"wi_{10 + i:032x}").mkdir()
+        before = inventory()
+        applied = self.migration_apply("--scan-limit", "3")
+        self.assertEqual((applied["truncated"], applied["scan_complete"], applied["candidates"],
+                          applied["renamed"], applied["converted"]), (True, False, 1, 0, 0))
+        self.assertEqual(inventory(), before)
+
+    def test_apply_preserves_bytes_history_and_drop_coverage_and_retries(self):
+        opened, event, source = self.legacy()
+        dropped, _, drop_source = self.legacy(action="modify", id="synthetic-drop", body="NEVER PRINT EVENT BODY")
+        current = self.project.root / "decisions" / f"{event['id']}.json"
+        write_json(current, event)
+        item_id = f"wi_{opened}"
+        seed = self.resolve(opened)["work_item"]
+        doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+        self.resolve(dropped, expected_action="modify", outcome="drop", title=None)
+        already, _, _ = self.legacy(id="synthetic-already")
+        self.resolve(already, outcome="drop", title=None)
+        rename_exclusive(self.sidecar(already), self.current_sidecar(already))
+        proposal = self.project.insights.submit(source="worker", title="No work", body="Synthetic", base_snapshot=None)
+        self.project.insights.decide(proposal["id"], "accept", "No action", "", "run", expected_rev=1,
+                                     work_item_intent="none")
+        self.project.set_control(paused=True)
+
+        # Make the existing JSON deliberately noncanonical so a reserialization
+        # or even a byte-exact copy cannot pass the bytes/inode checks.
+        for event_id in (opened, dropped):
+            path = self.sidecar(event_id)
+            path.write_bytes((json.dumps(json.loads(path.read_bytes()), indent=2) + "\n").encode())
+        immutable = [source, drop_source, current, self.current_sidecar(already),
+                     *(p for p in self.sidecar(opened).parent.glob("*.json") if p != self.sidecar(opened))]
+
+        def identity(path):
+            info = path.stat()
+            return (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+        before = {p: (p.read_bytes(), identity(p)) for p in immutable}
+        record_lock = self.project.root / "locks" / "insights.lock"
+        lock_identity = identity(record_lock)
+        moved = {event_id: (self.sidecar(event_id).read_bytes(), identity(self.sidecar(event_id)))
+                 for event_id in (opened, dropped)}
+
+        def under_exclusion(old, new):
+            for name in ("workspace.lock", "publication.lock", "insights.lock"):
+                self.assertTrue(held(self.project.root / "locks" / name))
+            rename_exclusive(old, new)
+
+        with patch.object(migration, "rename_exclusive", side_effect=under_exclusion):
+            applied = self.migration_apply()
+        self.assertEqual([applied[key] for key in ("ok", "candidates", "renamed", "converted", "already_current",
+                                                  "resolved_open", "resolved_drop", "explicit_no_work")],
+                         [True, 2, 2, 2, 1, 1, 2, 1])
+        for event_id, expected in moved.items():
+            self.assertFalse(self.sidecar(event_id).exists())
+            new = self.current_sidecar(event_id)
+            self.assertEqual((new.read_bytes(), identity(new)), expected)
+        self.assertEqual({p: (p.read_bytes(), identity(p)) for p in before}, before)
+        self.assertEqual(identity(record_lock), lock_identity)
+
+        forget_ledger(self.project.root)
+        self.assertEqual(self.store.explain(item_id)["history"], [seed, doing])
+        self.assertTrue(self.store.page_open()["coverage_complete"])
+        self.assertTrue(self.store.is_drop_only(f"wi_{dropped}"))
+        with patch.object(migration, "rename_exclusive") as rename:
+            retry = self.migration_apply()
+        rename.assert_not_called()
+        self.assertEqual((retry["ok"], retry["converted"], retry["already_current"]), (True, 0, 3))
+        with self.assertRaisesRegex(Denied, "re-read"):
+            self.store.transition(item_id, expected_rev=1, status="open", actor="worker")
+        self.assertEqual(self.store.transition(item_id, expected_rev=2, status="open", actor="worker")["rev"], 3)
+
+    def test_apply_replans_under_quiescence(self):
+        opened, _, _ = self.legacy()
+        self.resolve(opened)
+        self.project.set_control(paused=True)
+        quiescent = migration.quiescent
+
+        @contextlib.contextmanager
+        def change_before_lock(project, **kwargs):
+            self.legacy(id="synthetic-unresolved")
+            with quiescent(project, **kwargs):
+                yield
+
+        with (patch.object(migration, "quiescent", side_effect=change_before_lock),
+              patch.object(migration, "rename_exclusive") as rename):
+            report = self.migration_apply()
+        rename.assert_not_called()
+        self.assertEqual((report["ok"], report["scan_complete"], report["unresolved"], report["converted"]),
+                         (False, True, 1, 0))
+        self.assertTrue(self.sidecar(opened).is_file())
+        self.assertFalse(self.current_sidecar(opened).exists())
+
+    def test_apply_stops_on_directory_sync_failure_and_retry_converges(self):
+        opened = [self.legacy(id=f"synthetic-{i}")[0] for i in range(3)]
+        records = {f"wi_{event_id}": self.resolve(event_id)["work_item"] for event_id in opened}
+        self.project.set_control(paused=True)
+        attempts = []
+
+        def fail_second_sync(directory):
+            attempts.append(directory)
+            if len(attempts) == 2:
+                raise OSError(errno.EIO, "simulated sync failure", directory)
+            sync_dir(directory)
+
+        with patch.object(migration, "sync_dir", side_effect=fail_second_sync):
+            report = self.migration_apply()
+        self.assertEqual((report["ok"], report["candidates"], report["renamed"], report["converted"]),
+                         (False, 3, 2, 1))
+        self.assertEqual(report["errors"], [{"stage": "sync_directory", "type": "OSError", "errno": errno.EIO}])
+        for event_id in opened:
+            old, new = self.sidecar(event_id), self.current_sidecar(event_id)
+            self.assertEqual((old.exists(), new.exists()), (old.parent not in attempts, old.parent in attempts))
+        forget_ledger(self.project.root)
+        self.assertEqual({item_id: self.store.get(item_id) for item_id in records}, records)
+        self.assertEqual(self.migration_cli()[0], 0)
+        retry = self.migration_apply()
+        self.assertEqual((retry["ok"], retry["converted"], retry["already_current"]), (True, 1, 2))
 
     def test_open_drop_coverage_audit_and_history_immutability(self):
         opened, event, path = self.legacy(reason="r" * 1400, body="NEVER COPY BODY")
@@ -397,6 +540,11 @@ class LegacyWorkItemTests(Fixture):
         forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_legacy()
+        self.project.set_control(paused=True)
+        applied = self.migration_apply()
+        self.assertEqual((applied["ok"], applied["ambiguous_or_corrupt"], applied["renamed"]), (False, 1, 0))
+        self.assertTrue(os.path.samefile(sidecar, outside))
+        self.assertFalse(self.current_sidecar(event_id).exists())
         outside.unlink()
         outside.write_text("uncommitted")
         self.hardlink(outside, sidecar.parent / ".new-abcdefgh")
@@ -428,7 +576,14 @@ class LegacyWorkItemTests(Fixture):
         forget_ledger(self.project.root)
         with self.assertRaises(Denied):
             self.store.page_open()
-        sidecar.unlink()
+        current = self.current_sidecar(event_id)
+        sidecar.rename(current)
+        self.project.set_control(paused=True)
+        applied = self.migration_apply()
+        self.assertEqual((applied["ok"], applied["ambiguous_or_corrupt"], applied["already_current"]), (False, 1, 0))
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(target.read_bytes(), content)
+        current.unlink()
         sidecar.parent.rmdir()
         target_dir = self.project.root / "other-directory"
         target_dir.mkdir()

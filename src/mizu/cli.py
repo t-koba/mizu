@@ -212,8 +212,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Move verified records under quiescence")
     from .work_item_migration import DEFAULT_SCAN_LIMIT
-    p = sub.add_parser("migrate-work-items", help="Preview legacy work-item conversion without writes")
+    p = sub.add_parser("migrate-work-items", help="Preview legacy work-item conversion; dry-run unless --apply")
     p.add_argument("project", help="Paused managed project name")
+    p.add_argument("--apply", action="store_true", help="Rename verified work-item resolutions under quiescence")
     p.add_argument("--scan-limit", type=int, default=DEFAULT_SCAN_LIMIT,
                    help=f"Entry limit per scanned directory (default: {DEFAULT_SCAN_LIMIT})")
     p = sub.add_parser("prune", help="Preview (or apply) retention of completed runs, inputs, artifacts, logs and web cache")
@@ -498,8 +499,8 @@ def _cmd_migrate_records(config, project, args):
 
 
 def _cmd_migrate_work_items(config, project, args):
-    from .work_item_migration import plan
-    return plan(project, scan_limit=args.scan_limit)
+    from .work_item_migration import apply, plan
+    return (apply if args.apply else plan)(project, scan_limit=args.scan_limit)
 
 
 def _cmd_publication_record(config, project, args):

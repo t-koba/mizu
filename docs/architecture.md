@@ -1265,6 +1265,18 @@ hash mismatches fail closed. Store Denied/LimitExceeded and local I/O/lock error
 retain their classifications. Cancellation releases the lock; no automatic retry
 or scheduling is added.
 
+The host-only `mizu migrate-work-items` defaults to a bounded, read-only
+readiness scan. `--apply` repeats the complete scan with snapshot-GC exclusions
+and the same insights lock as the reconciliation writer. Unresolved, corrupt,
+or incompletely scanned sources block conversion. For each validated legacy
+sidecar, apply uses the native exclusive rename, checks the new file's bytes
+and the absence of the old name, then syncs the item directory where supported.
+It never rewrites the seed, revisions, or decision records; drop-only coverage
+and explicit no-work decisions are unchanged. Renames are atomic per item, not
+across the batch. Apply stops on the first failure and reports the completed
+counts without record paths or contents. Both names remain readable in separate
+items, so a retry can count valid current names and continue with old names.
+
 `page_open`, `get`, and CAS transitions resolve open legacy seeds through that
 validated sidecar without changing decision history. Open resolutions replay
 normal revision history; drop resolutions count as covered but are never open
