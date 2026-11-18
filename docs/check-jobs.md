@@ -164,9 +164,11 @@ refused, failed or source-mismatched result cannot authorize completion.
 For a bounded wait inside the current unit, add `wait_seconds=<positive integer>`
 to `action=result`. The call returns as soon as the job is terminal or the bound
 elapses, with the same result output; without it, `result` still returns
-immediately. The bound is capped by `limits.maximum_wait_seconds` and the run's
-remaining deadline, never holds the check-jobs lock and does not end the unit or
-release its model slot. This is the supported in-unit wait instead of a sandbox
+immediately. The bound is capped by `limits.maximum_wait_seconds`, the adapter
+reply window `limits.model_request_seconds` (so the tool replies before the
+bridge deadline, whose own margin sits on top of that window) and the run's
+remaining deadline; it never holds the check-jobs lock and does not end the unit
+or release its model slot. This is the supported in-unit wait instead of a sandbox
 `sleep`. To release the slot and wake later, finish with
 `outcome=wait, wait_for_check=<id>` instead.
 

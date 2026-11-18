@@ -224,6 +224,55 @@ class JobTests(Fixture):
         self.assertEqual(output['status'], 'queued')
         self.assertLess(elapsed, 0.75)
 
+    def test_result_wait_is_capped_by_model_request_window(self):
+        # The in-unit wait must also fit inside the adapter reply window: the
+        # bridge adds its own margin on top of model_request_seconds, so a
+        # longer wait would lose the reply even though the unit deadline is far
+        # away. The job is never run, so the wait always reaches its cap.
+        self.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits,
+                                       model_request_seconds=1,
+                                       maximum_wait_seconds=60))
+        self.project.config = self.config
+        ctx, job = self.submit()
+        ctx.deadline = time.monotonic() + 30
+        started = time.monotonic()
+        output = check_jobs.result(ctx, job['id'], wait_seconds=8)
+        elapsed = time.monotonic() - started
+        self.assertIn(output['status'], ('queued', 'running'))
+        # Roughly the one-second model-request window, not the eight-second
+        # requested wait; tolerance keeps the timing assertion non-flaky.
+        self.assertGreaterEqual(elapsed, 0.4)
+        self.assertLess(elapsed, 2)
+
+    def test_result_wait_replies_before_bridge_deadline(self):
+        from mizu.bridge import Bridge
+        from mizu.fs import read_json
+        from mizu.mcp_proxy import forward
+
+        # Reproduce the bridged path: a one-second model-request window gives
+        # the bridge a six-second absolute reply budget. A check-job result is
+        # not a joined operation, so the bridge deadline applies. Before the
+        # fix the eight-second wait overran that budget and the caller got
+        # 'Bridge deadline exceeded'; now it must get a normal result.
+        self.config = dataclasses.replace(self.config,
+            limits=dataclasses.replace(self.config.limits, model_request_seconds=1))
+        self.project.config = self.config
+        ctx, job = self.submit()
+        ctx.deadline = time.monotonic() + 30
+
+        def handle(operation, arguments):
+            return check_jobs.result(ctx, job['id'], wait_seconds=8)
+
+        with Bridge(handle, [], timeout=1) as bridge:
+            config = read_json(bridge.config_file)
+            self.assertEqual(config['joined_operations'], [])
+            started = time.monotonic()
+            output = forward(config, 'check_job_result', {})
+            elapsed = time.monotonic() - started
+        self.assertEqual(output['status'], 'queued')
+        self.assertLess(elapsed, 5)
+
     def test_detached_shared_job_cannot_escape_evidence_directory(self):
         ctx, job = self.submit()
         directory = check_jobs.root(self.project) / job['id']

@@ -1216,10 +1216,15 @@ def _await_terminal(context, job_id, wait_seconds):
     The runner writes job state under check-jobs.lock, so never sleep while
     holding it. Configuration and the run deadline shorten the effective
     bound: an in-unit wait must never outlive the unit that asked for it.
+    The adapter reply window (`limits.model_request_seconds`) also caps the
+    wait: the bridge adds its own margin on top of that value, so returning
+    within it lets the tool reply reach the caller before the bridge deadline.
     """
     from .check_job_index import TERMINAL
     start = time.monotonic()
-    cap = min(wait_seconds, context.config.limits.maximum_wait_seconds)
+    cap = min(wait_seconds,
+              context.config.limits.maximum_wait_seconds,
+              context.config.limits.model_request_seconds)
     if context.deadline is not None:
         cap = min(cap, max(0, context.deadline - start))
     deadline = start + cap

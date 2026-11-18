@@ -1149,7 +1149,9 @@ signal; it does not disable explicit check waits or other wake sources.
 
 For a short in-unit wait, `check_job action=result` accepts an optional
 `wait_seconds` bound that polls for a terminal result without ending the unit;
-it is capped by `limits.maximum_wait_seconds` and the run deadline
+it is capped by `limits.maximum_wait_seconds`, the adapter reply window
+`limits.model_request_seconds` (so the tool replies before the bridge deadline)
+and the run deadline
 (see [results and waiting](check-jobs.md#results-and-waiting)).
 
 Readiness/status polling has no side effects. After locked admission and prompt
