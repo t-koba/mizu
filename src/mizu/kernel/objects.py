@@ -141,6 +141,7 @@ class Objects:
                   "fields": values, "author": actor, "actor": actor, "transition": None,
                   "created_at": stamp, "updated_at": stamp}
         with self._locked():
+            self._check_refs(kind, values)
             self._publish(kind, record, event=kind.created_event, previous_state=None)
         return record
 
@@ -210,6 +211,35 @@ class Objects:
         return rows
 
     # -- internals ----------------------------------------------------------------------------
+    def _check_refs(self, kind: Kind, values: Mapping[str, Any]) -> None:
+        """Refs with declared kinds must name an existing object of one of them.
+
+        Reads use the bounded paths above; a missing, wrong-kind or corrupt
+        target is denied before anything is published.
+        """
+        for name, field in kind.fields.items():
+            if name not in values:
+                continue
+            spec = field.item if field.type == "list" else field
+            if spec is None or spec.type != "ref" or not spec.kinds:
+                continue
+            ids = values[name] if field.type == "list" else (values[name],)
+            for object_id in ids:
+                found = False
+                for target_kind in spec.kinds:
+                    if not self.revisions(target_kind, object_id):
+                        continue
+                    try:
+                        target = self.read(target_kind, object_id)
+                    except ValueError as exc:
+                        raise Denied(f"field {name} references a corrupt object") from exc
+                    if (isinstance(target, Mapping) and target.get("kind") == target_kind
+                            and target.get("id") == object_id):
+                        found = True
+                        break
+                if not found:
+                    raise Denied(f"field {name} must reference an existing object of: {', '.join(spec.kinds)}")
+
     @staticmethod
     def _fields(kind: Kind, fields: Mapping[str, Any], *, allowed: set) -> dict:
         if not isinstance(fields, Mapping):

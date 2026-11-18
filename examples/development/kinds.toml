@@ -78,12 +78,12 @@ by = ["author"]
 fields = ["reason"]
 
 # The insight/proposal lifecycle and its separate, immutable decisions.
-# An insight is submitted by a configured role (or the operator), names the
-# addressed holder in `holder` (the addressee) and may name an `urgency`
-# ("low", "normal", "high", or "none" for explicit no-urgency; omission also
-# means none). Only the addressed holder may decide. Only the author may revise
-# (which makes the insight pending again at a new revision) or withdraw.
-# A deferral may carry an aware revisit instant, fired once as an event.
+# An insight is submitted by a configured role (or the operator) and names the
+# addressed holder in `holder` (the addressee). `urgency` is a bounded string;
+# the kernel does not define or enforce a vocabulary for it. Only the addressed
+# holder may decide. Only the author may revise (which makes the insight pending
+# again at a new revision) or withdraw. A deferral may carry an aware revisit
+# instant, fired once as an event.
 [kinds.insight]
 states = ["pending", "accepted", "modified", "deferred", "rejected", "withdrawn"]
 initial = "pending"
@@ -128,13 +128,13 @@ to = "withdrawn"
 by = ["author"]
 
 # A decision is a separate create-only record, never edited in place. The host
-# writes it after the addressed holder's authorized transition above; the
-# operator may also write one where the workflow allows. It names the exact
-# insight object and the revision that was decided, so a later revision needs a
-# new decision. `action` is one of accept/modify/defer/reject; `reason` is
-# required, and an accept/modify may state an accepted `scope` while a defer may
-# state a `revisit` instant. The kernel bounds the fields; their vocabulary is
-# this declaration's policy, not kernel code.
+# writes it after the addressed holder's transition above; the operator may also
+# write one. `insight` must name an existing insight object: the kernel checks
+# the declared ref kind when the decision is created. `revision` is a positive
+# integer, `reason` is required and bounded, and `action` must be one of its
+# declared values: accept/modify/defer/reject. `scope` and `revisit` are bounded
+# but otherwise unconstrained; their meaning is this declaration's policy, not
+# kernel code.
 [kinds.decision]
 states = ["recorded"]
 initial = "recorded"
@@ -142,7 +142,7 @@ create = ["host", "operator"]
 created_event = "decision.recorded"
 fields.insight = {type = "ref", kinds = ["insight"], required = true}
 fields.revision = {type = "integer", min = 1, required = true}
-fields.action = {type = "string", max = 32, required = true}
+fields.action = {type = "string", max = 32, required = true, values = ["accept", "modify", "defer", "reject"]}
 fields.reason = {type = "string", max = 8192, required = true}
 fields.scope = {type = "string", max = 65536}
 fields.revisit = {type = "instant", event = "decision.revisit"}

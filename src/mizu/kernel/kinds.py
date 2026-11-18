@@ -80,6 +80,7 @@ class Field:
     max: int | None = None
     min: int | None = None
     kinds: tuple[str, ...] = ()
+    values: tuple[str, ...] = ()
     item: "Field | None" = None
     max_items: int = 0
     event: str | None = None
@@ -90,6 +91,8 @@ class Field:
         if self.type == "string":
             if not isinstance(value, str) or len(value) > (self.max or STRING_MAX):
                 raise Denied(f"{where} must be a string of at most {self.max or STRING_MAX} characters")
+            if self.values and value not in self.values:
+                raise Denied(f"{where} must be one of {', '.join(self.values)}")
         elif self.type == "integer":
             if (type(value) is not int or (self.min is not None and value < self.min)
                     or (self.max is not None and value > self.max)):
@@ -169,37 +172,41 @@ class Kind:
 
 
 def _field(name: str, raw: Any, where: str, *, nested: bool = False) -> Field:
-    _keys(raw, {"type", "required", "max", "min", "kinds", "item", "max_items", "event"}, where)
+    _keys(raw, {"type", "required", "max", "min", "kinds", "values", "item", "max_items", "event"}, where)
     kind = raw.get("type")
     if kind not in TYPES or (nested and kind == "list"):
         raise ConfigError(f"{where}.type must be one of {', '.join(TYPES)}")
     required = raw.get("required", False)
     if type(required) is not bool:
         raise ConfigError(f"{where}.required must be a boolean")
-    values: dict[str, Any] = {"name": name, "type": kind, "required": required}
+    spec: dict[str, Any] = {"name": name, "type": kind, "required": required}
     if "max" in raw:
-        values["max"] = _bound(raw["max"], f"{where}.max", -INTEGER_LIMIT if kind == "integer" else 1,
-                               INTEGER_LIMIT if kind == "integer" else STRING_MAX)
+        spec["max"] = _bound(raw["max"], f"{where}.max", -INTEGER_LIMIT if kind == "integer" else 1,
+                              INTEGER_LIMIT if kind == "integer" else STRING_MAX)
     if "min" in raw:
         if kind != "integer":
             raise ConfigError(f"{where}.min applies to integers only")
-        values["min"] = _bound(raw["min"], f"{where}.min", -INTEGER_LIMIT, INTEGER_LIMIT)
+        spec["min"] = _bound(raw["min"], f"{where}.min", -INTEGER_LIMIT, INTEGER_LIMIT)
     if "kinds" in raw:
         if kind != "ref":
             raise ConfigError(f"{where}.kinds applies to refs only")
-        values["kinds"] = _names(raw["kinds"], f"{where}.kinds")
+        spec["kinds"] = _names(raw["kinds"], f"{where}.kinds")
+    if "values" in raw:
+        if kind != "string":
+            raise ConfigError(f"{where}.values applies to strings only")
+        spec["values"] = _names(raw["values"], f"{where}.values")
     if "event" in raw:
         if kind != "instant":
             raise ConfigError(f"{where}.event applies to instants only")
-        values["event"] = _name(raw["event"], f"{where}.event", EVENT)
+        spec["event"] = _name(raw["event"], f"{where}.event", EVENT)
     if kind == "list":
         if "item" not in raw or "max_items" not in raw:
             raise ConfigError(f"{where} needs item and max_items")
-        values["item"] = _field(name, raw["item"], f"{where}.item", nested=True)
-        values["max_items"] = _bound(raw["max_items"], f"{where}.max_items", 1, LIST_MAX)
+        spec["item"] = _field(name, raw["item"], f"{where}.item", nested=True)
+        spec["max_items"] = _bound(raw["max_items"], f"{where}.max_items", 1, LIST_MAX)
     elif "item" in raw or "max_items" in raw:
         raise ConfigError(f"{where}: item and max_items apply to lists only")
-    return Field(**values)
+    return Field(**spec)
 
 
 def _requirement(raw: Any, where: str, fields: Mapping[str, Field], states_of) -> Requirement:

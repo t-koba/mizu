@@ -66,6 +66,7 @@ initial = "open"
 create = ["role:writer", "operator"]       # principals allowed to create
 fields.title = {type = "string", max = 200, required = true}
 fields.body = {type = "string", max = 65536}
+fields.status = {type = "string", values = ["open", "closed"]}
 fields.evidence = {type = "ref", kinds = ["check"]}
 fields.due = {type = "instant", event = "note.due"}
 
@@ -80,10 +81,16 @@ emits = "note.closed"                       # default: "<kind>.<name>"
 ```
 
 - `states` is a non-empty list of names; `initial` is one of them.
-- Field types: `string` (with `max`), `integer` (with `min`/`max`),
-  `boolean`, `instant` (aware ISO time), `ref` (an object id, optionally
-  restricted to `kinds`), `list` of one of these (with `max_items`), and
-  `principal`. `required` fields must be present at creation.
+- Field types: `string` (with `max`, and optionally `values`, a non-empty list
+  of unique lowercase names; every stored value must be one of them), `integer` (with
+  `min`/`max`), `boolean`, `instant` (aware ISO time), `ref` (an object id,
+  optionally restricted to `kinds`), `list` of one of these (with `max_items`),
+  and `principal`. `required` fields must be present at creation. An option
+  that does not apply to a field's type refuses the configuration.
+- On creation, a `ref` field declaring `kinds` must name an existing object of
+  one of those kinds; a missing, wrong-kind or corrupt target is denied. This
+  check applies to creation only; transition requirements are evaluated when a
+  transition is requested, as described below.
 - A transition names the states it leaves (`from`, or `["*"]`), the state it
   enters (`to`), the principals that may make it (`by`; `author` and
   `holder` resolve against the object), the fields it may set, its

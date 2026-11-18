@@ -31,6 +31,7 @@ states = ["open", "closed"]
 initial = "open"
 create = ["role:alpha", "operator"]
 fields.title = {type = "string", max = 80, required = true}
+fields.priority = {type = "string", values = ["low", "high"]}
 fields.holder = {type = "principal"}
 fields.evidence = {type = "ref", kinds = ["check"]}
 fields.due = {type = "instant", event = "task.due"}
@@ -94,6 +95,25 @@ class Kernel(unittest.TestCase):
         self.assertEqual([e["name"] for e in self.log.pending("beta")["events"]],
                          ["task.created", "task.claim", "task.finished"])
         self.assertTrue((self.root / "wake" / "beta").exists())
+
+    def test_create_checks_declared_ref_kinds(self):
+        task = self.objects.create("task", {"title": "t"}, "role:alpha")
+        with self.assertRaisesRegex(Denied, "evidence"):
+            self.objects.create("task", {"title": "t", "evidence": "0" * 32}, "role:alpha")
+        with self.assertRaisesRegex(Denied, "evidence"):  # an existing object of another kind
+            self.objects.create("task", {"title": "t", "evidence": task["id"]}, "role:alpha")
+        check = self.objects.create("check", {"snapshot": "s"}, "host")
+        made = self.objects.create("task", {"title": "t", "evidence": check["id"]}, "role:alpha")
+        self.assertEqual(made["fields"]["evidence"], check["id"])
+        (self.root / "objects" / "check" / check["id"] / "00000001.json").write_text("{", encoding="utf-8")
+        with self.assertRaises(Denied):  # a corrupt target is not a valid ref
+            self.objects.create("task", {"title": "t", "evidence": check["id"]}, "role:alpha")
+
+    def test_field_values_are_enforced(self):
+        self.objects.create("task", {"title": "t", "priority": "high"}, "role:alpha")
+        with self.assertRaisesRegex(Denied, "priority"):
+            self.objects.create("task", {"title": "t", "priority": "urgent"}, "role:alpha")
+        self.assertEqual(self.kinds["task"].fields["priority"].validate("low"), "low")
 
     def test_cursor_ack_and_paging(self):
         for index in range(5):
@@ -226,6 +246,18 @@ class Kernel(unittest.TestCase):
             {"x": {"states": ["a"], "initial": "a", "create": ["host"], "extra": 1}},
             {"x": {"states": ["a"], "initial": "a", "create": ["host"],
                    "fields": {"r": {"type": "ref", "kinds": ["missing"]}}}},
+            {"x": {"states": ["a"], "initial": "a", "create": ["host"],
+                   "fields": {"f": {"type": "string", "values": []}}}},
+            {"x": {"states": ["a"], "initial": "a", "create": ["host"],
+                   "fields": {"f": {"type": "string", "values": "a"}}}},
+            {"x": {"states": ["a"], "initial": "a", "create": ["host"],
+                   "fields": {"f": {"type": "string", "values": ["a", "a"]}}}},
+            {"x": {"states": ["a"], "initial": "a", "create": ["host"],
+                   "fields": {"f": {"type": "string", "values": ["A"]}}}},
+            {"x": {"states": ["a"], "initial": "a", "create": ["host"],
+                   "fields": {"f": {"type": "string", "values": [1]}}}},
+            {"x": {"states": ["a"], "initial": "a", "create": ["host"],
+                   "fields": {"f": {"type": "integer", "values": ["a"]}}}},
         ]
         for raw in bad:
             with self.subTest(raw=raw), self.assertRaises(ConfigError):
@@ -431,6 +463,21 @@ class ExampleInsightLifecycle(unittest.TestCase):
                                              "operator")["actor"], "operator")
         names = [self.log.read(seq)["name"] for seq in range(1, self.log.head() + 1)]
         self.assertEqual(names, ["insight.created", "insight.accept", "decision.recorded", "decision.recorded"])
+
+    def test_decision_creation_enforces_ref_kind_and_action_values(self):
+        insight = self.submit()
+        proposal = self.objects.create("proposal", {"title": "p", "body": "b",
+                                                    "holder": "role:reviewer"}, "operator")
+        record = {"insight": insight["id"], "revision": insight["rev"], "action": "accept", "reason": "ok"}
+        with self.assertRaises(Denied):
+            self.objects.create("decision", {**record, "insight": "0" * 32}, "host")
+        with self.assertRaises(Denied):  # a proposal is not an insight
+            self.objects.create("decision", {**record, "insight": proposal["id"]}, "host")
+        with self.assertRaisesRegex(Denied, "action"):
+            self.objects.create("decision", {**record, "action": "withdraw"}, "host")
+        made = self.objects.create("decision", {**record, "action": "modify"}, "host")
+        self.assertEqual(made["fields"]["action"], "modify")
+        self.assertEqual(self.log.head(), 3)  # insight, proposal and one decision
 
     def test_subscriptions_deliver_only_declared_matching_events(self):
         soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
