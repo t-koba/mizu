@@ -1742,7 +1742,8 @@ class PromptOrderTests(Fixture):
         self.assertEqual(list(json.loads(prompt_for(ctx)).keys()),
                          ["unit", "unit_tool_surface", "goal_digest", "admission", "external_check_wake",
                           "published_snapshot", "recent_snapshots",
-                          "workspace", "workspace_mode", "review_authority", "pending_insights",
+                          "workspace", "workspace_mode", "review_authority", "publication_state",
+                          "pending_insights",
                           "open_insights", "open_work_items", "operator_records",
                           "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
                           "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "research_state", "capture_limit", "ci_branch",
@@ -1753,6 +1754,7 @@ class PromptOrderTests(Fixture):
              "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "operator_records", "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",
              "research_state", "capture_limit", "workspace", "workspace_mode", "review_authority",
+             "publication_state",
              "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands",
              "ci_branch", "previous_report",
              "work_order", "run", "now", "timezone"])

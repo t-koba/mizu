@@ -589,6 +589,9 @@ def prompt_for(context: Context) -> str:
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        **reviews.prompt(context),
+                       "publication_state": reviews.publication_state(
+                           context, pending_insights=opening["pending_insights"],
+                           open_insights=opening["open_backlog"]),
                        "pending_insights": pending,
                        "open_insights": opening["open_backlog"],
                        "open_work_items": open_work_items,
@@ -707,6 +710,9 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        **reviews.prompt(context),
+                       "publication_state": reviews.publication_state(
+                           context, pending_insights=opening["pending_insights"],
+                           open_insights=opening["open_backlog"]),
                        "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,

@@ -10,8 +10,10 @@ from test_vcs_publish import (PublishFixture, PUSH_OK, adapter_settings, approve
                               current_digest, make_context, with_caps)
 from mizu import reviews, storage, storage_runs
 from mizu.config import load
-from mizu.errors import ConfigError, Denied
+from mizu.distribution import public_source_identity
+from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import read_json, write_json
+from mizu.publication import Publication
 from mizu.runtime import Engine, _on_change_observed
 from mizu.unit_prompts import prompt_for, prompt_delta_for
 
@@ -65,6 +67,76 @@ class ReviewVerdictTests(PublishFixture):
     def approvals(self):
         return reviews.require_approvals(
             make_context(self, self.config, self.publisher, review=False), current_digest(self))
+
+    def publication_state(self, pending=(), open_ids=()):
+        return reviews.publication_state(self.context(), pending_insights=pending,
+                                         open_insights={"ids": list(open_ids)})
+
+    def test_publication_state_limits_findings_to_exact_source_and_snapshot(self):
+        self.review("changes_requested")
+        source = self.project.snapshots.get()["id"]
+        pending = self.project.insights.submit(source="reviewer", base_snapshot=source,
+            title="Review finding", body="Material finding")
+        findings = [dict(pending, id=f"finding-{i}") for i in range(17)]
+        rows = [pending, pending, dict(pending, id="other-role", source="searcher"),
+                dict(pending, id="other-snapshot", base_snapshot="0" * 64), *findings]
+        self.assertEqual(self.publication_state(rows, [row["id"] for row in rows]), {
+            "cause": "changes_requested", "verdict": "changes_requested", "reviewer": "reviewer",
+            "finding_insights": [pending["id"], *(row["id"] for row in findings[:15])]})
+
+    def test_full_and_delta_prompts_project_publication_state(self):
+        self.review("changes_requested")
+        ctx = self.context()
+        finding = self.project.insights.submit(source="reviewer", base_snapshot=ctx.snapshot["id"],
+            title="Review finding", body="Material finding")
+        rejected = {"cause": "changes_requested", "verdict": "changes_requested",
+                    "reviewer": "reviewer", "finding_insights": [finding["id"]]}
+        published = {"cause": "published", "verdict": None, "reviewer": None, "finding_insights": []}
+
+        def check(expected):
+            # Delta did not re-offer the finding but it is still in its opening backlog.
+            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+                with self.subTest(builder=builder.__name__, cause=expected["cause"]):
+                    prompt = json.loads(builder(ctx, *args))
+                    self.assertEqual(prompt["publication_state"], expected)
+
+        def record(code_digest):
+            Publication.record_external(self.project.root, branch="main", published_sha="a" * 40,
+                code_digest=code_digest, approval=self.human_go["id"],
+                projection=public_source_identity(ctx.snapshot["files"]))
+
+        check(rejected)  # A local snapshot pin alone proves nothing about publication.
+        record("0" * 64)
+        check(rejected)
+        record(ctx.snapshot["code_digest"])
+        check(published)
+
+    def test_publication_state_falls_back_when_receipt_read_cannot_prove_publication(self):
+        self.review("changes_requested")
+        with patch.object(Publication, "list_receipts", side_effect=LimitExceeded("Bounded read")):
+            self.assertEqual(self.publication_state()["cause"], "changes_requested")
+        with patch.object(Publication, "list_receipts", return_value={
+                "publications": [{"code_digest": self.project.snapshots.get()["code_digest"]}],
+                "scan_stopped": True}):
+            self.assertEqual(self.publication_state()["cause"], "changes_requested")
+
+    def test_publication_state_uses_current_exact_approval_quorum(self):
+        self.add_reviewers()
+        self.select_quorum(("auditor", "reviewer", "inspector"), 2)
+        self.assertEqual(self.publication_state()["cause"], "awaiting_review")
+        self.review()
+        reviewer = self.project.root / "observed" / "reviewer.json"
+        auditor = self.project.root / "observed" / "auditor.json"
+        write_json(auditor, read_json(reviewer))
+        self.assertEqual(self.publication_state()["cause"], "awaiting_review")
+        auditor.write_text("not JSON")
+        self.assertEqual(self.publication_state()["cause"], "awaiting_review")
+        self.review("changes_requested", role="inspector")
+        self.assertEqual(self.publication_state()["cause"], "changes_requested")
+        self.review(role="auditor")
+        self.assertEqual(self.publication_state()["cause"], "approved_queued")
+        self.select_quorum((), 0)
+        self.assertEqual(self.publication_state()["cause"], "review_not_configured")
 
     def test_one_of_two_counts_only_selected_holders_in_config_order(self):
         self.add_reviewers()
@@ -422,6 +494,15 @@ class ReviewVerdictTests(PublishFixture):
                                   "review_verdict": "approve"})
         self.denied()
 
+    def test_publication_state_is_visible_to_roles_without_publish_grant(self):
+        self.select_quorum((), 0)
+        ctx = self.context("reviewer")
+        self.assertNotIn("vcs_publish", ctx.role.capabilities)
+        for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+            with self.subTest(builder=builder.__name__):
+                state = json.loads(builder(ctx, *args))["publication_state"]
+                self.assertEqual(state, {"cause": "review_not_configured", "verdict": None,
+                                         "reviewer": None, "finding_insights": []})
     def test_bounded_and_interrupted_runs_cannot_install_approval(self):
         def work(ctx, *_):
             ctx.bound_hit = "requests"

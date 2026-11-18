@@ -2895,6 +2895,25 @@ records are never review evidence. The run-local publication observation's
 order, including for singular selection. It is not part of publication identity
 or the publication receipt. This gate does not replace human approval,
 verification, projection checks or immutable publication dispatch safeguards.
+
+Full and delta unit prompts include the fixed field
+`publication_state = {cause, verdict, reviewer, finding_insights}`. It describes
+recorded evidence, not permission to publish or the status of a dispatch:
+
+| Cause | Meaning |
+|---|---|
+| `published` | A recorded publication receipt matches the exact code digest of the opening tree. The local `published_snapshot` pin is not publication evidence. An empty page, stopped scan, or read error falls back to review state. |
+| `changes_requested` | The approval threshold is unmet and a selected holder requested changes for this exact snapshot. |
+| `approved_queued` | Valid typed approvals for this exact snapshot meet the threshold; other publication gates still apply. This does not imply a dispatch has been queued. |
+| `awaiting_review` | Review is configured, but the current exact-snapshot receipts show neither enough approvals nor a changes request. |
+| `review_not_configured` | No publication review requirement is configured. |
+
+Only `changes_requested` names a `verdict` and `reviewer` (the first rejecting
+holder in configuration order). Its `finding_insights` contains up to 16
+unique IDs matched from insights already in the opening by exact reviewer
+role and reviewed snapshot. Findings are never invented; the other causes
+have null `verdict` and `reviewer` and an empty `finding_insights` list.
+
 `vcs_read` serves only `status`/`log`/`comments`/`proposals`/`acquire`/`artifacts`/`artifact`
 and the local `publications` listing of recorded publication receipts, which contacts
 no adapter and answers from the project's own durable evidence; the listing accepts

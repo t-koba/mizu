@@ -57,7 +57,8 @@ FIXED_KEYS = frozenset({
     "published_snapshot", "recent_snapshots", "snapshot_delta", "workspace", "workspace_mode",
     "operator_records", "decision_events", "decision_page", "decision_receipt_diagnostics",
     "decision_task", "work_item_events", "wait_events", "ci_wait_delivery", "obligations",
-    "capture_limit", "review_authority", "ci_branch", "external_check_wake", "run", "now", "timezone"})
+    "capture_limit", "review_authority", "publication_state", "ci_branch", "external_check_wake",
+    "run", "now", "timezone"})
 
 #: Row-fingerprint groups kept for session cursors, by the section that shows them.
 ROW_GROUPS = {"open_work_items": ("open_work_items",), "check_jobs": ("check_jobs", "shared_checks")}

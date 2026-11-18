@@ -14,6 +14,7 @@ import time
 from . import config
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, ID, loads_finite, safe_read, write_json
+from .publication import Publication
 
 RUN = re.compile(r"[0-9a-f]{32}\Z")
 VERDICTS = frozenset({"approve", "changes_requested"})
@@ -119,6 +120,64 @@ def cursor_review(project, config, expected_role: str, cursor, source):
     return receipt, review, saved
 
 
+def _current_reviews(context, holders):
+    """Yield validated current receipts in configuration order, never history."""
+    for holder in holders:
+        try:
+            cursor = loads_finite(safe_read(
+                context.project.root, f"observed/{holder}.json", RECORD_BYTES))
+            receipt, review, saved = cursor_review(
+                context.project, context.config, holder, cursor, context.snapshot)
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded):
+            continue
+        yield receipt, review, saved
+
+
+def publication_state(context, *, pending_insights, open_insights) -> dict:
+    """Describe recorded publication and review evidence without granting publication."""
+    state = {"cause": "awaiting_review", "verdict": None, "reviewer": None,
+             "finding_insights": []}
+    code_digest = context.snapshot["code_digest"]
+    if code_digest is not None:  # None would list receipts without a digest filter.
+        try:
+            page = Publication.list_receipts(context.project.root, code_digest=code_digest,
+                                             limit=1, policy=context.config.publication_evidence)
+            if page["publications"] and not page["scan_stopped"]:
+                return {**state, "cause": "published"}
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded):
+            pass  # An unavailable receipt is not proof of publication.
+
+    source_id = context.snapshot["id"]
+    holders, required = config.publication_review_requirement(context.config.publication)
+    if not holders or required < 1:
+        return {**state, "cause": "review_not_configured"}
+
+    approvals = set()
+    rejecting_holder = None
+    for _, review, _ in _current_reviews(context, holders):
+        if review["verdict"] == "approve":
+            approvals.add(review["role"])
+            if len(approvals) >= required:
+                return {**state, "cause": "approved_queued"}
+        elif rejecting_holder is None:
+            rejecting_holder = review["role"]
+    if rejecting_holder is None:
+        return state
+
+    # The backlog has only IDs; the opening's pending rows carry provenance.
+    open_ids = set(open_insights["ids"])
+    findings = {}
+    for row in pending_insights:
+        if row.get("source") == rejecting_holder and row.get("base_snapshot") == source_id:
+            finding_id = row.get("id")
+            if isinstance(finding_id, str) and finding_id in open_ids:
+                findings[finding_id] = None
+                if len(findings) == 16:
+                    break
+    return {"cause": "changes_requested", "verdict": "changes_requested",
+            "reviewer": rejecting_holder, "finding_insights": list(findings)}
+
+
 def require_approvals(context, code_digest) -> tuple[dict, ...]:
     """Consume selected holders' latest host-sealed exact-snapshot approvals.
 
@@ -131,19 +190,9 @@ def require_approvals(context, code_digest) -> tuple[dict, ...]:
     denied = "Publication requires an authorized typed approval for the exact snapshot"
     if not holders or required < 1:
         raise Denied(denied)
-    approvals = []
-    for holder in holders:
-        try:
-            cursor = loads_finite(safe_read(
-                context.project.root, f"observed/{holder}.json", RECORD_BYTES))
-            source = context.snapshot
-            receipt, review, saved = cursor_review(
-                context.project, context.config, holder, cursor, source)
-            if (review["verdict"] == "approve" and receipt["code_digest"] == code_digest
-                    and source["code_digest"] == code_digest):
-                approvals.append(saved)
-        except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded):
-            continue
+    approvals = tuple(saved for receipt, review, saved in _current_reviews(context, holders)
+                      if (review["verdict"] == "approve" and receipt["code_digest"] == code_digest
+                          and context.snapshot["code_digest"] == code_digest))
     if len(approvals) < required:
         raise Denied(denied)
-    return tuple(approvals)
+    return approvals
