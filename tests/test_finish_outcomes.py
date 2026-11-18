@@ -23,8 +23,9 @@ class FinishOutcomeTests(Fixture):
         self.assertEqual(fields["outcome"]["enum"], ["continue", "wait", "blocked", "done"])
         self.assertIn("wait_for_check", fields)
         self.assertIn("wait_seconds", fields)
-        for fragment in ("outcome=wait with wait_seconds=N", "outcome=wait with wait_for_check=<id>",
-                         "'done' on writable roles requires successful verification."):
+        for fragment in ("Use outcome=wait with wait_seconds=N to set a wake deadline",
+                         "Use outcome=wait with wait_for_check=<id> to resume",
+                         "For a writable role, outcome=done requires successful verification."):
             self.assertIn(fragment, finish["description"])
 
     def test_subset_removes_unavailable_outcomes_and_wait_fields(self):
@@ -38,7 +39,7 @@ class FinishOutcomeTests(Fixture):
         description = finish["description"]
         self.assertNotRegex(description, r"outcome=wait|a wait\b|wait_for_check|wait_seconds")
         self.assertIn("a blocked finish is accepted", description)
-        self.assertNotIn("'done' on writable roles", description)
+        self.assertNotIn("outcome=done", description)
 
     def test_invalid_outcomes_fail_configuration(self):
         original = self.file.read_text()

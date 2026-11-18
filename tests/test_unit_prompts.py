@@ -67,7 +67,8 @@ class UnitPromptSeamTests(Fixture):
                                "parent snapshot", "role-matching validated progress record",
                                "at least one selected true",
                                "`tool`, `code`, `decision`, or `insight` signal",
-                               "continuation shows that step in the published snapshot as the previous unit's",
+                               "continuation shows that step in the published snapshot as your proposal, not as an assignment",
+                               "Put the typed step in next_step, not in state.",
                                "a wait or blocked finish is accepted and the host",
                                "re-admits from that work",
                                "Unknown or truncated evidence refuses finish"):
