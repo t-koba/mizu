@@ -2530,6 +2530,9 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_waits.py', 'poll', 1, 1): (
         '32', 'format',
         'CI change observation / enrollment epoch is a 32-hex UUID-4 token'),
+    ('ci_waits.py', '_absence_generation', 1, 0): (
+        '32', 'format',
+        'CI absence revocation / advisory generation token is an exact 32-hex UUID string'),
     ('insights.py', '_validate_decision_projection', 1, 0): (
         '64', 'safety', 'decision projection / bound timestamp text before ISO-8601 parsing'),
     ('insights.py', '_validate_pending_projection', 1, 0): (
