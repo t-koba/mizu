@@ -333,6 +333,23 @@ class HolderOnlyTests(Fixture):
         self.assertEqual(shown['deferred_until'], at)
         self.assertEqual(store.get(item['id']), item)
 
+    def test_sole_holder_deadline_is_not_external_wait_liveness(self):
+        at = '2099-01-01T00:00:00+00:00'
+        deadline = self.block('deferred deadline liveness', {'kind': 'deadline', 'at': at})
+        role = self.config.roles['worker']
+        # A sole-holder deadline is deferred self-resolvable work, so it is not
+        # an external wait_liveness source even though time will pass its bound.
+        self.assertIs(_writer_wait_liveness(self.project, role), False)
+        # Its deferred form still reaches the holder's ready inventory.
+        ready_ids = [row['id'] for row in
+                     self.project.work_items.page_ready(role_name='worker')['items']]
+        self.assertIn(deadline['id'], ready_ids)
+        # A genuinely external wait for the same holder restores liveness.
+        question = stored_question_insight(self.project)
+        self.block('external insight liveness',
+                              {'kind': 'insight_decided', 'insight': question['id']})
+        self.assertIs(_writer_wait_liveness(self.project, role), True)
+
     def test_deadline_with_a_second_writer_stays_blocked(self):
         at = '2099-01-01T00:00:00+00:00'
         item = self.block('shared deadline', {'kind': 'deadline', 'at': at})

@@ -265,9 +265,12 @@ The host records `finish.wait_liveness` in the existing finish intent/result:
 `true` for an owned queued/running check, a pending external ledger wait, or a
 held CI wait with an exact publication/SHA dispatch request and no terminal
 evidence; `false` for proven absence/terminal/self-resolvable sources; `null`
-for unknown evidence. Future deadlines, pending dependencies, pending object or
-proposal waits, and code-change waits with another independently dispatched
-project writer remain external sources. Admission rechecks current liveness.
+for unknown evidence. Pending dependencies, pending object or proposal waits,
+future deadlines held by another party, and code-change waits with another
+independently dispatched project writer remain external sources. A holder-only
+future deadline is self-resolvable deferred work, not an external source: it
+stays in the holder's ready set as `deferred_until` and reports `false` here.
+Admission rechecks current liveness.
 Check discovery and the configured work-item prompt page bound the local reads;
 incomplete, ambiguous, corrupt or unreadable evidence cannot prove absence.
 A CI wait alone, including an unpublished snapshot without request evidence,
