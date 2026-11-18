@@ -147,7 +147,7 @@ class StorageAuditTests(Fixture):
         self.assertEqual(result["work_item_events_skipped"], 0)
         self.assertIn(f"snapshots/{snapshot['id']}.json", result["snapshots"])
         self.assertFalse((self.project.root / "snapshots" / f"{snapshot['id']}.json").exists())
-        self.assertTrue((item_dir / "legacy.json").is_file())
+        self.assertTrue((item_dir / "decision-resolution.json").is_file())
 
     def test_synthetic_open_legacy_sidecar_uses_item_reconstruction(self):
         event_id = f"{5:032x}"
@@ -184,10 +184,10 @@ class StorageAuditTests(Fixture):
         malformed_dir, _ = self.synthetic_drop(2)
         incomplete_dir, record = self.synthetic_drop(3)
         unexpected_dir, _ = self.synthetic_drop(4)
-        (malformed_dir / "legacy.json").write_bytes(b"{not-json")
+        (malformed_dir / "decision-resolution.json").write_bytes(b"{not-json")
         incomplete = dict(record)
         incomplete.pop("reason")
-        write_json(incomplete_dir / "legacy.json", incomplete)
+        write_json(incomplete_dir / "decision-resolution.json", incomplete)
         temporary = unexpected_dir / ".new-abcdefgh"
         temporary.write_bytes(b"synthetic interrupted append")
         (unexpected_dir / "2.json").write_bytes(b"{}")
