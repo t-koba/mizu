@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .config import FINISH_OUTCOMES, MAX_WAIT_SECONDS, Role
+from .config import FINISH_OUTCOMES, MAX_WAIT_SECONDS, Config, Role
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
 from .insights import QUESTION_RECORD_ROUTE
@@ -715,7 +715,8 @@ def operation_allowed(operation: str, capabilities) -> bool:
     return bool(gates & set(capabilities)) if gates is not None else operation in capabilities
 
 
-def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None) -> list[dict]:
+def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
+                     config: Config | None = None) -> list[dict]:
     operations = [name for name in capabilities if name not in MODIFIER_CAPABILITIES]
     operations += [name for name in STATE_READ_CAPABILITIES
                    if name not in capabilities and operation_allowed(name, capabilities)]
@@ -723,6 +724,8 @@ def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None)
     for name in operations:
         description, schema = (finish_definition(role.finish_outcomes)
                                if name == "finish" and role is not None else DEFINITIONS[name])
+        if config is not None and (statement := config.tool_effects.get(name)):
+            description += "\n\n" + statement
         tools.append({"name": "mizu_" + name, "operation": name,
                       "description": description, "inputSchema": schema})
     return tools

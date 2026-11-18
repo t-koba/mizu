@@ -225,7 +225,7 @@ def resolve_timezone(name: str):
         raise ConfigError(f"Unknown timezone: {name}") from exc
 
 
-def keys(data: dict, allowed: set[str], where: str) -> None:
+def keys(data: dict, allowed: set[str] | frozenset[str], where: str) -> None:
     if not isinstance(data, dict):
         raise ConfigError(f"{where} must be a table")
     unknown = set(data) - allowed
@@ -392,7 +392,7 @@ def _merge_into(base: dict, fragment: dict, origin: Path, origins: dict[str, Pat
 ROOT_KEYS = frozenset({
     "data_dir", "engines", "timezone", "limits", "sandbox", "profiles", "roles",
     "services", "editor",
-    "consult_role", "delegate_role", "web", "vcs", "materialize", "exclude",
+    "consult_role", "delegate_role", "web", "vcs", "materialize", "tool_effects", "exclude",
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
@@ -1511,6 +1511,7 @@ class Config:
     services: ServiceSettings = dataclasses.field(default_factory=ServiceSettings)
     editor: Editor = dataclasses.field(default_factory=Editor)
     completion_evidence: CompletionEvidence = dataclasses.field(default_factory=CompletionEvidence)
+    tool_effects: dict[str, str] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(self, "tzinfo", resolve_timezone(self.timezone))
@@ -2218,6 +2219,14 @@ def load(file: Path) -> Config:
     for k in ("timeout_seconds", "max_bytes"):
         number(mat[k], f"materialize.{k}", 1, 16777216)
     number(mat["diagnostic_bytes"], "materialize.diagnostic_bytes", 0, ADAPTER_DIAGNOSTIC_BYTES_MAX)
+    tool_effects = data.get("tool_effects", {})
+    keys(tool_effects, set(tool_effects), "tool_effects")
+    for name, statement in tool_effects.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigError("tool_effects keys must be nonempty strings")
+        if (not isinstance(statement, str) or not 1 <= len(statement) <= 1024
+                or any(unicodedata.category(char) == "Cc" for char in statement)):
+            raise ConfigError(f"tool_effects[{name!r}] must be a string of 1–1024 characters without controls")
     return Config(file, path_value(string(data.get("data_dir", "~/.local/state/mizu"), "data_dir"), file.parent),
                   environments, limits, sandbox, doctor_policy(data.get("doctor", {})),
                   profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
@@ -2233,4 +2242,5 @@ def load(file: Path) -> Config:
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})),
                   services=service_settings(data.get("services", {})),
                   editor=editor_settings(data.get("editor", {})),
-                  completion_evidence=completion_evidence_policy(data.get("completion_evidence", {}), roles))
+                  completion_evidence=completion_evidence_policy(data.get("completion_evidence", {}), roles),
+                  tool_effects=tool_effects)

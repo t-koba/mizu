@@ -421,6 +421,7 @@ continues and history is never reset.
 | `include` | Shared TOML fragments merged before validation; duplicate keys are errors (see below) |
 | `completion_evidence` | Versioned work-item done contract, inline evidence budget and default-empty reopening role allowlist (see above) |
 | `editor` | Operator-owned search policy captured in each immutable Editor export (see [Editor search](#editor-search)) |
+| `tool_effects` | Optional operator statements appended to [advertised tool descriptions](#tool-effect-statements) |
 
 The private evidence tree `private-validation/` holds receipts the product regenerates on demand and never commits (see [VALIDATION.md](VALIDATION.md)). A capture leaves that tree out, so a regenerated receipt never enters a published snapshot and never moves a tree's `code_digest`. The rule belongs to the product, so `exclude` cannot reintroduce it; a snapshot that already holds such a path stays readable.
 
@@ -2585,6 +2586,23 @@ Configures the operator-owned `[materialize]` adapter that warms already-mounted
 | `diagnostic_bytes` | `2048` | Maximum stderr tail shown on a configured program's nonzero exit (0–8192; `0` disables); labelled `external-untrusted` and model-visible |
 
 Only a normally exited nonzero adapter includes the bounded stderr excerpt; timeouts, output-limit and malformed protocol responses keep their existing generic errors. Stderr may include host-local paths or private data; set `diagnostic_bytes = 0` if it is not safe to send to the model.
+
+### Tool effect statements
+
+Use the optional root-level `[tool_effects]` table to tell roles what an
+adapter makes possible in this deployment. Keys are nonempty operation names
+without the `mizu_` prefix; unknown names have no effect.
+
+```toml
+[tool_effects]
+materialize = "The adapter can warm the read-only dependency cache for offline builds."
+```
+
+Each statement must be a string of 1–1024 characters without NUL or terminal
+controls (including tabs and line breaks); invalid settings fail config load.
+For a role offered the matching tool, Mizu appends the statement verbatim to its
+description after a blank line. The table defaults to empty. It only changes
+advertised descriptions, not tool availability, input schemas, or behavior.
 
 ## VCS (upstream sync, M1 step 5: grant-gated `sync` refresh plus daemon periodic fetch)
 
