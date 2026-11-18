@@ -343,13 +343,15 @@ def stage(args):
     sha = digest(canonical(manifest))
     name = f"{__version__}-{sha[:12]}-" + ("core" if args.core_only else "pi")
     release = args.prefix / "releases" / name
+    # Reap on both the reuse and fresh paths: main holds .install.lock around
+    # stage(), so no second stager in this prefix can race the cleanup.
+    mkdir(release.parent)
+    reap_abandoned_staging(release.parent)
     if release.exists():
         if release.is_symlink():
             raise Denied("Existing release must not be a symlink")
         verify_release(release.resolve(), expected_manifest=manifest)
     else:
-        mkdir(release.parent)
-        reap_abandoned_staging(release.parent)
         temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=release.parent))
         try:
             with stage_ownership(temporary), stage_signal_cleanup(temporary):

@@ -3015,6 +3015,46 @@ class InstallerStagingTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual((outside / "payload").read_text(encoding="utf-8"), "keep")
 
+    def test_reuse_reaps_abandoned_staging_without_restaging(self):
+        # Reaping belongs on the reuse path too: main holds .install.lock
+        # around stage(), so cleanup cannot race another stager in the prefix.
+        import argparse
+        manifest = {"a.py": {"sha256": "0" * 64, "executable": False}}
+        args = argparse.Namespace(core_only=True,
+                                  prefix=Path(tempfile.mkdtemp()),
+                                  bin_dir=Path(tempfile.mkdtemp()),
+                                  config=Path(tempfile.mkdtemp()) / "config.toml",
+                                  allow_install_scripts=False, stage_only=True,
+                                  activate=False, allow_mode_change=False)
+        for directory in (args.prefix, args.bin_dir, args.config.parent):
+            self.addCleanup(shutil.rmtree, directory)
+        with mock.patch.object(INSTALLER._platform, "is_root", return_value=False), \
+                mock.patch.object(INSTALLER, "source_manifest", return_value=manifest), \
+                mock.patch.object(INSTALLER, "source_files", return_value=[]) as source_files, \
+                mock.patch.object(INSTALLER, "command", side_effect=AssertionError("no command")):
+            first = INSTALLER.stage(args)
+            release = Path(first["release"])
+            before = {str(path.relative_to(release)): path.read_bytes()
+                      for path in release.rglob("*") if path.is_file()}
+            releases = release.parent
+            abandoned = releases / ".stage-abandoned"
+            owned = releases / ".stage-owned"
+            for directory in (abandoned, owned):
+                directory.mkdir()
+                (directory / "payload").write_text("x", encoding="utf-8")
+            source_files.reset_mock()
+            with INSTALLER.stage_ownership(owned):
+                second = INSTALLER.stage(args)
+        after = {str(path.relative_to(release)): path.read_bytes()
+                 for path in release.rglob("*") if path.is_file()}
+        self.assertEqual(second["status"], "staged")
+        self.assertEqual(second["release"], str(release))
+        source_files.assert_not_called()
+        self.assertFalse(abandoned.exists())
+        self.assertTrue(owned.exists())
+        self.assertEqual((owned / "payload").read_text(encoding="utf-8"), "x")
+        self.assertEqual(after, before)
+
     def test_reap_removes_abandoned_but_not_owned_staging_dirs(self):
         # An abandoned .stage-* dir is reaped; one with a live owner lock
         # (held by this process) survives, so reaping cannot race a stager.
