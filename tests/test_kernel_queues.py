@@ -314,10 +314,13 @@ class QueueStoreTests(unittest.TestCase):
         current = self.store.append("notes", {}, "role:alpha")
         self.assertFalse((self.root / "queues" / "notes" / "messages"
                           / f"{old['seq']:020d}.json").exists())
-        page = self.store.read("notes", "operator")
+        declared = copy.deepcopy(DECLARATIONS)
+        declared["notes"]["read"] = ["role:alpha", "operator", "role:beta"]
+        added_reader = QueueStore(self.root, parse_queues(declared))
+        page = added_reader.read("notes", "role:beta")
         self.assertEqual([row["seq"] for row in page["messages"]], [current["seq"]])
-        self.assertEqual(self.store.ack("notes", "operator", current["seq"]), current["seq"])
-        self.assertEqual(self.store.read("notes", "operator")["messages"], [])
+        self.assertEqual(added_reader.ack("notes", "role:beta", current["seq"]), current["seq"])
+        self.assertEqual(added_reader.read("notes", "role:beta")["messages"], [])
 
     def test_wildcard_reader_never_loses_a_message_to_retention(self):
         message = self.store.append("checks", {}, "host", now=OLD)
