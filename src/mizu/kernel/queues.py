@@ -390,8 +390,6 @@ class QueueStore:
                     and not any(isinstance(entry, Mapping) and entry.get("id") == message["id"]
                                 for entry in entries)):
                 raise Denied("Reference index is full")
-        for principal in self.queues[message["queue"]].wake:
-            identifier(principal[5:])
 
     def _due(self, message: Mapping, stamp: dt.datetime) -> bool:
         value = message.get("deliver_at")

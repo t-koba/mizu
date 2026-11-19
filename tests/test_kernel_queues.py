@@ -355,6 +355,18 @@ class QueueStoreTests(unittest.TestCase):
         self.assertFalse(intent.exists())
         self.assertEqual(self.store.append("notes", {}, "role:alpha")["seq"], MAX_REFS + 2)
 
+    def test_delayed_intent_for_removed_queue_recovers_without_wedging(self):
+        from mizu.fs import atomic_write, canonical
+        atomic = self.root / "queues" / "intent.json"
+        message = {"queue": "checks", "seq": 1, "id": "b" * 32, "author": "host",
+                   "at": "2026-01-01T00:00:00+00:00", "deliver_at": "2099-01-01T00:00:00+00:00",
+                   "refs": [], "body": {}}
+        atomic_write(atomic, canonical({"message": message}))
+        reduced = QueueStore(self.root, parse_queues({"notes": DECLARATIONS["notes"]}))
+        self.assertEqual(reduced.read("notes", "role:alpha")["messages"], [])
+        self.assertFalse(atomic.exists())
+        self.assertEqual(reduced.append("notes", {}, "role:alpha")["seq"], 1)
+
     def test_interrupted_append_is_completed_on_recovery(self):
         first = self.store.append("notes", {}, "role:alpha")
         message = dict(first)
