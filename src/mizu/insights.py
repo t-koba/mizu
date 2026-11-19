@@ -1701,6 +1701,7 @@ replacement insight without implying rejected substance.
                 write_json(self.root / "decision-history" / f"{uuid.uuid4().hex}.json", record, exclusive=True)
                 with self.ledger.write("insights", [f"d:{insight_id}"]):
                     write_json(self.root / "decisions" / f"{insight_id}.json", record)
+                self._shadow('decided', current, record)
         return record
 
     def _decision_token(self, role_name: str, payload: dict) -> str:

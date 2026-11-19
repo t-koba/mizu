@@ -8,6 +8,7 @@ from unittest.mock import patch
 import support  # noqa: F401  (puts src on the path)
 from mizu.config import load
 from mizu.errors import Denied
+from mizu.kernel_shadow import decision_object_id
 from mizu.project import initialize
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +77,33 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(self.project.kernel_events.head(), head)
         self.assertEqual(self.project.kernel_objects.revisions("decision", first["decision_key"]), [1])
+
+    def test_deferral_projects_state_instant_and_decision(self):
+        insight = self.submit("dd" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        decision = self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + moment,
+            "test-run", expected_rev=1)
+        decision_object = self.project.kernel_objects.read(
+            "decision", decision_object_id(decision))
+        self.assertEqual(decision_object["fields"]["action"], "defer")
+        self.assertEqual(decision_object["fields"]["revisit"], moment)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["state"], "deferred")
+        self.assertEqual(mirrored["fields"]["revisit_at"], moment)
+        self.assertEqual(self.project.kernel_objects.next_instant(), moment)
+
+    def test_withdrawal_projects_state_and_decision(self):
+        insight = self.submit("ee" * 16)
+        record = self.project.insights.withdraw(
+            insight["id"], source="writer", reason="No longer needed")
+        decision_object = self.project.kernel_objects.read(
+            "decision", decision_object_id(record))
+        self.assertEqual(decision_object["fields"]["action"], "withdraw")
+        self.assertEqual(decision_object["fields"]["reason"], "No longer needed")
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["state"], "withdrawn")
+        self.assertEqual(mirrored["actor"], "role:writer")
 
     def test_projection_failure_does_not_change_legacy_authority(self):
         with patch.object(self.project.kernel_objects, "create", side_effect=Denied("derived failure")):

@@ -12,9 +12,10 @@ import re
 from typing import Any, Mapping
 
 from .errors import Denied
+from .fs import canonical, digest
 
 _NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
-_ACTIONS = frozenset(("accept", "modify", "reject"))
+_ACTIONS = frozenset(("accept", "modify", "defer", "reject", "withdraw"))
 
 
 def principal(value: Any) -> str:
@@ -40,8 +41,24 @@ def insight_fields(record: Mapping[str, Any]) -> dict:
     return fields
 
 
+def instant_value(value: Any) -> str | None:
+    """Return an aware ISO instant from an exact value or a bounded revisit phrase."""
+    if not isinstance(value, str) or not value:
+        return None
+    for candidate in (value, *value.split()):
+        if len(candidate) > 64:
+            continue
+        try:
+            parsed = dt.datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        if parsed.tzinfo is not None:
+            return candidate
+    return None
+
+
 def decision_fields(record: Mapping[str, Any]) -> dict:
-    """Map one substantive decision to the declared kernel decision fields."""
+    """Map one recorded decision to the declared kernel decision fields."""
     if record.get("action") not in _ACTIONS:
         raise Denied("Action is not a kernel decision")
     fields = {"insight": record["id"], "revision": record["rev"],
@@ -49,15 +66,22 @@ def decision_fields(record: Mapping[str, Any]) -> dict:
     scope = record.get("scope")
     if scope is not None:
         fields["scope"] = scope
-    revisit = record.get("revisit")
-    if isinstance(revisit, str) and revisit:
-        try:
-            parsed = dt.datetime.fromisoformat(revisit)
-        except ValueError:
-            parsed = None
-        if parsed is not None and parsed.tzinfo is not None:
-            fields["revisit"] = revisit
+    revisit = instant_value(record.get("revisit"))
+    if revisit is not None:
+        fields["revisit"] = revisit
     return fields
+
+
+def decision_object_id(record: Mapping[str, Any]) -> str:
+    """Use the legacy key for one substantive decision, content for other events."""
+    if record.get("action") in ("accept", "modify", "reject"):
+        key = record.get("decision_key")
+        if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{32}", key):
+            return key
+        raise Denied("Invalid decision projection key")
+    return digest(canonical([record["id"], record["rev"], record["action"],
+                             record.get("reason"), record.get("revisit"),
+                             record.get("created_at")]))[:32]
 
 
 class KernelShadow:
@@ -90,17 +114,25 @@ class KernelShadow:
                                 actor=principal(record["source"]))
 
     def decided(self, insight: Mapping[str, Any], record: Mapping[str, Any]) -> None:
-        if record.get("action") not in _ACTIONS:
+        action = record.get("action")
+        if action not in _ACTIONS:
             return
         self.submitted(insight)
         current = self.objects.read("insight", insight["id"])
         if current["state"] == "pending":
-            self.objects.transition("insight", insight["id"], record["action"],
-                                    expected_rev=current["rev"], fields={},
-                                    actor=principal(insight.get("addressee", "writer")))
-        object_id = record.get("decision_key")
-        if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{32}", object_id):
-            raise Denied("Invalid decision projection id")
+            fields = {}
+            if action == "defer":
+                instant = instant_value(record.get("revisit"))
+                if instant is None:
+                    fields = None  # the decision still projects; the state needs an instant
+                else:
+                    fields["revisit_at"] = instant
+            if fields is not None:
+                actor = (principal(insight["source"]) if action == "withdraw"
+                         else principal(insight.get("addressee", "writer")))
+                self.objects.transition("insight", insight["id"], action,
+                                        expected_rev=current["rev"], fields=fields, actor=actor)
+        object_id = decision_object_id(record)
         fields = decision_fields(record)
         if self.objects.revisions("decision", object_id):
             existing = self.objects.read("decision", object_id)

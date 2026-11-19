@@ -674,7 +674,7 @@ class ExampleInsightLifecycle(unittest.TestCase):
         with self.assertRaises(Denied):  # a proposal is not an insight
             self.objects.create("decision", {**record, "insight": proposal["id"]}, "host")
         with self.assertRaisesRegex(Denied, "action"):
-            self.objects.create("decision", {**record, "action": "withdraw"}, "host")
+            self.objects.create("decision", {**record, "action": "unknown"}, "host")
         made = self.objects.create("decision", {**record, "action": "modify"}, "host")
         self.assertEqual(made["fields"]["action"], "modify")
         self.assertEqual(self.log.head(), 3)  # insight, proposal and one decision

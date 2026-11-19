@@ -142,7 +142,7 @@ create = ["host", "operator"]
 created_event = "decision.recorded"
 fields.insight = {type = "ref", kinds = ["insight"], required = true}
 fields.revision = {type = "integer", min = 1, required = true}
-fields.action = {type = "string", max = 32, required = true, values = ["accept", "modify", "defer", "reject"]}
+fields.action = {type = "string", max = 32, required = true, values = ["accept", "modify", "defer", "reject", "withdraw"]}
 fields.reason = {type = "string", max = 8192, required = true}
 fields.scope = {type = "string", max = 65536}
 fields.revisit = {type = "instant", event = "decision.revisit"}
