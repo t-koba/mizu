@@ -213,6 +213,29 @@ def _tombstone(value: dict) -> bytes:
     return canonical(record)
 
 
+def _verified_archive_row(db, key: str, value: dict) -> bool:
+    """Validate the newest archived row for a retained identity byte-for-byte.
+
+    Return True when a row exists and matches ``value`` (rev 0 tombstone record
+    and identity bytes, or a non-zero rev body via ``_body``). Return False when
+    there is no archive or no row. A mismatched existing row raises Denied so
+    both the read-only preflight and post-apply verification fail closed.
+    """
+    if db is None:
+        return False
+    archived = db.execute("SELECT rev, record, identity FROM insights "
+                          "WHERE id=? ORDER BY rev DESC LIMIT 1", (key,)).fetchone()
+    if archived is None:
+        return False
+    if archived[0] != 0:
+        _body(archived[1], key)
+        return True
+    if (archived[1] != _tombstone(value).decode()
+            or archived[2] != canonical(value).decode()):
+        raise Denied("Converted insight identity failed read-back verification")
+    return True
+
+
 def _live_identity_body(root: Path, key: str, has_inbox: bool) -> bool:
     """Validate an existing inbox body before treating it as a live candidate."""
     if not has_inbox:
@@ -292,18 +315,18 @@ def _import_identity(root: Path, db, path: Path, has_inbox: bool) -> None:
 def identity_conversion_state(root: Path) -> dict:
     """Read-only, no-recovery inventory of identities still needing conversion.
 
-    A live inbox body or any archived row is already represented; only an
-    identity whose body was removed before archival needs a tombstone row.
+    A live inbox body or a byte-valid archived row is already represented; only
+    an identity whose body was removed before archival needs a tombstone row.
+    A present but mismatched row fails closed instead of being treated as done.
     """
     entries = _identity_entries(root)
     has_inbox = _directory(root / "inbox")
     pending = []
     with _immutable_connect(root) as db:
-        for key, _, _ in entries:
+        for key, value, _ in entries:
             if _live_identity_body(root, key, has_inbox):
                 continue
-            row = db.execute("SELECT 1 FROM insights WHERE id=? LIMIT 1", (key,)).fetchone() if db else None
-            if row is None:
+            if not _verified_archive_row(db, key, value):
                 pending.append(key)
     return {"entries_examined": len(entries), "pending": pending}
 
@@ -336,16 +359,8 @@ def convert_identities(root: Path) -> dict:
             for key, value, _ in entries:
                 if _live_identity_body(root, key, has_inbox):
                     continue
-                archived = db.execute("SELECT rev, record, identity FROM insights "
-                                      "WHERE id=? ORDER BY rev DESC LIMIT 1", (key,)).fetchone()
-                if archived is None:
+                if not _verified_archive_row(db, key, value):
                     raise Denied("Converted insight identity is missing from the archive")
-                if archived[0] != 0:
-                    _body(archived[1], key)
-                    continue
-                if (archived[1] != _tombstone(value).decode()
-                        or archived[2] != canonical(value).decode()):
-                    raise Denied("Converted insight identity failed read-back verification")
     sync_dir(root)
     return report
 

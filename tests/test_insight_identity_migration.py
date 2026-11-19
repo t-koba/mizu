@@ -99,6 +99,45 @@ class InsightIdentityMigrationTests(Fixture):
         self.assertEqual(self.rows(), rows)
         self.assertEqual(first["converted"], 1)
 
+    def test_altered_existing_tombstone_refuses_before_any_backup(self):
+        item, path, _ = self.lost()
+        self.assertEqual(insight_identity_migration.apply(self.project)["converted"], 1)
+        raw_identity = path.read_bytes()
+        # Radiation confined to the archived tombstone's created_at bytes; the
+        # retained identity file is untouched.
+        tampered = canonical({"id": item["id"], "body_unavailable": True,
+                              "created_at": "2001-02-03T04:05:06+00:00"}).decode()
+        with contextlib.closing(sqlite3.connect(self.project.root / insight_archive.NAME)) as db, db:
+            db.execute("UPDATE insights SET record=? WHERE id=? AND rev=0", (tampered, item["id"]))
+        altered = self.rows()
+        with self.assertRaisesRegex(Denied, "read-back verification"):
+            insight_identity_migration.present(self.project)
+        report = insight_identity_migration.plan(self.project)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["errors"][0]["path"], "insight-ids")
+        backups = self.config.data / "migration-backups"
+        with self.assertRaises(Denied):
+            install_migration.convert(self.config, [self.project.root], self.root / "release")
+        self.assertFalse(backups.exists())
+        self.assertEqual(self.rows(), altered)
+        self.assertEqual(path.read_bytes(), raw_identity)
+
+    def test_valid_converted_tombstone_stays_a_clean_no_op(self):
+        _, path, _ = self.lost()
+        raw_identity = path.read_bytes()
+        first = insight_identity_migration.apply(self.project)
+        rows = self.rows()
+        self.assertFalse(insight_identity_migration.present(self.project))
+        report = insight_identity_migration.plan(self.project)
+        self.assertTrue(report["ok"])
+        self.assertEqual((report["entries_examined"], report["candidates"]), (1, 0))
+        self.assertEqual(report["records"], [])
+        second = insight_identity_migration.apply(self.project)
+        self.assertEqual((second["candidates"], second["converted"]), (0, 0))
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(path.read_bytes(), raw_identity)
+        self.assertEqual(first["converted"], 1)
+
     def test_install_registers_the_family_and_keeps_its_backup_receipt(self):
         item, path, _ = self.lost()
         original = path.read_bytes()
