@@ -38,3 +38,24 @@ run and `--apply` report `proposals`, `decisions` and `revisits` id lists.
 Without `--apply` the command is a dry run: it prints the planned ids and writes
 nothing. Malformed or ambiguous legacy input refuses the whole run before any
 append.
+
+## Stage-2 view
+
+`stage2_view.py` is an operator-run, read-only projection of the queues above.
+It calls `QueueStore.read` with the `operator` principal for `proposals`,
+`decisions`, `questions`, `answers` and `notices`, then joins decisions and
+revisits to proposals and answers to questions by message refs. It prints JSON
+with each proposal's decision and due delayed revisits, each question's answer,
+the notice bodies, and every queue's `head` and `delayed` flag. Reads use an
+explicit cursor, bounded pages and a page-count bound; the command never
+acknowledges or appends, so repeated reads at the same instant agree. A message
+that is not yet due stops its queue's read and is reported as `delayed` rather
+than skipped.
+
+```sh
+python3 examples/development/stage2_view.py config/config.toml --project NAME [--at 2099-01-01T00:00:00+00:00]
+```
+
+`--at` is an aware ISO instant used for delayed delivery; without it the kernel
+uses the current time. The reader imports no legacy insight or operator-record
+module and does not change runtime authority or routing.
