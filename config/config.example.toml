@@ -75,7 +75,7 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # Policy selects the review_verdict capability holder publication consumes.
 # Selection automatically confers the capability for existing configurations.
 # Any holder must be read-only with finish, without delegate or vcs_publish.
-# Each holder checks exact snapshot identity on_change, not just code digest.
+# Each holder checks the reviewed code digest on_change, so state-only republications need no new verdict.
 # Defaults grant/select nobody and block vcs_publish, even with human GO.
 # reviewer_role = ""
 # source_commit_timeout_seconds = 5
@@ -560,9 +560,9 @@ profile = "alternate"
 policy = ["policies/shared.md", "policies/reviewer.md"]
 workspace = "read"
 capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
-# on_change combines with interval_seconds. Ordinary roles compare code;
-# every review_verdict capability holder compares exact snapshot IDs so each
-# publication receives its own approval, including state-only snapshots.
+# on_change combines with interval_seconds. Roles compare the code digest;
+# a review_verdict capability holder's approval transfers to a same-code successor,
+# so only a changed code digest arms a new review.
 on_change = true
 interval_seconds = 900
 # A rejected finding returns for reconsideration even when the code is unchanged.

@@ -173,7 +173,7 @@ defense deletion to satisfy a corrupted test are the same failure class, so keep
 acceptance tests operator-owned or review the test diff before `done`; acceptance needs value assertions on fixed inputs, not mere execution -- test-file presence alone is not verification strength). When acceptance checks persisted effects, assert exact row/object counts and deny unknown persisted fields — prefer an independent readback over checker-echoed values, since value-only checks still pass on extra-record/extra-field effects.
 
 Publication through `vcs_publish` additionally requires the configured number
-of independent typed `approve` finish verdicts for the exact input snapshot,
+of independent typed `approve` finish verdicts for the reviewed code digest,
 authorized by the `review_verdict` capability, plus the existing operator-channel
 human GO for the branch and live code digest. Policy selects either a singular
 `publication.reviewer_role` (1-of-1) or distinct named `publication.reviewers`
@@ -185,9 +185,9 @@ selected role for compatibility; plural selections require existing explicit
 grants. Defaults grant/select nobody, and empty selection refuses publication
 even with valid human GO or an approval from an unselected holder. Missing,
 invalid, stale or rejecting evidence contributes zero, not a veto; only the
-selected holders' current exact-bound approvals count, without scan or fallback
+selected holders' current digest-bound approvals count, without scan or fallback
 to older receipts. Review findings, summary prose and worker-authored shared
-records never grant approval. Immutable review/run receipts and exact snapshot
+records never grant approval. Immutable review/run receipts and code-digest
 and captured-code checks prevent rebinding to a different candidate or holder.
 This proves review identity and binding, not the semantic correctness of a
 model's review; see the [review contract](configuration.md#vcs-publish-m2-step-1-vcs_readvcs_publish-behind-go-branch-approval).

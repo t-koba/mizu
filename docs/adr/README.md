@@ -147,12 +147,11 @@ and `shared_daily_requests` (0 disables) caps the shared total. Budget reports s
 so one project's usage no longer stops another under a smaller limit.
 
 ## ADR-023 — Change-gated observers
-Ordinary `on_change` observers compare `code_digest`, so state-only
-republications do not reschedule them and a no-action wake cannot loop model
-calls. Every `review_verdict` capability holder is an exact-snapshot exception:
-its observed cursor tracks the reviewed input separately from the immutable
-receipt and compares snapshot IDs, because approval cannot transfer to a
-same-code successor.
+`on_change` observers, including every `review_verdict` capability holder,
+compare `code_digest`, so state-only republications do not reschedule them and a
+no-action wake cannot loop model calls. A review holder's observed cursor keeps
+the reviewed input snapshot as evidence beside the immutable receipt, but its
+approval transfers to a same-code successor; a changed digest re-arms review.
 
 ## ADR-024 — Bounded run-evidence retention for bulky engine logs
 Operator-set `[limits]` day counts gzip raw run event logs at N days and drop them at M days

@@ -1253,13 +1253,14 @@ detected bound without declaring it:
 | **Publication** | `vcs_publish` and merge in `vcs_dispose` require a recorded human `GO <branch>` approval | always | No autonomous external publication: pushes, PRs, and merges never run without recorded human approval behind the exact digest; standing grants never substitute |
 | **CI request** | `vcs_request` requires the role capability and `[vcs] request_grant` | always | A request targets a completed publication receipt, never a branch head, and returned runs must bind to that commit. An explicit same-attempt request reconciles an unresolved dispatch through a non-dispatch adapter query; only durable `not_dispatched` permits a new attempt. Time never settles uncertainty. Read-only status/listing never settle it, and there is no automatic retry. The run's own record names each attempt, day, outcome and covered items, so CI activity is visible per unit |
 
-`on_change` is orthogonal to scheduling. Ordinary roles skip execution when the
-published `code_digest` is unchanged, so state-only republications do not
-reschedule them. Every `review_verdict` capability holder is an exact-snapshot
-exception: it compares snapshot IDs because each published input needs its own
-typed review, even when code is unchanged. Only a cursor validated against the
-exact typed review snapshot and its run receipt counts as reviewed; an observed
-attempt without a verdict remains pending. Any retry comes from the role's
+`on_change` is orthogonal to scheduling. Roles skip execution when the published
+`code_digest` is unchanged, so state-only republications do not reschedule them.
+Every `review_verdict` capability holder is likewise bound to the reviewed code
+digest: its typed approval carries to a same-code successor, so no new verdict is
+needed when only state changes. The reviewed input snapshot is retained as
+evidence, and only a cursor validated against its typed review and run receipt
+counts as reviewed for that digest; an observed attempt without a verdict remains
+pending. A changed code digest re-arms review. Any retry comes from the role's
 existing schedule or event recovery cadence, never an immediate internal loop.
 An unacknowledged decision event
 routed to the role (`decision_events` in `own` mode, or any-source matches with
@@ -2821,7 +2822,7 @@ exclusive selections:
   plural selection with `reviewer_role`.
 
 For plural selection, at least `required_approvals` distinct selected holders
-must approve the exact input snapshot and captured code digest. A missing,
+must approve the captured code digest of the reviewed input. A missing,
 malformed, stale, unauthorized or non-approve cursor contributes zero, not a
 veto: two approvals and one `changes_requested` satisfy 2-of-3. Copying another
 holder's cursor cannot contribute an approval. The gate evaluates only each
@@ -2885,12 +2886,13 @@ is made by the review gate.
 
 `vcs_publish` requires the configured number of independent typed approvals of
 its exact unit-opening snapshot **and** the unchanged captured code digest, in
-addition to the existing recorded human `GO <branch>`. Another snapshot with
-identical code does not inherit approval. Publish the candidate as a local
+addition to the existing recorded human `GO <branch>`. A state-only successor
+with identical code inherits the approval; a changed code digest does not.
+Publish the candidate as a local
 snapshot, let the configured holders assess it, then publish externally from a
 later writer unit without changing the tree. Worker-authored Insights/shared
 records are never review evidence. The run-local publication observation's
-`review` field is a list of all counted exact review receipts in configuration
+`review` field is a list of all counted typed review receipts in configuration
 order, including for singular selection. It is not part of publication identity
 or the publication receipt. This gate does not replace human approval,
 verification, projection checks or immutable publication dispatch safeguards.
@@ -2902,9 +2904,9 @@ recorded evidence, not permission to publish or the status of a dispatch:
 | Cause | Meaning |
 |---|---|
 | `published` | A validated recorded publication receipt matches the exact code digest of the opening tree, conclusive even when the receipt scan stopped. The local `published_snapshot` pin is not publication evidence. An empty page or read error falls back to review state. |
-| `changes_requested` | The approval threshold is unmet and a selected holder requested changes for this exact snapshot. |
-| `approved_queued` | Valid typed approvals for this exact snapshot meet the threshold; other publication gates still apply. This does not imply a dispatch has been queued. |
-| `awaiting_review` | Review is configured, but the current exact-snapshot receipts show neither enough approvals nor a changes request. |
+| `changes_requested` | The approval threshold is unmet and a selected holder requested changes for the current code digest. |
+| `approved_queued` | Valid typed approvals for the current code digest meet the threshold; other publication gates still apply. This does not imply a dispatch has been queued. |
+| `awaiting_review` | Review is configured, but the current digest-bound receipts show neither enough approvals nor a changes request. |
 | `review_not_configured` | No publication review requirement is configured. |
 
 Keyed receipt resolution for exact-snapshot waits reads a writer-owned index
