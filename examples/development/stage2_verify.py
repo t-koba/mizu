@@ -29,18 +29,19 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
 
 import convert_legacy  # noqa: E402  (example userland module)
-import stage2_view  # noqa: E402  (shared page bound)
+from mizu import queue_decision_delivery  # noqa: E402
 from mizu.config import load  # noqa: E402
 from mizu.errors import MizuError  # noqa: E402
 from mizu.fs import canonical  # noqa: E402
 from mizu.project import Project  # noqa: E402
+from mizu.queue_decision_delivery import AdapterError, read_complete  # noqa: E402
 
 QUEUES = convert_legacy.QUEUES
 READER = "operator"
-#: The latest representable instant, so every storable revisit is due.
-NOW = "9999-12-31T23:59:59.999999+00:00"
-PAGE = stage2_view.PAGE
-MAX_PAGES = stage2_view.MAX_PAGES
+#: Share the one bounded, fail-closed enumeration with decision parity.
+NOW = queue_decision_delivery.NOW
+PAGE = queue_decision_delivery.PAGE
+MAX_PAGES = queue_decision_delivery.MAX_PAGES
 FIELDS = ("queue", "id", "author", "body", "refs", "deliver_at")
 
 
@@ -89,30 +90,11 @@ def _index(messages, source: str, target: dict, queues=QUEUES) -> None:
 
 
 def _read_queue(store, name: str) -> list[dict]:
-    """Read every due message without touching the stored reader cursor."""
-    cap = MAX_PAGES * PAGE
-    messages: list[dict] = []
-    cursor = 0
-    for _ in range(MAX_PAGES):
-        page = store.read(name, READER, cursor=cursor, limit=PAGE, now=NOW)
-        head = page["head"]
-        if type(head) is not int or head < 0:
-            raise VerifyError(f"{name} reported a malformed queue head")
-        if head > cap:
-            raise VerifyError(f"{name} exceeds the {cap}-message page bound")
-        rows = page["messages"]
-        if not isinstance(rows, list):
-            raise VerifyError(f"{name} returned a malformed page")
-        messages.extend(rows)
-        if page["delayed"]:
-            raise VerifyError(f"{name} read is incomplete: a message is still delayed")
-        if not page["more"]:
-            return messages
-        following = page["next"]
-        if type(following) is not int or following <= cursor:
-            raise VerifyError(f"{name} pagination did not advance")
-        cursor = following
-    raise VerifyError(f"{name} exceeded {MAX_PAGES} pages")
+    """Thin gate wrapper: translate the shared reader's refusal into VerifyError."""
+    try:
+        return read_complete(store, name, READER)
+    except AdapterError as exc:
+        raise VerifyError(str(exc)) from exc
 
 
 def _differences(planned: dict, stored: dict) -> list[dict]:

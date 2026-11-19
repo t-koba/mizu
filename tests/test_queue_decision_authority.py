@@ -290,6 +290,66 @@ class QueueDecisionAuthority(unittest.TestCase):
         self.assertEqual(self.receipts(), [])
         self.assertFalse((self.project.root / "decision-receipts" / "worker").exists())
 
+    def test_complete_read_refuses_a_delayed_page_but_userland_keeps_prefix(self):
+        """One reader serves both modes: only the administrative one fails closed."""
+        store = self.project.kernel_queues
+        page = {"messages": [{"id": "f" * 32}], "head": 2,
+                "more": True, "next": 1, "delayed": True}
+        with mock.patch.object(store, "read", return_value=page):
+            with self.assertRaisesRegex(queue_decision_delivery.AdapterError,
+                                        "still delayed"):
+                queue_decision_delivery.read_complete(store, "decisions", "role:worker")
+            self.assertEqual(queue_decision_delivery._read_queue(
+                store, "decisions", "role:worker"), page["messages"])
+
+
+    def test_max_instant_revisit_before_accept_matches_legacy_page(self):
+        """A max-instant revisit must not hide the following ordinary accept."""
+        latest = "9999-12-31T23:59:59.999999+00:00"
+        defer_id, accept_id = "0" * 32, "1" * 32
+        snap = self.project.snapshots.get()["id"]
+        self.project.insights.submit(
+            source="worker", title="Max revisit proposal", body="Max revisit body",
+            base_snapshot=snap, insight_id=defer_id)
+        self.project.insights.decide(
+            defer_id, "defer", "Revisit at the latest instant", latest, "run-max",
+            expected_rev=1)
+        self.project.insights.submit(
+            source="worker", title="Accept after revisit", body="Accept after revisit body",
+            base_snapshot=snap, insight_id=accept_id,
+            kind="proposal", addressee="worker", urgency="high")
+        self.project.insights.decide(
+            accept_id, "accept", "Accepted after revisit", "", "run-max",
+            expected_rev=1, work_item_intent="none")
+
+        conversion = convert_legacy.apply(self.project)
+        verification = stage2_verify.verify(self.project)
+        self.assertTrue(verification["ok"])
+        rows = self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+        ids = [row["id"] for row in rows]
+        revisit_id = queue_decision_delivery.message_id("revisit", defer_id, 1)
+        accept_message = queue_decision_delivery.message_id("decision", accept_id, 1)
+        self.assertEqual(rows[ids.index(revisit_id)]["deliver_at"], latest)
+        self.assertLess(ids.index(revisit_id), ids.index(accept_message))
+
+        # The legacy page before activation carries the accept as a decision.
+        want = decision_delivery.pending(self.project, self.role)
+        self.assertEqual(decision_delivery.authority_kind(self.project.insights.root), None)
+        accept_event = next(event for event in want["events"]
+                            if event.get("insight") == accept_id)
+        self.assertEqual(accept_event["action"], "accept")
+
+        decision_reconciliation.activate_queue_decision_delivery(
+            self.project, conversion=conversion, verification=verification)
+        got = decision_delivery.pending(self.project, self.role)
+        self.assertEqual(canonical(got), canonical(want))
+        selected = next(event for event in got["events"] if event.get("insight") == accept_id)
+        self.assertEqual(selected["ack_token"], accept_event["ack_token"])
+        self.assertNotIn(
+            "insight.pending",
+            [event.get("kind") for event in got["events"] if event.get("insight") == accept_id])
+
 
 if __name__ == "__main__":
     unittest.main()

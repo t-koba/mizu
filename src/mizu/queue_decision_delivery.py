@@ -20,9 +20,13 @@ Trust and bounds: the role comes from the host's trusted configuration object.
 The only actor presented to a queue for reads is ``role:<role.name>``; receipt
 appends use the granted ``host`` principal. No argument can supply a principal.
 Reads start at cursor zero, use the kernel page bound and the stage-2
-page-count bound, and never move a durable cursor. A far-future ``now`` makes
-delayed revisits due; their messages are then skipped, because the ordinary
-message is the one current decision. Malformed or ambiguous converted metadata
+page-count bound, and never move a durable cursor. The separate complete
+administrative read uses the latest representable instant and refuses a page
+that still reports a delayed message, so parity reconstruction and the operator
+gate cannot silently compare a prefix. Delayed revisit messages are skipped as
+decision deliveries after that complete read, because the ordinary message is
+the one current decision; ordinary userland prefix consumers keep their
+head-of-line delivery semantics. Malformed or ambiguous converted metadata
 refuses the read instead of inventing a value.
 """
 from __future__ import annotations
@@ -44,8 +48,9 @@ QUEUES = (PROPOSALS, DECISIONS, RECEIPTS)
 #: The complete example conversion gate, including the record families still
 #: owned by other stage-2 slices until their own switches.
 CONVERSION_QUEUES = (PROPOSALS, DECISIONS, "questions", "answers", "notices", RECEIPTS)
-#: Later than any four-digit-year revisit, and aware so delivery is total.
-NOW = "9999-12-31T23:59:59+00:00"
+#: The latest instant the queue's aware ISO timestamps can represent, so every
+#: storable revisit is due for an administrative read.
+NOW = "9999-12-31T23:59:59.999999+00:00"
 PAGE = PAGE_MAX
 #: The shared stage-2 page-count bound; a larger queue refuses the read.
 MAX_PAGES = 64
@@ -131,8 +136,14 @@ def _body(message, queue: str) -> Mapping:
     return body
 
 
-def _read_queue(store, name: str, actor: str) -> list[dict]:
-    """Read the due prefix from sequence one without moving any cursor."""
+def _read_queue(store, name: str, actor: str, *, complete: bool = False) -> list[dict]:
+    """Read due pages from sequence one without moving any durable cursor.
+
+    The default returns the due prefix, which preserves the head-of-line
+    delivery semantics of userland revisit consumers. ``complete`` is the
+    administrative read: a page still reporting a delayed message refuses the
+    read instead of truncating it into a plausible prefix.
+    """
     cap = MAX_PAGES * PAGE
     messages: list[dict] = []
     cursor = 0
@@ -142,20 +153,29 @@ def _read_queue(store, name: str, actor: str) -> list[dict]:
         page = store.read(name, actor, cursor=cursor, limit=PAGE, now=NOW)
         head = page["head"]
         if type(head) is not int or head < 0:
-            raise AdapterError(f"{name} reported a malformed head")
+            raise AdapterError(f"{name} reported a malformed queue head")
         if head > cap:
             raise AdapterError(f"{name} exceeds the {cap}-message page bound")
         rows = page["messages"]
         if not isinstance(rows, list):
             raise AdapterError(f"{name} returned a malformed page")
         messages.extend(rows)
-        if page["delayed"] or not page["more"]:
+        if page["delayed"]:
+            if complete:
+                raise AdapterError(f"{name} read is incomplete: a message is still delayed")
+            return messages
+        if not page["more"]:
             return messages
         following = page["next"]
         if type(following) is not int or following <= cursor:
             raise AdapterError(f"{name} pagination did not advance")
         cursor = following
     raise AdapterError(f"{name} exceeded {MAX_PAGES} pages")
+
+
+def read_complete(store, name: str, actor: str) -> list[dict]:
+    """Enumerate one queue completely for administrative and parity reads."""
+    return _read_queue(store, name, actor, complete=True)
 
 
 class _ReceiptIndex:
@@ -369,7 +389,7 @@ def _candidates(project, name, wanted, sources, include_insights):
     """
     actor = f"role:{name}"
     store = project.kernel_queues
-    reads = {queue: _read_queue(store, queue, actor) for queue in QUEUES}
+    reads = {queue: read_complete(store, queue, actor) for queue in QUEUES}
     proposals: dict[str, dict] = {}
     for message in reads[PROPOSALS]:
         item = _proposal(project, message)
