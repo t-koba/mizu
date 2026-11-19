@@ -47,6 +47,8 @@ Operator notice writes are mirrored under the same boundary: for a deployment th
 
 Questions and answers stay behind the same boundary. For a deployment that declares the `question` and `answer` kinds, an insight submitted to the operator and a role record with the `operator_question` route each create one create-only kernel question object with a deterministic ID hashed from its authoritative identity (type, insight ID and revision, or type, record ID and computed digest); a revised insight question creates the object for its new revision. Its fields carry the declared subject shape, body and optional urgency; a role record without a representable body fails only the projection. Each accepted answer record creates a create-only answer object referencing that question, carrying the revision, action, body and the legacy record ID when it fits the declared reference bound. The answer object is written before the question transition: only `publish` moves a pending question to `answered` as `host`, other actions leave its state unchanged, and an exact retry leaves both objects unchanged. No legacy read consults kernel state. An answer to a missing question, a reused projection identity with different content, or any other write-site failure is a bounded diagnostic record, never a changed, blocked or replayed authoritative write.
 
+The read-only `KernelShadow.verify_notice`, `verify_question` and `verify_answer` helpers compare accepted envelopes with their declared objects and report bounded field, object and expected-state mismatches without writing or changing legacy authority.
+
 ## Invariants kept throughout
 
 Authentication of actors, append-only history, compare-and-swap, fail-closed

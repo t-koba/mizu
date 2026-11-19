@@ -162,6 +162,8 @@ class QuestionAnswerShadow(unittest.TestCase):
         answered = self.project.kernel_objects.read("question", question_id)
         self.assertEqual((answered["state"], answered["actor"]), ("answered", "host"))
         self.assertEqual(self.shadow().failures, [])
+        self.assertTrue(self.shadow().verify_question(record, computed)["ok"])
+        self.assertTrue(self.shadow().verify_answer(result["record"])["ok"])
 
     def test_exact_retries_leave_both_objects_unchanged(self):
         insight = self.insight_question()
@@ -297,6 +299,114 @@ class QuestionAnswerShadow(unittest.TestCase):
         self.assertEqual(self.project.kernel_objects.read("question", question_id)["state"],
                          "pending")
         self.assertEqual(self.shadow().failures, [])
+        # A non-publish answer has no expected question state to verify.
+        self.assertTrue(self.shadow().verify_answer(envelope, insight)["ok"])
+
+    def test_verify_question_reports_divergence_without_writing(self):
+        insight = self.insight_question(urgency="high")
+        question_id = insight_question_object_id(insight)
+        asked = self.ask(urgency="normal")
+        record, computed = asked["record"], asked["record_digest"]
+        record_id = record_question_object_id(record, computed)
+        head = self.project.kernel_events.head()
+        revisions = self.project.kernel_objects.revisions("question", question_id)
+        failures = list(self.shadow().failures)
+        stored = self.project.insights.read(insight["id"])
+        expected = {"kind": "question", "object": question_id, "ok": True,
+                    "mismatches": []}
+        self.assertEqual(self.shadow().verify_question(insight, insight=insight), expected)
+        self.assertTrue(self.shadow().verify_question(record, computed)["ok"])
+        self.assertEqual(self.shadow().verify_question(record, computed)["object"], record_id)
+
+        read = self.project.kernel_objects.read
+
+        def corrupted(kind, oid, *args, **kwargs):
+            current = read(kind, oid, *args, **kwargs)
+            if (kind, oid) == ("question", question_id):
+                return {**current, "fields": {**current["fields"], "body": "Tampered"}}
+            return current
+
+        with patch.object(self.project.kernel_objects, "read", side_effect=corrupted):
+            divergent = self.shadow().verify_question(insight, insight=insight)
+        self.assertFalse(divergent["ok"])
+        self.assertEqual(divergent["mismatches"], ["question field body differs"])
+        with patch.object(self.project.kernel_objects, "read", side_effect=Denied("gone")):
+            missing = self.shadow().verify_question(insight, insight=insight)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["mismatches"],
+                         [f"question object {question_id} unavailable: Denied"])
+
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertEqual(self.project.kernel_objects.revisions("question", question_id), revisions)
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["fields"]["body"],
+                         "Which behavior?")
+        self.assertEqual(self.shadow().failures, failures)
+        self.assertEqual(self.project.insights.read(insight["id"]), stored)
+
+    def test_verify_answer_reads_exact_projection_without_writing(self):
+        insight = self.insight_question()
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        result = self.answer(subject)
+        answer = result["record"]
+        answer_id = answer_object_id(answer)
+        head = self.project.kernel_events.head()
+        revisions = self.project.kernel_objects.revisions("answer", answer_id)
+        failures = list(self.shadow().failures)
+        stored = records.store(self.project).get(answer["id"])[0]
+        self.assertEqual(self.shadow().verify_answer(answer, insight), {
+            "kind": "answer", "object": answer_id, "ok": True, "mismatches": []})
+
+        read = self.project.kernel_objects.read
+
+        def corrupted(kind, oid, *args, **kwargs):
+            current = read(kind, oid, *args, **kwargs)
+            if (kind, oid) == ("answer", answer_id):
+                return {**current, "fields": {**current["fields"], "action": "withdraw"}}
+            return current
+
+        with patch.object(self.project.kernel_objects, "read", side_effect=corrupted):
+            divergent = self.shadow().verify_answer(answer, insight)
+        self.assertFalse(divergent["ok"])
+        self.assertEqual(divergent["mismatches"], ["answer field action differs"])
+        without_insight = self.shadow().verify_answer(answer)
+        self.assertFalse(without_insight["ok"])
+        self.assertEqual(without_insight["object"], answer_id)
+        self.assertEqual(without_insight["mismatches"], ["answer fields unavailable: Denied"])
+        with patch.object(self.project.kernel_objects, "read", side_effect=Denied("gone")):
+            missing = self.shadow().verify_answer(answer, insight)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["mismatches"],
+                         [f"answer object {answer_id} unavailable: Denied",
+                          f"question object {insight_question_object_id(insight)} unavailable: Denied"])
+
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertEqual(self.project.kernel_objects.revisions("answer", answer_id), revisions)
+        self.assertEqual(self.project.kernel_objects.read("answer", answer_id)["fields"]["action"],
+                         "publish")
+        self.assertEqual(self.shadow().failures, failures)
+        self.assertEqual(records.store(self.project).get(answer["id"])[0], stored)
+
+    def test_verify_answer_checks_published_question_state(self):
+        insight = self.insight_question()
+        question_id = insight_question_object_id(insight)
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        with patch.object(self.project.kernel_objects, "transition",
+                          side_effect=Denied("derived transition failure")):
+            result = self.answer(subject)
+        answer = result["record"]
+        head = self.project.kernel_events.head()
+        stored = records.store(self.project).get(answer["id"])[0]
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["state"],
+                         "pending")
+        report = self.shadow().verify_answer(answer, insight)
+        self.assertEqual(report["object"], answer_object_id(answer))
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["mismatches"], ["question state is pending, expected answered"])
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertEqual(records.store(self.project).get(answer["id"])[0], stored)
+
+        self.shadow().answered(answer, insight)
+        self.assertTrue(self.shadow().verify_answer(answer, insight)["ok"])
 
 
 if __name__ == "__main__":

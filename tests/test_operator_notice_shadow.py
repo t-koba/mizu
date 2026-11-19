@@ -8,6 +8,7 @@ from unittest.mock import patch
 import support  # noqa: F401  (puts src on the path)
 from mizu import operator_records as records
 from mizu.config import load
+from mizu.errors import Denied
 from mizu.fs import canonical, digest
 from mizu.kernel_shadow import notice_fields, notice_object_id
 from mizu.project import initialize
@@ -140,6 +141,50 @@ class OperatorNoticeShadow(unittest.TestCase):
                   "payload": {"body": "Notice", "target": {"id": "n" * 257}},
                   "subject": {}}
         self.assertNotIn("reference", notice_fields(record, "ab" * 32))
+
+    def test_verify_notice_reads_exact_projection_without_writing(self):
+        result = self.notice(subject=self.subject)
+        record, computed = result["record"], result["record_digest"]
+        object_id = notice_object_id(record)
+        head = self.project.kernel_events.head()
+        revisions = self.project.kernel_objects.revisions("notice", object_id)
+        failures = list(self.shadow().failures)
+        stored = records.store(self.project).get(record["id"])[0]
+
+        self.assertEqual(self.shadow().verify_notice(record, computed), {
+            "kind": "notice", "object": object_id, "ok": True, "mismatches": []})
+
+        read = self.project.kernel_objects.read
+
+        def corrupted(kind, oid, *args, **kwargs):
+            current = read(kind, oid, *args, **kwargs)
+            if (kind, oid) == ("notice", object_id):
+                return {**current, "fields": {**current["fields"], "body": "Tampered"}}
+            return current
+
+        def wrong_state(kind, oid, *args, **kwargs):
+            current = read(kind, oid, *args, **kwargs)
+            return {**current, "state": "withdrawn"} if (kind, oid) == ("notice", object_id) else current
+
+        with patch.object(self.project.kernel_objects, "read", side_effect=corrupted):
+            divergent = self.shadow().verify_notice(record, computed)
+        self.assertFalse(divergent["ok"])
+        self.assertEqual(divergent["mismatches"], ["notice field body differs"])
+        with patch.object(self.project.kernel_objects, "read", side_effect=wrong_state):
+            stale = self.shadow().verify_notice(record, computed)
+        self.assertEqual(stale["mismatches"], ["notice state is withdrawn, expected recorded"])
+        with patch.object(self.project.kernel_objects, "read", side_effect=Denied("gone")):
+            missing = self.shadow().verify_notice(record, computed)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["mismatches"],
+                         [f"notice object {object_id} unavailable: Denied"])
+
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertEqual(self.project.kernel_objects.revisions("notice", object_id), revisions)
+        self.assertEqual(self.project.kernel_objects.read("notice", object_id)["fields"],
+                         notice_fields(record, computed))
+        self.assertEqual(self.shadow().failures, failures)
+        self.assertEqual(records.store(self.project).get(record["id"])[0], stored)
 
 
 if __name__ == "__main__":

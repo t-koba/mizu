@@ -257,6 +257,120 @@ class KernelShadow:
         result["ok"] = not mismatches
         return result
 
+    def _read_projection(self, kind: str, object_id: str,
+                         mismatches: list[str]) -> dict | None:
+        """Read one declared object; an unavailable projection is a mismatch."""
+        try:
+            return self.objects.read(kind, object_id)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"{kind} object {object_id} unavailable: {type(exc).__name__}")
+            return None
+
+    @staticmethod
+    def _compare_fields(kind: str, expected: Mapping[str, Any],
+                        current: Mapping[str, Any], mismatches: list[str]) -> None:
+        fields = current["fields"]
+        for key in sorted(set(expected) | set(fields)):
+            if key not in fields or key not in expected or fields[key] != expected[key]:
+                mismatches.append(f"{kind} field {key} differs")
+
+    @staticmethod
+    def _check_state(kind: str, current: Mapping[str, Any], expected: str,
+                     mismatches: list[str]) -> None:
+        if current["state"] != expected:
+            mismatches.append(f"{kind} state is {current['state']}, expected {expected}")
+
+    def verify_notice(self, record: Mapping[str, Any], computed: str) -> dict:
+        """Compare one authoritative notice with its projected kernel object."""
+        result = {"kind": "notice", "object": "", "ok": False, "mismatches": []}
+        mismatches = result["mismatches"]
+        try:
+            object_id = notice_object_id(record)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"notice identity unavailable: {type(exc).__name__}")
+            return result
+        result["object"] = object_id
+        try:
+            expected = notice_fields(record, computed)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"notice fields unavailable: {type(exc).__name__}")
+            return result
+        current = self._read_projection("notice", object_id, mismatches)
+        if current is not None:
+            self._compare_fields("notice", expected, current, mismatches)
+            self._check_state("notice", current, "recorded", mismatches)
+        result["ok"] = not mismatches
+        return result
+
+    def verify_question(self, record: Mapping[str, Any], computed: str | None = None,
+                        insight: Mapping[str, Any] | None = None) -> dict:
+        """Compare one authoritative question with its projected kernel object."""
+        result = {"kind": "question", "object": "", "ok": False, "mismatches": []}
+        mismatches = result["mismatches"]
+        try:
+            if insight is not None:
+                object_id = insight_question_object_id(insight)
+            else:
+                object_id = record_question_object_id(record, computed)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"question identity unavailable: {type(exc).__name__}")
+            return result
+        result["object"] = object_id
+        try:
+            if insight is not None:
+                expected = insight_question_fields(insight)
+            else:
+                expected = record_question_fields(record, computed)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"question fields unavailable: {type(exc).__name__}")
+            return result
+        current = self._read_projection("question", object_id, mismatches)
+        if current is not None:
+            self._compare_fields("question", expected, current, mismatches)
+        result["ok"] = not mismatches
+        return result
+
+    def verify_answer(self, record: Mapping[str, Any],
+                      insight: Mapping[str, Any] | None = None) -> dict:
+        """Compare one answer with its object and, when published, its question."""
+        result = {"kind": "answer", "object": "", "ok": False, "mismatches": []}
+        mismatches = result["mismatches"]
+        try:
+            object_id = answer_object_id(record)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"answer identity unavailable: {type(exc).__name__}")
+            return result
+        result["object"] = object_id
+        try:
+            subject = record["subject"]
+            if not isinstance(subject, Mapping):
+                raise Denied("Invalid answer projection subject")
+            if subject.get("type") == "insight":
+                if insight is None or insight.get("id") != subject.get("id"):
+                    raise Denied("Answer question insight is unavailable")
+                revision = subject["rev"]
+                question_id = insight_question_object_id({**insight, "rev": revision})
+            elif subject.get("type") == "record":
+                revision = 1
+                question_id = record_question_object_id(subject, subject["digest"])
+            else:
+                raise Denied("Invalid answer projection subject")
+            action = record["payload"]["action"]
+            expected = answer_fields(record, question_id, revision)
+        except (Denied, KeyError, TypeError, ValueError) as exc:
+            mismatches.append(f"answer fields unavailable: {type(exc).__name__}")
+            return result
+        current = self._read_projection("answer", object_id, mismatches)
+        if current is not None:
+            self._compare_fields("answer", expected, current, mismatches)
+            self._check_state("answer", current, "recorded", mismatches)
+        if action == "publish":
+            question = self._read_projection("question", question_id, mismatches)
+            if question is not None:
+                self._check_state("question", question, "answered", mismatches)
+        result["ok"] = not mismatches
+        return result
+
     def submitted(self, record: Mapping[str, Any]) -> None:
         object_id = insight_object_id(record)
         if self.objects.revisions("insight", object_id):
