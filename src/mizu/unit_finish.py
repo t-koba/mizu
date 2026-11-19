@@ -174,6 +174,15 @@ def _writer_next_task(project, snapshot, role_name) -> str | None:
         return None
 
 
+def _resolved_wait_row(row) -> bool:
+    """Whether one ready row carries an externally resolved wait."""
+    if not isinstance(row, dict) or row.get("wait_satisfied") is True:
+        return True
+    liveness = row.get("wait_liveness") if isinstance(row, dict) else None
+    return (isinstance(liveness, dict)
+            and liveness.get("state") in ("due", "terminal"))
+
+
 class ContextFinishMixin:
     def _finish_progress(self, captured, finished, *, ready_work=None):
         return _progress_record(
@@ -233,6 +242,10 @@ class ContextFinishMixin:
                 # both admission gates and the no-progress record compare the
                 # real ready identity, so unchanged retries reach the existing
                 # recovery threshold and park until a genuine change or wake.
+                # A resolved wait is that independent wake: its liveness state
+                # is new evidence even when the ready membership is unchanged.
+                if any(_resolved_wait_row(row) for row in page["items"]):
+                    self.ready_work_signature = None
                 return
             ids = ", ".join(str(row.get("id", "unknown"))[:64] for row in page["items"][:3])
             raise Denied(f"{page['total']} ready item(s), including {ids}.")
