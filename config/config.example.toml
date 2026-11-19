@@ -5,6 +5,8 @@
 # deep-merge and any duplicate leaf key is an error naming both files.
 # Relative values inside fragments resolve against this directory.
 # include = []
+# To mirror legacy insight/decision writes into kernel objects, include the
+# example userland kinds: include = ["../examples/development/kinds.toml"].
 # Per-project policy belongs in projects/NAME/project.toml, not this file:
 # work_item_wait_resolution = "reopen" (default); "manual" disables automatic reopening.
 data_dir = "~/.local/state/mizu"

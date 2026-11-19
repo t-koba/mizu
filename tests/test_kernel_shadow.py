@@ -1,0 +1,84 @@
+"""Authoritative legacy insight/decision writes mirror into declared kernel objects."""
+import dataclasses
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import support  # noqa: F401  (puts src on the path)
+from mizu.config import load
+from mizu.errors import Denied
+from mizu.project import initialize
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = ROOT / "tests" / "kernel_userland.toml"
+
+
+class KernelShadowProjection(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="mizu-kernel-shadow-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.config = dataclasses.replace(load(CONFIG), data=root / "data")
+        source = root / "source"
+        source.mkdir()
+        (source / "app.py").write_bytes(b"VALUE = 2\n")
+        goal = root / "GOAL.md"
+        goal.write_text("Preserve correctness.\n")
+        self.project = initialize(self.config, "shadow", source, goal,
+                                  ["writer", "reviewer", "observer", "idle"],
+                                  ["python3 -m unittest"])
+        self.project.set_control(armed=True, paused=False, wake_generation="test-wake")
+
+    def submit(self, insight_id=None):
+        return self.project.insights.submit(
+            source="writer", title="Migrate proposals", body="Mirror the accepted facts",
+            base_snapshot=None, insight_id=insight_id, addressee="reviewer", urgency="high")
+
+    def test_submit_revise_and_decide_project_into_kernel(self):
+        insight = self.submit("aa" * 16)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["fields"], {
+            "title": "Migrate proposals", "body": "Mirror the accepted facts",
+            "holder": "role:reviewer", "urgency": "high"})
+        self.assertEqual(mirrored["author"], "role:writer")
+        self.assertEqual(mirrored["state"], "pending")
+
+        decision = self.project.insights.decide(
+            insight["id"], "accept", "The addressed holder accepted", "", "test-run",
+            expected_rev=1, work_item_intent="none")
+        mirrored_decision = self.project.kernel_objects.read("decision", decision["decision_key"])
+        self.assertEqual(mirrored_decision["fields"], {
+            "insight": insight["id"], "revision": 1, "action": "accept",
+            "reason": "The addressed holder accepted"})
+        self.assertEqual(mirrored_decision["author"], "host")
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "accepted")
+
+        revised = self.project.insights.revise(
+            insight["id"], source="writer", title="Revised proposal", body="With new evidence",
+            base_snapshot=None, expected_rev=1)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["rev"], 3)  # create, accepted, revise
+        self.assertEqual(mirrored["fields"]["title"], "Revised proposal")
+        self.assertEqual(mirrored["state"], "pending")
+        self.assertEqual(mirrored["actor"], "role:writer")
+
+    def test_decision_replay_does_not_duplicate_kernel_objects(self):
+        insight = self.submit("bb" * 16)
+        first = self.project.insights.decide(
+            insight["id"], "reject", "Not now", "", "test-run",
+            expected_rev=1)
+        head = self.project.kernel_events.head()
+        second = self.project.insights.decide(
+            insight["id"], "reject", "Not now", "", "test-run",
+            expected_rev=1)
+        self.assertEqual(first, second)
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertEqual(self.project.kernel_objects.revisions("decision", first["decision_key"]), [1])
+
+    def test_projection_failure_does_not_change_legacy_authority(self):
+        with patch.object(self.project.kernel_objects, "create", side_effect=Denied("derived failure")):
+            insight = self.submit("cc" * 16)
+        self.assertEqual(self.project.insights.read(insight["id"])["title"], "Migrate proposals")
+        self.assertEqual(self.project.kernel_objects.revisions("insight", insight["id"]), [])

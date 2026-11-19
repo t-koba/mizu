@@ -87,7 +87,7 @@ fields = ["reason"]
 [kinds.insight]
 states = ["pending", "accepted", "modified", "deferred", "rejected", "withdrawn"]
 initial = "pending"
-create = ["role:writer", "role:reviewer", "role:auditor", "role:searcher", "operator"]
+create = ["role:writer", "role:reviewer", "role:auditor", "role:searcher", "role:worker", "operator"]
 fields.title = {type = "string", max = 240, required = true}
 fields.body = {type = "string", max = 65536, required = true}
 fields.holder = {type = "principal", required = true}

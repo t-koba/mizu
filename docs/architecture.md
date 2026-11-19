@@ -54,6 +54,7 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `sandbox.py`, `process.py` | Bounded execution, termination, cleanup | Experiment usefulness |
 | `snapshot.py` | Content objects, immutable manifests, published pointer | Semantic correctness |
 | `insights.py` | Submission identity, revisable proposals, decision history/legacy receipts, source-current shared-decision projection and page construction, initial work-item seeds | Acceptance or rejection |
+| `kernel_shadow.py` | Userland mapping of authoritative legacy insight/decision facts onto declared generic kernel objects | Legacy authority, acceptance or projection policy |
 | `insight_tools.py` | Context-bound insight tool adaptation: paged reads, role/run/snapshot provenance, grant checks, and evidence-attachment audit records | Insight persistence/decision semantics or dispatch/schema policy |
 | `shared_records.py` | Bounded canonical records, exact role/record/digest receipts and manifest-scoped paged reads | Source eligibility, route policy, lifecycle, or cutover |
 | `host_records.py` | Declared publisher-outcome validation and host-only exact-snapshot record route | Publisher observation, generic record storage, work-item lifecycle or completion |

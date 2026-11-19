@@ -77,6 +77,7 @@ from .work_item_seed import (make_seed, validate_scope, validate_seed, validate_
                              task_id, task_seeds)
 from .fs import (MAX_FRAME, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
                  read_json, safe_read, safe_read_managed, write_json, mkdir, DIGEST)
+from .kernel_shadow import KernelShadow  # userland projection, never a legacy authority
 
 MAX_DECISION_EVENT_BYTES = 1024 * 1024
 AUTOMATIC_INSIGHT_ARCHIVE_INTERVAL_MAX = 2678400
@@ -479,7 +480,8 @@ class Insights:
                  decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS,
                  decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS,
                  decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES,
-                 history_entries: int = 1000):
+                 history_entries: int = 1000,
+                 kernel_shadow: KernelShadow | None = None):
         self.root, self.maximum = root, maximum
         self._automatic_archive_last_monotonic = None
         self._automatic_archive_last_interval = None
@@ -516,6 +518,17 @@ class Insights:
         self.snapshots = None
         #: Shared seed preflight/storage service, wired by Project.
         self.work_items = None
+        #: Optional derived kernel projection wired by Project; never read for legacy truth.
+        self.kernel_shadow = kernel_shadow
+
+    def _shadow(self, operation: str, *args) -> None:
+        """Best-effort projection; a derived failure never changes a legacy result."""
+        if self.kernel_shadow is None:
+            return
+        try:
+            getattr(self.kernel_shadow, operation)(*args)
+        except (Denied, OSError, ValueError, TypeError, KeyError):
+            return
 
     def _work_item_store(self):
         # Standalone Insights readers need no ledger; mutation gets the same
@@ -645,6 +658,7 @@ class Insights:
             with self.ledger.write("insights", [f"i:{insight_id}"]):
                 write_json(path, record, exclusive=True)
             write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": record["created_at"]}, exclusive=True)
+            self._shadow('submitted', record)
             return record
 
     def revise(self, insight_id: str, *, source: str, title: str, body: str,
@@ -756,6 +770,7 @@ replacement insight without implying rejected substance.
             sha = digest(canonical(payload))
             write_json(self.root / "insight-ids" / f"{insight_id}.json",
                        {"id": insight_id, "sha256": sha, "created_at": record["created_at"]})
+            self._shadow('revised', record)
             return record
 
     def history(self, insight_id: str, *, after_rev: int = 0,
@@ -1318,6 +1333,7 @@ replacement insight without implying rejected substance.
                                   "registration_id": uuid.uuid4().hex}
                     mkdir(self.root / "waits")
                     write_json(self.root / "waits" / f"{insight_id}.json", registered)
+                self._shadow('decided', current, record)
         return record
 
     def _normalize_wait(self, wait, action: str) -> dict | None:

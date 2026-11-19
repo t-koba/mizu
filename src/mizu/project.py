@@ -19,6 +19,7 @@ from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read
 from .check_job_index import CHECK_JOBS, CheckJobSource
 from .insights import Insights
 from .kernel import EventLog, Objects
+from .kernel_shadow import KernelShadow
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
                        progress_disposition, progress_projection, validate_progress)
@@ -148,6 +149,7 @@ class Project:
                                  decision_reconciliation_bytes=config.limits.decision_reconciliation_bytes,
                                  cursor_ttl_seconds=config.limits.insight_cursor_ttl_seconds,
                                  history_entries=config.limits.insight_history_entries,
+                                 kernel_shadow=KernelShadow(self.kernel_objects),
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
         self.insights.snapshots = self.snapshots
