@@ -404,6 +404,49 @@ class QueueDecisionAuthority(unittest.TestCase):
             if m["id"] == decision_id), 1)
         self.assert_parity(identity)
 
+    def test_exact_defer_replay_survives_retained_history_above_scan_ceiling(self):
+        """A retry stays a no-op however much decision history is retained."""
+        self.activate()
+        identity = "3" * 32
+        self.live_submit(identity, "Deferred with oversized history")
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-h", expected_rev=1)
+        history = self.project.insights.root / "decision-history"
+        existing = {path.name for path in history.glob("*.json")}
+        for i in range(1005):
+            name = f'{"e" * 24}{i:08x}.json'
+            if name not in existing:
+                (history / name).write_text("{}")
+        self.assertGreater(len(list(history.glob("*.json"))), 1000)
+        # The old bounded scan raised "Decision history recovery bound exceeded"
+        # here; the stable-id message carries the stem with one keyed read.
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-h", expected_rev=1)
+        events = self.assert_parity(identity)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["action"], "defer")
+
+    def test_exact_defer_replay_uses_message_identity_without_history_scan(self):
+        """The O(1) message read does not depend on retained history at all."""
+        self.activate()
+        identity = "4" * 32
+        self.live_submit(identity, "Deferred with detached history")
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-d", expected_rev=1)
+        history = self.project.insights.root / "decision-history"
+        history.rename(self.project.insights.root / "decision-history-detached")
+        # Without the message path the scan would raise "Decision history
+        # unavailable for replay"; the stable-id message is sufficient.
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-d", expected_rev=1)
+        decision_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1)
+        rows = [m for m in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if m["id"] == decision_id]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["body"]["action"], "defer")
+
     def test_exact_defer_replay_repairs_missed_append_with_original_identity(self):
         """A retry after a lost first append restores the original legacy_event."""
         self.activate()

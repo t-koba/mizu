@@ -653,7 +653,7 @@ def _require_producer_queues(project) -> None:
     proposal = project.config.queues[PROPOSALS]
     decision = project.config.queues[DECISIONS]
     if (not allows(proposal.write, "operator") or not allows(proposal.read, "role:writer")
-            or not allows(decision.write, "role:writer")):
+            or not allows(decision.write, "role:writer") or not allows(decision.read, "role:writer")):
         raise AdapterError("Declarations do not grant the decision producer its write and binding reads")
 
 
@@ -788,6 +788,26 @@ class DecisionQueueWriter:
             if instant is not None:
                 store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
                              deliver_at=instant, id=message_id(REVISIT_KIND, identity, rev))
+
+    def retained_event_identity(self, insight_id: str, rev: int) -> str | None:
+        """Return the history stem bound by an already-appended decision message.
+
+        The stable-id decision message carries ``legacy_event``: the exact
+        decision-history filename the first write (or one-time conversion)
+        bound. Reading it by id is O(1) and independent of how much decision
+        history is permanently retained. Returns None only when no decision
+        message has been appended yet, so the caller can fall back to the
+        bounded content scan for an interrupted first append. A present but
+        malformed envelope fails closed through ``identifier``.
+        """
+        store = self.project.kernel_queues
+        try:
+            message = store.message(message_id(DECISION_KIND, insight_id, rev), "role:writer")
+        except Denied:
+            return None
+        if message["queue"] != DECISIONS:
+            raise Denied("Decision identity message names another queue")
+        return identifier(message["body"].get("legacy_event"))
 
     def decide(self, current, event, event_id: str) -> None:
         """Append the declared decision (and delayed revisit) for one event."""

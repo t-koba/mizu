@@ -1446,10 +1446,20 @@ replacement insight without implying rejected substance.
         retains verbatim. An exact replay must reuse that original stem: a
         recomputed key would give the stable-id queue row a different body and
         a retry would be refused, or a missed first append would be repaired
-        under the wrong identity. Find the single retained history event whose
-        content is this decision, bounded to the configured insight-history
-        entry ceiling, and fail closed on absence, ambiguity or malformed rows.
+        under the wrong identity.
+
+        The stable-id decision message already carries that stem, so read it
+        in O(1) first: decision history is retained permanently and can exceed
+        any scan ceiling, while a replay must stay a content no-op regardless
+        of age. Only when no decision message exists (an interrupted first
+        append) fall back to the bounded content-match scan over history.
         """
+        writer = self.decision_queue_writer
+        if writer is not None and writer.active():
+            retained = writer.retained_event_identity(decision["id"], rev)
+            if retained is not None:
+                identifier(retained)
+                return retained
         history = self.root / "decision-history"
         if not insight_archive._directory(history):
             raise Denied("Decision history unavailable for replay")
