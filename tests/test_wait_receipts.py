@@ -134,6 +134,25 @@ class WaitReceiptTests(Fixture):
         self.assertNotEqual(replayed[0]["registration_id"], original_id)
         self.assertEqual(read_json(self.project.root / "decisions" / f"{insight_id}.json"), record)
 
+    def test_substantive_decision_with_defer_fields_is_not_a_replay(self):
+        # A stored defer with matching reason/revisit/run must not swallow a
+        # substantive accept/modify/reject as an exact defer replay. Each
+        # substantive action on its own fresh defer is recorded normally.
+        for action in ("accept", "modify", "reject"):
+            with self.subTest(action=action):
+                insight_id = f"{action:0<32}"[:32]
+                self.project.insights.submit(
+                    source="reviewer", title=action, body="evidence",
+                    base_snapshot=self.project.snapshots.get()["id"], insight_id=insight_id)
+                self.project.insights.decide(
+                    insight_id, "defer", "why", "revisit-cond", "test", expected_rev=1)
+                out = self.project.insights.decide(
+                    insight_id, action, "why", "revisit-cond", "test", expected_rev=1)
+                self.assertEqual(out["action"], action)
+                stored = read_json(self.project.root / "decisions" / f"{insight_id}.json")
+                self.assertEqual(stored["action"], action)
+                self.assertNotEqual(stored["action"], "defer")
+
     def test_exact_defer_replay_rejects_unresolvable_smoke_ref_without_a_wait(self):
         # The fresh path validates every supplied smoke_ref pair before writing a
         # wait. An exact defer replay that supplies a new wait must validate the

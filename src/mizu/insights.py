@@ -1286,7 +1286,8 @@ replacement insight without implying rejected substance.
             if prior is not None and prior.get("action") == "withdraw":
                 raise Denied("Insight withdrawn; revise the topic to reopen it")
             key = _decision_key(insight_id, rev)
-            if (prior is not None and prior.get("action") == "defer"
+            if (prior is not None and action == "defer"
+                    and prior.get("action") == "defer"
                     and prior.get("reason") == reason and prior.get("revisit") == revisit
                     and prior.get("run") == run):
                 # An exact defer retry must return the original event. A fresh
