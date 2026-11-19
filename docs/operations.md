@@ -731,7 +731,9 @@ migration** runs under `insights.lock`, before capturing the page high-water:
   start a fresh traversal to include them. The database, tombstones and marker
   travel together through normal backup/restore.
 
-Promotion registers the same import as `migrate-insight-identities`: preflight
+Promotion registers the same import under the internal install-time operation
+`migrate-insight-identities`; that is a report key, not a CLI command. Inspect
+archived state with `mizu insight page --scope archive <project>`. Preflight
 inventories only identities without a live or archived body using a no-recovery
 archive read. Apply runs under project quiescence and `insights.lock`, is
 idempotent for rows and the marker, and verifies each imported tombstone's exact

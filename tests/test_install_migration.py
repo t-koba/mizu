@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from support import Fixture, ROOT
+from support import Fixture, ROOT, forget_ledger
 from mizu import (install_migration, insight_identity_migration, operator_records,
                   record_migration, storage, work_item_migration)
 from mizu.errors import Denied
@@ -203,6 +203,34 @@ class InstallMigrationTests(Fixture):
         archive, = self.backups.glob('*/*.tar.gz')
         with tarfile.open(archive, 'r:gz') as saved:
             self.assertNotIn(f'objects/{old_object}', saved.getnames())
+
+    def test_corrupt_identity_guidance_names_a_real_read_only_command(self):
+        key = 'a' * 32
+        self.project.insights.submit(source='searcher', title='Lost title', body='Lost body',
+                                     base_snapshot=None, insight_id=key)
+        # Drop the body outside product writers so the retained identity is a
+        # conversion candidate, then corrupt it to fail closed during preflight.
+        (self.project.root / 'inbox' / f'{key}.json').unlink()
+        forget_ledger(self.project.root)
+        (self.project.root / 'insight-ids' / f'{key}.json').write_bytes(b'{not json')
+        with self.assertRaises(Denied) as raised:
+            install_migration.convert(self.config, [self.project.root], self.release)
+        message = str(raised.exception)
+        self.assertIn('preflight scan (no backup created) failed', message)
+        self.assertIn('mizu insight page --scope archive sample', message)
+        self.assertNotIn('mizu migrate-insight-identities', message)
+        self.assertIn('archive:', message)
+        self.assertIn('Keep projects stopped until repaired or restored.', message)
+        self.assertFalse(self.backups.exists())
+
+    def test_unknown_operation_key_never_becomes_a_cli_preview(self):
+        with self.assertRaises(Denied) as raised:
+            with install_migration._step('sample', self.backups / 'sample.tar.gz',
+                                         ['unsupported-operation'], 'scan'):
+                raise OSError('synthetic failure')
+        message = str(raised.exception)
+        self.assertIn('mizu doctor', message)
+        self.assertNotIn('mizu unsupported-operation', message)
 
     def test_incomplete_scan_refuses_before_backup_or_any_conversion(self):
         flat, _, _ = self.flat_record()

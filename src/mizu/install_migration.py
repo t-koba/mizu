@@ -20,6 +20,15 @@ _FAILURES = (MizuError, OSError, ValueError, EOFError, tarfile.TarError, sqlite3
 _COUNTS = ("entries_examined", "candidates", "converted", "already_current", "renamed",
            "resolved_open", "resolved_drop", "explicit_no_work", "unresolved", "ambiguous_or_corrupt")
 
+# Report keys name internal operations, not CLI subcommands. Guidance points at
+# real read-only inspections; the two migration previews stay dry-run without
+# --apply, and archived identity state is surfaced by the archive page reader.
+_INSPECTION_COMMANDS = {
+    "migrate-records": "migrate-records",
+    "migrate-work-items": "migrate-work-items",
+    "migrate-insight-identities": "insight page --scope archive",
+}
+
 
 def _directory_mode(path):
     info = path.lstat()
@@ -46,7 +55,8 @@ def _step(project, archive, commands, stage):
     try:
         yield
     except _FAILURES as exc:
-        previews = "; ".join(f"mizu {command} {project}" for command in commands)
+        previews = "; ".join(f"mizu {_INSPECTION_COMMANDS[key]} {project}" for key in commands
+                             if key in _INSPECTION_COMMANDS) or "mizu doctor"
         raise Denied(f"Install migration for {project}: {stage} failed: {exc}. "
                      f"Inspect with {previews}; archive: {archive} (check its sibling receipt). "
                      "Keep projects stopped until repaired or restored.") from exc
