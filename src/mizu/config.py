@@ -397,7 +397,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "insight_decisions", "workspace_cache",
     "operator_records", "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import", "doctor", "completion_evidence", "kinds"})
+    "project_import", "doctor", "completion_evidence", "kinds", "queues"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -1289,6 +1289,11 @@ def _kernel_kinds(raw):
     return parse_kinds(raw)
 
 
+def _kernel_queues(raw):
+    from .kernel import parse_queues
+    return parse_queues(raw)
+
+
 def _kernel_subscriptions(raw, where):
     from .kernel import parse_subscriptions
     return parse_subscriptions(raw, where)
@@ -1516,6 +1521,8 @@ class Config:
     record_kinds: dict = dataclasses.field(default_factory=dict)
     #: Kernel object kinds declared by the deployment (docs/kernel.md).
     kinds: dict = dataclasses.field(default_factory=dict)
+    #: Kernel message queues declared by the deployment (docs/kernel.md).
+    queues: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
     dispatch_evidence: DispatchEvidence = dataclasses.field(default_factory=DispatchEvidence)
     ci_requests: CiRequestEvidence = dataclasses.field(default_factory=CiRequestEvidence)
@@ -2255,6 +2262,7 @@ def load(file: Path) -> Config:
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records, record_kinds=kinds,
                   kinds=_kernel_kinds(data.get("kinds", {})),
+                  queues=_kernel_queues(data.get("queues", {})),
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),

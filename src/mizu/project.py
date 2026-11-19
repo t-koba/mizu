@@ -18,7 +18,7 @@ from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .check_job_index import CHECK_JOBS, CheckJobSource
 from .insights import Insights
-from .kernel import EventLog, Objects
+from .kernel import EventLog, Objects, QueueStore
 from .kernel_shadow import KernelShadow
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
@@ -140,6 +140,7 @@ class Project:
         self.kernel_events = EventLog(
             self.root, {name: config.roles[name].subscribe for name in self.roles})
         self.kernel_objects = Objects(self.root, config.kinds, self.kernel_events)
+        self._kernel_queues = None
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
         self.insights = Insights(self.root, retention_days=config.limits.retention_days,
                                  producer_inputs_per_source=config.limits.producer_inputs_per_source,
@@ -186,6 +187,13 @@ class Project:
         self.verify = ()
         self.recorded_batches = {}
         self.lineage_target = None
+
+    @property
+    def kernel_queues(self) -> QueueStore:
+        """Declared queues for this project; constructed on first use."""
+        if self._kernel_queues is None:
+            self._kernel_queues = QueueStore(self.root, self.config.queues)
+        return self._kernel_queues
 
     def refresh_settings(self) -> None:
         """Reload and validate mutable project.toml without rebuilding stores.

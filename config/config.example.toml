@@ -98,6 +98,16 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # create = ["operator"]
 # fields.title = {type = "string", max = 200, required = true}
 
+# Kernel message queues (see docs/kernel.md): named declarations with write,
+# read and wake principals, retention and an optional body schema. None by
+# default; examples/development/queues.toml shows declarations to include.
+# [queues.tasks]
+# write = ["role:*", "operator"]
+# read = ["role:reader"]
+# wake = ["role:reader"]
+# [queues.tasks.schema]
+# title = {type = "string", max = 200, required = true}
+
 # Named dynamic-model selectors (see docs/model-selection.md). Empty by default;
 # a role's selector key replaces its profile with one of these tables.
 # [selectors]

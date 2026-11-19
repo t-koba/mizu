@@ -581,6 +581,32 @@ DECLARATIONS = {
         'MAX_EVIDENCE_CHARS': (
             '8192', 'safety', 'insights / fixed evidence text bound per entry'),
     },
+    'kernel/queues.py': {
+        'MAX_BODY_BYTES': (
+            '1024 * 1024', 'safety',
+            'kernel queues / one MiB message-body ceiling from docs/kernel.md'),
+        'MAX_MESSAGE_BYTES': (
+            '1024 * 1024 + 65536', 'safety',
+            'kernel queues / fixed envelope read bound: one MiB body plus metadata and reference indexes'),
+        'PAGE_MAX': (
+            '512', 'mechanism',
+            'kernel queues / delivery and reference page ceiling from docs/kernel.md'),
+        'PAGE_DEFAULT': (
+            '64', 'mechanism',
+            'kernel queues / default delivery and reference page, capped by PAGE_MAX'),
+        'MAX_REFS': (
+            '512', 'safety',
+            'kernel queues / bounded references per message and per reverse-reference index'),
+        'MAX_RETENTION_SCAN': (
+            '256', 'mechanism',
+            'kernel queues / bounded retention work per append or read, never a timer'),
+        'DEFAULT_RETAIN_DAYS': (
+            '30', 'mechanism',
+            'kernel queues / documented retention default declared per queue in configuration'),
+        'INTEGER_LIMIT': (
+            '(1 << 63) - 1', 'format',
+            'kernel queues / TOML signed-64-bit integer representation ceiling for declared fields'),
+    },
     'kernel_shadow.py': {
         'MAX_SHADOW_FAILURES': (
             '32', 'safety',
@@ -1979,6 +2005,12 @@ RANGE_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 SYMBOLIC_RANGE_ARGUMENTS = {
+    ('kernel/queues.py', 'QueueStore._retain', 0, 0): (
+        'cursor + 1', 'mechanism',
+        'kernel queues / retention resumes after the durable retain cursor'),
+    ('kernel/queues.py', 'QueueStore._retain', 1, 0): (
+        'stop + 1', 'mechanism',
+        'kernel queues / retention window ends at the bounded derived stop sequence'),
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         'LEGACY_CHECK_REQUEST_SEQUENCE_COUNT', 'safety',
         'check jobs / reconstruct the bounded legacy sequence space before indexed allocation'),
