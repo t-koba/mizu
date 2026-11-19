@@ -12,10 +12,11 @@ change provides a capability or enforces a behavior; behavioral rules belong in
 operator policy, not mechanism.
 
 Mizu is an operating system for model roles. The kernel ([kernel.md](kernel.md))
-provides units, scheduling, objects, events, accounting, drivers and tools; it
-names no role, record kind, state, event or workflow. Roles, record kinds and
-their lifecycles, what completion or publication requires, and what models are
-told are deployment configuration and policy. Parts of the current code still
+provides units, scheduling, declared message queues, accounting, drivers and
+tools; it names no role, queue, message kind, state or workflow and keeps no
+record state. Roles, what each queue carries and what a reader does with it,
+what completion or publication requires, and what models are told are
+deployment configuration and policy. Parts of the current code still
 embed one development workflow; [os-migration.md](os-migration.md) is the plan
 that removes them, and the component table below describes the code as it is
 during that migration. A Markdown policy explains which work to choose; it
