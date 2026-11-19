@@ -113,6 +113,73 @@ def notice_fields(record: Mapping[str, Any], computed: str) -> dict:
     return fields
 
 
+def insight_question_object_id(record: Mapping[str, Any]) -> str:
+    """Hash one insight submission's identity into a kernel question ID."""
+    legacy = record["id"]
+    revision = record.get("rev", 1)
+    if (not isinstance(legacy, str) or not legacy
+            or type(revision) is not int or revision < 1):
+        raise Denied("Invalid question projection identity")
+    return digest(canonical(["kernel-shadow", "question", "insight", legacy, revision]))[:32]
+
+
+def record_question_object_id(record: Mapping[str, Any], computed: str) -> str:
+    """Hash one role question's ID and content digest into a kernel question ID."""
+    legacy = record["id"]
+    if (not isinstance(legacy, str) or not legacy
+            or not isinstance(computed, str) or not computed):
+        raise Denied("Invalid question projection identity")
+    return digest(canonical(["kernel-shadow", "question", "record", legacy, computed]))[:32]
+
+
+def insight_question_fields(record: Mapping[str, Any]) -> dict:
+    """Map an operator-addressed insight to the declared question fields."""
+    fields = {"subject_type": "insight", "subject_ref": insight_object_id(record),
+              "subject_rev": record.get("rev", 1), "body": record["body"]}
+    urgency = record.get("urgency")
+    if urgency is not None:
+        fields["urgency"] = urgency
+    return fields
+
+
+def record_question_fields(record: Mapping[str, Any], computed: str) -> dict:
+    """Map one role question envelope to the declared question fields."""
+    payload = record["payload"]
+    body = payload.get("body") if isinstance(payload, Mapping) else None
+    if not isinstance(body, str) or not body.strip():
+        raise Denied("Role question has no representable body")
+    fields = {"subject_type": "record", "record_kind": record["kind"],
+              "record_id": record["id"], "record_digest": computed, "body": body}
+    urgency = payload.get("urgency")
+    if urgency is not None:
+        fields["urgency"] = urgency
+    return fields
+
+
+def answer_object_id(record: Mapping[str, Any]) -> str:
+    """Map one accepted legacy answer ID to a stable kernel object ID."""
+    legacy = record["id"]
+    if not isinstance(legacy, str) or not legacy:
+        raise Denied("Invalid answer projection identity")
+    return digest(canonical(["kernel-shadow", "answer", legacy]))[:32]
+
+
+def answer_fields(record: Mapping[str, Any], question_id: str, revision: int) -> dict:
+    """Map one accepted answer to the declared create-only answer fields."""
+    payload = record["payload"]
+    body = payload.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise Denied("Answer has no representable body")
+    fields = {"question": question_id, "revision": revision,
+              "action": payload["action"], "body": body}
+    # The field is optional: an oversized reference is omitted rather than
+    # silently truncated into a different identity.
+    reference = record["id"]
+    if isinstance(reference, str) and len(reference) <= RECORD_NAME_MAX_CHARS:
+        fields["reference"] = reference
+    return fields
+
+
 def decision_object_id(record: Mapping[str, Any]) -> str:
     """Use the legacy key for one substantive decision, content for other events."""
     if record.get("action") in ("accept", "modify", "reject"):
@@ -212,16 +279,62 @@ class KernelShadow:
                                 expected_rev=current["rev"], fields=updatable,
                                 actor=principal(record["source"]))
 
+    def _create_once(self, kind: str, object_id: str, fields: dict, label: str) -> bool:
+        """Create one derived object or verify an exact replay of its content."""
+        if self.objects.revisions(kind, object_id):
+            existing = self.objects.read(kind, object_id)
+            if existing["fields"] != fields:
+                raise Denied(f"{label} projection id was reused with different content")
+            return False
+        self.objects.create(kind, fields, "host", object_id=object_id)
+        return True
+
     def noticed(self, record: Mapping[str, Any], computed: str) -> None:
         """Mirror one accepted operator notice as a create-only kernel object."""
-        object_id = notice_object_id(record)
-        fields = notice_fields(record, computed)
-        if self.objects.revisions("notice", object_id):
-            existing = self.objects.read("notice", object_id)
-            if existing["fields"] != fields:
-                raise Denied("Notice projection id was reused with different content")
+        self._create_once("notice", notice_object_id(record),
+                          notice_fields(record, computed), "Notice")
+
+    def questioned(self, record: Mapping[str, Any]) -> None:
+        """Mirror one operator-addressed insight submission as a question."""
+        if record.get("addressee") != "operator":
+            return
+        self._create_once("question", insight_question_object_id(record),
+                          insight_question_fields(record), "Insight question")
+
+    def questioned_record(self, record: Mapping[str, Any], computed: str) -> None:
+        """Mirror one accepted role record question as a kernel question."""
+        self._create_once("question", record_question_object_id(record, computed),
+                          record_question_fields(record, computed), "Record question")
+
+    def answered(self, record: Mapping[str, Any],
+                 insight: Mapping[str, Any] | None = None) -> None:
+        """Mirror one accepted answer, then mark a published question answered."""
+        subject = record["subject"]
+        if not isinstance(subject, Mapping):
+            raise Denied("Invalid answer projection subject")
+        if subject.get("type") == "insight":
+            if insight is None or insight.get("id") != subject.get("id"):
+                raise Denied("Answer question insight is unavailable")
+            revision = subject["rev"]
+            question_id = insight_question_object_id({**insight, "rev": revision})
+        elif subject.get("type") == "record":
+            revision = 1
+            question_id = record_question_object_id(subject, subject["digest"])
         else:
-            self.objects.create("notice", fields, "host", object_id=object_id)
+            raise Denied("Invalid answer projection subject")
+        fields = answer_fields(record, question_id, revision)
+        # The create-only answer is established before the mutable question
+        # state, so a rejected answer field cannot leave a half-written
+        # projection. A replay still reaches the transition below so a failed
+        # transition can be repaired without rewriting the answer object.
+        self._create_once("answer", answer_object_id(record), fields, "Answer")
+        if record["payload"]["action"] != "publish":
+            return
+        question = self.objects.read("question", question_id)
+        if question["state"] != "pending":
+            return
+        self.objects.transition("question", question_id, "answer",
+                                expected_rev=question["rev"], fields=None, actor="host")
 
     def decided(self, insight: Mapping[str, Any], record: Mapping[str, Any]) -> None:
         action = record.get("action")

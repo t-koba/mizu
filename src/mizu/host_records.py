@@ -167,6 +167,17 @@ def _wake(project):
         os.utime(directory, None, follow_symlinks=False)
 
 
+def _project_question(project, envelope, computed):
+    """Best-effort derived mirror; a projection failure never changes a write."""
+    shadow = getattr(getattr(project, "insights", None), "kernel_shadow", None)
+    if shadow is None:
+        return
+    try:
+        shadow.questioned_record(envelope, computed)
+    except Exception as exc:
+        shadow.note_failure("question", envelope["id"], exc)
+
+
 def write_role(context, args):
     """Runtime-authenticated declared data; no caller principal or source IDs."""
     if "record_write" not in context.role.capabilities:
@@ -196,6 +207,8 @@ def write_role(context, args):
         computed = shared.put(envelope, writer=writer)
         if existing:
             _sync(shared, record_id)
+    if policies[kind]['route'] == 'operator_question':
+        _project_question(context.project, envelope, computed)
     if policies[kind]['wake']:
         _wake(context.project)
     return {'record': envelope, 'record_digest': computed}

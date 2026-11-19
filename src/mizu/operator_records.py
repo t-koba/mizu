@@ -231,6 +231,19 @@ def _project_notice(project, envelope, computed):
         shadow.note_failure("operator.notice", envelope["id"], exc)
 
 
+def _project_answer(project, envelope, computed):
+    """Best-effort derived mirror; a projection failure never changes a write."""
+    shadow = getattr(getattr(project, "insights", None), "kernel_shadow", None)
+    if shadow is None:
+        return
+    try:
+        subject = envelope["subject"]
+        insight = _question(project, subject) if subject.get("type") == "insight" else None
+        shadow.answered(envelope, insight)
+    except Exception as exc:
+        shadow.note_failure("answer", envelope["id"], exc)
+
+
 def write(project, *, event_id, kind, body='', addressee=None, subject=None,
           action='publish', target=None):
     """Trusted CLI only. Stable event ID is required for uncertain-write replay.
@@ -277,6 +290,8 @@ def write(project, *, event_id, kind, body='', addressee=None, subject=None,
         remember(shared, envelope)  # canonical-first; also repairs exact retries
         if kind == 'operator.notice':
             _project_notice(project, envelope, computed)
+        elif kind == 'answer':
+            _project_answer(project, envelope, computed)
     return {'record': envelope, 'record_digest': computed}
 
 

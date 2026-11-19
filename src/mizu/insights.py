@@ -535,6 +535,16 @@ class Insights:
                 except (AttributeError, KeyError, TypeError, ValueError):
                     pass
 
+    def _project_question(self, record: dict) -> None:
+        """Best-effort question mirror; a projection failure never changes a write."""
+        shadow = self.kernel_shadow
+        if shadow is None:
+            return
+        try:
+            shadow.questioned(record)
+        except Exception as exc:
+            shadow.note_failure("question", record["id"], exc)
+
     def _work_item_store(self):
         # Standalone Insights readers need no ledger; mutation gets the same
         # service without a module-level import cycle or a second lock.
@@ -664,6 +674,7 @@ class Insights:
                 write_json(path, record, exclusive=True)
             write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": record["created_at"]}, exclusive=True)
             self._shadow('submitted', record)
+            self._project_question(record)
             return record
 
     def revise(self, insight_id: str, *, source: str, title: str, body: str,
@@ -776,6 +787,7 @@ replacement insight without implying rejected substance.
             write_json(self.root / "insight-ids" / f"{insight_id}.json",
                        {"id": insight_id, "sha256": sha, "created_at": record["created_at"]})
             self._shadow('revised', record)
+            self._project_question(record)
             return record
 
     def history(self, insight_id: str, *, after_rev: int = 0,
