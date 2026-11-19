@@ -134,6 +134,26 @@ class WaitReceiptTests(Fixture):
         self.assertNotEqual(replayed[0]["registration_id"], original_id)
         self.assertEqual(read_json(self.project.root / "decisions" / f"{insight_id}.json"), record)
 
+    def test_exact_defer_replay_rejects_unresolvable_smoke_ref_without_a_wait(self):
+        # The fresh path validates every supplied smoke_ref pair before writing a
+        # wait. An exact defer replay that supplies a new wait must validate the
+        # same way: a re-arm cannot carry a dangling ref the fresh path refuses.
+        _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="Ref Replay")
+        before = self.rows()
+        insight_id = before[0][0]["insight"]
+        record = read_json(self.project.root / "decisions" / f"{insight_id}.json")
+        self.assertEqual(self.project.insights.consume_waits("reviewer", before[0]), 1)
+        self.assertEqual(self.rows()[0], [])
+        wait_path = self.project.root / "waits" / f"{insight_id}.json"
+        self.assertFalse(wait_path.exists())
+        with self.assertRaises(Denied):
+            self.project.insights.decide(
+                insight_id, "defer", "parked", "wait for it", "test",
+                wait={"kind": "deadline", "at": _past(), "smoke_refs": ["a" * 32]},
+                expected_rev=1)
+        self.assertFalse(wait_path.exists())
+        self.assertEqual(read_json(self.project.root / "decisions" / f"{insight_id}.json"), record)
+
     def test_tokens_bind_role_source_payload_and_current_unit_before_intent(self):
         self.seed(count=2)
         for index, attr, source in ((0, "wait_events", events.WAIT), (1, "obligations", events.OBLIGATION)):

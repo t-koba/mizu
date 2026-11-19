@@ -1296,6 +1296,10 @@ replacement insight without implying rejected substance.
                 # supplied wait is still re-armed with a fresh registration id:
                 # replay must not silently drop a wake the caller asked for.
                 if registered is not None:
+                    # A replay may supply a different wait than the original; validate
+                    # its refs exactly as the fresh-decision write does, before any
+                    # persistence, so a re-arm cannot carry unresolved smoke pairs.
+                    require_pairs(self.root, registered.get("smoke_refs", []))
                     store.prepare_decision_write(need_wait=True)
                     rearmed = {**registered, "owner": insight_id, "rev": rev,
                                "decision": prior, "registered_at": now(), "run": run,
