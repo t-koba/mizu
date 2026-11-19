@@ -126,10 +126,12 @@ null for no delivered input). A writer `continue`/`bounded` finish that parks
 reanchors its signature to the validated complete empty finish-time inventory,
 so dispositions made in that unit do not cause a redundant self-wake. Any ready
 work remaining at that check refuses those finishes; work becoming ready after
-it remains new input. A writer-selected `wait` or `blocked` finish instead
+it remains new input. A writer-selected `wait` or `blocked` finish normally
 leaves the signature unanchored so the ready-work observation re-admits the
-role; it does not anchor a new set. Finish-time `ready_work` remains the separate
-True/False/null idle diagnostic, not an admission cursor.
+role. The one exception is a whole ready set of this holder's own deadlines
+still in the future: the opening signature is kept and the earliest deadline is
+the wake. Neither case anchors a new set. Finish-time `ready_work` remains the
+separate True/False/null idle diagnostic, not an admission cursor.
 
 A writable role with both `work_order` and `work_items_transition` also records
 progress schema 5's resolution-delivery receipts. `wait_resolution_tokens` holds
@@ -229,10 +231,12 @@ observable wait, or drop it with a reason. Holding it as `doing` is not a
 disposition. Unheld open work and this role's held work count; other holders'
 work does not block the role. A progress-backed new `next_step` may instead hand off
 immediately under the existing validation rules. A writer-selected `wait` or
-`blocked` finish is instead accepted with role-eligible ready work: the host leaves
-the progress ready-set signature unanchored so the existing ready-work observation
-re-admits the role, without requiring any item transition. A host-imposed bounded
-yield may likewise retain ready work.
+`blocked` finish is instead accepted with role-eligible ready work: the host
+normally leaves the progress ready-set signature unanchored so the existing
+ready-work observation re-admits the role, without requiring any item transition.
+If every ready row is this holder's own future deadline, the opening signature
+stays anchored and the role parks until that instant passes or other input
+changes. A host-imposed bounded yield may likewise retain ready work.
 
 Ready-work presence alone never authorizes a timed re-admission, for either
 `wait` or no-progress `continue`/`bounded` records. Ready-set changes still wake
