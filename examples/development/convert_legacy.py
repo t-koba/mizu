@@ -128,9 +128,9 @@ def _record_receipt_id(role: str, token: str) -> str:
 
 
 def _message_id(kind: str, identity: str, rev: int | str) -> str:
-    """Stable, domain-separated 32-hex id for one legacy identity/revision."""
-    token = f"convert-legacy:v1:{kind}:{identity}:{rev}".encode("utf-8")
-    return hashlib.sha256(token).hexdigest()[:32]
+    """Stable id shared with the runtime producer, so conversion and live writes agree."""
+    from mizu.queue_decision_delivery import message_id
+    return message_id(kind, identity, rev)
 
 
 def _identity(value: object, label: str) -> str:

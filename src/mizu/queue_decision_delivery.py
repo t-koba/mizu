@@ -7,11 +7,14 @@ policies. The workflow vocabulary here is the stage-2 intermediate that exists
 until stage 2 is deleted.
 
 A host-only authority marker (see :mod:`mizu.decision_delivery`) selects this
-adapter for non-shared decision reads and receipts. It rebuilds the exact
-``decision_delivery.pending`` page from the declared ``proposals``,
-``decisions`` and ``receipts`` queues, and appends settled receipts only to the
-declared host-writable ``receipts`` queue. The shared-authority branch is
-unaffected.
+adapter for non-shared decision reads, receipts and the single live producer.
+It rebuilds the exact ``decision_delivery.pending`` page from the declared ``proposals``,
+``decisions`` and ``receipts`` queues, appends settled receipts only to the
+declared host-writable ``receipts`` queue, and appends each post-activation
+proposal/decision once through :class:`DecisionQueueWriter`. Ordinary
+``Insights.submit``/``Insights.decide`` call that writer under the same marker
+that switches the readers, so the live envelope has one authoritative path.
+The shared-authority branch is unaffected.
 
 Trust and bounds: the role comes from the host's trusted configuration object.
 The only actor presented to a queue for reads is ``role:<role.name>``; receipt
@@ -32,7 +35,7 @@ from collections.abc import Mapping
 from .config import MAX_DECISION_RECEIPT_DIAGNOSTICS, role_decision_events_limit
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, digest, identifier
-from .kernel.queues import PAGE_MAX
+from .kernel.queues import PAGE_MAX, allows
 
 PROPOSALS = "proposals"
 DECISIONS = "decisions"
@@ -562,3 +565,178 @@ def acknowledge(project, role, events) -> None:
             raise Denied("Invalid decision acknowledgement action")
         body = {"ack_token": token, "legacy_role": name, "legacy_action": action}
         store.append(RECEIPTS, body, "host", id=_receipt_id(name, token))
+
+
+# -- Runtime producer ---------------------------------------------------------
+#
+# The activation marker switches every decision-delivery read and receipt to
+# these queues. The same marker therefore has to switch the envelope producer:
+# after activation an ordinary submit/decide is delivered only through the
+# declared queue, never through a legacy delivery projection. The legacy
+# inbox/decision-history writes in Insights remain storage for revisions, work
+# items and waits; they are not a second delivery path. One producer appends
+# each envelope, with stable ids so an exact retry cannot append a second row.
+
+
+def message_id(kind: str, identity: str, rev: int | str) -> str:
+    """The conversion-stable 32-hex id for one insight identity and revision.
+
+    Shared with the one-time conversion so a message converted before
+    activation and a message produced after it have the same identity.
+    """
+    import hashlib
+    token = f"convert-legacy:v1:{kind}:{identity}:{rev}".encode("utf-8")
+    return hashlib.sha256(token).hexdigest()[:32]
+
+
+def _require_producer_queues(project) -> None:
+    """A missing or malformed declaration refuses the write instead of falling back."""
+    needed = {
+        PROPOSALS: ("title", "body", *PROPOSAL_FIELDS),
+        DECISIONS: ("action", "reason", "revisit", *PROPOSAL_FIELDS,
+                    "legacy_event", "legacy_decided_at", "legacy_run", "legacy_record"),
+    }
+    for queue, names in needed.items():
+        declaration = project.config.queues.get(queue)
+        if declaration is None or any(name not in declaration.fields for name in names):
+            raise AdapterError(f"{queue} declaration lacks decision producer metadata")
+    proposal = project.config.queues[PROPOSALS]
+    decision = project.config.queues[DECISIONS]
+    if (not allows(proposal.write, "operator") or not allows(proposal.read, "role:writer")
+            or not allows(decision.write, "role:writer")):
+        raise AdapterError("Declarations do not grant the decision producer its write and binding reads")
+
+
+def _put(project, queue: str, name: str, value, label: str, *, allow_none: bool = False):
+    field = project.config.queues[queue].fields[name]
+    if value is None and allow_none:
+        return field.validate(None)
+    if not isinstance(value, str) or (not value.strip() and not allow_none):
+        raise AdapterError(f"{label} has an empty {name}")
+    try:
+        field.validate(value)
+    except Denied as exc:
+        raise AdapterError(f"{label} has an invalid {name}: {exc}") from exc
+    return value
+
+
+def _proposal_body(project, record) -> dict:
+    queue = PROPOSALS
+    rev = record.get("rev")
+    if type(rev) is not int or rev < 1:
+        raise AdapterError("Proposal revision is not a positive integer")
+    evidence = record.get("evidence", [])
+    if not isinstance(evidence, list) or any(not isinstance(entry, dict) for entry in evidence):
+        raise AdapterError("Proposal evidence is not a list of evidence entries")
+    body = {
+        "title": _put(project, queue, "title", record.get("title"), "Proposal"),
+        "body": _put(project, queue, "body", record.get("body"), "Proposal"),
+        "legacy_insight": _put(project, queue, "legacy_insight", record.get("id"), "Proposal"),
+        "legacy_rev": _put(project, queue, "legacy_rev", str(rev), "Proposal"),
+        "legacy_source": _put(project, queue, "legacy_source", record.get("source"), "Proposal"),
+        "legacy_addressee": _put(project, queue, "legacy_addressee",
+                                 record.get("addressee"), "Proposal"),
+        "legacy_evidence": _put(project, queue, "legacy_evidence",
+                                canonical(evidence).decode("utf-8"), "Proposal"),
+        "legacy_created_at": _put(project, queue, "legacy_created_at",
+                                  record.get("created_at"), "Proposal"),
+    }
+    for key, name in (("kind", "legacy_kind"), ("urgency", "legacy_urgency")):
+        if key in record:
+            body[name] = _put(project, queue, name, record[key], "Proposal")
+    return body
+
+
+def _revisit_instant(value) -> str | None:
+    """The exact aware instant conversion would delay, or None for a phrase."""
+    from .kernel_shadow import instant_value
+    return instant_value(value) if isinstance(value, str) else None
+
+
+class DecisionQueueWriter:
+    """The single authoritative decision-envelope writer once queues are active.
+
+    Wired by ``Project`` into ``Insights``; ordinary submit/decide call it under
+    the same project lock as the storage write, so an activated project switches
+    producer and reader with one marker. Activation refuses to publish that
+    marker unless this writer is present and its declarations validate.
+    """
+
+    def __init__(self, project):
+        self.project = project
+        self._active = False
+
+    def active(self) -> bool:
+        # The marker is create-only and one-way. Cache only the active state:
+        # activation can happen later in this process, so an inactive answer
+        # is rechecked on the next write. Avoid re-reading the retained report
+        # (up to the history-scale reconciliation bound) on every submission.
+        if self._active:
+            return True
+        from .decision_delivery import authority_kind
+        self._active = authority_kind(self.project.root) == "queues"
+        return self._active
+
+    def require(self) -> None:
+        _require_producer_queues(self.project)
+
+    def submit(self, record) -> None:
+        """Append the declared proposal for a newly stored insight record."""
+        self.require()
+        body = _proposal_body(self.project, record)
+        identity = record["id"]
+        if len(canonical(body)) > MAX_FRAME:  # transport frame, no new knob
+            raise AdapterError("Proposal envelope exceeds the transport frame")
+        self.project.kernel_queues.append(
+            PROPOSALS, body, "operator", id=message_id(PROPOSALS, identity, record["rev"]))
+
+    def decide(self, current, event, event_id: str) -> None:
+        """Append the declared decision (and delayed revisit) for one event."""
+        self.require()
+        action = event.get("action")
+        if action not in DELIVERED_ACTIONS:
+            raise AdapterError("Decision producer requires a delivered action")
+        proposal_id = message_id(PROPOSALS, current["id"], current["rev"])
+        # A decision binds the exact proposal it answers. Read the stored
+        # message rather than re-deriving metadata: evidence may have been
+        # attached after the proposal was written, and conversion binds both
+        # rows to the same values.
+        store = self.project.kernel_queues
+        try:
+            proposal = store.message(proposal_id, "role:writer")
+        except Denied as exc:
+            raise AdapterError("Decision has no bound queue proposal") from exc
+        if proposal["queue"] != PROPOSALS:
+            raise AdapterError("Decision proposal id names another queue")
+        source = proposal["body"]
+        queue = DECISIONS
+        body = {
+            "action": _put(self.project, queue, "action", action, "Decision"),
+            "reason": _put(self.project, queue, "reason", event.get("reason"), "Decision"),
+            **{name: source[name] for name in PROPOSAL_FIELDS if name in source},
+            "legacy_event": _put(self.project, queue, "legacy_event", event_id, "Decision"),
+            "legacy_decided_at": _put(self.project, queue, "legacy_decided_at",
+                                      event.get("created_at"), "Decision"),
+            "legacy_record": _put(self.project, queue, "legacy_record",
+                                  canonical(event).decode("utf-8"), "Decision"),
+        }
+        if "decision_key" in event:
+            body["legacy_decision_key"] = _put(
+                self.project, queue, "legacy_decision_key", event["decision_key"], "Decision")
+        if "run" in event:
+            body["legacy_run"] = _put(self.project, queue, "legacy_run",
+                                      event["run"], "Decision", allow_none=True)
+        if action == "defer":
+            body["revisit"] = _put(self.project, queue, "revisit",
+                                   event.get("revisit"), "Decision")
+        if len(canonical(body)) > MAX_FRAME:
+            raise AdapterError("Decision envelope exceeds the transport frame")
+        identity = current["id"]
+        rev = current["rev"]
+        store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
+                     id=message_id(DECISIONS, identity, rev))
+        if action == "defer":
+            instant = _revisit_instant(event.get("revisit"))
+            if instant is not None:
+                store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
+                             deliver_at=instant, id=message_id("revisit", identity, rev))

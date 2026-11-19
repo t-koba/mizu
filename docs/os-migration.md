@@ -36,10 +36,15 @@ decision family, the operator then runs `stage2_activate.py`: it reapplies the
 idempotent conversion, requires `stage2_verify.py` to pass, and publishes the
 durable `"queues"` authority marker. From then on non-shared decision reads and
 acknowledgements use the declared `proposals`, `decisions` and `receipts`
-queues; there is no dual-write or runtime boolean flag. The production
-userland adapter is `src/mizu/queue_decision_delivery.py`; example queue names,
-schemas, roles and meanings stay in `examples/development/`. The shared
-authority branch keeps precedence and is unchanged. The record family has its
+queues; there is no dual-write or runtime boolean flag. The same marker switches
+the live producer: ordinary `Insights.submit` and `Insights.decide` append their
+proposal and decision envelopes through that adapter's one writer, and
+activation refuses to publish the marker unless the writer is wired and its
+queue declarations grant the write. Legacy inbox and history writes remain only
+as storage for revisions, work items and waits, never as a second delivery path.
+The production userland adapter is `src/mizu/queue_decision_delivery.py`;
+example queue names, schemas, roles and meanings stay in `examples/development/`.
+The shared authority branch keeps precedence and is unchanged. The record family has its
 own `record-authority.json` marker and `stage2_record_activate.py` gate. Once
 activated, questions, answers, notices and per-record acknowledgements are read
 and written through `questions`, `answers`, `notices` and `record-receipts` by

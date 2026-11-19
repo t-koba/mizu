@@ -520,6 +520,10 @@ class Insights:
         self.work_items = None
         #: Optional derived kernel projection wired by Project; never read for legacy truth.
         self.kernel_shadow = kernel_shadow
+        #: Single queue-backed decision-envelope producer, wired by Project.
+        #: Only used when the queue authority marker is active; see
+        #: :mod:`mizu.queue_decision_delivery`.
+        self.decision_queue_writer = None
 
     def _shadow(self, operation: str, *args) -> None:
         """Best-effort projection; a derived failure never changes a legacy result."""
@@ -687,6 +691,9 @@ class Insights:
                 write_json(path, record, exclusive=True)
             write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": record["created_at"]}, exclusive=True)
             self._shadow('submitted', record)
+            writer = self.decision_queue_writer
+            if writer is not None and writer.active():
+                writer.submit(record)
             return self._accepted(record)
 
     def revise(self, insight_id: str, *, source: str, title: str, body: str,
@@ -1296,6 +1303,12 @@ replacement insight without implying rejected substance.
                     with lock(self.root / "locks" / "decisions.lock"), \
                             self.ledger.write("insights", [f"d:{insight_id}"]):
                         write_json(raw, existing)
+                # An interrupted first attempt may have committed history before
+                # the queue append. Replay the same stable-id envelope so a
+                # crash cannot strand the decision in the legacy store alone.
+                writer = self.decision_queue_writer
+                if writer is not None and writer.active():
+                    writer.decide(current, existing, key)
                 return existing
             if prior is not None and prior.get("action") in ("accept", "modify", "reject"):
                 raise Denied("Insight already decided at this revision; revise the topic to reopen it")
@@ -1376,6 +1389,9 @@ replacement insight without implying rejected substance.
                     mkdir(self.root / "waits")
                     write_json(self.root / "waits" / f"{insight_id}.json", registered)
                 self._shadow('decided', current, record)
+                writer = self.decision_queue_writer
+                if writer is not None and writer.active():
+                    writer.decide(current, record, event_id)
         return record
 
     def _normalize_wait(self, wait, action: str) -> dict | None:

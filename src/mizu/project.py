@@ -154,6 +154,9 @@ class Project:
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
                                  work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
         self.insights.snapshots = self.snapshots
+        # The same authority marker switches decision reads and the live writer.
+        from .queue_decision_delivery import DecisionQueueWriter
+        self.insights.decision_queue_writer = DecisionQueueWriter(self)
         # Late acceptance is a separate projection; immutable snapshots stay unchanged.
         from . import operator_records, queue_record_delivery
         from .operator_records import record_question_lookup, register_question_wait, record_answer_evidence

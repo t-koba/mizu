@@ -496,6 +496,13 @@ def activate_queue_decision_delivery(project, *, conversion, verification):
                 raise Denied("Decision delivery is shared; queue activation is closed")
             retained_report(insights.root, marker)
             return marker
+        # Fail closed: readers switch only when the live producer is wired and
+        # its declarations validate, so activation can never leave ordinary
+        # writes stranded in the legacy delivery path.
+        writer = getattr(insights, "decision_queue_writer", None)
+        if writer is None:
+            raise Denied("Decision queue producer is not wired")
+        writer.require()
         maximum = insights.decision_reconciliation_bytes
         if len(plan_raw) > maximum or len(report_raw) > maximum:
             raise LimitExceeded("Decision reconciliation exceeds configured byte bound")
