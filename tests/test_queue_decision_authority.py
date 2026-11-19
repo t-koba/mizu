@@ -378,6 +378,91 @@ class QueueDecisionAuthority(unittest.TestCase):
             [event.get("kind") for event in got["events"] if event.get("insight") == accept_id])
 
 
+    def test_exact_defer_replay_preserves_stable_envelope_without_duplicate(self):
+        """A retry crosses the clock tick but keeps the original queue identity."""
+        self.activate()
+        identity = "8" * 32
+        self.live_submit(identity, "Deferred for exact replay")
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-e", expected_rev=1)
+        decision_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1)
+
+        def rows():
+            return {m["id"]: canonical(m["body"]) for m in
+                    self.project.kernel_queues.read(
+                        "decisions", "operator", now=stage2_verify.NOW)["messages"]}
+
+        before = rows()
+        self.assertIn(decision_id, before)
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-e", expected_rev=1)
+        after = rows()
+        self.assertEqual(after, before)
+        self.assertEqual(sum(1 for m in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if m["id"] == decision_id), 1)
+        self.assert_parity(identity)
+
+    def test_exact_defer_replay_repairs_missed_append_with_original_identity(self):
+        """A retry after a lost first append restores the original legacy_event."""
+        self.activate()
+        identity = "9" * 32
+        self.live_submit(identity, "Deferred with interrupted append")
+        writer = self.project.insights.decision_queue_writer
+        real_decide = writer.decide
+        calls = {"count": 0}
+
+        def drop_first_append(*args):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return
+            return real_decide(*args)
+
+        with mock.patch.object(writer, "decide", side_effect=drop_first_append):
+            self.project.insights.decide(
+                identity, "defer", "why", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        decision_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1)
+        self.assertEqual([m for m in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if m["id"] == decision_id], [])
+
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        rows = [m for m in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if m["id"] == decision_id]
+        self.assertEqual(len(rows), 1)
+        history = self.project.insights.root / "decision-history"
+        history_stems = [p.stem for p in history.glob("*.json")
+                         if json.loads(p.read_text()).get("id") == identity]
+        self.assertEqual(len(history_stems), 1)
+        self.assertEqual(rows[0]["body"]["legacy_event"], history_stems[0])
+        self.assert_parity(identity)
+
+    def test_converted_defer_replay_keeps_retained_history_identity(self):
+        """A converted defer's original history stem survives exact replay."""
+        self.activate()
+        identity = stage2_tests.DEFER_ID
+        decision_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1)
+        before = [m for m in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if m["id"] == decision_id]
+        self.assertEqual(len(before), 1)
+        original_event = before[0]["body"]["legacy_event"]
+
+        self.project.insights.decide(
+            identity, "defer", "Deferred reason", stage2_tests.REVISIT_AT,
+            "run-c", expected_rev=1)
+        after = [m for m in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if m["id"] == decision_id]
+        self.assertEqual(len(after), 1)
+        self.assertEqual(after[0]["body"]["legacy_event"], original_event)
+        self.assert_parity(identity)
+
     def legacy_page(self):
         """Read the legacy page without changing the durable activation marker."""
         with mock.patch.object(decision_delivery, "authority_kind", return_value=None):

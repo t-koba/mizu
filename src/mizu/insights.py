@@ -1309,7 +1309,15 @@ replacement insight without implying rejected substance.
                     write_json(self.root / "waits" / f"{insight_id}.json", rearmed)
                 writer = self.decision_queue_writer
                 if writer is not None and writer.active():
-                    writer.decide(current, prior, key)
+                    # The first write bound legacy_event to the retained
+                    # decision-history filename (a random stem for defers,
+                    # and the original stem for converted defers). Recover
+                    # that exact identity so a retry is a content no-op and a
+                    # missed first append is repaired with the same envelope.
+                    # A deterministically recomputed key would not match a
+                    # converted defer's retained stem.
+                    event_id = self._decision_event_identity(prior, rev)
+                    writer.decide(current, prior, event_id)
                 return prior
             event_path = self.root / "decision-history" / f"{key}.json"
             if event_path.exists() or event_path.is_symlink():
@@ -1428,6 +1436,45 @@ replacement insight without implying rejected substance.
                 if writer is not None and writer.active():
                     writer.decide(current, record, event_id)
         return record
+
+    def _decision_event_identity(self, decision: dict, rev: int) -> str:
+        """Recover the retained history filename stem for an effective decision.
+
+        The queue writer binds ``legacy_event`` to the decision-history file
+        name. Substantive decisions use the per-revision key as that name, but
+        defers (and pre-key legacy decisions) use a random stem that conversion
+        retains verbatim. An exact replay must reuse that original stem: a
+        recomputed key would give the stable-id queue row a different body and
+        a retry would be refused, or a missed first append would be repaired
+        under the wrong identity. Find the single retained history event whose
+        content is this decision, bounded to the configured insight-history
+        entry ceiling, and fail closed on absence, ambiguity or malformed rows.
+        """
+        history = self.root / "decision-history"
+        if not insight_archive._directory(history):
+            raise Denied("Decision history unavailable for replay")
+        wanted = canonical(decision)
+        stem = None
+        scanned = 0
+        for path in sorted(history.glob("*.json")):
+            scanned += 1
+            if scanned > MAX_INSIGHT_HISTORY_ENTRIES:
+                raise Denied("Decision history recovery bound exceeded")
+            if path.is_symlink():
+                continue
+            record = json.loads(safe_read(self.root, f"decision-history/{path.name}",
+                                          MAX_DECISION_EVENT_BYTES))
+            if not isinstance(record, dict):
+                raise Denied("Malformed decision history during replay")
+            if (record.get("id") == decision.get("id") and record.get("rev") == rev
+                    and canonical(record) == wanted):
+                if stem is not None:
+                    raise Denied("Ambiguous decision history for replay")
+                stem = path.stem
+        if stem is None:
+            raise Denied("Decision history event not found for replay")
+        identifier(stem)
+        return stem
 
     def _normalize_wait(self, wait, action: str) -> dict | None:
         return normalize_wait(wait, action, self.project_snapshots_digest)
