@@ -193,29 +193,31 @@ class KernelShadow:
         if action not in _ACTIONS:
             return
         self.submitted(insight)
-        object_id = insight_object_id(insight)
-        current = self.objects.read("insight", object_id)
-        if current["state"] in _FROM_STATES.get(action, ()):
-            fields = {}
-            if action == "defer":
-                instant = instant_value(record.get("revisit"))
-                if instant is None:
-                    fields = None  # the decision still projects; the state needs an instant
-                else:
-                    fields["revisit_at"] = instant
-            if action == "withdraw" and current["fields"].get("revisit_at") is not None:
-                fields["revisit_at"] = None  # clear the superseded revisit timer
-            if fields is not None:
-                actor = (principal(insight["source"]) if action == "withdraw"
-                         else current["fields"].get("holder",
-                                                    principal(insight.get("addressee", "writer"))))
-                self.objects.transition("insight", object_id, action,
-                                        expected_rev=current["rev"], fields=fields, actor=actor)
-        object_id = decision_object_id(record)
+        # The create-only decision record is established before the mutable
+        # insight state, so a rejected decision field cannot leave a half-written
+        # projection. Replays still reach the state transition below.
+        decision_id = decision_object_id(record)
         fields = decision_fields(record)
-        if self.objects.revisions("decision", object_id):
-            existing = self.objects.read("decision", object_id)
+        if self.objects.revisions("decision", decision_id):
+            existing = self.objects.read("decision", decision_id)
             if existing["fields"] != fields:
                 raise Denied("Decision projection id was reused with different content")
+        else:
+            self.objects.create("decision", fields, "host", object_id=decision_id)
+        object_id = insight_object_id(insight)
+        current = self.objects.read("insight", object_id)
+        if current["state"] not in _FROM_STATES.get(action, ()):
             return
-        self.objects.create("decision", fields, "host", object_id=object_id)
+        state_fields = {}
+        if action == "defer":
+            instant = instant_value(record.get("revisit"))
+            if instant is None:
+                return  # the decision is recorded; the state needs an instant
+            state_fields["revisit_at"] = instant
+        if action == "withdraw" and current["fields"].get("revisit_at") is not None:
+            state_fields["revisit_at"] = None  # clear the superseded revisit timer
+        actor = (principal(insight["source"]) if action == "withdraw"
+                 else current["fields"].get("holder",
+                                            principal(insight.get("addressee", "writer"))))
+        self.objects.transition("insight", object_id, action,
+                                expected_rev=current["rev"], fields=state_fields, actor=actor)

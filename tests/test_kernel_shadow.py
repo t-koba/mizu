@@ -184,6 +184,38 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertEqual(decision["fields"]["action"], "withdraw")
         self.assertTrue(self.project.insights.kernel_shadow.verify(insight, record)["ok"])
 
+    def test_rejected_decision_fields_leave_insight_state_unchanged(self):
+        insight = self.submit("e" * 32)
+        decision = self.project.insights.decide(
+            insight["id"], "accept", "x" * 9000, "", "test-run",
+            expected_rev=1, work_item_intent="none")
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "pending")
+        self.assertEqual(self.project.kernel_objects.revisions(
+            "decision", decision_object_id(decision)), [])
+        result = self.project.insights.kernel_shadow.verify(insight, decision)
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.project.insights.kernel_shadow.failures[-1]["operation"],
+                         "decided")
+
+    def test_transition_failure_leaves_replayable_decision_record(self):
+        insight = self.submit("f" * 32)
+        shadow = self.project.insights.kernel_shadow
+        with patch.object(self.project.kernel_objects, "transition",
+                          side_effect=Denied("derived transition failure")):
+            decision = self.project.insights.decide(
+                insight["id"], "accept", "Accepted", "", "test-run",
+                expected_rev=1, work_item_intent="none")
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "pending")
+        recorded = self.project.kernel_objects.read("decision", decision_object_id(decision))
+        self.assertEqual(recorded["fields"]["action"], "accept")
+        shadow.clear_failures(insight["id"])
+        shadow.decided(insight, decision)
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "accepted")
+        self.assertTrue(shadow.verify(insight, decision)["ok"])
+
     def test_projection_failure_does_not_change_legacy_authority(self):
         with patch.object(self.project.kernel_objects, "create", side_effect=Denied("derived failure")):
             insight = self.submit("cc" * 16)
