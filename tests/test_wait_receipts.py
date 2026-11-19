@@ -116,6 +116,24 @@ class WaitReceiptTests(Fixture):
                     for group in self.rows():
                         self.assertEqual(len(group), 0 if explicit else 1)
 
+    def test_exact_defer_replay_rearms_wait_without_duplicating_projection(self):
+        _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()}, title="Replay")
+        before = self.rows()
+        self.assertEqual(len(before[0]), 1)
+        original_id = before[0][0]["registration_id"]
+        insight_id = before[0][0]["insight"]
+        record = read_json(self.project.root / "decisions" / f"{insight_id}.json")
+        # Consume the wait, then replay the identical defer with a fresh wait.
+        self.assertEqual(self.project.insights.consume_waits("reviewer", before[0]), 1)
+        self.assertEqual(self.rows()[0], [])
+        self.assertEqual(self.project.insights.decide(
+            insight_id, "defer", "parked", "wait for it", "test",
+            wait={"kind": "deadline", "at": _past()}, expected_rev=1), record)
+        replayed = self.rows()[0]
+        self.assertEqual(len(replayed), 1)
+        self.assertNotEqual(replayed[0]["registration_id"], original_id)
+        self.assertEqual(read_json(self.project.root / "decisions" / f"{insight_id}.json"), record)
+
     def test_tokens_bind_role_source_payload_and_current_unit_before_intent(self):
         self.seed(count=2)
         for index, attr, source in ((0, "wait_events", events.WAIT), (1, "obligations", events.OBLIGATION)):

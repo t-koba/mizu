@@ -1292,7 +1292,16 @@ replacement insight without implying rejected substance.
                 # An exact defer retry must return the original event. A fresh
                 # timestamp would derive a second kernel decision object and
                 # event for one disposition, so a retry crossing a clock tick
-                # must stay the same no-op as a substantive keyed replay.
+                # must stay the same no-op as a substantive keyed replay. A
+                # supplied wait is still re-armed with a fresh registration id:
+                # replay must not silently drop a wake the caller asked for.
+                if registered is not None:
+                    store.prepare_decision_write(need_wait=True)
+                    rearmed = {**registered, "owner": insight_id, "rev": rev,
+                               "decision": prior, "registered_at": now(), "run": run,
+                               "registration_id": uuid.uuid4().hex}
+                    mkdir(self.root / "waits")
+                    write_json(self.root / "waits" / f"{insight_id}.json", rearmed)
                 writer = self.decision_queue_writer
                 if writer is not None and writer.active():
                     writer.decide(current, prior, key)
