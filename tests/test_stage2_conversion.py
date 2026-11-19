@@ -299,19 +299,76 @@ class Stage2QuestionConversion(Fixture):
         self.assertEqual(len(report["notices"]), 1)
         self.assertEqual(tree_state(self.project.root), before)
 
-    def test_unbindable_answer_refuses_before_any_append(self):
-        from support import stored_question_insight
-        insight = stored_question_insight(self.project)
-        records.write(self.project, event_id="insight-answer", kind="answer",
-                      body="Legacy insight answer",
-                      subject={"type": "insight", "id": insight["id"], "rev": 1})
+    def refuse(self):
         before = self.legacy_state()
         with contextlib.redirect_stderr(io.StringIO()) as errors:
             code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
         self.assertEqual(code, 2)
-        self.assertIn("does not address a declared role question", errors.getvalue())
         self.assertFalse((self.project.root / "queues").exists())
         self.assertEqual(self.legacy_state(), before)
+        return errors.getvalue()
+
+    def test_insight_answer_converts_to_proposal_referencing_answer(self):
+        from support import stored_question_insight
+        insight = stored_question_insight(self.project)
+        subject = {"type": "insight", "id": insight["id"], "rev": insight["rev"]}
+        answer = records.write(self.project, event_id="insight-answer", kind="answer",
+                               body="Legacy insight answer", subject=subject)
+        proposal_id = convert_legacy._message_id("proposal", insight["id"], insight["rev"])
+        answer_id = convert_legacy._message_id("answer", answer["record"]["id"],
+                                               answer["record_digest"])
+        question_id, question_answer_id, _ = self.ids()
+        legacy_before = self.legacy_state()
+
+        messages, report = convert_legacy._plan(self.project)
+        self.assertEqual(report["answers"], [question_answer_id, answer_id])
+        self.assertIn(proposal_id, report["proposals"])
+        ids = [message["id"] for message in messages]
+        self.assertLess(ids.index(proposal_id), ids.index(answer_id))
+
+        first = self.convert("--apply")
+        self.assertEqual(first, {**report, "applied": True})
+        self.assertEqual(self.convert("--apply"), first)
+        self.assertEqual(self.legacy_state(), legacy_before)
+
+        answers = self.store.read("answers", "operator")["messages"]
+        self.assertEqual([m["id"] for m in answers], [question_answer_id, answer_id])
+        self.assertEqual(answers[0]["refs"], [question_id])
+        self.assertEqual(answers[1]["refs"], [proposal_id])
+        self.assertEqual(answers[1]["author"], "operator")
+        self.assertEqual(answers[1]["body"], {
+            "body": "Legacy insight answer",
+            "legacy_addressee": "worker",
+            "legacy_subject": canonical(subject).decode(),
+            "legacy_writer": "operator.cli",
+            "legacy_id": answer["record"]["id"],
+            "legacy_digest": answer["record_digest"],
+            "legacy_action": "publish"})
+        self.assertEqual(self.store.message(proposal_id, "operator")["queue"], "proposals")
+
+    def test_answer_to_revised_insight_refuses_before_any_append(self):
+        from support import history_write_json, stored_question_insight
+        insight = stored_question_insight(self.project)
+        records.write(self.project, event_id="insight-answer", kind="answer",
+                      body="Legacy insight answer",
+                      subject={"type": "insight", "id": insight["id"], "rev": 1})
+        # Only the original release could revise this retained question insight.
+        path = self.project.root / "inbox" / f"{insight['id']}.json"
+        history_write_json(path, {**json.loads(path.read_text()), "rev": 2})
+        self.assertIn("does not bind a converted insight revision", self.refuse())
+
+    def test_answer_to_nonexistent_insight_revision_refuses_before_any_append(self):
+        import copy
+        from support import stored_question_insight
+        insight = stored_question_insight(self.project)
+        answer = records.write(self.project, event_id="insight-answer", kind="answer",
+                               body="Legacy insight answer",
+                               subject={"type": "insight", "id": insight["id"], "rev": 1})
+        envelope = copy.deepcopy(answer["record"])
+        envelope["id"] = "operator/sample/missing-revision"
+        envelope["subject"] = {"type": "insight", "id": insight["id"], "rev": 2}
+        records.store(self.project).put(envelope, writer=records.WRITER)
+        self.assertIn("does not bind a converted insight revision", self.refuse())
 
 
 if __name__ == "__main__":

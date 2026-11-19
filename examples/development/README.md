@@ -35,11 +35,13 @@ append.
 Converted questions derive their required `question` from the exact legacy
 payload; the full payload, subject, authenticated writer, id and digest are
 retained in declared optional fields. Answers carry the exact legacy body and
-reference their converted question; notices carry their exact body, action and
-optional closure target. Legacy `operator.cli` authorship is retained in the
-body while the message author is the queue's granted principal. An answer that
-does not bind an exact declared role question, a truncated enumeration or a
-field that exceeds its declared bound refuses the whole run before any append.
+reference their converted question or, for an insight revision, that revision's
+converted proposal; notices carry their exact body, action and optional closure
+target. Legacy `operator.cli` authorship is retained in the body while the
+message author is the queue's granted principal. An answer that does not bind an
+exact declared role question or converted insight revision, a truncated
+enumeration or a field that exceeds its declared bound refuses the whole run
+before any append.
 
 ```sh
 python3 examples/development/convert_legacy.py config/config.toml --project NAME [--apply]

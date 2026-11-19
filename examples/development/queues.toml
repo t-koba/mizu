@@ -22,7 +22,8 @@ action = {type = "string", values = ["accept", "modify", "defer", "reject", "wit
 reason = {type = "string", max = 8192, required = true}
 revisit = {type = "string", max = 8192}
 
-# Questions to the operator, and the operator's answers (refs = [question id]).
+# Questions to the operator, and the operator's answers
+# (refs = [question id or converted insight proposal id]).
 [queues.questions]
 write = ["role:*"]
 read = ["operator", "role:*"]

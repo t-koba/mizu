@@ -32,9 +32,11 @@ over another message.
   is bound by the kernel from the authenticated unit, never from a tool
   argument. The operator and roles read this queue.
 - The operator answers by appending to `answers` with `refs` to the question.
-  Readers join an answer to its question through that reference. An answer is
-  not a command and does not change any other record unless the deployment's
-  own tooling says so.
+  Readers join an answer to its question through that reference. A legacy
+  answer to an insight revision instead references that revision's converted
+  proposal, and refuses conversion when no proposal was converted for it. An
+  answer is not a command and does not change any other record unless the
+  deployment's own tooling says so.
 - All roles and the operator may read answers. Acknowledgement is explicit; an
   unacknowledged answer remains in the role's delivery view.
 

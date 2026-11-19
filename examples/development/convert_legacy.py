@@ -14,9 +14,11 @@ and (when present) one decision message. A deferral whose revisit carries an
 aware instant also becomes a delayed decision message from the writer to itself,
 referencing that proposal. Declared role questions become question messages,
 their exact authenticated answers become referencing answer messages, and
-operator notices become notice messages. Historical writers that differ from a
-queue's declared author are retained in the message body, never used to bypass
-a write grant. Message ids derive from legacy identity and content, so an exact
+operator notices become notice messages. A legacy answer to an insight
+revision becomes an answer message referencing that revision's converted
+proposal; a revision that was not converted refuses the run. Historical
+writers that differ from a queue's declared author are retained in the message
+body, never used to bypass a write grant. Message ids derive from legacy identity and content, so an exact
 replay appends nothing: QueueStore returns the existing message. All input is
 validated before the first append; a malformed or unbindable record refuses the
 whole run. Archived revisions stay in the legacy archive; they are not silently
@@ -222,6 +224,19 @@ def _role_questions(project, declaration) -> tuple[list[dict], dict]:
     return messages, index
 
 
+def _insight_proposal_ref(subject, proposal_index, label):
+    """Bind an exact legacy insight answer subject to its converted proposal."""
+    if (not isinstance(subject, dict) or set(subject) != {"type", "id", "rev"}
+            or subject["type"] != "insight"):
+        raise ConversionError(f"{label} does not address an insight revision")
+    insight_id = _identity(subject["id"], "Legacy answer insight id")
+    rev = _revision(subject["rev"], "Legacy answer insight revision")
+    proposal_id = proposal_index.get((insight_id, rev))
+    if proposal_id is None:
+        raise ConversionError(f"{label} does not bind a converted insight revision")
+    return proposal_id
+
+
 def _record_body(envelope, digest, declaration, fields, *, allow_empty=()):
     """Copy the exact operator record content and its legacy routing metadata."""
     payload = envelope["payload"]
@@ -246,8 +261,12 @@ def _record_body(envelope, digest, declaration, fields, *, allow_empty=()):
     return body
 
 
-def _operator_messages(project, question_index, answer_decl, notice_decl):
-    """Enumerate authenticated answers and notices from the compact catalog."""
+def _operator_messages(project, question_index, proposal_index, answer_decl, notice_decl):
+    """Enumerate authenticated answers and notices from the compact catalog.
+
+    Answers bind to either an exact declared role question or an insight
+    revision whose proposal was converted in this run.
+    """
     try:
         with os.scandir(project.root / "shared-records" / "operator") as entries:
             if not any(entry.is_file(follow_symlinks=False) for entry in entries):
@@ -271,17 +290,22 @@ def _operator_messages(project, question_index, answer_decl, notice_decl):
             if envelope["payload"]["action"] != "publish":
                 raise ConversionError(f"Legacy answer {record_id} is not a published answer")
             subject = envelope["subject"]
-            if not isinstance(subject, dict) or subject.get("type") != "record":
+            if (not isinstance(subject, dict)
+                    or subject.get("type") not in ("record", "insight")):
                 raise ConversionError(
                     f"Legacy answer {record_id} does not address a declared role question")
-            question_id = question_index.get(
-                (subject.get("kind"), subject.get("id"), subject.get("digest")))
-            if question_id is None:
-                raise ConversionError(
-                    f"Legacy answer {record_id} does not bind an exact role question")
+            if subject["type"] == "insight":
+                target = _insight_proposal_ref(
+                    subject, proposal_index, f"Legacy answer {record_id}")
+            else:
+                target = question_index.get(
+                    (subject.get("kind"), subject.get("id"), subject.get("digest")))
+                if target is None:
+                    raise ConversionError(
+                        f"Legacy answer {record_id} does not bind an exact role question")
             messages.append({"queue": ANSWERS,
                              "id": _message_id("answer", record_id, digest),
-                             "author": ANSWER_AUTHOR, "refs": (question_id,),
+                             "author": ANSWER_AUTHOR, "refs": (target,),
                              "body": _record_body(envelope, digest, answer_decl, RECORD_FIELDS)})
         else:
             messages.append({"queue": NOTICES,
@@ -309,6 +333,7 @@ def _plan(project) -> tuple[list[dict], dict]:
 
     messages: list[dict] = []
     by_id: dict[str, dict] = {}
+    proposal_index: dict[tuple[str, int], str] = {}
     cursor = None
 
     def add(message: dict) -> None:
@@ -330,6 +355,7 @@ def _plan(project) -> tuple[list[dict], dict]:
                     or _revision(record.get("rev", 1), "Record revision") != rev):
                 raise ConversionError(f"Ambiguous legacy insight {insight_id} at revision {rev}")
             proposal_id = _message_id("proposal", insight_id, rev)
+            proposal_index[(insight_id, rev)] = proposal_id
             add({"queue": PROPOSALS, "id": proposal_id, "author": PROPOSAL_AUTHOR,
                  "refs": (), "body": {
                      "title": _text(record.get("title"), proposal_decl.fields["title"], "Title"),
@@ -367,7 +393,8 @@ def _plan(project) -> tuple[list[dict], dict]:
     questions, question_index = _role_questions(project, question_decl)
     for message in questions:
         add(message)
-    for message in _operator_messages(project, question_index, answer_decl, notice_decl):
+    for message in _operator_messages(project, question_index, proposal_index,
+                                      answer_decl, notice_decl):
         add(message)
 
     report = {"project": project.name, "applied": False,
