@@ -1,7 +1,8 @@
 # Development userland (example)
 
 This directory expresses a development workflow (proposals and their
-decisions, questions and answers, notices, work and its completion, checks) as
+decisions, questions and answers, notices, converted decision receipts, work
+and its completion, checks) as
 queue declarations and role policy on the kernel
 ([docs/kernel.md](../../docs/kernel.md)). It is an example: a deployment
 includes it from its own configuration and changes it freely. The kernel reads
@@ -21,9 +22,10 @@ store that stage 1 replaces and is deleted with it.
 `convert_legacy.py` is an operator-run example-userland command. It reads the
 current legacy insights and their effective decisions through the public
 Insight API, declared role questions and their answers through the operator
-record APIs, and operator notices from the same authenticated record store. It
-appends equivalent messages to the `proposals`, `decisions`, `questions`,
-`answers` and `notices` queues declared in `queues.toml`. Archived revisions
+record APIs, operator notices from the same authenticated record store, and
+legacy per-token decision receipts. It appends equivalent messages to the
+`proposals`, `decisions`, `questions`, `answers`, `notices` and `receipts` queues
+declared in `queues.toml`. Archived revisions
 stay in the legacy store; nothing is rewritten and no runtime authority, route
 or capability changes. Decision messages use the queue's declared writer
 principal (`role:writer`) as historical authorship only. A deferral whose
@@ -34,7 +36,14 @@ carries its exact legacy revisit condition in the declared `revisit` field,
 whether or not it is an instant. A malformed instant refuses the run before any
 append.
 
-Converted proposals and decisions retain the exact legacy insight id,
+Receipt conversion feeds each token through the legacy receipt reader, so a
+settled receipt becomes a `receipts` message and the three corrupt-receipt
+reasons (`malformed_json`, `invalid_receipt`, `invalid_timestamp`) are retained
+as declared `legacy_reason` values. The action is inferred by binding the token
+to its current legacy decision event or pending envelope; a receipt no current
+candidate binds is reported as unbound and left unconverted. These messages are
+converted legacy receipts, not kernel state. Converted proposals and decisions
+retain the exact legacy insight id,
 revision, source, addressee, current evidence, decision key and aware decision
 instant in declared optional fields for a queue-backed decision adapter; a
 delayed revisit carries the same decision metadata as its decision.
@@ -55,9 +64,10 @@ python3 examples/development/convert_legacy.py config/config.toml --project NAME
 
 Message ids are derived from legacy identity and content: insight id and
 revision for proposals/decisions/revisits, record id and digest for
-questions/answers/notices, each in its own domain, so a repeat appends nothing.
-Both the dry run and `--apply` report `proposals`, `decisions`, `revisits`,
-`questions`, `answers` and `notices` id lists.
+questions/answers/notices, role and token for receipts, each in its own domain,
+so a repeat appends nothing. Both the dry run and `--apply` report `proposals`,
+`decisions`, `revisits`, `questions`, `answers`, `notices` and `receipts` id
+lists, plus any `unbound_receipts` tokens.
 Without `--apply` the command is a dry run: it prints the planned ids and writes
 nothing. Malformed or ambiguous legacy input refuses the whole run before any
 append.
@@ -88,9 +98,10 @@ module and does not change runtime authority or routing.
 ## Decision adapter read slice
 
 `stage2_decision_adapter.py` is a read-only example-userland reconstruction of
-the legacy `decision_delivery.pending` page from the converted `proposals` and
-`decisions` queues. `pending(project, role, *, actions=None, limit=None,
-include_insights=True, sources=None)` returns the same `shared`, `events`,
+the legacy `decision_delivery.pending` page from the converted `proposals`,
+`decisions` and `receipts` queues.
+`pending(project, role, *, actions=None, limit=None, include_insights=True,
+sources=None)` returns the same `shared`, `events`,
 `diagnostics`, `page` and `manifest` dictionary; it derives the queue actor as
 `role:<role.name>` from the supplied trusted role and accepts no principal.
 An omitted `sources` follows `role.decision_sources`, or `own` when unset,
@@ -101,8 +112,13 @@ kind and urgency and the decision's history event id, key, run and canonical
 history record make the payload and acknowledgement tokens byte-identical to
 the legacy page (the event id is the history filename, not the decision key,
 for deferrals). Any configured role may be an insight addressee, so the example
-`queues.toml` grants every role read of proposals; write and wake grants are
-unchanged.
+`queues.toml` grants every role read of proposals and receipts; write and wake
+grants are unchanged. A valid converted receipt for this role suppresses its token's
+decision or pending event before limits and byte bounding are applied. A
+corrupt receipt omits that event and emits the legacy
+`{event, ack_token, action, reason}` diagnostic, capped by the legacy
+`decision_receipt_diagnostics` setting and present in both the result and a
+returned page. The adapter reads no legacy receipt file.
 
 ```python
 from stage2_decision_adapter import pending
@@ -111,16 +127,16 @@ page = pending(project, role, actions=role.decision_events,
 ```
 
 This is a comparison slice only: no runtime call site is switched, no legacy
-module is deleted and no feature flag is added. Legacy receipts and the shared
-decision-authority page are not queue facts, so this adapter reproduces the
-non-shared page with no receipts; tests compare it against the legacy call on
-that fixture.
+module is deleted and no feature flag is added. The shared decision-authority
+page is not a queue fact, so tests compare the non-shared page against the
+legacy call on fixtures with settled, corrupt and absent receipts.
 
 ## Conversion gate
 
 `stage2_verify.py` is an operator-run, read-only migration gate. It recomputes
-the current plan with `convert_legacy._plan` and compares it with the five
-conversion queues on queue, id, author, body, ordered refs and delivery
+the current plan with `convert_legacy._plan` and compares it with the declared
+conversion queues, including `receipts`, on queue, id, author, body, ordered
+refs and delivery
 instant. Reads use the `operator` principal, an explicit cursor, bounded pages
 and a fixed far-future instant so delayed revisits are included; nothing is
 appended or acknowledged. Missing, extra or changed messages, duplicate ids

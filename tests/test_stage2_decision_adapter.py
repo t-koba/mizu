@@ -182,6 +182,137 @@ class Stage2DecisionAdapter(Fixture):
                 finally:
                     path.write_bytes(original)
 
+    def test_other_corrupt_reasons_match_legacy_diagnostics(self):
+        before = self.legacy_page()
+        decision = next(event for event in before["events"]
+                        if event.get("insight") == DEFER_ID)
+        pending = next(event for event in before["events"]
+                       if event.get("insight") == OTHER_ID)
+        parent = self.project.root / "decision-receipts" / "worker"
+        parent.mkdir(parents=True, exist_ok=True)
+        (parent / f"{decision['ack_token']}.json").write_bytes(
+            canonical({"role": "worker"}))
+        (parent / f"{pending['ack_token']}.json").write_bytes(canonical({
+            "role": "worker", "event": pending["event"],
+            "ack_token": pending["ack_token"], "acknowledged_at": "not-an-instant"}))
+        report = self.convert()
+        self.assertEqual(len(report["receipts"]), 2)
+        reasons = {message["body"]["ack_token"]: message["body"]["legacy_reason"]
+                   for message in self.project.kernel_queues.read(
+                       "receipts", "operator")["messages"]}
+        self.assertEqual(reasons, {decision["ack_token"]: "invalid_receipt",
+                                   pending["ack_token"]: "invalid_timestamp"})
+        want, got = self.parity_page()
+        self.assertEqual(canonical(want["diagnostics"]), canonical(got["diagnostics"]))
+        self.assertEqual({item["ack_token"]: item["reason"] for item in got["diagnostics"]},
+                         reasons)
+
+    def convert(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
+        self.assertEqual(code, 0)
+        return json.loads(output.getvalue())
+
+    def legacy_page(self, **kwargs):
+        return decision_delivery.pending(self.project, self.role(), **kwargs)
+
+    def parity_page(self, **kwargs):
+        want = self.legacy_page(**kwargs)
+        got = adapter.pending(self.project, self.role(), **kwargs)
+        self.assertEqual(canonical(want), canonical(got))
+        self.assertEqual(want, got)
+        return want, got
+
+    def test_no_receipts_matches_legacy(self):
+        """An explicit zero-receipt case stays byte-identical to legacy."""
+        self.assertFalse((self.project.root / "decision-receipts" / "worker").exists())
+        self.assertEqual(self.project.kernel_queues.read(
+            "receipts", "operator")["messages"], [])
+        want, got = self.parity_page()
+        self.assertEqual(want["diagnostics"], [])
+        self.assertEqual(got["diagnostics"], [])
+
+    def test_valid_receipts_suppress_decision_and_pending_events(self):
+        before = self.legacy_page()
+        decision = next(event for event in before["events"]
+                        if event.get("insight") == ACCEPT_ID)
+        pending = next(event for event in before["events"]
+                       if event.get("insight") == PENDING_ID)
+        self.project.insights.acknowledge_decisions("worker", [decision, pending])
+        report = self.convert()
+        self.assertEqual(len(report["receipts"]), 2)
+        self.assertEqual(report["unbound_receipts"], [])
+        want, got = self.parity_page()
+        self.assertEqual(want["diagnostics"], [])
+        delivered = [event.get("insight") for event in got["events"]]
+        self.assertNotIn(ACCEPT_ID, delivered)
+        self.assertNotIn(PENDING_ID, delivered)
+        self.assertEqual([event["insight"] for event in want["events"]], delivered)
+
+    def test_corrupt_receipts_match_legacy_diagnostics_and_suppression(self):
+        before = self.legacy_page()
+        decision = next(event for event in before["events"]
+                        if event.get("insight") == ACCEPT_ID)
+        pending = next(event for event in before["events"]
+                       if event.get("insight") == PENDING_ID)
+        parent = self.project.root / "decision-receipts" / "worker"
+        parent.mkdir(parents=True, exist_ok=True)
+        for event in (decision, pending):
+            (parent / f"{event['ack_token']}.json").write_bytes(b"{invalid-json")
+        report = self.convert()
+        self.assertEqual(len(report["receipts"]), 2)
+        stored = self.project.kernel_queues.read("receipts", "operator")["messages"]
+        body_by_token = {message["body"]["ack_token"]: message["body"] for message in stored}
+        self.assertEqual(body_by_token, {
+            item["ack_token"]: {"ack_token": item["ack_token"], "legacy_role": "worker",
+                                "legacy_action": action, "legacy_reason": "malformed_json"}
+            for item, action in ((decision, "accept"), (pending, "pending"))})
+        want, got = self.parity_page()
+        expected = [{"event": item["event"], "ack_token": item["ack_token"],
+                     "action": action, "reason": "malformed_json"}
+                    for item, action in ((decision, "accept"), (pending, "pending"))]
+        self.assertEqual(canonical(want["diagnostics"]), canonical(got["diagnostics"]))
+        self.assertEqual(got["diagnostics"], expected)
+        delivered = [event.get("insight") for event in got["events"]]
+        self.assertNotIn(ACCEPT_ID, delivered)
+        self.assertNotIn(PENDING_ID, delivered)
+
+    def test_diagnostics_cap_and_page_copy(self):
+        before = self.legacy_page()
+        decision = next(event for event in before["events"]
+                        if event.get("insight") == ACCEPT_ID)
+        parent = self.project.root / "decision-receipts" / "worker"
+        parent.mkdir(parents=True, exist_ok=True)
+        (parent / f"{decision['ack_token']}.json").write_bytes(b"{invalid-json")
+        self.convert()
+        with mock.patch.object(self.project.insights, "decision_receipt_diagnostics", 0):
+            want, got = self.parity_page()
+        self.assertEqual(want["diagnostics"], [])
+        self.assertEqual(got["diagnostics"], [])
+        with mock.patch.object(adapter, "MAX_FRAME", 300), \
+                mock.patch.object(decision_delivery, "MAX_FRAME", 300):
+            got = adapter.pending(self.project, self.role())
+            legacy = decision_delivery.pending(self.project, self.role())
+        self.assertEqual(canonical(legacy["diagnostics"]), canonical(got["diagnostics"]))
+        self.assertIsNotNone(got["page"])
+        self.assertEqual(got["page"]["diagnostics"], got["diagnostics"])
+
+    def test_oversized_receipt_refuses_the_whole_conversion(self):
+        before = self.legacy_page()
+        decision = next(event for event in before["events"]
+                        if event.get("insight") == ACCEPT_ID)
+        parent = self.project.root / "decision-receipts" / "worker"
+        parent.mkdir(parents=True, exist_ok=True)
+        receipt = parent / f"{decision['ack_token']}.json"
+        receipt.write_bytes(b"x" * 1025)
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("conversion refused", errors.getvalue())
+        self.assertEqual(self.project.kernel_queues.read("receipts", "operator")["messages"], [])
+
     def test_work_item_decision_and_other_role_addressee(self):
         """A rich history record and another role's attention still reconstruct."""
         snap = self.project.snapshots.get()

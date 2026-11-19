@@ -2,12 +2,14 @@
 """Read-only, queue-backed reconstruction of the legacy decision page.
 
 This is example userland, not kernel code and not a runtime call-site switch.
-It reads only the declared ``proposals`` and ``decisions`` queues through
-``project.kernel_queues`` and rebuilds the exact non-shared
+It reads only the declared ``proposals``, ``decisions`` and ``receipts``
+queues through ``project.kernel_queues`` and rebuilds the exact non-shared
 ``decision_delivery.pending`` dictionary (``shared``, ``events``,
 ``diagnostics``, ``page``, ``manifest``) from the metadata retained by
-``convert_legacy.py``. Nothing here reads a legacy insight, history, receipt or
-shared record after conversion; legacy page calls belong in comparison tests.
+``convert_legacy.py``. Converted receipts suppress settled candidates and
+yield the legacy per-token diagnostics; the adapter never opens a legacy
+insight, history, receipt or shared record after conversion, and legacy page
+calls belong in comparison tests.
 
 Because the queue has no per-message filter and any configured role may be the
 addressee of an insight, the example ``queues.toml`` grants every role read of
@@ -21,10 +23,12 @@ future ``now`` makes delayed revisits due; their messages are then skipped,
 because the ordinary message is the one current decision. Malformed or
 ambiguous converted metadata refuses the read instead of inventing a value.
 
-Limits of this read slice: the legacy path also suppresses already receipted
-events and can serve a shared-authority page. Neither legacy receipts nor the
-shared store are queue facts, so this adapter does not reproduce those two
-filters; the runtime keeps its legacy authority until the one-commit switch.
+The ``receipts`` messages carry only the declared token, role, inferred action
+and optional reason; diagnostics take their action from the candidate event
+itself, exactly as legacy does. The legacy diagnostics cap is reused. The
+remaining limit of this read slice is the shared-authority page, which has no
+queue facts here; the runtime keeps its legacy authority until the one-commit
+switch.
 """
 from __future__ import annotations
 
@@ -47,7 +51,8 @@ from mizu.fs import MAX_FRAME, canonical, digest, identifier  # noqa: E402
 
 PROPOSALS = "proposals"
 DECISIONS = "decisions"
-QUEUES = (PROPOSALS, DECISIONS)
+RECEIPTS = "receipts"
+QUEUES = (PROPOSALS, DECISIONS, RECEIPTS)
 #: Later than any four-digit-year revisit, and aware so delivery is total.
 NOW = "9999-12-31T23:59:59+00:00"
 PAGE = stage2_view.PAGE
@@ -57,6 +62,7 @@ MAX_DECISIONS = 100
 #: Captured at import so the prompt-frame bound can be varied independently.
 DECISION_PAYLOAD_BYTES = MAX_FRAME
 INSIGHT_PENDING = "insight.pending"
+RECEIPT_PENDING = "pending"
 DELIVERED_ACTIONS = frozenset({"accept", "modify", "defer", "reject"})
 ID = re.compile(r"[0-9a-f]{32}\Z")
 MISSING = object()
@@ -154,6 +160,45 @@ def _read_queue(store, name: str, actor: str) -> list[dict]:
             raise AdapterError(f"{name} pagination did not advance")
         cursor = following
     raise AdapterError(f"{name} exceeded {MAX_PAGES} pages")
+
+
+class _ReceiptIndex:
+    """Token-keyed view of one role's converted legacy receipts."""
+
+    def __init__(self, project, role_name: str, messages: list[dict]):
+        self.settled: set[str] = set()
+        self.corrupt: dict[str, str] = {}
+        self.actions: dict[str, str] = {}
+        for message in messages:
+            body = _body(message, RECEIPTS)
+            if message.get("deliver_at") is not None or message["refs"]:
+                raise AdapterError("A converted receipt cannot be delayed or reference a message")
+            token = _field(project, RECEIPTS, "ack_token", body, "Receipt")
+            receipt_role = _string(project, RECEIPTS, "legacy_role", body, "Receipt")
+            action = _field(project, RECEIPTS, "legacy_action", body, "Receipt")
+            reason = body.get("legacy_reason")
+            if "legacy_reason" in body:
+                reason = _field(project, RECEIPTS, "legacy_reason", body, "Receipt")
+            if receipt_role != role_name:
+                continue
+            if token in self.settled or token in self.corrupt:
+                raise AdapterError(f"Duplicate converted receipt for {token}")
+            if reason is None:
+                self.settled.add(token)
+            else:
+                if action not in DELIVERED_ACTIONS | {RECEIPT_PENDING}:
+                    raise AdapterError("Converted receipt has an undeclared action")
+                self.corrupt[token] = reason
+                self.actions[token] = action
+
+    def verdict(self, token: str, action: str) -> str | None:
+        """Return None when deliverable, "valid" when settled, or a reason."""
+        if token in self.settled:
+            return "valid"
+        reason = self.corrupt.get(token)
+        if reason is not None and self.actions[token] != action:
+            raise AdapterError("Converted receipt action does not bind its candidate")
+        return reason
 
 
 def _proposal(project, message) -> dict:
@@ -300,6 +345,9 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True,
     actor = f"role:{name}"
     store = project.kernel_queues
     reads = {queue: _read_queue(store, queue, actor) for queue in QUEUES}
+    receipts = _ReceiptIndex(project, name, reads[RECEIPTS])
+    cap = project.insights.decision_receipt_diagnostics
+    decision_diagnostics: list[dict] = []
 
     proposals: dict[str, dict] = {}
     for message in reads[PROPOSALS]:
@@ -309,20 +357,56 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True,
         proposals[item["id"]] = item
     decisions = [_decision(project, message, proposals) for message in reads[DECISIONS]]
     decided = {decision["proposal"]["id"] for decision in decisions}
-    events = sorted((event for event in
-                     (_decision_event(name, item, sources) for item in decisions
-                      if item["deliver_at"] is None and item["action"] in wanted)
-                     if event is not None),
+
+    def deliverable_decisions():
+        for item in decisions:
+            if item["deliver_at"] is not None or item["action"] not in wanted:
+                continue
+            event = _decision_event(name, item, sources)
+            if event is None:
+                continue
+            verdict = receipts.verdict(event["ack_token"], event["action"])
+            if verdict == "valid":
+                continue
+            if verdict is not None:
+                if len(decision_diagnostics) < cap:
+                    decision_diagnostics.append({"event": event["event"],
+                                                 "ack_token": event["ack_token"],
+                                                 "action": event["action"],
+                                                 "reason": verdict})
+                continue
+            yield event
+
+    events = sorted(deliverable_decisions(),
                     key=lambda event: (_stamp(event), event["event"]))[:limit]
+    diagnostics = list(decision_diagnostics)
 
     if include_insights:
         configured_roles = set(project.roles) & project.config.roles.keys()
-        insights = sorted((event for event in
-                           (_pending_event(name, item, configured_roles)
-                            for item in proposals.values()
-                            if item["id"] not in decided)
-                           if event is not None),
+        pending_diagnostics: list[dict] = []
+
+        def deliverable_insights():
+            for item in proposals.values():
+                if item["id"] in decided:
+                    continue
+                event = _pending_event(name, item, configured_roles)
+                if event is None:
+                    continue
+                verdict = receipts.verdict(event["ack_token"], RECEIPT_PENDING)
+                if verdict == "valid":
+                    continue
+                if verdict is not None:
+                    if len(pending_diagnostics) < cap:
+                        pending_diagnostics.append({"event": event["event"],
+                                                    "ack_token": event["ack_token"],
+                                                    "action": RECEIPT_PENDING,
+                                                    "reason": verdict})
+                    continue
+                yield event
+
+        insights = sorted(deliverable_insights(),
                           key=lambda event: (_stamp(event), event["event"]))[:limit]
+        diagnostics = (decision_diagnostics + pending_diagnostics)[:cap]
         decision_capped = bool(wanted) and len(events) == limit
         insight_capped = len(insights) == limit
         source_capped = decision_capped or insight_capped
@@ -364,9 +448,11 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True,
                 else:
                     break
             if len(delivered) < len(limited):
-                return dict(shared=False, events=delivered, diagnostics=[],
-                            page={"events": list(delivered), **legacy_summary(delivered)},
-                            manifest=())
+                page = {"events": list(delivered), **legacy_summary(delivered)}
+                if diagnostics:
+                    page["diagnostics"] = list(diagnostics)
+                return dict(shared=False, events=delivered, diagnostics=diagnostics,
+                            page=page, manifest=())
         events = delivered
-    return dict(shared=False, events=events, diagnostics=[],
+    return dict(shared=False, events=events, diagnostics=diagnostics,
                 page=None, manifest=())

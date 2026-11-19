@@ -2,7 +2,7 @@
 
 This file is deployment policy, not kernel code. It gives the meanings that
 `queues.toml` declares for stage 2: proposals and decisions, questions and
-answers, and notices. The kernel enforces the declared grants and schemas; it
+answers, notices, and converted decision receipts. The kernel enforces the declared grants and schemas; it
 does not know these names, infer states from them, or give a message authority
 over another message.
 
@@ -45,6 +45,15 @@ over another message.
 - The operator or host writes notices; all roles and the operator read them.
   A notice informs its readers. It grants no capability and changes no workflow
   state by itself.
+
+## Converted receipts
+
+The host writes converted legacy decision receipts to `receipts`; every role,
+the operator and the host may read them. A message carries the legacy token,
+role, inferred action and, for a corrupt receipt, its bounded reason. Receipts
+are conversion facts, not kernel state: they do not grant, deny or acknowledge
+anything by themselves. A queue-backed reader may suppress the matching
+token's pending decision or attention and surface the legacy diagnostic.
 
 ## Boundaries
 

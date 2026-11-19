@@ -3,8 +3,8 @@
 
 This is example userland, not kernel code: it reads the legacy Insight API and
 the shared record store, then appends equivalent messages to the ``proposals``,
-``decisions``, ``questions``, ``answers`` and ``notices`` queues declared in
-``queues.toml``. Nothing here changes legacy authority, routes a runtime
+``decisions``, ``questions``, ``answers``, ``notices`` and ``receipts`` queues
+declared in ``queues.toml``. Nothing here changes legacy authority, routes a runtime
 message, writes a kernel object or grants a capability. The only writes are
 QueueStore appends, and those go through the queue declarations' existing write
 grants.
@@ -22,7 +22,12 @@ referencing that proposal. Declared role questions become question messages,
 their exact authenticated answers become referencing answer messages, and
 operator notices become notice messages. A legacy answer to an insight
 revision becomes an answer message referencing that revision's converted
-proposal; a revision that was not converted refuses the run. Historical
+proposal; a revision that was not converted refuses the run. Legacy
+decision-receipt files become per-token ``receipts`` messages: the exact
+receipt reader classifies each token as settled or as one of its three
+corrupt reasons, and the token is bound to a current legacy candidate event to
+infer the action. Receipts that no current candidate binds are reported and
+left unconverted, since they cannot affect a legacy page. Historical
 writers that differ from a queue's declared author are retained in the message
 body, never used to bypass a write grant. Message ids derive from legacy identity and content, so an exact
 replay appends nothing: QueueStore returns the existing message. All input is
@@ -47,8 +52,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mizu import operator_records as legacy
 from mizu.config import load
-from mizu.errors import Denied, MizuError
-from mizu.fs import MAX_FRAME, canonical, lock, safe_read
+from mizu import insight_archive
+from mizu.errors import Denied, LimitExceeded, MizuError
+from mizu.fs import MAX_FRAME, canonical, identifier, lock, safe_read
+from mizu.insights import CorruptDecisionReceipt
 from mizu.kernel.queues import allows
 from mizu.kernel_shadow import instant_value
 from mizu.project import Project
@@ -58,7 +65,12 @@ DECISIONS = "decisions"
 QUESTIONS = "questions"
 ANSWERS = "answers"
 NOTICES = "notices"
-QUEUES = (PROPOSALS, DECISIONS, QUESTIONS, ANSWERS, NOTICES)
+RECEIPTS = "receipts"
+QUEUES = (PROPOSALS, DECISIONS, QUESTIONS, ANSWERS, NOTICES, RECEIPTS)
+RECEIPT_AUTHOR = "host"
+RECEIPT_FIELDS = ("ack_token", "legacy_role", "legacy_action")
+RECEIPT_OPTIONAL = ("legacy_reason",)
+DECISION_ACTIONS = frozenset({"accept", "modify", "defer", "reject"})
 PROPOSAL_AUTHOR = "operator"
 #: The declaration names role:writer as the decision writer; historical
 #: decisions are attributed to that principal without granting a runtime role.
@@ -177,6 +189,113 @@ def _nullable_copy(value: object, field, label: str):
     if value is None:
         return field.validate(None)
     return _copy(value, field, label)
+
+
+def _receipt_files(root: Path) -> list[tuple[str, str]]:
+    """Enumerate safe per-role, per-token legacy receipt file names."""
+    if not insight_archive._directory(root):
+        return []
+    with os.scandir(root) as entries:
+        roles = sorted(entry.name for entry in entries)
+    if len(roles) > MAX_PAGES:
+        raise ConversionError("Legacy receipt roles exceed the conversion scan bound")
+    result: list[tuple[str, str]] = []
+    for role in roles:
+        identifier(role)
+        parent = root / role
+        if not insight_archive._directory(parent):
+            raise ConversionError(f"Unsafe legacy decision receipt directory for {role}")
+        with os.scandir(parent) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+        if len(names) > MAX_PAGES:
+            raise ConversionError("Legacy receipts exceed the conversion scan bound")
+        for name in names:
+            token = name[:-5]
+            if not DIGEST.fullmatch(token):
+                raise ConversionError(f"Malformed legacy decision receipt token {name}")
+            result.append((role, token))
+    return result
+
+
+def _receipt_candidates(project, role: str) -> dict[str, tuple[str, str]]:
+    """Bind one role's current legacy candidates to (event id, action).
+
+    A receipt file carries no action. Its token is bound to a current decision
+    payload or pending envelope instead, which is the exact candidate legacy
+    delivery uses; only that candidate can yield a receipt diagnostic.
+    """
+    insights = project.insights
+    candidates: dict[str, tuple[str, str]] = {}
+    history = insights.root / "decision-history"
+    if insight_archive._directory(history):
+        with os.scandir(history) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+        if len(names) > MAX_PAGES:
+            raise ConversionError("Legacy decision history exceeds the conversion scan bound")
+        for name in names:
+            try:
+                selected = insights._current_decision_event(
+                    history / name, DECISION_ACTIONS, sources="any")
+            except (Denied, LimitExceeded, OSError, ValueError, TypeError,
+                    KeyError, AttributeError):
+                continue
+            if selected is None:
+                continue
+            payload = selected[1]
+            try:
+                identifier(payload["event"])
+                token = insights._decision_token(role, payload)
+            except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+            candidates[token] = (payload["event"], payload["action"])
+    configured = set(project.roles) & project.config.roles.keys()
+    try:
+        envelopes = list(insights._pending_insight_envelopes_locked(configured, role))
+    except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise ConversionError(f"Unreadable legacy pending candidates for {role}") from exc
+    if len(envelopes) > MAX_PAGES:
+        raise ConversionError("Legacy pending candidates exceed the conversion scan bound")
+    for _, envelope in envelopes:
+        payload = envelope["payload"]
+        try:
+            identifier(payload["event"])
+            token = insights._decision_token(role, payload)
+        except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
+            continue
+        candidates[token] = (payload["event"], "pending")
+    return candidates
+
+
+def _receipt_messages(project, declaration, bound_roles: dict) -> tuple[list[dict], list[str]]:
+    """Project safe legacy receipt files through the exact receipt reader."""
+    fields = declaration.fields
+    messages: list[dict] = []
+    unbound: list[str] = []
+    for role, token in _receipt_files(project.insights.root / "decision-receipts"):
+        if role not in bound_roles:
+            bound_roles[role] = _receipt_candidates(project, role)
+        candidate = bound_roles[role].get(token)
+        if candidate is None:
+            unbound.append(token)
+            continue
+        event, action = candidate
+        body = {
+            "ack_token": _copy(token, fields["ack_token"], "Legacy receipt token"),
+            "legacy_role": _copy(role, fields["legacy_role"], "Legacy receipt role"),
+            "legacy_action": _copy(action, fields["legacy_action"], "Legacy receipt action"),
+        }
+        try:
+            received = project.insights._decision_received(
+                role, {"event": event, "ack_token": token})
+        except CorruptDecisionReceipt as exc:
+            body["legacy_reason"] = _copy(
+                exc.reason, fields["legacy_reason"], "Legacy receipt reason")
+        else:
+            if not received:  # The file vanished between enumeration and the read.
+                continue
+        messages.append({"queue": RECEIPTS, "id": _message_id("receipt", role, token),
+                         "author": RECEIPT_AUTHOR, "refs": (), "body": body})
+    return messages, unbound
 
 
 def _history_record(root, stem: str) -> dict:
@@ -455,6 +574,7 @@ def _plan(project) -> tuple[list[dict], dict]:
     question_decl = _fields(project, QUESTIONS, ("question",), QUESTION_FIELDS)
     answer_decl = _fields(project, ANSWERS, ("body",), RECORD_FIELDS)
     notice_decl = _fields(project, NOTICES, ("body",), NOTICE_FIELDS)
+    receipt_decl = _fields(project, RECEIPTS, RECEIPT_FIELDS, RECEIPT_OPTIONAL)
     if not allows(proposal_decl.write, PROPOSAL_AUTHOR):
         raise ConversionError("operator may not append to the proposals queue")
     if not allows(decision_decl.write, DECISION_AUTHOR):
@@ -463,6 +583,8 @@ def _plan(project) -> tuple[list[dict], dict]:
         raise ConversionError("operator may not append to the answers queue")
     if not allows(notice_decl.write, NOTICE_AUTHOR):
         raise ConversionError("operator may not append to the notices queue")
+    if not allows(receipt_decl.write, RECEIPT_AUTHOR):
+        raise ConversionError("host may not append to the receipts queue")
 
     messages: list[dict] = []
     by_id: dict[str, dict] = {}
@@ -535,6 +657,9 @@ def _plan(project) -> tuple[list[dict], dict]:
     for message in _operator_messages(project, question_index, proposal_index,
                                       answer_decl, notice_decl):
         add(message)
+    receipt_messages, unbound = _receipt_messages(project, receipt_decl, {})
+    for message in receipt_messages:
+        add(message)
 
     report = {"project": project.name, "applied": False,
               "proposals": [m["id"] for m in messages if m["queue"] == PROPOSALS],
@@ -543,7 +668,9 @@ def _plan(project) -> tuple[list[dict], dict]:
               "revisits": [m["id"] for m in messages if "deliver_at" in m],
               "questions": [m["id"] for m in messages if m["queue"] == QUESTIONS],
               "answers": [m["id"] for m in messages if m["queue"] == ANSWERS],
-              "notices": [m["id"] for m in messages if m["queue"] == NOTICES]}
+              "notices": [m["id"] for m in messages if m["queue"] == NOTICES],
+              "receipts": [m["id"] for m in messages if m["queue"] == RECEIPTS],
+              "unbound_receipts": unbound}
     return messages, report
 
 

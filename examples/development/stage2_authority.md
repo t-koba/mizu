@@ -9,7 +9,8 @@ and this directory; `src/mizu/kernel/` does not learn any of them.
 
 The switch is only safe after `convert_legacy.py --apply` and
 `stage2_verify.py` agree: every current proposal, decision, delayed revisit,
-role question, answer and notice exists in the declared queues with the same
+role question, answer, notice and converted receipt exists in the declared
+queues with the same
 id, author, body, refs and delivery instant as the legacy authority. Until the
 switch, the legacy stores remain authoritative; the queue messages are a
 conversion of them, not a second live record.
@@ -23,12 +24,13 @@ feature flag. The same commit removes the legacy modules listed for stage 2 in
 
 Two userland adapters, kept outside the kernel, carry the workflow meaning:
 
-1. **Decision adapter** — reads the `proposals` and `decisions` queues and
-   returns the exact page shapes consumed by `decision_delivery.pending`:
-   proposal identity and revision, effective decision fields, delayed
-   revisit fields, source/addressee, event ids, limits, truncation flags and
-   manifests. Writes use `queue_write` to append a decision referencing the
-   proposal, and a delayed self-addressed revisit when the decision is a
+1. **Decision adapter** — reads the `proposals`, `decisions` and `receipts`
+   queues and returns the exact page shapes consumed by
+   `decision_delivery.pending`: proposal identity and revision, effective
+   decision fields, delayed revisit fields, source/addressee, event ids,
+   limits, truncation flags, receipt diagnostics and manifests. Writes use
+   `queue_write` to append a decision referencing the proposal, and a delayed
+   self-addressed revisit when the decision is a
    deferral with a parseable instant. The host binds the author from the
    authenticated unit; no adapter API accepts a principal.
 2. **Record adapter** — reads `questions`, `answers` and `notices` and returns
@@ -48,9 +50,10 @@ grant itself a queue right.
 Each slice is independently verified and snapshot-bound.
 
 - Decision adapter reads only (implemented): `stage2_decision_adapter.pending`
-  reproduces `decision_delivery.pending` page shapes from a fixture project
-  containing converted queues; `tests/test_stage2_decision_adapter.py` compares
-  canonical bytes with the legacy page.
+  reproduces `decision_delivery.pending` page shapes, receipt suppression and
+  corrupt-receipt diagnostics from a fixture project containing converted
+  queues; `tests/test_stage2_decision_adapter.py` compares canonical bytes with
+  the legacy page.
 - Decision adapter writes only: reproduce `Insights.decide` effects as queue
   appends, including deferred revisits and idempotent retries; compare the
   resulting queue state with the legacy effect.
@@ -70,12 +73,14 @@ sources=None")`; it returns the legacy dictionary (`shared`, `events`,
 `diagnostics`, `page`, `manifest`) and accepts no actor or principal. The actor
 presented to `QueueStore` is always `role:<role.name>` from the trusted role
 object. An omitted `sources` follows `role.decision_sources`, or `own` when
-unset, exactly as the legacy call does. It reads only the declared `proposals` and `decisions` queues from
-sequence one with the kernel page size and the stage-2 page-count bound, and
-never acknowledges, appends or advances a cursor.
+unset, exactly as the legacy call does. It reads only the declared `proposals`,
+`decisions` and `receipts` queues from sequence one with the kernel page size
+and the stage-2 page-count bound, and never acknowledges, appends or advances a
+cursor.
 
 Conversion retains the metadata this reconstruction needs: proposal instant,
-kind and urgency for `insight.pending` payloads, and the decision's exact
+kind and urgency for `insight.pending` payloads, the declared `receipts`
+messages for per-token settlement and corrupt reasons, and the decision's exact
 history event id, decision key, run and canonical history record for
 acknowledgement tokens. The event id is the `decision-history` filename: for
 deferrals it is not the decision key. The whole record is retained because
@@ -85,11 +90,15 @@ event is built. Legacy page calls appear only in the comparison tests.
 
 Because the queue has no per-message filter and any configured role can be an
 insight addressee, the example `queues.toml` grants every role read of
-`proposals`; writes and wakes are unchanged. This read slice does **not**
-switch a runtime call site, add a flag or dual-write, suppress legacy
-receipts, or serve a shared-authority page: those are later slices of the same
-switch. Receipt suppression and the shared store have no queue facts yet, so
-exactly-zero-receipt, non-shared fixtures are the parity boundary.
+`proposals` and `receipts`; writes and wakes are unchanged. Conversion binds
+each receipt token to a current legacy candidate to infer its action, then
+uses the exact legacy receipt reader to classify settlement or one of the
+three corrupt reasons. The adapter suppresses settled candidates before
+applying limits and returns the legacy diagnostic shape for corrupt ones under
+the legacy cap; it never opens a legacy receipt file. This read slice does
+**not** switch a runtime call site, add a flag, dual-write or serve a
+shared-authority page; the shared store remains a later slice of the same
+switch.
 
 ## Invariants at every step
 

@@ -107,3 +107,14 @@ wake = ["role:writer"]
 [queues.checks.schema]
 snapshot = {type = "digest", required = true}
 status = {type = "string", values = ["passed", "failed", "cancelled"], required = true}
+
+# Converted legacy decision receipts, not kernel state: each message records
+# that one role has already settled one token-bound decision or pending event.
+[queues.receipts]
+write = ["host"]
+read = ["role:*", "operator", "host"]
+[queues.receipts.schema]
+ack_token = {type = "digest", required = true}
+legacy_role = {type = "string", max = 256, required = true}
+legacy_action = {type = "string", values = ["accept", "modify", "defer", "reject", "pending"], required = true}
+legacy_reason = {type = "string", values = ["malformed_json", "invalid_receipt", "invalid_timestamp"]}

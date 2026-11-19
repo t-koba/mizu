@@ -18,6 +18,7 @@ import convert_legacy  # noqa: E402  (example userland module)
 import stage2_verify  # noqa: E402  (example userland module)
 
 COUNTS = {name: {"planned": 1, "stored": 1} for name in convert_legacy.QUEUES}
+COUNTS["receipts"] = {"planned": 0, "stored": 0}  # No legacy receipts in this fixture.
 
 
 class Stage2Verify(unittest.TestCase):

@@ -2,8 +2,8 @@
 """Operator-run, read-only gate for the converted stage-2 queues.
 
 This is example userland, not kernel code: it recomputes the current legacy
-conversion plan with ``convert_legacy._plan`` and compares it with the five
-declared queues as stored. Every read uses the ``operator`` principal, an
+conversion plan with ``convert_legacy._plan`` and compares it with the declared
+queues, including converted receipts, as stored. Every read uses the ``operator`` principal, an
 explicit cursor and a fixed far-future instant, so delayed revisits are
 included and the result does not depend on the clock. Nothing is appended,
 acknowledged or advanced. A record is compared on its queue, id, author,
