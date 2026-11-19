@@ -18,24 +18,38 @@ store that stage 1 replaces and is deleted with it.
 
 `convert_legacy.py` is an operator-run example-userland command. It reads the
 current legacy insights and their effective decisions through the public
-Insight API and appends equivalent messages to the `proposals` and `decisions`
-queues declared in `queues.toml`. Archived revisions stay in the legacy store;
-nothing is rewritten and no runtime authority, route or capability changes.
-Decision messages use the queue's declared writer principal (`role:writer`) as
-historical authorship only. A deferral whose revisit carries an aware instant
-also becomes a delayed decision message (same action, reason and revisit,
-referencing the converted proposal) due at exactly that instant; past instants
-are immediately due. Every converted defer decision carries its exact legacy
-revisit condition in the declared `revisit` field, whether or not it is an
-instant. A malformed instant refuses the run before any append.
+Insight API, declared role questions and their answers through the operator
+record APIs, and operator notices from the same authenticated record store. It
+appends equivalent messages to the `proposals`, `decisions`, `questions`,
+`answers` and `notices` queues declared in `queues.toml`. Archived revisions
+stay in the legacy store; nothing is rewritten and no runtime authority, route
+or capability changes. Decision messages use the queue's declared writer
+principal (`role:writer`) as historical authorship only. A deferral whose
+revisit carries an aware instant also becomes a delayed decision message (same
+action, reason and revisit, referencing the converted proposal) due at exactly
+that instant; past instants are immediately due. Every converted defer decision
+carries its exact legacy revisit condition in the declared `revisit` field,
+whether or not it is an instant. A malformed instant refuses the run before any
+append.
+
+Converted questions derive their required `question` from the exact legacy
+payload; the full payload, subject, authenticated writer, id and digest are
+retained in declared optional fields. Answers carry the exact legacy body and
+reference their converted question; notices carry their exact body, action and
+optional closure target. Legacy `operator.cli` authorship is retained in the
+body while the message author is the queue's granted principal. An answer that
+does not bind an exact declared role question, a truncated enumeration or a
+field that exceeds its declared bound refuses the whole run before any append.
 
 ```sh
 python3 examples/development/convert_legacy.py config/config.toml --project NAME [--apply]
 ```
 
-Message ids are derived from the legacy insight id and revision, plus a
-separate domain for revisit messages, so a repeat appends nothing. Both the dry
-run and `--apply` report `proposals`, `decisions` and `revisits` id lists.
+Message ids are derived from legacy identity and content: insight id and
+revision for proposals/decisions/revisits, record id and digest for
+questions/answers/notices, each in its own domain, so a repeat appends nothing.
+Both the dry run and `--apply` report `proposals`, `decisions`, `revisits`,
+`questions`, `answers` and `notices` id lists.
 Without `--apply` the command is a dry run: it prints the planned ids and writes
 nothing. Malformed or ambiguous legacy input refuses the whole run before any
 append.

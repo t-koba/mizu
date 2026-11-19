@@ -30,6 +30,13 @@ read = ["operator", "role:*"]
 question = {type = "string", max = 8192, required = true}
 context = {type = "string", max = 65536}
 default = {type = "string", max = 8192}
+# Legacy projection metadata: canonical JSON of the exact original payload and
+# subject, plus its authenticated writer, id and digest.
+legacy_payload = {type = "string", max = 65536}
+legacy_subject = {type = "string", max = 65536}
+legacy_writer = {type = "string", max = 65536}
+legacy_id = {type = "string", max = 65536}
+legacy_digest = {type = "digest"}
 
 [queues.answers]
 write = ["operator"]
@@ -37,6 +44,12 @@ read = ["role:*", "operator"]
 wake = ["role:writer"]
 [queues.answers.schema]
 body = {type = "string", max = 65536, required = true}
+legacy_addressee = {type = "string", max = 65536}
+legacy_subject = {type = "string", max = 65536}
+legacy_writer = {type = "string", max = 65536}
+legacy_id = {type = "string", max = 65536}
+legacy_digest = {type = "digest"}
+legacy_action = {type = "string", max = 65536}
 
 # Operator notices to roles.
 [queues.notices]
@@ -45,6 +58,13 @@ read = ["role:*", "operator"]
 wake = ["role:writer"]
 [queues.notices.schema]
 body = {type = "string", max = 65536, required = true}
+legacy_addressee = {type = "string", max = 65536}
+legacy_subject = {type = "string", max = 65536}
+legacy_writer = {type = "string", max = 65536}
+legacy_id = {type = "string", max = 65536}
+legacy_digest = {type = "digest"}
+legacy_action = {type = "string", max = 65536}
+legacy_target = {type = "string", max = 65536}
 
 # Results written by the host's check runner.
 [queues.checks]

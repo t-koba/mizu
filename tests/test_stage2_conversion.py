@@ -9,8 +9,11 @@ from pathlib import Path
 
 import support  # noqa: F401  (puts src on the path)
 from support import Fixture
+from mizu import operator_records as records
 from mizu.config import load
+from mizu.fs import canonical
 from mizu.kernel import QueueStore
+from mizu.project import Project
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples" / "development"))
@@ -22,6 +25,17 @@ DEFER_ID = "c" * 32
 REVISIT_AT = "2099-01-01T00:00:00+00:00"
 BEFORE_REVISIT = "2098-12-31T23:59:59+00:00"
 AFTER_REVISIT = "2099-01-01T00:00:01+00:00"
+QUESTION_DECLARATION = """
+[record_kinds."role.question"]
+writer = "role.worker"
+route = "operator_question"
+wake = false
+retention = "permanent"
+acknowledgement = "explicit"
+subject = "object"
+maximum = 8192
+"""
+QUESTION_PAYLOAD = {"body": "Which option?", "source": "reviewer"}
 
 
 def tree_state(root):
@@ -167,6 +181,137 @@ class Stage2Conversion(Fixture):
         self.assertEqual(code, 2)
         self.assertIn("exceeds the declared", errors.getvalue())
         self.assertFalse((self.project.root / "queues").exists())
+
+
+class Stage2QuestionConversion(Fixture):
+    """Declared role questions, their answers and notices become queue messages."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.copyfile(QUEUES, self.file.parent / "queues.toml")
+        text = 'include = ["queues.toml"]\n' + self.file.read_text()
+        index = text.index("capabilities = [", text.index("[roles.worker]")) + len("capabilities = [")
+        self.file.write_text(text[:index] + '"record_write", ' + text[index:] + QUESTION_DECLARATION)
+        self.config = load(self.file)
+        self.project = Project(self.config, "sample")
+        self.store = QueueStore(self.project.root, self.config.queues)
+        snap = self.project.snapshots.get()
+        self.project.insights.submit(source="worker", title="Legacy proposal",
+                                     body="Legacy body", base_snapshot=snap["id"],
+                                     insight_id=INSIGHT_ID)
+        self.project.insights.decide(INSIGHT_ID, "accept", "Reviewed", "", "test-run",
+                                     expected_rev=1, work_item_intent="none")
+        question = self.context().handle("record_write", dict(
+            kind="role.question", id="question1", subject="{}",
+            payload=json.dumps(QUESTION_PAYLOAD)))
+        self.question_record = question["record"]
+        self.question_digest = question["record_digest"]
+        self.subject = dict(type="record", kind="role.question",
+                            id=self.question_record["id"], digest=self.question_digest)
+        self.answer = records.write(self.project, event_id="answer1", kind="answer",
+                                    body="Use option A", subject=self.subject)
+        self.notice = records.write(self.project, event_id="notice1", kind="operator.notice",
+                                    body="Answer in prose", addressee="worker")
+
+    def convert(self, *flags):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = convert_legacy.main([str(self.file), "--project", "sample", *flags])
+        self.assertEqual(code, 0)
+        return json.loads(output.getvalue())
+
+    def ids(self):
+        return (convert_legacy._message_id(
+                    "question", f"{self.subject['kind']}/{self.subject['id']}",
+                    self.question_digest),
+                convert_legacy._message_id("answer", self.answer["record"]["id"],
+                                           self.answer["record_digest"]),
+                convert_legacy._message_id("notice", self.notice["record"]["id"],
+                                           self.notice["record_digest"]))
+
+    def legacy_state(self):
+        root = self.project.root
+        return {str(path.relative_to(root)): path.read_bytes()
+                for name in ("inbox", "shared-records", "operator-record-index",
+                             "insight-revisions")
+                for path in sorted((root / name).rglob("*")) if path.is_file()}
+
+    def test_question_answer_notice_convert_exactly_and_replay_appends_nothing(self):
+        question_id, answer_id, notice_id = self.ids()
+        legacy_before = self.legacy_state()
+        preview = self.convert()
+        self.assertFalse(preview["applied"])
+        self.assertEqual((preview["questions"], preview["answers"], preview["notices"]),
+                         ([question_id], [answer_id], [notice_id]))
+        first = self.convert("--apply")
+        second = self.convert("--apply")
+        self.assertEqual(first, {**preview, "applied": True})
+        self.assertEqual(second, first)
+        self.assertEqual(self.legacy_state(), legacy_before)
+
+        questions = self.store.read("questions", "operator")["messages"]
+        answers = self.store.read("answers", "operator")["messages"]
+        notices = self.store.read("notices", "operator")["messages"]
+        self.assertEqual([m["id"] for m in questions], [question_id])
+        self.assertEqual([m["id"] for m in answers], [answer_id])
+        self.assertEqual([m["id"] for m in notices], [notice_id])
+        self.assertEqual(questions[0]["author"], "role:worker")
+        self.assertEqual(questions[0]["body"], {
+            "question": "Which option?",
+            "legacy_payload": canonical(QUESTION_PAYLOAD).decode(),
+            "legacy_subject": canonical({}).decode(),
+            "legacy_writer": "role.worker",
+            "legacy_id": self.question_record["id"],
+            "legacy_digest": self.question_digest})
+        self.assertEqual(answers[0]["author"], "operator")
+        self.assertEqual(answers[0]["refs"], [question_id])
+        self.assertEqual(self.store.message(question_id, "operator"), questions[0])
+        self.assertEqual(answers[0]["body"], {
+            "body": "Use option A",
+            "legacy_addressee": "worker",
+            "legacy_subject": canonical(self.subject).decode(),
+            "legacy_writer": "operator.cli",
+            "legacy_id": self.answer["record"]["id"],
+            "legacy_digest": self.answer["record_digest"],
+            "legacy_action": "publish"})
+        self.assertEqual(notices[0]["author"], "operator")
+        self.assertEqual(notices[0]["body"], {
+            "body": "Answer in prose",
+            "legacy_addressee": "worker",
+            "legacy_subject": canonical({}).decode(),
+            "legacy_writer": "operator.cli",
+            "legacy_id": self.notice["record"]["id"],
+            "legacy_digest": self.notice["record_digest"],
+            "legacy_action": "publish",
+            "legacy_target": canonical(None).decode()})
+        self.assertEqual((self.store.read("questions", "operator")["head"],
+                          self.store.read("answers", "operator")["head"],
+                          self.store.read("notices", "operator")["head"]), (1, 1, 1))
+        # The proposal/decision family converts in the same run, unchanged.
+        self.assertEqual(len(preview["proposals"]), 1)
+        self.assertEqual(len(preview["decisions"]), 1)
+
+    def test_dry_run_writes_nothing(self):
+        before = tree_state(self.project.root)
+        report = self.convert()
+        self.assertEqual(len(report["questions"]), 1)
+        self.assertEqual(len(report["answers"]), 1)
+        self.assertEqual(len(report["notices"]), 1)
+        self.assertEqual(tree_state(self.project.root), before)
+
+    def test_unbindable_answer_refuses_before_any_append(self):
+        from support import stored_question_insight
+        insight = stored_question_insight(self.project)
+        records.write(self.project, event_id="insight-answer", kind="answer",
+                      body="Legacy insight answer",
+                      subject={"type": "insight", "id": insight["id"], "rev": 1})
+        before = self.legacy_state()
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("does not address a declared role question", errors.getvalue())
+        self.assertFalse((self.project.root / "queues").exists())
+        self.assertEqual(self.legacy_state(), before)
 
 
 if __name__ == "__main__":
