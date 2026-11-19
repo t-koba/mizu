@@ -12,6 +12,7 @@ from .prompt_sections import WORK_CAPABILITIES
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 from .kernel.events import PAGE_MAX as EVENT_PAGE_MAX
 from .kernel.objects import PAGE_MAX as OBJECT_PAGE_MAX, REVISION_MAX
+from .kernel.queues import PAGE_MAX as QUEUE_PAGE_MAX
 
 
 def _writer_continuation_contract(outcomes: tuple[str, ...]) -> str:
@@ -705,6 +706,38 @@ DEFINITIONS = {
                    "head is refused. Cursors only move forward; the host binds the role, so no "
                    "other role's cursor can be advanced.",
                    obj({"seq": KERNEL_CURSOR_SCHEMA}, ("seq",))),
+    "queue_write": ("Append a message to a declared queue. The host binds your role as author; "
+                    "no author argument is accepted. Declared body fields only. An optional 32-hex "
+                    "id is create-only: an identical retry returns the existing message and different "
+                    "content is refused. refs name earlier messages you may read; deliver_at delays "
+                    "delivery. Each queue's write grant is enforced by the kernel.",
+                    obj({"queue": KERNEL_NAME_SCHEMA, "body": KERNEL_FIELDS_SCHEMA,
+                         "refs": array(KERNEL_ID_SCHEMA, QUEUE_PAGE_MAX),
+                         "deliver_at": text(64), "id": KERNEL_ID_SCHEMA},
+                        ("queue", "body"))),
+    "queue_read": ("Read due messages from a declared queue after your role's durable cursor, or "
+                   "after cursor when supplied. Reads are bounded; next, head and more locate the "
+                   "page. A read does not advance the cursor. The host binds the role and the queue's "
+                   "read grant is enforced by the kernel.",
+                   obj({"queue": KERNEL_NAME_SCHEMA,
+                        "cursor": KERNEL_CURSOR_SCHEMA,
+                        "limit": {"type": "integer", "minimum": 1, "maximum": QUEUE_PAGE_MAX}},
+                       ("queue",))),
+    "queue_ack": ("Advance your role's durable cursor in a declared queue to seq; a seq above the "
+                  "queue head is refused and cursors only move forward. The host binds the role.",
+                  obj({"queue": KERNEL_NAME_SCHEMA, "seq": KERNEL_CURSOR_SCHEMA},
+                      ("queue", "seq"))),
+    "message_read": ("Read one message by its 32-hex id if your role may read its queue. The host "
+                     "binds the role; no author or queue argument is accepted.",
+                     obj({"id": KERNEL_ID_SCHEMA}, ("id",))),
+    "message_refs": ("List messages referring to id, or that id refers to, in either direction "
+                     "('to' or 'from'), bounded and paged by message id. Only messages your role "
+                     "may read are returned.",
+                     obj({"id": KERNEL_ID_SCHEMA,
+                          "direction": {"type": "string", "enum": ["to", "from"]},
+                          "cursor": KERNEL_ID_SCHEMA,
+                          "limit": {"type": "integer", "minimum": 1, "maximum": QUEUE_PAGE_MAX}},
+                         ("id", "direction"))),
     "finish": finish_definition(FINISH_OUTCOMES),
 }
 
@@ -726,6 +759,11 @@ KERNEL_CAPABILITIES = {
     "objects_list": frozenset({"objects"}),
     "events_read": frozenset({"events"}),
     "events_ack": frozenset({"events"}),
+    "queue_write": frozenset({"queues"}),
+    "queue_read": frozenset({"queues"}),
+    "queue_ack": frozenset({"queues"}),
+    "message_read": frozenset({"queues"}),
+    "message_refs": frozenset({"queues"}),
 }
 
 

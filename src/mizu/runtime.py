@@ -86,7 +86,7 @@ from . import reviews
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
-from . import kernel_tools
+from . import kernel_queue_tools, kernel_tools
 from . import work_item_operations
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
@@ -223,6 +223,7 @@ OBSERVATIONAL_OPS = frozenset({
     "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read",
     "objects_read", "objects_list", "events_read",
+    "queue_read", "message_read", "message_refs",
     "result_read", "ready_work_read", "work_order_read", "report_read",
 })
 REPLAYABLE_READ_ARGUMENTS = {"fetch": "receipt_id", "probe": "receipt_id", "search": "result_id"}
@@ -1384,6 +1385,21 @@ class Context(ContextFinishMixin):
     def _op_events_ack(self, args: dict) -> dict:
         return kernel_tools.events_ack(self, args)
 
+    def _op_queue_write(self, args: dict) -> dict:
+        return kernel_queue_tools.queue_write(self, args)
+
+    def _op_queue_read(self, args: dict) -> dict:
+        return kernel_queue_tools.queue_read(self, args)
+
+    def _op_queue_ack(self, args: dict) -> dict:
+        return kernel_queue_tools.queue_ack(self, args)
+
+    def _op_message_read(self, args: dict) -> dict:
+        return kernel_queue_tools.message_read(self, args)
+
+    def _op_message_refs(self, args: dict) -> dict:
+        return kernel_queue_tools.message_refs(self, args)
+
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
         return write_role(self, args)
@@ -2059,6 +2075,9 @@ class Context(ContextFinishMixin):
         "objects_create": _op_objects_create, "objects_transition": _op_objects_transition,
         "objects_read": _op_objects_read, "objects_list": _op_objects_list,
         "events_read": _op_events_read, "events_ack": _op_events_ack,
+        "queue_write": _op_queue_write, "queue_read": _op_queue_read,
+        "queue_ack": _op_queue_ack, "message_read": _op_message_read,
+        "message_refs": _op_message_refs,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "attach_evidence": _op_attach_evidence,
