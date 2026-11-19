@@ -545,6 +545,17 @@ class Insights:
         except Exception as exc:
             shadow.note_failure("question", record["id"], exc)
 
+    def _accepted(self, record: dict) -> dict:
+        """Return an accepted legacy record after replaying its question mirror.
+
+        Exact retries, retained records and no-op revisions are accepted writes
+        too, so a previously failed projection gets the same bounded repair
+        chance as a fresh submission. The legacy record and its authority stay
+        exactly as they were; a projection failure remains a diagnostic only.
+        """
+        self._project_question(record)
+        return record
+
     def _work_item_store(self):
         # Standalone Insights readers need no ledger; mutation gets the same
         # service without a module-level import cycle or a second lock.
@@ -614,6 +625,7 @@ class Insights:
                         best, best_key = item, key
                 if best is not None:
                     out = _normalize(best)
+                    self._project_question(out)
                     out["replayed"] = True
                     return out
                 insight_id = identifier(uuid.uuid4().hex)
@@ -647,14 +659,15 @@ class Insights:
                 if old is not None:
                     current_payload = {k: old.get(k) if k != "origin" else old.get("origin") for k in payload}
                     if current_payload == payload:
-                        return _normalize(old)
+                        return self._accepted(_normalize(old))
                     core = ("id", "source", "title", "body", "base_snapshot", *INSIGHT_METADATA_DEFAULTS)
                     if all(old.get(k) == payload.get(k) for k in core):
-                        return _normalize(old)
+                        return self._accepted(_normalize(old))
                 raise Denied("Insight ID was reused with different content")
             if old is None and identity:
-                return {**payload, "created_at": identity["created_at"], "rev": 1,
-                        "updated_at": identity["created_at"], "retained": False}
+                record = {**payload, "created_at": identity["created_at"], "rev": 1,
+                          "updated_at": identity["created_at"], "retained": False}
+                return self._accepted(record)
             if old is None and (self.root / "decisions" / f"{insight_id}.json").exists():
                 raise Denied("Decided ID has no retained identity; reuse refused")
             if old:
@@ -665,17 +678,16 @@ class Insights:
                     # Same content, different provenance: preserve the first
                     # store instead of raising, keeping the identity bound to
                     # the stored record.
-                    return _normalize(old)
+                    return self._accepted(_normalize(old))
                 write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": old["created_at"]}, exclusive=True)
-                return _normalize(old)
+                return self._accepted(_normalize(old))
             record = {**payload, "created_at": now(), "rev": 1, "evidence": []}
             record["updated_at"] = record["created_at"]
             with self.ledger.write("insights", [f"i:{insight_id}"]):
                 write_json(path, record, exclusive=True)
             write_json(identity_path, {"id": insight_id, "sha256": sha, "created_at": record["created_at"]}, exclusive=True)
             self._shadow('submitted', record)
-            self._project_question(record)
-            return record
+            return self._accepted(record)
 
     def revise(self, insight_id: str, *, source: str, title: str, body: str,
                base_snapshot: str | None, run: str | None = None,
@@ -751,7 +763,7 @@ replacement insight without implying rejected substance.
                                 "created_at": old.get("created_at")})
                 except (OSError, ValueError, TypeError, AttributeError, Denied):
                     pass
-                return _normalize(old)
+                return self._accepted(_normalize(old))
             stamped = now()
             archive = {**old, "rev": current_rev,
                        "superseded_at": stamped, "superseded_by_rev": current_rev + 1}
@@ -787,8 +799,7 @@ replacement insight without implying rejected substance.
             write_json(self.root / "insight-ids" / f"{insight_id}.json",
                        {"id": insight_id, "sha256": sha, "created_at": record["created_at"]})
             self._shadow('revised', record)
-            self._project_question(record)
-            return record
+            return self._accepted(record)
 
     def history(self, insight_id: str, *, after_rev: int = 0,
                 limit: int | None = None) -> dict:

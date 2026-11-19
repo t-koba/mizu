@@ -511,6 +511,9 @@ def _cmd_storage(config, project, args):
 
 
 def _cmd_kernel_shadow(config, project, args):
+    # Lazy: only this operator command needs the record helpers.
+    from . import operator_records
+
     insight = project.insights.read(args.insight)
     shadow = project.insights.kernel_shadow
     decision = project.insights.decision(insight["id"])
@@ -525,9 +528,21 @@ def _cmd_kernel_shadow(config, project, args):
                 shadow.decided(insight, decision)
         except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
             shadow.note_failure("reproject", insight["id"], exc)
+        try:
+            shadow.questioned(insight)
+        except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
+            shadow.note_failure("reproject", insight["id"], exc)
+        answers = operator_records.reproject_answers(project, insight["id"])
+    else:
+        answers = operator_records.insight_answers(project, insight["id"])
     return {"project": project.name, "insight": insight["id"],
             "enabled": shadow is not None,
             "verification": shadow.verify(insight, decision) if shadow is not None else None,
+            "question_verification": (
+                shadow.verify_question(insight, insight=insight)
+                if shadow is not None and insight.get("addressee") == "operator" else None),
+            "answer_verification": ([shadow.verify_answer(record, insight)
+                                     for record, _ in answers] if shadow is not None else []),
             "failures": [row for row in (shadow.failures if shadow is not None else [])
                          if row["insight"] == insight["id"]]}
 

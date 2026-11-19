@@ -244,6 +244,35 @@ def _project_answer(project, envelope, computed):
         shadow.note_failure("answer", envelope["id"], exc)
 
 
+def insight_answers(project, insight_id):
+    """Return full answer envelopes addressed to one exact insight (read-only).
+
+    The scan uses the configured operator-record catalog bound and never
+    repairs legacy metadata or consults kernel state.
+    """
+    shared = store(project)
+    return [(envelope, computed)
+            for envelope, computed in shared.records(
+                namespace='operator',
+                scan_limit=project.config.limits.operator_record_catalog_scan_entries)
+            if envelope['kind'] == 'answer'
+            and envelope['subject'].get('type') == 'insight'
+            and envelope['subject'].get('id') == insight_id]
+
+
+def reproject_answers(project, insight_id):
+    """Replay one insight's answer projections through the contained mirror.
+
+    Returns the replayed envelopes so a caller can verify the derived objects
+    observationally. A failed answer stays a bounded diagnostic and does not
+    stop the other replays.
+    """
+    answers = insight_answers(project, insight_id)
+    for envelope, computed in answers:
+        _project_answer(project, envelope, computed)
+    return answers
+
+
 def write(project, *, event_id, kind, body='', addressee=None, subject=None,
           action='publish', target=None):
     """Trusted CLI only. Stable event ID is required for uncertain-write replay.

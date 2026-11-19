@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import support  # noqa: F401  (puts src on the path)
 from mizu import host_records, operator_records as records
+from mizu.cli import _cmd_kernel_shadow, parser
 from mizu.config import load
 from mizu.errors import Denied
 from mizu.fs import canonical, digest
@@ -71,6 +72,12 @@ class QuestionAnswerShadow(unittest.TestCase):
     def answer(self, subject, event="answer1", body="Use option A"):
         return records.write(self.project, event_id=event, kind="answer",
                              body=body, subject=subject)
+
+    def cli_report(self, insight_id, *, reproject=False):
+        argv = ["kernel-shadow", self.project.name, insight_id]
+        if reproject:
+            argv.append("--reproject")
+        return _cmd_kernel_shadow(self.config, self.project, parser().parse_args(argv))
 
     def test_insight_question_and_publish_answer_transition(self):
         insight = self.insight_question(urgency="high")
@@ -407,6 +414,123 @@ class QuestionAnswerShadow(unittest.TestCase):
 
         self.shadow().answered(answer, insight)
         self.assertTrue(self.shadow().verify_answer(answer, insight)["ok"])
+
+
+    def test_exact_resubmit_replays_failed_question_projection(self):
+        shadow = self.shadow()
+        with patch.object(shadow, "questioned", side_effect=OSError("transient question failure")):
+            insight = self.insight_question(event="re" * 16)
+        question_id = insight_question_object_id(insight)
+        self.assertEqual(self.project.kernel_objects.revisions("question", question_id), [])
+        self.assertEqual(shadow.failures[-1]["operation"], "question")
+        stored = self.project.insights.read(insight["id"])
+
+        self.assertEqual(self.insight_question(event=insight["id"]), insight)
+        self.assertEqual(self.project.insights.read(insight["id"]), stored)
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["fields"]["body"],
+                         "Which behavior?")
+        self.assertTrue(shadow.verify_question(insight, insight=insight)["ok"])
+
+    def test_auto_id_dedup_replays_failed_question_projection(self):
+        shadow = self.shadow()
+        submit = dict(source="writer", title="Queued question", body="Which behavior?",
+                      base_snapshot=None, addressee="operator")
+        with patch.object(shadow, "questioned", side_effect=OSError("transient question failure")):
+            first = self.project.insights.submit(**submit)
+        question_id = insight_question_object_id(first)
+        self.assertEqual(self.project.kernel_objects.revisions("question", question_id), [])
+
+        replay = self.project.insights.submit(**submit)
+        self.assertEqual(replay["id"], first["id"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(self.project.insights.read(first["id"]), first)
+        self.assertTrue(shadow.verify_question(first, insight=first)["ok"])
+
+    def test_revise_no_op_replays_failed_question_projection(self):
+        shadow = self.shadow()
+        with patch.object(shadow, "questioned", side_effect=OSError("transient question failure")):
+            insight = self.insight_question(event="rv" * 16)
+        question_id = insight_question_object_id(insight)
+        self.assertEqual(self.project.kernel_objects.revisions("question", question_id), [])
+
+        revised = self.project.insights.revise(
+            insight["id"], source="writer", title=insight["title"], body=insight["body"],
+            base_snapshot=None, expected_rev=1, addressee="operator")
+        self.assertEqual(revised, insight)
+        self.assertEqual(self.project.insights.read(insight["id"]), insight)
+        self.assertTrue(shadow.verify_question(insight, insight=insight)["ok"])
+        self.assertEqual(self.project.kernel_objects.revisions("question", question_id), [1])
+
+    def test_reproject_repairs_failed_question_and_reports_verification(self):
+        shadow = self.shadow()
+        with patch.object(shadow, "questioned", side_effect=OSError("transient question failure")):
+            insight = self.insight_question(event="rp" * 16)
+        question_id = insight_question_object_id(insight)
+        self.assertEqual(self.project.kernel_objects.revisions("question", question_id), [])
+
+        report = self.cli_report(insight["id"], reproject=True)
+        self.assertTrue(report["enabled"])
+        self.assertTrue(report["verification"]["ok"])
+        self.assertTrue(report["question_verification"]["ok"])
+        self.assertEqual(report["question_verification"]["object"], question_id)
+        self.assertEqual(report["answer_verification"], [])
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["state"], "pending")
+        self.assertEqual(self.project.insights.read(insight["id"]), insight)
+
+    def test_legal_long_body_projects_question(self):
+        bound = self.config.kinds["question"].fields["body"].max
+        # Half the declared bound is the legacy insight preview byte bound.
+        body = "x" * (bound // 2 + 1)
+        self.assertGreater(len(body), bound // 2)
+        insight = self.project.insights.submit(
+            source="writer", title="Long question", body=body, base_snapshot=None,
+            insight_id="lg" * 16, addressee="operator")
+        question_id = insight_question_object_id(insight)
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["fields"]["body"],
+                         body)
+        self.assertTrue(self.shadow().verify_question(insight, insight=insight)["ok"])
+        self.assertEqual(self.shadow().failures, [])
+
+    def test_reproject_repairs_failed_answer_projection(self):
+        insight = self.insight_question(event="ar" * 16)
+        question_id = insight_question_object_id(insight)
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        with patch.object(self.shadow(), "answered", side_effect=OSError("transient answer failure")):
+            result = self.answer(subject, event="answer-reproject")
+        answer = result["record"]
+        answer_id = answer_object_id(answer)
+        self.assertEqual(self.project.kernel_objects.revisions("answer", answer_id), [])
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["state"], "pending")
+
+        report = self.cli_report(insight["id"], reproject=True)
+        self.assertTrue(report["question_verification"]["ok"])
+        self.assertEqual(len(report["answer_verification"]), 1)
+        self.assertTrue(report["answer_verification"][0]["ok"])
+        self.assertEqual(report["answer_verification"][0]["object"], answer_id)
+        self.assertEqual(self.project.kernel_objects.read("answer", answer_id)["state"], "recorded")
+        self.assertEqual(self.project.kernel_objects.read("question", question_id)["state"], "answered")
+        self.assertEqual(records.store(self.project).get(answer["id"])[0], answer)
+
+    def test_verify_report_observes_question_and_answer_without_writing(self):
+        insight = self.insight_question(event="vf" * 16)
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        result = self.answer(subject, event="answer-verify")
+        answer_id = answer_object_id(result["record"])
+        question_id = insight_question_object_id(insight)
+        head = self.project.kernel_events.head()
+        revisions = (self.project.kernel_objects.revisions("question", question_id),
+                     self.project.kernel_objects.revisions("answer", answer_id))
+        failures = list(self.shadow().failures)
+
+        report = self.cli_report(insight["id"])
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertTrue(report["verification"]["ok"])
+        self.assertTrue(report["question_verification"]["ok"])
+        self.assertEqual(len(report["answer_verification"]), 1)
+        self.assertTrue(report["answer_verification"][0]["ok"])
+        self.assertEqual(report["failures"], failures)
+        self.assertEqual((self.project.kernel_objects.revisions("question", question_id),
+                          self.project.kernel_objects.revisions("answer", answer_id)), revisions)
 
 
 if __name__ == "__main__":

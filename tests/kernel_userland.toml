@@ -3,6 +3,8 @@
 # kernel capabilities and subscriptions that the lifecycle test drives.
 # config.example.toml grants neither capability to any shipped role. The test
 # redirects data_dir into its temporary directory before initializing a project.
+# Included kinds.question and kinds.insight declare fields.body max = 131072,
+# matching the legacy insight preview bound; long legal bodies still project.
 include = ["../examples/development/kinds.toml"]
 data_dir = "state"
 timezone = "UTC"

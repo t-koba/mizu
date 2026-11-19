@@ -89,7 +89,7 @@ states = ["pending", "accepted", "modified", "deferred", "rejected", "withdrawn"
 initial = "pending"
 create = ["role:writer", "role:reviewer", "role:auditor", "role:searcher", "role:worker", "operator"]
 fields.title = {type = "string", max = 240, required = true}
-fields.body = {type = "string", max = 65536, required = true}
+fields.body = {type = "string", max = 131072, required = true}
 fields.holder = {type = "principal", required = true}
 fields.urgency = {type = "string", max = 16}
 fields.revisit_at = {type = "instant", event = "insight.revisit"}
@@ -168,7 +168,7 @@ fields.subject_rev = {type = "integer", min = 1}
 fields.record_kind = {type = "string", max = 64}
 fields.record_id = {type = "string", max = 256}
 fields.record_digest = {type = "digest"}
-fields.body = {type = "string", max = 65536, required = true}
+fields.body = {type = "string", max = 131072, required = true}
 fields.urgency = {type = "string", max = 16}
 [[kinds.question.transitions]]
 name = "answer"
