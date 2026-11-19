@@ -173,6 +173,43 @@ class KernelShadowProjection(unittest.TestCase):
             "insight", insight["id"])["state"], "pending")
         self.assertIsNone(self.project.kernel_objects.next_instant())
 
+    def test_revise_with_stale_defer_decision_never_rearms_timer(self):
+        insight = self.submit("d7" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + moment,
+            "test-run", expected_rev=1)
+        revised = self.project.insights.revise(
+            insight["id"], source="writer", title="Revised proposal", body="New evidence",
+            base_snapshot=None, expected_rev=1)
+        shadow = self.project.insights.kernel_shadow
+        stale = self.project.insights.decision(insight["id"])
+        self.assertEqual(revised["rev"], 2)
+        self.assertEqual(stale["rev"], 1)
+
+        def assert_no_timer(label):
+            mirrored = self.project.kernel_objects.read("insight", insight["id"])
+            self.assertEqual(mirrored["state"], "pending", label)
+            self.assertIsNone(mirrored["fields"].get("revisit_at"), label)
+            self.assertIsNone(self.project.kernel_objects.next_instant(), label)
+            result = shadow.verify(revised, stale)
+            self.assertTrue(result["ok"], f"{label}: {result['mismatches']}")
+
+        assert_no_timer("normal revise")
+        args = parser().parse_args(["kernel-shadow", "shadow", insight["id"], "--reproject"])
+        report = _cmd_kernel_shadow(self.config, self.project, args)
+        self.assertEqual(report["failures"], [])
+        self.assertTrue(report["verification"]["ok"], report["verification"]["mismatches"])
+        assert_no_timer("reprojection")
+        self.assertEqual(self.project.kernel_objects.read(
+            "decision", decision_object_id(stale))["fields"]["action"], "defer")
+        # A superseded decision no longer owns state, but its decision object
+        # is still checked, so a divergent projection cannot pass unnoticed.
+        divergent = shadow.verify(revised, {**stale, "scope": "changed"})
+        self.assertFalse(divergent["ok"])
+        self.assertEqual(divergent["mismatches"],
+                         [f"decision object {decision_object_id(stale)} fields differ"])
+
     def test_exact_defer_replay_does_not_duplicate_projection(self):
         insight = self.submit("d3" * 16)
         self.project.insights.decide(

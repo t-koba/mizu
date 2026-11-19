@@ -201,6 +201,22 @@ def answer_fields(record: Mapping[str, Any], question_id: str, revision: int) ->
     return fields
 
 
+def decision_is_current(insight: Mapping[str, Any], decision: Mapping[str, Any] | None) -> bool:
+    """Whether one decision binds to the insight revision being projected.
+
+    A decision stays a create-only record after a revise reopens its insight.
+    Only a decision on the current legacy revision may still decide the
+    projected state and revisit timer; an older pointer is superseded even
+    while the legacy store keeps it as the latest decision event.
+    """
+    if decision is None:
+        return False
+    insight_rev = insight.get("rev", 1)
+    decision_rev = decision.get("rev", 1)
+    return (type(insight_rev) is int and type(decision_rev) is int
+            and insight_rev == decision_rev)
+
+
 def decision_object_id(record: Mapping[str, Any]) -> str:
     """Use the legacy key for one substantive decision, content for other events."""
     if record.get("action") in ("accept", "modify", "reject"):
@@ -246,30 +262,32 @@ class KernelShadow:
         except Denied as exc:
             mismatch(f"insight object unavailable: {type(exc).__name__}")
             current = None
+        action = decision.get("action") if decision else None
         if current is not None:
             for key, value in insight_fields(insight).items():
                 if current["fields"].get(key) != value:
                     mismatch(f"insight field {key} differs")
-            action = decision.get("action") if decision else None
+            state_action = action if decision_is_current(insight, decision) else None
             # Without a projected terminal state the declared base state is
             # the only state the mirror can legitimately hold. A defer without
-            # a parseable revisit instant is recorded but stays pending.
-            expected_state = _STATES.get(action) if action in _ACTIONS else "pending"
-            if action == "defer" and instant_value(decision.get("revisit")) is None:
+            # a parseable revisit instant is recorded but stays pending, and a
+            # decision on a superseded revision no longer owns this state.
+            expected_state = (_STATES.get(state_action) if state_action in _ACTIONS
+                              else "pending")
+            if state_action == "defer" and instant_value(decision.get("revisit")) is None:
                 expected_state = "pending"
             if current["state"] != expected_state:
                 mismatch(f"insight state is {current['state']}, expected {expected_state}")
-            if action == "defer":
+            if state_action == "defer":
                 instant = instant_value(decision.get("revisit"))
                 if instant is not None:
                     if current["fields"].get("revisit_at") != instant:
                         mismatch("insight revisit_at differs")
                 elif current["fields"].get("revisit_at") is not None:
                     mismatch("insight revisit_at is set without an instant")
-            if action == "withdraw" and current["fields"].get("revisit_at") is not None:
+            if state_action == "withdraw" and current["fields"].get("revisit_at") is not None:
                 mismatch("withdrawn insight still has a revisit instant")
 
-        action = decision.get("action") if decision else None
         if decision is not None and action in _ACTIONS:
             object_id = decision_object_id(decision)
             expected = decision_fields(decision)
@@ -505,6 +523,11 @@ class KernelShadow:
                 raise Denied("Decision projection id was reused with different content")
         else:
             self.objects.create("decision", fields, "host", object_id=decision_id)
+        if not decision_is_current(insight, record):
+            # The revise retired this decision's state and revisit timer. A
+            # replay or explicit reprojection keeps the create-only decision
+            # but must not restore the superseded disposition.
+            return
         object_id = insight_object_id(insight)
         current = self.objects.read("insight", object_id)
         actor = (principal(insight["source"]) if action == "withdraw"
