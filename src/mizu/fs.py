@@ -607,6 +607,24 @@ def publish_pointer(root: Path, pointer: dict, *, name: str = "latest.json") -> 
     write_json(root / name, pointer)
 
 
+#: DOS device base names Windows reserves in every directory, regardless of
+#: case or extension. A format rule, not operator policy.
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
+
+
+def _windows_reserved(part: str) -> bool:
+    """True when a path component names a Windows DOS device.
+
+    Windows matches the base name before the first dot without regard to case,
+    so ``NUL``, ``nul.txt`` and ``CON.config.json`` all name devices.
+    """
+    return part.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES
+
+
 def relative_parts(name: str) -> tuple[str, ...]:
     if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
         raise Denied("Invalid relative path")
@@ -617,7 +635,7 @@ def relative_parts(name: str) -> tuple[str, ...]:
     if (name[1:2] == ":" and PureWindowsPath(name).drive) or any(p in ("", ".", "..") for p in parts):
         raise Denied("Path must be relative, without empty, '.' or '..' components")
     if _platform.IS_WINDOWS and any(':' in p or p.endswith((' ', '.')) or
-            PureWindowsPath(p).is_reserved() for p in parts):
+            _windows_reserved(p) for p in parts):
         raise Denied("Path is not representable on Windows")
     return parts
 

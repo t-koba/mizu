@@ -9,7 +9,6 @@ import stat
 import struct
 import sys
 import tempfile
-from pathlib import PureWindowsPath
 import threading
 import time
 import unittest
@@ -24,7 +23,6 @@ from mizu.fs import (_open_read, _rename_exclusive_posix, _replace_windows, atom
                      write_json)
 from mizu.pi import credentials
 from mizu.process import environment, run
-from mizu import platform as fs_platform
 
 
 class JsonTests(unittest.TestCase):
@@ -463,21 +461,41 @@ class FileTests(unittest.TestCase):
                 relative_parts(path)
 
     def test_relative_parts_accepts_exactly_the_documented_shapes(self):
-        for path in ("C:", "C:/x", "c:x", "1:x", "a:b/c", "//h/s/x", "a/", "/", "\u00e9:/x",
-                     "a/b:c", "x/.", "x/..", ".hidden", "a b", "\u65e5/\u672c"):
-            parts = tuple(path.split("/"))
-            drive = path[1:2] == ":" and PureWindowsPath(path).drive
-            bad = (not path or path.startswith("/") or bool(drive)
-                   or any(p in ("", ".", "..") for p in parts)
-                   or (fs_platform.IS_WINDOWS and any(
-                       ":" in p or p.endswith((" ", ".")) or PureWindowsPath(p).is_reserved()
-                       for p in parts)))
+        accepted = ("a/b", "a/b/c", ".hidden", "a b", "\u00e9/x", "\u65e5/\u672c",
+                    "CONsole", "COM10", "a.nul")
+        # Drive detection differs across supported Python versions; these are
+        # the drive shapes refused on every one of them.
+        refused = ("C:", "C:/x", "c:x", "a:b/c", "//h/s/x", "a/", "/", "",
+                   ".", "..", "x/.", "x/..")
+        for path in accepted:
             with self.subTest(path=path):
-                if bad:
-                    with self.assertRaises(Denied):
-                        relative_parts(path)
-                else:
-                    self.assertEqual(relative_parts(path), parts)
+                self.assertEqual(relative_parts(path), tuple(path.split("/")))
+        for path in refused:
+            with self.subTest(path=path), self.assertRaises(Denied):
+                relative_parts(path)
+
+    def test_windows_reserved_components_are_refused_with_or_without_extension(self):
+        reserved = ("CON", "con", "PRN", "AUX", "NUL",
+                    *(f"COM{n}" for n in range(1, 10)),
+                    *(f"LPT{n}" for n in range(1, 10)),
+                    "nul.txt", "NUL.tar.gz", "Con.fig", "dir/AUX.log",
+                    "ok/com1.txt/data", "NUL .txt")
+        ordinary = ("console", "COM0", "COM10", "LPT", "NULa", "nul-like",
+                    "a.nul", "dir/a.con.txt", "\u65e5/\u672c")
+        with patch("mizu.fs._platform.IS_WINDOWS", True):
+            for path in reserved:
+                with self.subTest(path=path), self.assertRaises(Denied):
+                    relative_parts(path)
+            for path in ordinary:
+                with self.subTest(path=path):
+                    self.assertEqual(relative_parts(path), tuple(path.split("/")))
+            for path in ("nul ", "nul.", "a /b", "a./b"):
+                with self.subTest(path=path), self.assertRaises(Denied):
+                    relative_parts(path)
+        with patch("mizu.fs._platform.IS_WINDOWS", False):
+            for path in reserved:
+                with self.subTest(path=path):
+                    self.assertEqual(relative_parts(path), tuple(path.split("/")))
 
     def test_safe_read_regular(self):
         (self.root / "x").write_bytes("unicode\u2028value".encode())
