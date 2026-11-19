@@ -741,6 +741,17 @@ row bytes inside the commit. Source identity files are not removed, because the
 runtime still uses them for live insights; their legacy reader stays until a
 separate change moves those writes to the archive.
 
+Two families are deliberately outside install-time conversion. Per-token
+`decision-receipts/` (and the diagnostics-only `decision-cursors/`) remain the
+live acknowledgement authority for a project with no shared/queue marker;
+the runtime writes them on finish and reads them back to suppress redelivery.
+Retained `insight-ids/` files stay because live submit/revise still write and
+read them for stable-ID dedup and body reconstruction. Promotion reports the
+receipts under `uncovered_families` rather than converting them. Neither reader
+is removable on an already-converted proof: for their authority mode they are
+current, not superseded, so removal would lose live write behaviour. A future
+change may drop either reader only after its live writes move to the new format.
+
 A tombstone summary contains `id`, `body_unavailable: true`, validated
 `created_at`, and `rev` **only if explicitly recorded in the identity** (no
 assumed revision 1). It has no invented title, body, source, origin, evidence,
