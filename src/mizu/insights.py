@@ -806,6 +806,9 @@ replacement insight without implying rejected substance.
             write_json(self.root / "insight-ids" / f"{insight_id}.json",
                        {"id": insight_id, "sha256": sha, "created_at": record["created_at"]})
             self._shadow('revised', record)
+            writer = self.decision_queue_writer
+            if writer is not None and writer.active():
+                writer.submit(record)
             return self._accepted(record)
 
     def history(self, insight_id: str, *, after_rev: int = 0,
@@ -1745,7 +1748,12 @@ replacement insight without implying rejected substance.
             raw = self.root / "decisions" / f"{insight_id}.json"
             existing = None if raw.is_symlink() else read_json(raw)
             effective = _effective_decision(rev, existing)
+            writer = self.decision_queue_writer
             if effective is not None and effective.get("action") == "withdraw":
+                # A completed withdrawal whose queue append failed still has
+                # to reach the live reader; the stable id makes the replay safe.
+                if writer is not None and writer.active():
+                    writer.withdraw(current, effective)
                 return effective
             if (effective is not None and effective.get("action") in {"accept", "modify"}
                     and not allow_decided):
@@ -1760,6 +1768,8 @@ replacement insight without implying rejected substance.
                 with self.ledger.write("insights", [f"d:{insight_id}"]):
                     write_json(self.root / "decisions" / f"{insight_id}.json", record)
                 self._shadow('decided', current, record)
+                if writer is not None and writer.active():
+                    writer.withdraw(current, record)
         return record
 
     def _decision_token(self, role_name: str, payload: dict) -> str:

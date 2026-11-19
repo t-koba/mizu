@@ -378,5 +378,114 @@ class QueueDecisionAuthority(unittest.TestCase):
             [event.get("kind") for event in got["events"] if event.get("insight") == accept_id])
 
 
+    def legacy_page(self):
+        """Read the legacy page without changing the durable activation marker."""
+        with mock.patch.object(decision_delivery, "authority_kind", return_value=None):
+            return decision_delivery.pending(self.project, self.role)
+
+    def live_submit(self, identity, title):
+        return self.project.insights.submit(
+            source="worker", title=title, body=f"{title} body",
+            base_snapshot=self.project.snapshots.get()["id"], insight_id=identity)
+
+    def assert_parity(self, identity):
+        want = self.legacy_page()
+        got = decision_delivery.pending(self.project, self.role)
+        self.assertEqual(canonical(want), canonical(got))
+        self.assertEqual(want, got)
+        return [event for event in got["events"] if event.get("insight") == identity]
+
+    def test_withdraw_after_activation_clears_the_queue_page(self):
+        self.activate()
+        identity = "9" * 32
+        self.live_submit(identity, "Withdrawn after activation")
+        self.assertEqual([event.get("kind") for event in self.assert_parity(identity)],
+                         ["insight.pending"])
+
+        record = self.project.insights.withdraw(
+            identity, source="worker", reason="Author withdrew", expected_rev=1)
+        self.assertEqual(record["action"], "withdraw")
+        self.assertEqual(self.assert_parity(identity), [])
+
+        proposal_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.PROPOSAL_KIND, identity, 1)
+        clear_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.CLEAR_KIND, identity, 1)
+        decisions = self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+        clear = next(row for row in decisions if row["id"] == clear_id)
+        self.assertEqual(clear["refs"], [proposal_id])
+        self.assertEqual(clear["body"]["action"], "withdraw")
+        # An exact retry reuses the same stable message, not a second row.
+        self.project.insights.withdraw(
+            identity, source="worker", reason="Author withdrew", expected_rev=1)
+        self.assertEqual([row["id"] for row in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]].count(clear_id), 1)
+
+    def test_revise_after_activation_replaces_the_pending_proposal(self):
+        self.activate()
+        identity = "8" * 32
+        self.live_submit(identity, "Original title")
+        self.assertEqual([event["rev"] for event in self.assert_parity(identity)], [1])
+
+        record = self.project.insights.revise(
+            identity, source="worker", title="Revised title", body="Revised body",
+            base_snapshot=None, expected_rev=1)
+        self.assertEqual(record["rev"], 2)
+        events = self.assert_parity(identity)
+        self.assertEqual([event.get("kind") for event in events], ["insight.pending"])
+        self.assertEqual([event["rev"] for event in events], [2])
+
+        proposals = self.project.kernel_queues.read("proposals", "operator")["messages"]
+        ids = {row["id"] for row in proposals}
+        for rev in (1, 2):
+            self.assertIn(queue_decision_delivery.message_id(
+                queue_decision_delivery.PROPOSAL_KIND, identity, rev), ids)
+        # The old revision is archived in legacy storage but is no longer a
+        # queue delivery candidate; a repeated no-op revise stays idempotent.
+        self.project.insights.revise(
+            identity, source="worker", title="Revised title", body="Revised body",
+            base_snapshot=None, expected_rev=2)
+        self.assertEqual(self.assert_parity(identity), events)
+
+    def test_decide_revise_withdraw_lifecycle_matches_legacy(self):
+        self.activate()
+        identity = "7" * 32
+        self.live_submit(identity, "Lifecycle proposal")
+        self.assertEqual([event.get("kind") for event in self.assert_parity(identity)],
+                         ["insight.pending"])
+        self.project.insights.decide(
+            identity, "accept", "Accepted once", "", "run-lifecycle", expected_rev=1,
+            work_item_intent="none")
+        accepted = self.assert_parity(identity)
+        self.assertEqual([event["action"] for event in accepted], ["accept"])
+
+        self.project.insights.revise(
+            identity, source="worker", title="Reopened proposal", body="Reopened body",
+            base_snapshot=None, expected_rev=1)
+        reopened = self.assert_parity(identity)
+        self.assertEqual([event.get("kind") for event in reopened], ["insight.pending"])
+        self.assertEqual([event["rev"] for event in reopened], [2])
+
+        self.project.insights.withdraw(
+            identity, source="worker", reason="Closed by author", expected_rev=2)
+        self.assertEqual(self.assert_parity(identity), [])
+
+    def test_withdraw_of_an_accepted_revision_suppresses_the_decision_event(self):
+        self.activate()
+        identity = "6" * 32
+        self.live_submit(identity, "Accepted then withdrawn")
+        self.project.insights.decide(
+            identity, "accept", "Accepted before withdrawal", "", "run-accepted",
+            expected_rev=1, work_item_intent="none")
+        accepted = self.assert_parity(identity)
+        self.assertEqual([event["action"] for event in accepted], ["accept"])
+
+        self.project.insights.withdraw(
+            identity, source="operator", reason="Operator withdrew after acceptance",
+            expected_rev=1, allow_decided=True)
+        self.assertEqual(self.assert_parity(identity), [])
+
+
 if __name__ == "__main__":
     unittest.main()

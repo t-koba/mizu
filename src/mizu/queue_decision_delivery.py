@@ -12,9 +12,12 @@ It rebuilds the exact ``decision_delivery.pending`` page from the declared ``pro
 ``decisions`` and ``receipts`` queues, appends settled receipts only to the
 declared host-writable ``receipts`` queue, and appends each post-activation
 proposal/decision once through :class:`DecisionQueueWriter`. Ordinary
-``Insights.submit``/``Insights.decide`` call that writer under the same marker
-that switches the readers, so the live envelope has one authoritative path.
-The shared-authority branch is unaffected.
+``Insights.submit``/``Insights.revise`` and ``Insights.decide``/
+``Insights.withdraw`` call that writer under the same marker that switches the
+readers, so the live envelope has one authoritative path. Only the newest
+revision and its effective decision produce envelopes; a clear row suppresses
+delivery without emitting a decision event. The shared-authority branch is
+unaffected.
 
 Trust and bounds: the role comes from the host's trusted configuration object.
 The only actor presented to a queue for reads is ``role:<role.name>``; receipt
@@ -48,6 +51,11 @@ RECEIPTS = "receipts"
 PROPOSAL_KIND = "proposal"
 DECISION_KIND = "decision"
 REVISIT_KIND = "revisit"
+#: Generic kind for a decision that only clears a proposal's pending delivery
+#: without emitting a decision event. It is distinct from ``DECISION_KIND`` so
+#: a later clear of an already-decided revision cannot collide with the
+#: first decision's stable id.
+CLEAR_KIND = "clear"
 QUEUES = (PROPOSALS, DECISIONS, RECEIPTS)
 #: The complete example conversion gate, including the record families still
 #: owned by other stage-2 slices until their own switches.
@@ -401,10 +409,28 @@ def _candidates(project, name, wanted, sources, include_insights):
             raise AdapterError(f"Duplicate converted proposal {item['id']}")
         proposals[item["id"]] = item
     decisions = [_decision(project, message, proposals) for message in reads[DECISIONS]]
-    decided = {decision["proposal"]["id"] for decision in decisions}
-    delivered = []
+    # Only the newest revision of an insight is live: a revise archives the old
+    # revision in legacy storage and reopens the topic under a new proposal.
+    current_rev: dict[str, int] = {}
+    for item in proposals.values():
+        insight = item["legacy_insight"]
+        if insight not in current_rev or item["rev"] > current_rev[insight]:
+            current_rev[insight] = item["rev"]
+    live = {item["id"] for item in proposals.values()
+            if item["rev"] == current_rev[item["legacy_insight"]]}
+    # One effective decision per live proposal: a later live row supersedes an
+    # earlier one (a clear overlays an already delivered decision), while a
+    # delayed revisit copy never replaces the ordinary decision it duplicates.
+    effective: dict[str, dict] = {}
     for item in decisions:
-        if item["deliver_at"] is not None or item["action"] not in wanted:
+        proposal_id = item["proposal"]["id"]
+        if item["deliver_at"] is not None or proposal_id not in live:
+            continue
+        effective[proposal_id] = item
+    decided = set(effective)
+    delivered = []
+    for item in effective.values():
+        if item["action"] not in wanted:
             continue
         event = _decision_event(name, item, sources)
         if event is not None:
@@ -413,7 +439,7 @@ def _candidates(project, name, wanted, sources, include_insights):
     if include_insights:
         configured_roles = set(project.roles) & project.config.roles.keys()
         for item in proposals.values():
-            if item["id"] in decided:
+            if item["id"] not in live or item["id"] in decided:
                 continue
             event = _pending_event(name, item, configured_roles)
             if event is not None:
@@ -714,12 +740,10 @@ class DecisionQueueWriter:
         self.project.kernel_queues.append(
             PROPOSALS, body, "operator", id=message_id(PROPOSAL_KIND, identity, record["rev"]))
 
-    def decide(self, current, event, event_id: str) -> None:
-        """Append the declared decision (and delayed revisit) for one event."""
+    def _append_decision(self, current, event, event_id: str, kind: str) -> None:
+        """Append one decision row bound to the proposal it answers."""
         self.require()
         action = event.get("action")
-        if action not in DELIVERED_ACTIONS:
-            raise AdapterError("Decision producer requires a delivered action")
         proposal_id = message_id(PROPOSAL_KIND, current["id"], current["rev"])
         # A decision binds the exact proposal it answers. Read the stored
         # message rather than re-deriving metadata: evidence may have been
@@ -758,9 +782,28 @@ class DecisionQueueWriter:
         identity = current["id"]
         rev = current["rev"]
         store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
-                     id=message_id(DECISION_KIND, identity, rev))
+                     id=message_id(kind, identity, rev))
         if action == "defer":
             instant = _revisit_instant(event.get("revisit"))
             if instant is not None:
                 store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
                              deliver_at=instant, id=message_id(REVISIT_KIND, identity, rev))
+
+    def decide(self, current, event, event_id: str) -> None:
+        """Append the declared decision (and delayed revisit) for one event."""
+        if event.get("action") not in DELIVERED_ACTIONS:
+            raise AdapterError("Decision producer requires a delivered action")
+        self._append_decision(current, event, event_id, DECISION_KIND)
+
+    def withdraw(self, current, record) -> None:
+        """Clear a proposal's pending delivery without emitting a decision event.
+
+        The generic clear kind owns a stable id separate from the delivered
+        decision, so clearing a revision that was already accepted cannot
+        collide with that decision's id. A replay reuses the same row.
+        """
+        if record.get("action") != "withdraw":
+            raise AdapterError("Clear producer requires a withdrawal record")
+        identity, rev = current["id"], current["rev"]
+        self._append_decision(current, record,
+                              message_id(CLEAR_KIND, identity, rev), CLEAR_KIND)
