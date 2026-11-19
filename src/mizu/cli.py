@@ -225,6 +225,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("insight", help="Exact insight ID or unique prefix")
     p.add_argument("--reproject", action="store_true",
                    help="Replay the projection once before verifying (writes kernel objects only)")
+    p = sub.add_parser("kernel-shadow-audit", help="Bounded read-only audit of all declared stage-2 kernel shadows")
+    p.add_argument("project", help="Managed project name")
     p = sub.add_parser("migrate-records", help="Preview flat shared record migration; dry-run unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Move verified records under quiescence")
@@ -503,6 +505,12 @@ def _cmd_prune(config, project, args):
     return prune(project, apply=args.apply, keep_artifacts=args.keep_artifacts)
 
 
+def _cmd_kernel_shadow_audit(config, project, args):
+    # Lazy: only this read-only operator command needs the audit helper.
+    from . import kernel_shadow_audit
+    return kernel_shadow_audit.audit(project)
+
+
 def _cmd_storage(config, project, args):
     from .storage import audit, reclaim
     if getattr(args, "apply", False):
@@ -671,6 +679,7 @@ _PROJECT_COMMANDS = {
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
     "usage": _cmd_usage, "backup": _cmd_backup,
     "prune": _cmd_prune, "storage": _cmd_storage, "kernel-shadow": _cmd_kernel_shadow,
+    "kernel-shadow-audit": _cmd_kernel_shadow_audit,
     "migrate-records": _cmd_migrate_records,
     "migrate-work-items": _cmd_migrate_work_items,
 }
@@ -869,7 +878,8 @@ def _execute(config, args):
                   if args.target_id is not None else None)
         return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
                      addressee=args.role, subject=subject, action=args.action, target=target)
-    read_only = args.command in ("migrate-records", "migrate-work-items")
+    read_only = args.command in ("migrate-records", "migrate-work-items",
+                                 "kernel-shadow-audit")
     if args.command == "kernel-shadow" and not getattr(args, "reproject", False):
         read_only = True
     project = Project(config, args.project, read_only=read_only)

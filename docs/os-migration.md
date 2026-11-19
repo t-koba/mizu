@@ -49,6 +49,8 @@ Questions and answers stay behind the same boundary. For a deployment that decla
 
 The read-only `KernelShadow.verify_notice`, `verify_question` and `verify_answer` helpers compare accepted envelopes with their declared objects and report bounded field, object and expected-state mismatches without writing or changing legacy authority.
 
+`mizu kernel-shadow-audit PROJECT` is the bounded stage-2 proof: a read-only pass over the live insight page (capped by `INSIGHT_RETRIEVAL_LIMIT`), operator records and declared `operator_question` role records (each capped by `[limits].operator_record_catalog_scan_entries`) verifies every declared insight, decision, notice, question and answer projection against the authoritative legacy files, reporting exact counts, bounded mismatches and truncation flags. It never writes kernel objects or legacy records, never reprojects, and never changes legacy authority; a clean report is completion evidence for the shadow only, not an authority cutover or permission to delete the dedicated stage-2 modules.
+
 ## Invariants kept throughout
 
 Authentication of actors, append-only history, compare-and-swap, fail-closed
