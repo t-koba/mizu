@@ -47,9 +47,10 @@ grant itself a queue right.
 
 Each slice is independently verified and snapshot-bound.
 
-- Decision adapter reads only: reproduce `decision_delivery.pending` page
-  shapes from a fixture project containing converted queues; compare with the
-  legacy page byte for byte.
+- Decision adapter reads only (implemented): `stage2_decision_adapter.pending`
+  reproduces `decision_delivery.pending` page shapes from a fixture project
+  containing converted queues; `tests/test_stage2_decision_adapter.py` compares
+  canonical bytes with the legacy page.
 - Decision adapter writes only: reproduce `Insights.decide` effects as queue
   appends, including deferred revisits and idempotent retries; compare the
   resulting queue state with the legacy effect.
@@ -59,6 +60,35 @@ Each slice is independently verified and snapshot-bound.
   questions, answers and notices; delete the record-specific modules.
 - Shared-module branches for those families are removed only after both
   switches, together with the imports they served.
+
+## Implemented decision read slice
+
+`stage2_decision_adapter.py` is an example-userland module, outside
+`src/mizu/kernel/`. Its only entry point is
+`pending(project, role, *, actions=None, limit=None, include_insights=True,
+sources="own")`; it returns the legacy dictionary (`shared`, `events`,
+`diagnostics`, `page`, `manifest`) and accepts no actor or principal. The actor
+presented to `QueueStore` is always `role:<role.name>` from the trusted role
+object. It reads only the declared `proposals` and `decisions` queues from
+sequence one with the kernel page size and the stage-2 page-count bound, and
+never acknowledges, appends or advances a cursor.
+
+Conversion retains the metadata this reconstruction needs: proposal instant,
+kind and urgency for `insight.pending` payloads, and the decision's exact
+history event id, decision key, run and canonical history record for
+acknowledgement tokens. The event id is the `decision-history` filename: for
+deferrals it is not the decision key. The whole record is retained because
+work-item-bearing decisions carry further token-bound fields. Messages whose
+metadata is malformed or does not bind its proposal are refused before any
+event is built. Legacy page calls appear only in the comparison tests.
+
+Because the queue has no per-message filter and any configured role can be an
+insight addressee, the example `queues.toml` grants every role read of
+`proposals`; writes and wakes are unchanged. This read slice does **not**
+switch a runtime call site, add a flag or dual-write, suppress legacy
+receipts, or serve a shared-authority page: those are later slices of the same
+switch. Receipt suppression and the shared store have no queue facts yet, so
+exactly-zero-receipt, non-shared fixtures are the parity boundary.
 
 ## Invariants at every step
 

@@ -3,9 +3,13 @@
 # what a reader does with a message is written in the role policy files.
 
 # Findings and proposals for the writer to judge.
+# Any configured role can be the addressee of an insight, and the queue has no
+# per-message filter: a role must be able to read the proposal that carries its
+# own pending attention before the adapter can reconstruct it. This is the
+# least grant that admits that read; writing and waking stay unchanged.
 [queues.proposals]
 write = ["role:*", "operator", "host"]
-read = ["role:writer", "operator"]
+read = ["role:*", "operator"]
 wake = ["role:writer"]
 [queues.proposals.schema]
 title = {type = "string", max = 240, required = true}
@@ -17,6 +21,9 @@ legacy_rev = {type = "string", max = 64}
 legacy_source = {type = "string", max = 65536}
 legacy_addressee = {type = "string", max = 65536}
 legacy_evidence = {type = "string", max = 65536}
+legacy_created_at = {type = "instant"}
+legacy_kind = {type = "string", values = ["proposal", "question"]}
+legacy_urgency = {type = "string", values = ["low", "normal", "high"]}
 
 # The writer's decision on a proposal: refs = [proposal id].
 # A deferral is the same decision with a revisit written as a delayed message
@@ -28,15 +35,24 @@ read = ["role:*", "operator"]
 action = {type = "string", values = ["accept", "modify", "defer", "reject", "withdraw"], required = true}
 reason = {type = "string", max = 8192, required = true}
 revisit = {type = "string", max = 8192}
-# The same legacy metadata as proposals, plus the immutable decision key and
-# its aware instant; every decision and delayed revisit carries all of it.
+# The same legacy metadata as proposals, plus the immutable decision history
+# event id (the filename in decision-history), its decision key when present,
+# the nullable run and the canonical JSON of that exact history record. All of
+# them are needed to rebuild the byte-exact legacy delivery token; every
+# decision and delayed revisit carries the same metadata.
 legacy_insight = {type = "id"}
 legacy_rev = {type = "string", max = 64}
 legacy_source = {type = "string", max = 65536}
 legacy_addressee = {type = "string", max = 65536}
 legacy_evidence = {type = "string", max = 65536}
+legacy_created_at = {type = "instant"}
+legacy_kind = {type = "string", values = ["proposal", "question"]}
+legacy_urgency = {type = "string", values = ["low", "normal", "high"]}
 legacy_event = {type = "id"}
+legacy_decision_key = {type = "id"}
+legacy_run = {type = "string", max = 256}
 legacy_decided_at = {type = "instant"}
+legacy_record = {type = "string", max = 1048576}
 
 # Questions to the operator, and the operator's answers
 # (refs = [question id or converted insight proposal id]).

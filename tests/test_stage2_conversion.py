@@ -74,20 +74,18 @@ class Stage2Conversion(Fixture):
                                      "test-run", expected_rev=1)
 
     def legacy_metadata(self, insight_id):
-        """Read the exact metadata the legacy API exposes for one insight."""
+        """Read the exact metadata the conversion must retain for one insight."""
         summary = next(item for item in self.project.insights.list_page(
             scope="live", limit=1000)["items"] if item["id"] == insight_id)
         record = self.project.insights.read(insight_id)
-        proposal = {
-            "legacy_insight": insight_id,
-            "legacy_rev": str(summary["rev"]),
-            "legacy_source": summary["source"],
-            "legacy_addressee": summary["addressee"],
-            "legacy_evidence": canonical(record["evidence"]).decode()}
+        proposal = convert_legacy._legacy_metadata(
+            summary, record, None, self.config.queues["proposals"])
         decision = summary["decision"]
-        return proposal, {**proposal,
-                          "legacy_event": decision["decision_key"],
-                          "legacy_decided_at": decision["created_at"]}
+        source = convert_legacy._decision_source(
+            self.project, insight_id, summary["rev"], decision)
+        decision_metadata = convert_legacy._legacy_metadata(
+            summary, record, decision, self.config.queues["decisions"], source)
+        return proposal, decision_metadata
 
     def convert(self, *flags):
         output = io.StringIO()
@@ -239,7 +237,7 @@ class Stage2Conversion(Fixture):
             (lambda item: {**item, "addressee": " "}, "Legacy insight addressee"),
             (lambda item: {**item, "decision": {**item["decision"],
                                                "decision_key": "g" * 32}},
-             "Legacy decision event"),
+             "Legacy decision key"),
             (lambda item: {**item, "decision": {**item["decision"],
                                                "created_at": "2099-01-01T00:00:00"}},
              "Legacy decision instant"),

@@ -11,7 +11,12 @@ grants.
 
 The current live insight and its current effective decision become one proposal
 and (when present) one decision message, both carrying the exact legacy
-decision-event metadata in declared optional fields. A deferral whose revisit
+decision-event metadata in declared optional fields: identity, revision,
+routing, evidence, instant, kind and urgency on the proposal; the immutable
+history event id and record (including its run and decision key) on the
+decision. The event id is the decision-history filename, not the decision key:
+deferrals and withdrawals use a different name, and the whole retained record
+binds the legacy acknowledgement token byte for byte. A deferral whose revisit
 carries an aware instant also becomes a delayed decision message from the writer to itself,
 referencing that proposal. Declared role questions become question messages,
 their exact authenticated answers become referencing answer messages, and
@@ -43,7 +48,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from mizu import operator_records as legacy
 from mizu.config import load
 from mizu.errors import Denied, MizuError
-from mizu.fs import canonical, lock
+from mizu.fs import MAX_FRAME, canonical, lock, safe_read
 from mizu.kernel.queues import allows
 from mizu.kernel_shadow import instant_value
 from mizu.project import Project
@@ -66,8 +71,10 @@ RECORD_FIELDS = ("legacy_addressee", "legacy_subject", "legacy_writer",
                  "legacy_id", "legacy_digest", "legacy_action")
 NOTICE_FIELDS = (*RECORD_FIELDS, "legacy_target")
 PROPOSAL_LEGACY_FIELDS = ("legacy_insight", "legacy_rev", "legacy_source",
-                          "legacy_addressee", "legacy_evidence")
-DECISION_LEGACY_FIELDS = (*PROPOSAL_LEGACY_FIELDS, "legacy_event", "legacy_decided_at")
+                          "legacy_addressee", "legacy_evidence", "legacy_created_at",
+                          "legacy_kind", "legacy_urgency")
+DECISION_LEGACY_FIELDS = (*PROPOSAL_LEGACY_FIELDS, "legacy_event", "legacy_decision_key",
+                          "legacy_run", "legacy_decided_at", "legacy_record")
 PAGE = 1000
 MAX_PAGES = 1024
 ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -165,7 +172,71 @@ def _evidence(value: object, label: str) -> list:
     return value
 
 
-def _legacy_metadata(summary, record, decision, declaration) -> dict[str, str]:
+def _nullable_copy(value: object, field, label: str):
+    """Copy a declared field whose legacy value is explicitly null."""
+    if value is None:
+        return field.validate(None)
+    return _copy(value, field, label)
+
+
+def _history_record(root, stem: str) -> dict:
+    """Read one exact legacy decision-history event without rewriting it."""
+    try:
+        value = json.loads(safe_read(root, f"decision-history/{stem}.json", MAX_FRAME))
+    except (Denied, OSError, ValueError, TypeError, UnicodeError) as exc:
+        raise ConversionError(f"Unreadable legacy decision event {stem}") from exc
+    if not isinstance(value, dict):
+        raise ConversionError(f"Malformed legacy decision event {stem}")
+    return value
+
+
+def _decision_source(project, insight_id: str, rev: int, decision: dict) -> tuple[str, dict]:
+    """Bind the effective decision to its exact history event id and record.
+
+    The delivery event name is the history filename, not the decision key:
+    deferrals and withdrawals use a random id. Substantive decisions are
+    addressed by their key; other actions need one bounded history scan. The
+    full immutable record is retained because work items and other fields also
+    bind the legacy acknowledgement token.
+    """
+    root = project.insights.root
+    key = decision.get("decision_key")
+    if key is not None:
+        key = _identity(key, "Legacy decision key")
+        path = root / "decision-history" / f"{key}.json"
+        found = path.is_file() and not path.is_symlink()
+        candidates = [(key, _history_record(root, key))] if found else []
+    else:
+        candidates = []
+    if not candidates:
+        try:
+            with os.scandir(root / "decision-history") as entries:
+                names = sorted(entry.name for entry in entries
+                               if entry.is_file(follow_symlinks=False))
+        except FileNotFoundError:
+            names = []
+        if len(names) > MAX_PAGES:
+            raise ConversionError("Legacy decision history exceeds the conversion scan bound")
+        for name in names:
+            stem = name[:-5] if name.endswith(".json") else name
+            try:
+                _identity(stem, "Legacy decision event")
+            except ConversionError:
+                continue
+            candidates.append((stem, _history_record(root, stem)))
+    matches = [(stem, record) for stem, record in candidates
+               if record.get("id") == insight_id and record.get("rev") == rev
+               and record.get("action") == decision.get("action")
+               and record.get("reason") == decision.get("reason")
+               and record.get("revisit") == decision.get("revisit")
+               and record.get("decision_key") == decision.get("decision_key")]
+    if len(matches) != 1:
+        raise ConversionError(
+            f"Cannot bind one legacy decision event for {insight_id} revision {rev}")
+    return matches[0]
+
+
+def _legacy_metadata(summary, record, decision, declaration, source=None) -> dict[str, str]:
     """Copy legacy decision-event metadata into one queue's declared fields.
 
     The values come from the validated insight page, current record and
@@ -185,12 +256,30 @@ def _legacy_metadata(summary, record, decision, declaration) -> dict[str, str]:
         "legacy_evidence": _copy(
             _json(_evidence(record.get("evidence"), "Legacy evidence"), "Legacy evidence"),
             fields["legacy_evidence"], "Legacy evidence")}
+    for name, label in (("created_at", "Legacy insight instant"),
+                        ("kind", "Legacy insight kind"),
+                        ("urgency", "Legacy insight urgency")):
+        if name in record:
+            field = f"legacy_{name}"
+            metadata[field] = _copy(record[name], fields[field], label)
     if decision is not None:
-        metadata["legacy_event"] = _copy(decision.get("decision_key"),
-                                         fields["legacy_event"], "Legacy decision event")
+        if source is None:
+            raise ConversionError("Legacy decision event is not bound")
+        stem, history = source
+        metadata["legacy_event"] = _copy(stem, fields["legacy_event"], "Legacy decision event")
         metadata["legacy_decided_at"] = _copy(decision.get("created_at"),
                                               fields["legacy_decided_at"],
                                               "Legacy decision instant")
+        if "decision_key" in decision:
+            metadata["legacy_decision_key"] = _copy(
+                decision["decision_key"], fields["legacy_decision_key"],
+                "Legacy decision key")
+        if "run" in decision:
+            metadata["legacy_run"] = _nullable_copy(
+                decision["run"], fields["legacy_run"], "Legacy decision run")
+        metadata["legacy_record"] = _copy(
+            _json(history, "Legacy decision event"), fields["legacy_record"],
+            "Legacy decision event")
     return metadata
 
 
@@ -416,8 +505,11 @@ def _plan(project) -> tuple[list[dict], dict]:
                 raise ConversionError(f"Decision for {insight_id} does not bind its current revision")
             action = _text(decision.get("action"), decision_decl.fields["action"], "Action")
             reason = _text(decision.get("reason"), decision_decl.fields["reason"], "Reason")
+            source = _decision_source(project, insight_id, rev, decision)
             body = {"action": action, "reason": reason,
-                    **_legacy_metadata(summary, record, decision, decision_decl)}
+                    **_legacy_metadata(summary, record, decision, decision_decl, source)}
+            if canonical(source[1]) != canonical(decision):
+                raise ConversionError("Ambiguous legacy decision event metadata")
             if action == "defer":
                 revisit = _text(decision.get("revisit"), decision_decl.fields["revisit"], "Revisit")
                 body["revisit"] = revisit

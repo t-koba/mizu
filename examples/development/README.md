@@ -85,6 +85,35 @@ python3 examples/development/stage2_view.py config/config.toml --project NAME [-
 uses the current time. The reader imports no legacy insight or operator-record
 module and does not change runtime authority or routing.
 
+## Decision adapter read slice
+
+`stage2_decision_adapter.py` is a read-only example-userland reconstruction of
+the legacy `decision_delivery.pending` page from the converted `proposals` and
+`decisions` queues. `pending(project, role, *, actions=None, limit=None,
+include_insights=True, sources="own")` returns the same `shared`, `events`,
+`diagnostics`, `page` and `manifest` dictionary; it derives the queue actor as
+`role:<role.name>` from the supplied trusted role and accepts no principal.
+Reads use explicit bounded cursors from sequence one, never acknowledge or
+append, and refuse malformed or unbound converted metadata. Proposal instant,
+kind and urgency and the decision's history event id, key, run and canonical
+history record make the payload and acknowledgement tokens byte-identical to
+the legacy page (the event id is the history filename, not the decision key,
+for deferrals). Any configured role may be an insight addressee, so the example
+`queues.toml` grants every role read of proposals; write and wake grants are
+unchanged.
+
+```python
+from stage2_decision_adapter import pending
+page = pending(project, role, actions=role.decision_events,
+               limit=10, sources="own")
+```
+
+This is a comparison slice only: no runtime call site is switched, no legacy
+module is deleted and no feature flag is added. Legacy receipts and the shared
+decision-authority page are not queue facts, so this adapter reproduces the
+non-shared page with no receipts; tests compare it against the legacy call on
+that fixture.
+
 ## Conversion gate
 
 `stage2_verify.py` is an operator-run, read-only migration gate. It recomputes
