@@ -1648,7 +1648,10 @@ class WorkItems:
             query += f" WHERE status IN ({', '.join('?' * len(statuses))})"
         with self._ledger.read("items", locked=False) as db:
             found = _rows(db, query + " ORDER BY id", tuple(statuses or ()))
-        return [json.loads(raw) for (raw,) in found]
+        items = [json.loads(raw) for (raw,) in found]
+        for item in items:
+            self._require_migrated_item(item["id"])
+        return items
 
     def unseeded_decisions(self) -> int:
         """Count legacy accept/modify decisions that no reconciliation resolved."""
@@ -2310,7 +2313,6 @@ class WorkItems:
         """
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
-        self._require_migrated_store()
         record_question = self.record_question_lookup() if self.record_question_lookup is not None else None
         cursor_key = _open_cursor_key(cursor)
         if delivered_wait_resolution_tokens is None:
@@ -2358,6 +2360,7 @@ class WorkItems:
         deferred_at = None
         for entry in active:
             item, since = self._decode(*entry[:3])
+            self._require_migrated_item(item["id"])
             if _active_transform is not None:
                 transformed = _active_transform(item)
                 if transformed is not item:
@@ -2554,6 +2557,7 @@ class WorkItems:
         selected = []
         for (raw,) in newest:
             item = json.loads(raw)
+            self._require_migrated_item(item["id"])
             sort_key, row = self.closed_row(item)
             selected.append((None, sort_key, row, item if include_items else None))
         rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
@@ -2587,7 +2591,9 @@ class WorkItems:
             size = 1024  # Envelope and two bounded opaque cursors.
             position = after
             for seq, raw, doing_since, blocked_since in found[:limit]:
-                row = {"item": json.loads(raw), "doing_since": doing_since,
+                item = json.loads(raw)
+                self._require_migrated_item(item["id"])
+                row = {"item": item, "doing_since": doing_since,
                        "blocked_since": blocked_since}
                 row_bytes = len(canonical(row))
                 if row_bytes > MAX_PROJECTION_BYTES:
