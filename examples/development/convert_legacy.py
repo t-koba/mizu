@@ -3,11 +3,13 @@
 
 This is example userland, not kernel code: it reads the legacy Insight API and
 the shared record store, then appends equivalent messages to the ``proposals``,
-``decisions``, ``questions``, ``answers``, ``notices`` and ``receipts`` queues
-declared in ``queues.toml``. Nothing here changes legacy authority, routes a runtime
-message, writes a kernel object or grants a capability. The only writes are
-QueueStore appends, and those go through the queue declarations' existing write
-grants.
+``decisions``, ``questions``, ``answers``, ``notices``, ``receipts`` and
+``record-receipts`` queues declared in ``queues.toml``. Nothing here changes
+legacy authority, routes a runtime message, writes a kernel object or grants a
+capability. The only writes are QueueStore appends, and those go through the
+queue declarations' existing write grants. ``QUEUES`` stays the original six
+conversion families; ``VERIFY_QUEUES`` adds record receipts for the record gate
+without changing the decision gate's plan or report identity.
 
 The current live insight and its current effective decision become one proposal
 and (when present) one decision message, both carrying the exact legacy
@@ -17,23 +19,29 @@ history event id and record (including its run and decision key) on the
 decision. The event id is the decision-history filename, not the decision key:
 deferrals and withdrawals use a different name, and the whole retained record
 binds the legacy acknowledgement token byte for byte. A deferral whose revisit
-carries an aware instant also becomes a delayed decision message from the writer to itself,
-referencing that proposal. Declared role questions become question messages,
-their exact authenticated answers become referencing answer messages, and
-operator notices become notice messages. A legacy answer to an insight
-revision becomes an answer message referencing that revision's converted
-proposal; a revision that was not converted refuses the run. Legacy
+carries an aware instant also becomes a delayed decision message from the
+writer to itself, referencing that proposal. Declared role questions become
+question messages carrying the exact envelope ``kind`` and ``created_at`` instant; their exact
+authenticated answers become referencing answer messages, and operator
+notices become notice messages, both carrying the envelope ``created_at``. A
+legacy answer to an insight revision becomes an answer message referencing
+that revision's converted proposal; a revision that was not converted refuses the run. Legacy
 decision-receipt files become per-token ``receipts`` messages: the exact
 receipt reader classifies each token as settled or as one of its three
 corrupt reasons, and the token is bound to a current legacy candidate event to
 infer the action and its legacy enumeration order (decision-history glob order
 then pending-envelope order, fixed-width hex). Receipts that no current
 candidate binds are reported and left unconverted, since they cannot affect a
-legacy page. Historical
-writers that differ from a queue's declared author are retained in the message
-body, never used to bypass a write grant. Message ids derive from legacy identity and content, so an exact
-replay appends nothing: QueueStore returns the existing message. All input is
-validated before the first append; a malformed or unbindable record refuses the
+legacy page. Per-role, per-record SharedRecords acknowledgements become
+host-authored ``record-receipts`` messages: each canonical receipt is bound to
+its role, record id and pinned immutable record digest, and the token is
+rebuilt with the same SharedRecords binding so an exact acknowledgement
+suppresses the same delivery if record authority is switched later. Stable ids
+make a replay idempotent. These are conversion messages, not a runtime switch.
+Historical writers that differ from a queue's declared author are retained in
+the message body, never used to bypass a write grant. Message ids derive from
+legacy identity and content, so an exact replay appends nothing: QueueStore
+returns the existing message. All input is validated before the first append; a malformed or unbindable record refuses the
 whole run. Archived revisions stay in the legacy archive; they are not silently
 reinvented here.
 
@@ -56,11 +64,13 @@ from mizu import operator_records as legacy
 from mizu.config import load
 from mizu import insight_archive
 from mizu.errors import Denied, LimitExceeded, MizuError
-from mizu.fs import MAX_FRAME, canonical, identifier, lock, safe_read
+from mizu.fs import MAX_FRAME, canonical, digest, identifier, loads_finite, lock, safe_read
 from mizu.insights import CorruptDecisionReceipt
 from mizu.kernel.queues import allows
 from mizu.kernel_shadow import instant_value
 from mizu.project import Project
+from mizu.shared_records import (RECORD_BYTES, RECEIPT_BYTES, SharedRecords,
+                                 _name, _token)
 
 PROPOSALS = "proposals"
 DECISIONS = "decisions"
@@ -68,7 +78,13 @@ QUESTIONS = "questions"
 ANSWERS = "answers"
 NOTICES = "notices"
 RECEIPTS = "receipts"
+RECORD_RECEIPTS = "record-receipts"
 QUEUES = (PROPOSALS, DECISIONS, QUESTIONS, ANSWERS, NOTICES, RECEIPTS)
+#: The original six stay pinned for decision activation reports and retries.
+#: The record gate verifies this larger set; the record receipts never enter
+#: the decision gate's plan/report identity.
+VERIFY_QUEUES = (*QUEUES, RECORD_RECEIPTS)
+RECORD_RECEIPT_FIELDS = ("ack_token", "legacy_role", "legacy_record_id", "legacy_record_digest")
 RECEIPT_AUTHOR = "host"
 RECEIPT_FIELDS = ("ack_token", "legacy_role", "legacy_action")
 RECEIPT_OPTIONAL = ("legacy_reason", "legacy_order")
@@ -83,9 +99,9 @@ DECISION_AUTHOR = "role:writer"
 ANSWER_AUTHOR = "operator"
 NOTICE_AUTHOR = "operator"
 QUESTION_FIELDS = ("legacy_payload", "legacy_subject", "legacy_writer",
-                   "legacy_id", "legacy_digest")
+                   "legacy_id", "legacy_digest", "legacy_kind", "legacy_created_at")
 RECORD_FIELDS = ("legacy_addressee", "legacy_subject", "legacy_writer",
-                 "legacy_id", "legacy_digest", "legacy_action")
+                 "legacy_id", "legacy_digest", "legacy_action", "legacy_created_at")
 NOTICE_FIELDS = (*RECORD_FIELDS, "legacy_target")
 PROPOSAL_LEGACY_FIELDS = ("legacy_insight", "legacy_rev", "legacy_source",
                           "legacy_addressee", "legacy_evidence", "legacy_created_at",
@@ -101,6 +117,12 @@ DATEISH = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 class ConversionError(Exception):
     """Malformed or ambiguous legacy input; refuse before any append."""
+
+
+def _record_receipt_id(role: str, token: str) -> str:
+    """Stable host-receipt message id: an exact replay cannot append twice."""
+    return digest(canonical({"queue": RECORD_RECEIPTS, "role": role,
+                             "ack_token": token}))[:32]
 
 
 def _message_id(kind: str, identity: str, rev: int | str) -> str:
@@ -483,7 +505,12 @@ def _role_questions(project, declaration) -> tuple[list[dict], dict]:
             "legacy_id": _copy(subject["id"], declaration.fields["legacy_id"],
                                "Legacy question id"),
             "legacy_digest": _copy(digest, declaration.fields["legacy_digest"],
-                                   "Legacy question digest")}
+                                   "Legacy question digest"),
+            "legacy_kind": _copy(envelope["kind"], declaration.fields["legacy_kind"],
+                                 "Legacy question kind"),
+            "legacy_created_at": _copy(envelope["created_at"],
+                                       declaration.fields["legacy_created_at"],
+                                       "Legacy question instant")}
         key = (subject["kind"], subject["id"], subject["digest"])
         if key in index:
             raise ConversionError(f"Conflicting legacy role question {subject['id']}")
@@ -524,6 +551,8 @@ def _record_body(envelope, digest, declaration, fields, *, allow_empty=()):
             value = payload["action"]
         elif name == "legacy_target":
             value = _json(payload["target"], "Legacy target")
+        elif name == "legacy_created_at":
+            value = envelope["created_at"]
         else:
             value = _json(envelope["subject"], "Legacy subject")
         body[name] = _copy(value, declaration.fields[name], name.replace("_", " "))
@@ -585,6 +614,68 @@ def _operator_messages(project, question_index, proposal_index, answer_decl, not
     return messages
 
 
+def _record_receipt_messages(project, declaration) -> list[dict]:
+    """Project exact per-role, per-record receipt files into host queue messages.
+
+    Every receipt is validated as a canonical SharedRecords receipt and bound to
+    an existing immutable record with the pinned digest. The legacy token uses
+    the same SharedRecords binding the runtime adapter rebuilds, so an exact
+    acknowledgement suppresses the same delivery after the switch.
+    """
+    root = project.insights.root / "shared-record-receipts"
+    if not insight_archive._directory(root):
+        return []
+    with os.scandir(root) as entries:
+        roles = sorted(entry.name for entry in entries)
+    if len(roles) > MAX_PAGES:
+        raise ConversionError("Legacy record receipt roles exceed the conversion scan bound")
+    messages = []
+    shared = SharedRecords(project.insights.root)
+    for directory in roles:
+        parent = root / directory
+        if not insight_archive._directory(parent):
+            raise ConversionError(f"Unsafe legacy record receipt directory for {directory}")
+        with os.scandir(parent) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+        if len(names) > MAX_PAGES:
+            raise ConversionError("Legacy record receipts exceed the conversion scan bound")
+        for name in names:
+            try:
+                raw = safe_read(root, f"{directory}/{name}", RECEIPT_BYTES)
+                receipt = loads_finite(raw)
+                if (type(receipt) is not dict
+                        or set(receipt) != {"role", "record_id", "record_digest", "acknowledged_at"}
+                        or canonical(receipt) != raw):
+                    raise ValueError("receipt shape")
+                role = identifier(receipt["role"])
+                if directory != hashlib.sha256(role.encode()).hexdigest():
+                    raise ValueError("receipt role directory")
+                if name != hashlib.sha256(
+                        receipt["record_id"].encode()).hexdigest() + ".json":
+                    raise ValueError("receipt record directory")
+                record_id = _name(receipt["record_id"])
+                record_digest = _digest(receipt["record_digest"], "Legacy record digest")
+                token = _token(role, record_id, record_digest)
+                record_name = shared.record_name(record_id)
+                record_raw = safe_read(project.insights.root, record_name, RECORD_BYTES)
+                if record_raw is None or digest(record_raw) != record_digest:
+                    raise ValueError("record binding")
+            except (Denied, OSError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
+                raise ConversionError(f"Unbindable legacy record receipt {directory}/{name}") from exc
+            body = {
+                "ack_token": _copy(token, declaration.fields["ack_token"], "Record receipt token"),
+                "legacy_role": _copy(role, declaration.fields["legacy_role"], "Record receipt role"),
+                "legacy_record_id": _copy(record_id, declaration.fields["legacy_record_id"],
+                                          "Record receipt id"),
+                "legacy_record_digest": _copy(record_digest,
+                                              declaration.fields["legacy_record_digest"],
+                                              "Record receipt digest"),
+            }
+            messages.append({"queue": RECORD_RECEIPTS, "id": _record_receipt_id(role, token),
+                             "author": RECEIPT_AUTHOR, "refs": (), "body": body})
+    return messages
+
+
 def _plan(project) -> tuple[list[dict], dict]:
     proposal_decl = _fields(project, PROPOSALS, ("title", "body"), PROPOSAL_LEGACY_FIELDS)
     decision_decl = _fields(project, DECISIONS, ("action", "reason"), DECISION_LEGACY_FIELDS)
@@ -592,6 +683,7 @@ def _plan(project) -> tuple[list[dict], dict]:
     answer_decl = _fields(project, ANSWERS, ("body",), RECORD_FIELDS)
     notice_decl = _fields(project, NOTICES, ("body",), NOTICE_FIELDS)
     receipt_decl = _fields(project, RECEIPTS, RECEIPT_FIELDS, RECEIPT_OPTIONAL)
+    record_receipt_decl = _fields(project, RECORD_RECEIPTS, RECORD_RECEIPT_FIELDS)
     if not allows(proposal_decl.write, PROPOSAL_AUTHOR):
         raise ConversionError("operator may not append to the proposals queue")
     if not allows(decision_decl.write, DECISION_AUTHOR):
@@ -602,6 +694,8 @@ def _plan(project) -> tuple[list[dict], dict]:
         raise ConversionError("operator may not append to the notices queue")
     if not allows(receipt_decl.write, RECEIPT_AUTHOR):
         raise ConversionError("host may not append to the receipts queue")
+    if not allows(record_receipt_decl.write, RECEIPT_AUTHOR):
+        raise ConversionError("host may not append to the record-receipts queue")
 
     messages: list[dict] = []
     by_id: dict[str, dict] = {}
@@ -677,6 +771,8 @@ def _plan(project) -> tuple[list[dict], dict]:
     receipt_messages, unbound = _receipt_messages(project, receipt_decl, {})
     for message in receipt_messages:
         add(message)
+    for message in _record_receipt_messages(project, record_receipt_decl):
+        add(message)
 
     report = {"project": project.name, "applied": False,
               "proposals": [m["id"] for m in messages if m["queue"] == PROPOSALS],
@@ -687,6 +783,7 @@ def _plan(project) -> tuple[list[dict], dict]:
               "answers": [m["id"] for m in messages if m["queue"] == ANSWERS],
               "notices": [m["id"] for m in messages if m["queue"] == NOTICES],
               "receipts": [m["id"] for m in messages if m["queue"] == RECEIPTS],
+              "record_receipts": [m["id"] for m in messages if m["queue"] == RECORD_RECEIPTS],
               "unbound_receipts": unbound}
     return messages, report
 
@@ -717,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = load(Path(args.config))
-        for queue in QUEUES:
+        for queue in VERIFY_QUEUES:
             if queue not in config.queues:
                 raise ConversionError(f"Configuration does not declare the {queue} queue")
         project = Project(config, args.project, read_only=not args.apply)

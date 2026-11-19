@@ -191,7 +191,8 @@ class Stage2View(Fixture):
             "legacy_writer": "operator.cli",
             "legacy_id": answer["record"]["id"],
             "legacy_digest": answer["record_digest"],
-            "legacy_action": "publish"})
+            "legacy_action": "publish",
+            "legacy_created_at": answer["record"]["created_at"]})
         self.assertEqual(view["questions"], [
             {"id": QUESTION_ID, "question": "Which source?", "context": "Stage 2",
              "default": "kernel queues", "answer": {"body": "Use the declared queues."}}])

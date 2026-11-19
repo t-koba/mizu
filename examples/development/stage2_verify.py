@@ -47,7 +47,7 @@ class VerifyError(Exception):
     """A queue or record cannot be compared without inventing facts."""
 
 
-def _record(message: Mapping, source: str) -> dict:
+def _record(message: Mapping, source: str, queues=QUEUES) -> dict:
     """Copy exactly the six comparable fields, never a store-local field."""
     if not isinstance(message, Mapping):
         raise VerifyError(f"Malformed {source} message")
@@ -55,7 +55,7 @@ def _record(message: Mapping, source: str) -> dict:
         if field not in message:
             raise VerifyError(f"Malformed {source} message lacks {field}")
     queue, ident, author = message["queue"], message["id"], message["author"]
-    if not isinstance(queue, str) or queue not in QUEUES:
+    if not isinstance(queue, str) or queue not in queues:
         raise VerifyError(f"{source} message has an undeclared queue {queue!r}")
     if not isinstance(ident, str) or not ident:
         raise VerifyError(f"{source} message has no id")
@@ -74,9 +74,9 @@ def _record(message: Mapping, source: str) -> dict:
             "refs": list(refs), "deliver_at": deliver_at}
 
 
-def _index(messages, source: str, target: dict) -> None:
+def _index(messages, source: str, target: dict, queues=QUEUES) -> None:
     for message in messages:
-        record = _record(message, source)
+        record = _record(message, source, queues)
         ident = record["id"]
         if ident in target:
             raise VerifyError(f"Duplicate {source} message id {ident}")
@@ -129,22 +129,33 @@ def _differences(planned: dict, stored: dict) -> list[dict]:
     return result
 
 
-def verify(project) -> dict:
-    """Compare the current conversion plan with the declared stored queues."""
+def verify(project, *, queues=None) -> dict:
+    """Compare the current conversion plan with the declared stored queues.
+
+    The default is the original six queues: decision activation pins that gate.
+    A caller switching record delivery passes ``convert_legacy.VERIFY_QUEUES``
+    so record receipts are checked too. Both sets compare only their own plan
+    messages, so neither gate's report identity changes.
+    """
+    selected = convert_legacy.QUEUES if queues is None else tuple(queues)
+    if any(not isinstance(queue, str) or queue not in convert_legacy.VERIFY_QUEUES
+           or len(set(selected)) != len(selected) for queue in selected):
+        raise VerifyError("Unknown or duplicate verify queue")
     plan_messages, _ = convert_legacy._plan(project)
+    plan_messages = [message for message in plan_messages if message["queue"] in selected]
     planned: dict = {}
-    _index(plan_messages, "plan", planned)
+    _index(plan_messages, "plan", planned, selected)
 
     store = project.kernel_queues
     stored: dict = {}
     sizes = {}
-    for queue in QUEUES:
+    for queue in selected:
         messages = _read_queue(store, queue)
-        _index(messages, "store", stored)
+        _index(messages, "store", stored, selected)
         sizes[queue] = len(messages)
     counts = Counter(record["queue"] for record, _ in planned.values())
     checked = {queue: {"planned": counts[queue], "stored": sizes[queue]}
-               for queue in QUEUES}
+               for queue in selected}
     differences = _differences(planned, stored)
     return {"project": project.name, "checked": checked,
             "ok": not differences, "differences": differences}
@@ -157,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = load(Path(args.config))
-        for queue in QUEUES:
+        for queue in convert_legacy.VERIFY_QUEUES:
             if queue not in config.queues:
                 raise VerifyError(f"Configuration does not declare the {queue} queue")
         project = Project(config, args.project, read_only=True)

@@ -15,10 +15,12 @@ from mizu.config import load
 from mizu.fs import canonical
 from mizu.kernel import QueueStore
 from mizu.project import Project
+from mizu.shared_records import _token
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples" / "development"))
 import convert_legacy  # noqa: E402  (example userland module)
+import stage2_verify  # noqa: E402  (example userland module)
 
 QUEUES = ROOT / "examples" / "development" / "queues.toml"
 INSIGHT_ID = "a" * 32
@@ -345,7 +347,9 @@ class Stage2QuestionConversion(Fixture):
             "legacy_subject": canonical({}).decode(),
             "legacy_writer": "role.worker",
             "legacy_id": self.question_record["id"],
-            "legacy_digest": self.question_digest})
+            "legacy_digest": self.question_digest,
+            "legacy_kind": self.question_record["kind"],
+            "legacy_created_at": self.question_record["created_at"]})
         self.assertEqual(answers[0]["author"], "operator")
         self.assertEqual(answers[0]["refs"], [question_id])
         self.assertEqual(self.store.message(question_id, "operator"), questions[0])
@@ -356,7 +360,8 @@ class Stage2QuestionConversion(Fixture):
             "legacy_writer": "operator.cli",
             "legacy_id": self.answer["record"]["id"],
             "legacy_digest": self.answer["record_digest"],
-            "legacy_action": "publish"})
+            "legacy_action": "publish",
+            "legacy_created_at": self.answer["record"]["created_at"]})
         self.assertEqual(notices[0]["author"], "operator")
         self.assertEqual(notices[0]["body"], {
             "body": "Answer in prose",
@@ -366,7 +371,8 @@ class Stage2QuestionConversion(Fixture):
             "legacy_id": self.notice["record"]["id"],
             "legacy_digest": self.notice["record_digest"],
             "legacy_action": "publish",
-            "legacy_target": canonical(None).decode()})
+            "legacy_target": canonical(None).decode(),
+            "legacy_created_at": self.notice["record"]["created_at"]})
         self.assertEqual((self.store.read("questions", "operator")["head"],
                           self.store.read("answers", "operator")["head"],
                           self.store.read("notices", "operator")["head"]), (1, 1, 1))
@@ -426,7 +432,8 @@ class Stage2QuestionConversion(Fixture):
             "legacy_writer": "operator.cli",
             "legacy_id": answer["record"]["id"],
             "legacy_digest": answer["record_digest"],
-            "legacy_action": "publish"})
+            "legacy_action": "publish",
+            "legacy_created_at": answer["record"]["created_at"]})
         self.assertEqual(self.store.message(proposal_id, "operator")["queue"], "proposals")
 
     def test_answer_to_revised_insight_refuses_before_any_append(self):
@@ -452,6 +459,99 @@ class Stage2QuestionConversion(Fixture):
         envelope["subject"] = {"type": "insight", "id": insight["id"], "rev": 2}
         records.store(self.project).put(envelope, writer=records.WRITER)
         self.assertIn("does not bind a converted insight revision", self.refuse())
+
+
+class Stage2RecordReceiptConversion(Stage2QuestionConversion):
+    """Converted SharedRecords acknowledgements and the two verify queue sets."""
+
+    def acknowledge_question(self):
+        role = self.config.roles["worker"]
+        page, manifest = records.pending(self.project, role)
+        context = self.context("worker")
+        records.bind(context, (page, manifest))
+        records.acknowledge(context, {manifest[0].ack_token})
+        return manifest[0]
+
+    def test_receipt_converts_exactly_replays_and_verifies_both_queue_sets(self):
+        entry = self.acknowledge_question()
+        legacy_receipt_bytes = next(
+            (self.project.root / "shared-record-receipts").rglob("*.json")).read_bytes()
+        token = _token("worker", entry.record_id, entry.record_digest)
+        self.assertEqual(token, entry.ack_token)
+        receipt_id = convert_legacy._record_receipt_id("worker", token)
+        self.assertRegex(receipt_id, r"[0-9a-f]{32}\Z")
+        self.assertEqual(convert_legacy.QUEUES, ("proposals", "decisions", "questions",
+                                                 "answers", "notices", "receipts"))
+        self.assertEqual(convert_legacy.VERIFY_QUEUES,
+                         (*convert_legacy.QUEUES, "record-receipts"))
+
+        preview = self.convert()
+        self.assertEqual(preview["record_receipts"], [receipt_id])
+        first = self.convert("--apply")
+        self.assertEqual(first, {**preview, "applied": True})
+        self.assertEqual(self.convert("--apply"), first)
+
+        rows = self.store.read("record-receipts", "host")["messages"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual({key: rows[0][key] for key in
+                          ("queue", "id", "author", "refs", "body")},
+                         {"queue": "record-receipts", "id": receipt_id,
+                          "author": "host", "refs": [],
+                          "body": {"ack_token": token,
+                                   "legacy_role": "worker",
+                                   "legacy_record_id": entry.record_id,
+                                   "legacy_record_digest": entry.record_digest}})
+        # The legacy receipt file stays authoritative and byte-identical.
+        paths = list((self.project.root / "shared-record-receipts").rglob("*.json"))
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0].read_bytes(), legacy_receipt_bytes)
+
+        default = stage2_verify.verify(self.project)
+        self.assertEqual(tuple(default["checked"]), convert_legacy.QUEUES)
+        self.assertTrue(default["ok"])
+        explicit = stage2_verify.verify(self.project, queues=convert_legacy.VERIFY_QUEUES)
+        self.assertEqual(tuple(explicit["checked"]), convert_legacy.VERIFY_QUEUES)
+        self.assertTrue(explicit["ok"])
+        self.assertEqual(explicit["checked"]["record-receipts"],
+                         {"planned": 1, "stored": 1})
+
+    def test_undeclared_or_repeated_verify_queues_are_refused(self):
+        for queues in (("record-receipts", "record-receipts"), ("notices", "unknown"),
+                       ("receipts", 1)):
+            with self.subTest(queues=queues), self.assertRaises(stage2_verify.VerifyError):
+                stage2_verify.verify(self.project, queues=queues)
+
+    def test_unbindable_receipt_refuses_before_any_append(self):
+        self.acknowledge_question()
+        path = next((self.project.root / "shared-record-receipts").rglob("*.json"))
+        receipt = json.loads(path.read_text())
+        receipt["record_digest"] = "b" * 64
+        path.write_bytes(canonical(receipt))
+        before = tree_state(self.project.root)
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
+        self.assertEqual(code, 2)
+        self.assertIn("Unbindable legacy record receipt", errors.getvalue())
+        self.assertFalse((self.project.root / "queues").exists())
+        self.assertEqual(tree_state(self.project.root), before)
+
+    def test_stored_receipt_extra_is_reported_only_when_its_queue_is_selected(self):
+        self.acknowledge_question()
+        self.convert("--apply")
+        extra_id = "e" * 32
+        self.store.append("record-receipts", {"ack_token": "e" * 64,
+                                              "legacy_role": "worker",
+                                              "legacy_record_id": "extra.record",
+                                              "legacy_record_digest": "e" * 64},
+                          "host", id=extra_id)
+        default = stage2_verify.verify(self.project)
+        self.assertTrue(default["ok"])
+        explicit = stage2_verify.verify(self.project, queues=convert_legacy.VERIFY_QUEUES)
+        self.assertFalse(explicit["ok"])
+        self.assertEqual(explicit["checked"]["record-receipts"],
+                         {"planned": 1, "stored": 2})
+        self.assertEqual(explicit["differences"],
+                         [{"kind": "extra", "queue": "record-receipts", "id": extra_id}])
 
 
 if __name__ == "__main__":

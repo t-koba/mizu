@@ -1,8 +1,8 @@
 # Development userland (example)
 
 This directory expresses a development workflow (proposals and their
-decisions, questions and answers, notices, converted decision receipts, work
-and its completion, checks) as
+decisions, questions and answers, notices, converted decision receipts and
+record acknowledgements, work and its completion, checks) as
 queue declarations and role policy on the kernel
 ([docs/kernel.md](../../docs/kernel.md)). It is an example: a deployment
 includes it from its own configuration and changes it freely. The kernel reads
@@ -22,10 +22,11 @@ store that stage 1 replaces and is deleted with it.
 `convert_legacy.py` is an operator-run example-userland command. It reads the
 current legacy insights and their effective decisions through the public
 Insight API, declared role questions and their answers through the operator
-record APIs, operator notices from the same authenticated record store, and
-legacy per-token decision receipts. It appends equivalent messages to the
-`proposals`, `decisions`, `questions`, `answers`, `notices` and `receipts` queues
-declared in `queues.toml`. Archived revisions
+record APIs, operator notices from the same authenticated record store, legacy
+per-token decision receipts and per-role, per-record SharedRecords
+acknowledgements. It appends equivalent messages to the `proposals`,
+`decisions`, `questions`, `answers`, `notices`, `receipts` and `record-receipts`
+queues declared in `queues.toml`. Archived revisions
 stay in the legacy store; nothing is rewritten and no runtime authority, route
 or capability changes. Decision messages use the queue's declared writer
 principal (`role:writer`) as historical authorship only. A deferral whose
@@ -43,16 +44,22 @@ as declared `legacy_reason` values. The action and fixed-width hex enumeration
 order are inferred by binding the token to its current legacy decision event
 or pending envelope in legacy diagnostic order (decision-history glob order
 then pending-envelope order); a receipt no current candidate binds is reported
-as unbound and left unconverted. These messages are
-converted legacy receipts, not kernel state. Converted proposals and decisions
+as unbound and left unconverted. Per-role record acknowledgements become
+host-writable `record-receipts` messages: each canonical receipt is bound to
+its role directory, record id file and pinned immutable record digest, and the
+`ack_token` is rebuilt with the same SharedRecords binding. These messages are
+converted legacy receipts, not kernel state, and this conversion does not
+switch runtime record authority. Converted proposals and decisions
 retain the exact legacy insight id,
 revision, source, addressee, current evidence, decision key and aware decision
 instant in declared optional fields for a queue-backed decision adapter; a
 delayed revisit carries the same decision metadata as its decision.
 Converted questions derive their required `question` from the exact legacy
-payload; the full payload, subject, authenticated writer, id and digest are
-retained in declared optional fields. Answers carry the exact legacy body and
-reference their converted question or, for an insight revision, that revision's
+payload; the full payload, subject, authenticated writer, id, envelope `kind`
+and `created_at` instant, and digest are retained in declared optional fields.
+Answers and notices retain the envelope `created_at` as well. Answers carry
+the exact legacy body and reference their converted question or, for an insight
+revision, that revision's
 converted proposal; notices carry their exact body, action and optional closure
 target. Legacy `operator.cli` authorship is retained in the body while the
 message author is the queue's granted principal. An answer that does not bind an
@@ -66,10 +73,11 @@ python3 examples/development/convert_legacy.py config/config.toml --project NAME
 
 Message ids are derived from legacy identity and content: insight id and
 revision for proposals/decisions/revisits, record id and digest for
-questions/answers/notices, role and token for receipts, each in its own domain,
+questions/answers/notices, role and token for receipts, and role and token for
+record receipts, each in its own domain,
 so a repeat appends nothing. Both the dry run and `--apply` report `proposals`,
-`decisions`, `revisits`, `questions`, `answers`, `notices` and `receipts` id
-lists, plus any `unbound_receipts` tokens.
+`decisions`, `revisits`, `questions`, `answers`, `notices`, `receipts` and
+`record_receipts` id lists, plus any `unbound_receipts` tokens.
 Without `--apply` the command is a dry run: it prints the planned ids and writes
 nothing. Malformed or ambiguous legacy input refuses the whole run before any
 append.
@@ -146,7 +154,11 @@ refs and delivery
 instant. Reads use the `operator` principal, an explicit cursor, bounded pages
 and a fixed far-future instant so delayed revisits are included; nothing is
 appended or acknowledged. Missing, extra or changed messages, duplicate ids
-and unreadable queues fail the gate.
+and unreadable queues fail the gate. The command checks the original six
+queues by default; a caller preparing a record-queue switch passes
+`verify(project, queues=convert_legacy.VERIFY_QUEUES)` to check `record-receipts`
+too. The two sets report only their own queues, so a decision gate report stays
+byte-identical.
 
 ```sh
 python3 examples/development/stage2_verify.py config/config.toml --project NAME

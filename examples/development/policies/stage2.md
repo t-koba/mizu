@@ -2,7 +2,8 @@
 
 This file is deployment policy, not kernel code. It gives the meanings that
 `queues.toml` declares for stage 2: proposals and decisions, questions and
-answers, notices, and converted decision receipts. The kernel enforces the declared grants and schemas; it
+answers, notices, converted decision receipts and converted record receipts.
+The kernel enforces the declared grants and schemas; it
 does not know these names, infer states from them, or give a message authority
 over another message.
 
@@ -52,6 +53,15 @@ over another message.
 - The operator or host writes notices; all roles and the operator read them.
   A notice informs its readers. It grants no capability and changes no workflow
   state by itself.
+
+## Converted record receipts
+
+The host conversion writes per-role, per-record SharedRecords acknowledgements
+to `record-receipts`, never to another queue. A message carries the exact
+`ack_token`, `legacy_role`, `legacy_record_id` and `legacy_record_digest`, with
+a stable id derived from the role and token so an exact retry appends nothing.
+These are conversion metadata: reading them does not grant a role runtime
+acknowledgement authority or switch the legacy record path.
 
 ## Converted receipts
 

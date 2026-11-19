@@ -64,12 +64,16 @@ question = {type = "string", max = 8192, required = true}
 context = {type = "string", max = 65536}
 default = {type = "string", max = 8192}
 # Legacy projection metadata: canonical JSON of the exact original payload and
-# subject, plus its authenticated writer, id and digest.
+# subject, plus its authenticated writer, id, envelope kind, creation instant
+# and digest. The kind and instant are required to rebuild the canonical
+# envelope byte for byte after the record authority switches to queues.
 legacy_payload = {type = "string", max = 65536}
 legacy_subject = {type = "string", max = 65536}
 legacy_writer = {type = "string", max = 65536}
 legacy_id = {type = "string", max = 65536}
 legacy_digest = {type = "digest"}
+legacy_kind = {type = "string", max = 65536}
+legacy_created_at = {type = "instant"}
 
 [queues.answers]
 write = ["operator"]
@@ -83,6 +87,7 @@ legacy_writer = {type = "string", max = 65536}
 legacy_id = {type = "string", max = 65536}
 legacy_digest = {type = "digest"}
 legacy_action = {type = "string", max = 65536}
+legacy_created_at = {type = "instant"}
 
 # Operator notices to roles.
 [queues.notices]
@@ -98,6 +103,7 @@ legacy_id = {type = "string", max = 65536}
 legacy_digest = {type = "digest"}
 legacy_action = {type = "string", max = 65536}
 legacy_target = {type = "string", max = 65536}
+legacy_created_at = {type = "instant"}
 
 # Results written by the host's check runner.
 [queues.checks]
@@ -121,3 +127,17 @@ legacy_reason = {type = "string", values = ["malformed_json", "invalid_receipt",
 # Fixed-width 8-hex enumeration index preserving legacy diagnostic order:
 # decision-history glob order then pending-envelope order.
 legacy_order = {type = "string", max = 8}
+
+# Converted per-role, per-record SharedRecords acknowledgements. Host-writable
+# only; stable ids make an exact retry idempotent. These are conversion
+# messages: a future queue-backed record adapter could read them to suppress
+# already settled records and append settled receipts here, but this example
+# does not switch runtime record authority.
+[queues."record-receipts"]
+write = ["host"]
+read = ["role:*", "operator", "host"]
+[queues."record-receipts".schema]
+ack_token = {type = "digest", required = true}
+legacy_role = {type = "string", max = 256, required = true}
+legacy_record_id = {type = "string", max = 256, required = true}
+legacy_record_digest = {type = "digest", required = true}
