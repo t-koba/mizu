@@ -905,11 +905,13 @@ def work_inputs(project, role, snapshot, bounds):
                   'title': _clip(item.get('title'), cap), 'at': _at(item.get('created_at'))}
                  for item in pending if isinstance(item, dict)][:bounds['max_proposals']]
     from . import decision_delivery
-    if decision_delivery.authority(project.insights.root) is not None:
-        events = []
+    kind = decision_delivery.authority_kind(project.insights.root)
+    actions = tuple(a for a in role.decision_events if a in EVIDENCE_ACTIONS)
+    events = []
+    if kind == "shared":
         if bounds['max_decisions']:
             state = decision_delivery.pending(
-                project, role, actions=tuple(a for a in role.decision_events if a in EVIDENCE_ACTIONS),
+                project, role, actions=actions,
                 limit=bounds['max_decisions'], include_insights=False)
             # A page reference is delivery, not evidence loss. Resolve only its
             # frozen full-envelope identity; classifier text bounds still apply.
@@ -918,10 +920,16 @@ def work_inputs(project, role, snapshot, bounds):
             store = SharedRecords(project.insights.root, {"insight.decision": INSIGHT_DECISION_POLICY})
             events = [store.get(entry.record_id, expected_digest=entry.record_digest)[0]["payload"]
                       for entry in state["manifest"]]
-    else:
+    elif bounds['max_decisions']:
         try:
-            events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
-                                                      limit=bounds['max_decisions'])
+            if kind == "queues":
+                from . import queue_decision_delivery
+                events = queue_decision_delivery.pending(
+                    project, role, actions=actions, limit=bounds['max_decisions'],
+                    include_insights=False)["events"]
+            else:
+                events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
+                                                          limit=bounds['max_decisions'])
         except Exception:
             events = []
     decisions = [{'insight': event.get('insight'), 'rev': event.get('rev'),

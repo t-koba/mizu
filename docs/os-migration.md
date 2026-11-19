@@ -31,7 +31,17 @@ policy and a `decisions` queue in the configuration, not code.
 
 Existing records move once, by an operational conversion that reads the
 legacy files and appends equivalent messages. It ships with the example
-userland, runs under the operator, and is not part of the kernel.
+userland, runs under the operator, and is not part of the kernel. For the
+decision family, the operator then runs `stage2_activate.py`: it reapplies the
+idempotent conversion, requires `stage2_verify.py` to pass, and publishes the
+durable `"queues"` authority marker. From then on non-shared decision reads and
+acknowledgements use the declared `proposals`, `decisions` and `receipts`
+queues; there is no dual-write or runtime boolean flag. The production
+userland adapter is `src/mizu/queue_decision_delivery.py`; example queue names,
+schemas, roles and meanings stay in `examples/development/`. The shared
+authority branch keeps precedence and is unchanged. The remaining stage-2
+record families still switch in their own slice before the dedicated modules
+are deleted.
 
 ## Stages
 

@@ -18,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .delegation_jobs import DelegationJobs, _WorkspaceLease
-from . import decision_delivery, delegation_gates, lineage, operator_records, delivery_settlement
+from . import (decision_delivery, delegation_gates, lineage, operator_records,
+               delivery_settlement, queue_decision_delivery)
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
@@ -3765,6 +3766,8 @@ class Engine(EngineAdmissionMixin):
                         decision_delivery.acknowledge(context, selected_tokens &
                                                       {e["ack_token"] for e in selected_decisions})
                         delivery_settlement.succeeded(context, "decision")
+                    elif decision_delivery.authority_kind(project.insights.root) == "queues":
+                        queue_decision_delivery.acknowledge(project, role, selected_decisions)
                     else:
                         with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
                             project.insights.acknowledge_decisions(

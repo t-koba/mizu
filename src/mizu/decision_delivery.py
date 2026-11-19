@@ -26,7 +26,8 @@ def authority(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
         marker = loads_finite(raw)
         if (type(marker) is not dict or set(marker) != {"schema", "kind", "authority", "plan_digest", "report_digest"}
                 or type(marker["schema"]) is not int or marker["schema"] != 1
-                or marker["kind"] != "insight.decision" or marker["authority"] != "shared"
+                or marker["kind"] != "insight.decision"
+                or marker["authority"] not in ("shared", "queues")
                 or any(not isinstance(marker[key], str) or not DIGEST.fullmatch(marker[key])
                        for key in ("plan_digest", "report_digest")) or canonical(marker) != raw):
             raise ValueError("marker schema")
@@ -43,6 +44,12 @@ def authority(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
     return marker
 
 
+def authority_kind(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
+    """Return the selected durable authority: None, "shared" or "queues"."""
+    marker = authority(root, report_bytes=report_bytes)
+    return None if marker is None else marker["authority"]
+
+
 def retained_report(root, marker, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
     """Read and validate the retained report where its body is actually needed.
 
@@ -53,10 +60,19 @@ def retained_report(root, marker, *, report_bytes=MAX_DECISION_RECONCILIATION_BY
     raw = safe_read(root, REPORT_FILE, report_bytes)
     if digest(raw) != marker["report_digest"]:
         raise Denied("Decision authority report digest mismatch")
+    if marker["authority"] != "shared":
+        plan_raw = safe_read(root, PLAN_FILE, report_bytes)
+        if digest(plan_raw) != marker["plan_digest"]:
+            raise Denied("Decision authority plan digest mismatch")
     try:
         report = loads_finite(raw)
-        if not isinstance(report, dict) or report.get("plan_digest") != marker["plan_digest"]:
-            raise ValueError("plan digest")
+        if not isinstance(report, dict):
+            raise ValueError("report shape")
+        if marker["authority"] == "shared":
+            if report.get("plan_digest") != marker["plan_digest"]:
+                raise ValueError("plan digest")
+        elif report.get("ok") is not True or report.get("project") is None:
+            raise ValueError("queue verification report")
     except (ValueError, TypeError, UnicodeError) as exc:
         raise Denied("Decision authority plan digest mismatch") from exc
     return report
@@ -71,14 +87,14 @@ def page_bytes(role):
 
 def pending(project, role, *, actions=None, limit=None, include_insights=True):
     """One branch only, shared failures propagate. Manifest is host-only unit state."""
-    shared = authority(project.insights.root) is not None
+    kind = authority_kind(project.insights.root)
     if role.name == "operator":
         raise Denied("Operator insights belong to the human host inbox")
     configured_roles = set(project.roles) & project.config.roles.keys()
     actions = role.decision_events if actions is None else actions
     limit = role_decision_events_limit(project.config, role) if limit is None else limit
     sources = getattr(role, "decision_sources", "own") or "own"
-    if shared:
+    if kind == "shared":
         budget = page_bytes(role) if role.decision_events else (role.decision_page_bytes or MAX_FRAME)
         if actions or include_insights:
             page, manifest = project.insights.shared_decision_page(
@@ -88,6 +104,10 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True):
             page, manifest = {"events": [], "pending_count": 0, "truncated": False,
                               "count_truncated": False, "byte_truncated": False}, ()
         return dict(shared=True, events=page["events"], diagnostics=[], page=page, manifest=manifest)
+    if kind == "queues":
+        from .queue_decision_delivery import pending as queue_pending
+        return queue_pending(project, role, actions=actions, limit=limit,
+                             include_insights=include_insights, sources=sources)
     events, diagnostics = (project.insights.decision_events_with_diagnostics(
         role.name, actions, limit=limit, sources=sources) if actions else ([], []))
     if include_insights:
@@ -157,7 +177,8 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True):
 def store(context):
     # Do not reinterpret a retained unit against today's routes/source. But an
     # authority mutation/corruption cannot authorize a different receipt writer.
-    if not context.shared_decisions or authority(context.project.insights.root) is None:
+    if (not context.shared_decisions
+            or authority_kind(context.project.insights.root) != "shared"):
         raise Denied("Shared decision unit authority changed")
     return SharedRecords(context.project.insights.root, INSIGHT_DELIVERY_POLICIES)
 

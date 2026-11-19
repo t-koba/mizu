@@ -59,8 +59,9 @@ inputs. The trusted host adapter never executes model-provided host commands.
 | `insight_tools.py` | Context-bound insight tool adaptation: paged reads, role/run/snapshot provenance, grant checks, and evidence-attachment audit records | Insight persistence/decision semantics or dispatch/schema policy |
 | `shared_records.py` | Bounded canonical records, exact role/record/digest receipts and manifest-scoped paged reads | Source eligibility, route policy, lifecycle, or cutover |
 | `host_records.py` | Declared publisher-outcome validation and host-only exact-snapshot record route | Publisher observation, generic record storage, work-item lifecycle or completion |
-| `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement | Host activation or other event-family routing |
-| `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and one-way activation after per-role pending-set parity; publishes the authority marker last | Model-granted activation or task lifecycle |
+| `decision_delivery.py` | One durable-marker-selected `insight.decision` runtime route for prompt, wake, selection, retrieval and acknowledgement; dispatches shared, queue-backed or legacy reads | Host activation or other event-family routing |
+| `queue_decision_delivery.py` | Stage-2 userland adapter for non-shared decision reads and exact settled receipts on the declared queues; not kernel code | Queue names, schemas and meanings, or workflow policy |
+| `decision_reconciliation.py` | Host-only exact legacy-receipt preflight/apply and shared activation after per-role pending-set parity; also publishes queue authority from the operator's conversion and verify reports | Model-granted activation or task lifecycle |
 | `work_items.py` | Append-audited records, CAS lifecycle, bounded open pages and by-ID history | Work-item scheduling and policy |
 | `work_order.py` | Writer's bounded atomic current plan with CAS, run receipt, and review-gated display only | Item status/scope/evidence, scheduling, admission, or priority |
 | `web.py` | Allowed retrieval, policy-bounded protocol observation, and external source receipts | Scientific truth |
@@ -81,10 +82,13 @@ JSON is the machine format; Markdown is the human policy/report format.
 
 The [shared-record delivery](shared-records.md) mechanism is implemented as a
 bounded immutable store with manifest-scoped reads and receipts. A host-only,
-one-way marker can activate shared delivery for `insight.decision` after exact
-legacy-receipt migration and full per-role pending-set parity; legacy remains
-the default until that explicit activation. Other event families keep their
-existing authorities and are not switched by this pilot.
+one-way marker selects the `insight.decision` authority: absent means legacy,
+`"shared"` activates shared delivery after exact legacy-receipt migration and
+full per-role pending-set parity, and `"queues"` selects the stage-2 queue
+adapter after the example conversion and verify gate pass. The two activations
+are mutually exclusive and shared precedence in reads is unchanged. Legacy
+remains the default until one of those explicit activations. Other event
+families keep their existing authorities and are not switched by these pilots.
 
 ## Work-unit transaction
 
@@ -494,8 +498,13 @@ decision-authority marker, delivery uses the existing legacy exact per-token
 receipt mechanism, with a distinct pending-insight token domain; existing
 decision token identities are unchanged. Corrupt legacy receipt content yields
 a bounded unresolved diagnostic; unsafe stores fail closed. Active shared mode
-never falls back to legacy delivery or receipts. This routing does not activate
-SharedRecords; only the host-only reconciliation can activate it. That
+never falls back to legacy delivery or receipts. A `"queues"` marker routes the
+same non-shared page through `queue_decision_delivery`, which derives tokens
+from converted queue metadata and appends settled receipts only to the declared
+host-writable `receipts` queue, with stable ids and exact token revalidation.
+Legacy file receipts and SharedRecords receipts are never written in that mode;
+this routing does not activate either store. Only host-only reconciliation
+activates an authority. That
 reconciliation maps both `insight.decision` and addressed `insight.pending`
 receipts: it pins current per-role pending sets and their source/receipt bytes,
 preflights existing shared receipts, writes only missing exact records, requires

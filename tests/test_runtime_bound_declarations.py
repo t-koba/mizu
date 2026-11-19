@@ -639,6 +639,11 @@ DECLARATIONS = {
         '_DECISION_IDLE_CACHE_LIMIT': (
             '256', 'safety', 'decision delivery / bounded in-process empty-decision cache entries'),
     },
+    'queue_decision_delivery.py': {
+        'MAX_PAGES': (
+            '64', 'safety',
+            'queue decision adapter / shared stage-2 read page-count bound before an oversized queue is refused'),
+    },
     'work_item_resolution.py': {
         'MAX_RESOLUTION_BYTES': (
             '521', 'format', 'work items / exact maximum canonical wait-resolution member growth'),

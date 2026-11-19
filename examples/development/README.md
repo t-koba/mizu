@@ -97,41 +97,45 @@ python3 examples/development/stage2_view.py config/config.toml --project NAME [-
 uses the current time. The reader imports no legacy insight or operator-record
 module and does not change runtime authority or routing.
 
-## Decision adapter read slice
+## Decision adapter and runtime switch
 
-`stage2_decision_adapter.py` is a read-only example-userland reconstruction of
-the legacy `decision_delivery.pending` page from the converted `proposals`,
-`decisions` and `receipts` queues.
+The parity-proven adapter now lives in the production userland module
+`src/mizu/queue_decision_delivery.py`; `stage2_decision_adapter.py` is a thin
+compatibility shim that re-exports it so stage-2 comparison tests run
+unchanged. It reconstructs the non-shared `decision_delivery.pending` page from
+the converted `proposals`, `decisions` and `receipts` queues.
 `pending(project, role, *, actions=None, limit=None, include_insights=True,
 sources=None)` returns the same `shared`, `events`,
 `diagnostics`, `page` and `manifest` dictionary; it derives the queue actor as
 `role:<role.name>` from the supplied trusted role and accepts no principal.
 An omitted `sources` follows `role.decision_sources`, or `own` when unset,
 exactly as the legacy call does.
-Reads use explicit bounded cursors from sequence one, never acknowledge or
-append, and refuse malformed or unbound converted metadata. Proposal instant,
-kind and urgency and the decision's history event id, key, run and canonical
-history record make the payload and acknowledgement tokens byte-identical to
-the legacy page (the event id is the history filename, not the decision key,
-for deferrals). Any configured role may be an insight addressee, so the example
-`queues.toml` grants every role read of proposals and receipts; write and wake
-grants are unchanged. A valid converted receipt for this role suppresses its token's
-decision or pending event before limits and byte bounding are applied. A
-corrupt receipt omits that event and emits the legacy
-`{event, ack_token, action, reason}` diagnostic, capped by the legacy
-`decision_receipt_diagnostics` setting and present in both the result and a
-returned page. The adapter reads no legacy receipt file.
+Reads use explicit bounded cursors from sequence one, never move a cursor or
+read a legacy decision file, and refuse malformed or unbound converted
+metadata. Proposal instant, kind and urgency and the decision's history event
+id, key, run and canonical history record make the payload and acknowledgement
+tokens byte-identical to the legacy page (the event id is the history
+filename, not the decision key, for deferrals). Any configured role may be an
+insight addressee, so the example `queues.toml` grants every role read of
+proposals and receipts; write and wake grants are unchanged. A valid settled
+receipt for this role suppresses its token's decision or pending event before
+limits and byte bounding are applied. A corrupt receipt omits that event and
+emits the legacy `{event, ack_token, action, reason}` diagnostic, capped by the
+legacy `decision_receipt_diagnostics` setting and present in both the result and
+a returned page.
 
 ```python
-from stage2_decision_adapter import pending
+from mizu.queue_decision_delivery import pending
 page = pending(project, role, actions=role.decision_events,
                limit=10, sources="own")
 ```
 
-This is a comparison slice only: no runtime call site is switched, no legacy
-module is deleted and no feature flag is added. The shared decision-authority
-page is not a queue fact, so tests compare the non-shared page against the
-legacy call on fixtures with settled, corrupt and absent receipts.
+With the `"queues"` authority marker, every non-shared runtime read (prompt,
+wake probe, selection and work order) uses this module, and `finish` writes
+schema-valid settled receipts only to the declared host-writable `receipts`
+queue. Token binding is revalidated against the queue candidates and a stable
+message id makes retries idempotent; legacy receipt files and shared receipts
+are not written. The shared branch and `decision_read` tools are unchanged.
 
 ## Conversion gate
 
@@ -151,3 +155,19 @@ python3 examples/development/stage2_verify.py config/config.toml --project NAME
 It prints a JSON report (`project`, per-queue `checked` counts, `ok`,
 `differences`) and exits 0 on equality, 2 on refusal or mismatch. It writes
 nothing to legacy stores and changes no runtime authority.
+
+## Decision authority switch
+
+`stage2_activate.py` is the operator-run host gate for this family. It reapplies
+the idempotent conversion, requires `stage2_verify.py` to pass, and publishes
+the durable `"queues"` decision-authority marker through the host-only
+production API. It refuses when a shared marker is present, pins the conversion
+and verify reports as create-only bytes before the marker, and returns the
+retained marker on an exact retry.
+
+```sh
+python3 examples/development/stage2_activate.py config/config.toml --project NAME
+```
+
+No runtime tool can call it. See [stage2_authority.md](stage2_authority.md) for
+the marker states and the remaining slices.

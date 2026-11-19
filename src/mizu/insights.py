@@ -2461,9 +2461,11 @@ replacement insight without implying rejected substance.
         left for explicit operator-controlled recovery.
         """
         identifier(role_name)
+        from .decision_delivery import authority_kind
+        if authority_kind(self.root) == "queues":
+            raise Denied("Legacy decision receipts are closed after queue activation")
         with self._decision_receipt_lock(role_name):
-            from .decision_delivery import authority
-            if authority(self.root) is not None:
+            if authority_kind(self.root) is not None:
                 raise Denied("Legacy decision receipts are closed after shared activation")
             if sources not in ("own", "any"):
                 raise Denied("Decision event sources must be own or any")

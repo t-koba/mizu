@@ -386,6 +386,8 @@ def activate_decision_delivery(project):
     with _boundary(insights, routes):
         marker = authority(insights.root)
         if marker is not None:
+            if marker["authority"] != "shared":
+                raise Denied("Decision delivery is queued; shared activation is closed")
             # A host retry validates the history-scale body; the runtime wake
             # path stays marker-only and never parses it.
             retained_report(insights.root, marker)
@@ -438,6 +440,75 @@ def activate_decision_delivery(project):
                 raise Denied("Decision activation report changed before marker")
         marker = {"schema": 1, "kind": "insight.decision", "authority": "shared",
                   "plan_digest": report["plan_digest"], "report_digest": digest(canonical(report))}
+        atomic_write(insights.root / AUTHORITY_FILE, canonical(marker), exclusive=True)
+        retained_report(insights.root, marker)
+        return marker
+
+
+def _validate_queue_gate(project, conversion, verification):
+    """Check the trusted example conversion and stage-verify reports."""
+    from .queue_decision_delivery import CONVERSION_QUEUES
+    if (type(conversion) is not dict or conversion.get("project") != project.name
+            or conversion.get("applied") is not True
+            or type(conversion.get("unbound_receipts")) is not list
+            or conversion["unbound_receipts"]):
+        raise Denied("Stage-2 conversion has not been applied cleanly")
+    if (type(verification) is not dict or verification.get("project") != project.name
+            or verification.get("ok") is not True
+            or verification.get("differences") != []
+            or type(verification.get("checked")) is not dict
+            or set(verification["checked"]) != set(CONVERSION_QUEUES)
+            or any(set(row) != {"planned", "stored"}
+                   or type(row["planned"]) is not int or type(row["stored"]) is not int
+                   or row["planned"] != row["stored"]
+                   for row in verification["checked"].values())):
+        raise Denied("Stage-2 verify did not pass")
+    for queue in CONVERSION_QUEUES:
+        if queue not in project.config.queues:
+            raise Denied(f"Configuration does not declare the {queue} queue")
+        fields = ("decisions", "revisits") if queue == "decisions" else (queue,)
+        row = verification["checked"][queue]
+        counts = [conversion.get(field) for field in fields]
+        count = sum(len(value) for value in counts if isinstance(value, list))
+        if (any(type(value) is not list for value in counts)
+                or count != row["planned"]):
+            raise Denied("Stage-2 conversion and verify reports disagree")
+    return canonical(conversion), canonical(verification)
+
+
+def activate_queue_decision_delivery(project, *, conversion, verification):
+    """Publish durable queue authority from the operator's stage-2 gate reports.
+
+    Host-only: no model tool reaches this API. The caller supplies the reports
+    produced by ``convert_legacy.apply`` and ``stage2_verify.verify`` for this
+    exact project. They are pinned as create-only plan/report bytes before the
+    marker is published last. An exact retry returns the retained marker; a
+    shared marker or a changed report refuses without rewriting authority.
+    """
+    from .decision_delivery import (AUTHORITY_FILE, PLAN_FILE, REPORT_FILE,
+                                    authority, retained_report)
+    insights = project.insights
+    plan_raw, report_raw = _validate_queue_gate(project, conversion, verification)
+    with _boundary(insights, {}):
+        marker = authority(insights.root)
+        if marker is not None:
+            if marker["authority"] != "queues":
+                raise Denied("Decision delivery is shared; queue activation is closed")
+            retained_report(insights.root, marker)
+            return marker
+        maximum = insights.decision_reconciliation_bytes
+        if len(plan_raw) > maximum or len(report_raw) > maximum:
+            raise LimitExceeded("Decision reconciliation exceeds configured byte bound")
+        for name, raw in ((PLAN_FILE, plan_raw), (REPORT_FILE, report_raw)):
+            try:
+                (insights.root / name).lstat()
+            except FileNotFoundError:
+                atomic_write(insights.root / name, raw, exclusive=True)
+            else:
+                if safe_read(insights.root, name, maximum) != raw:
+                    raise Denied("Decision activation proof changed before marker")
+        marker = {"schema": 1, "kind": "insight.decision", "authority": "queues",
+                  "plan_digest": digest(plan_raw), "report_digest": digest(report_raw)}
         atomic_write(insights.root / AUTHORITY_FILE, canonical(marker), exclusive=True)
         retained_report(insights.root, marker)
         return marker

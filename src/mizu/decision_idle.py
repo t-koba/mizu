@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import stat
 
-from . import decision_delivery, platform as _platform
+from . import decision_delivery, platform as _platform, queue_decision_delivery
 from .fs import digest
 
 
@@ -12,7 +12,8 @@ from .fs import digest
 #: metadata-change witness; Windows always runs the exact scan. An empty
 #: decision/attention page is reused only while every source the exact scan
 #: reads is unchanged: the role's inbox, decision-history, decisions and
-#: decision receipts; the authority/report marker; the shared
+#: decision receipts; the authority/report marker; the declared queues and
+#: their receipt queue when queue authority is selected; the shared
 #: `shared-records/insight` record partition; and the hashed shared receipt
 #: store for the role. File entry metadata is included. A non-empty result is
 #: never cached as empty. This is a delivery
@@ -76,16 +77,25 @@ def _decision_source_fingerprint(project, role_name):
                        info.st_nlink, info.st_mtime_ns, info.st_ctime_ns,
                        info.st_size), tuple(entries))
 
-    names = ["inbox", "decision-history", "decisions", "decision-receipts",
-             f"decision-receipts/{role_name}", "shared-records",
-             "shared-records/insight", "shared-record-receipts",
-             f"shared-record-receipts/{digest(role_name.encode())}"]
+    kind = decision_delivery.authority_kind(root)
+    if kind == "queues":
+        names = [f"queues/{queue}" for queue in queue_decision_delivery.QUEUES]
+        names += [f"queues/{queue}/messages" for queue in queue_decision_delivery.QUEUES]
+    else:
+        names = ["inbox", "decision-history", "decisions", "decision-receipts",
+                 f"decision-receipts/{role_name}", "shared-records",
+                 "shared-records/insight", "shared-record-receipts",
+                 f"shared-record-receipts/{digest(role_name.encode())}"]
     for name in names:
         part = directory(name)
         if part is None:
             return None
         parts.append(part)
-    for name in (decision_delivery.AUTHORITY_FILE, decision_delivery.REPORT_FILE):
+    markers = [decision_delivery.AUTHORITY_FILE, decision_delivery.REPORT_FILE]
+    if kind == "queues":
+        markers.append(decision_delivery.PLAN_FILE)
+        markers += [f"queues/{queue}/head.json" for queue in queue_decision_delivery.QUEUES]
+    for name in markers:
         path = root / name
         try:
             info = path.lstat()
@@ -124,7 +134,7 @@ def _decision_delivery_state(project, role_name, role):
     cached = _DECISION_IDLE_CACHE.get(key)
     if before is not None and cached is not None and cached[0] == before:
         return _empty_decision_state(cached[1])
-    shared = decision_delivery.authority(project.insights.root) is not None
+    shared = decision_delivery.authority_kind(project.insights.root) == "shared"
     state = decision_delivery.pending(project, role)
     after = _decision_source_fingerprint(project, role_name)
     if (not state["events"] and not state["diagnostics"]

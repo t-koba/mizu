@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import datetime as dt
 
-from . import check_jobs, ci_waits, decision_delivery, operator_records, proposal_waits, reviews, work_item_events
+from . import (check_jobs, ci_waits, decision_delivery, operator_records, proposal_waits,
+               queue_decision_delivery, reviews, work_item_events)
 from . import wait_events as structured_wait_events
 from .config import role_progress_signals
 from .errors import Busy, Denied, LimitExceeded
@@ -264,8 +265,13 @@ class ContextFinishMixin:
             raise Denied("ack_events must select unique event tokens delivered to this role in this unit")
         # Recheck the immutable decision binding, not mutable topic state: the
         # role may have revised/withdrawn a topic as part of handling it.
+        decision_tokens = [token for token in tokens if token in decisions]
+        authority = decision_delivery.authority_kind(self.project.insights.root)
         if self.shared_decisions:
-            decision_delivery.validate(self, [token for token in tokens if token in decisions])
+            decision_delivery.validate(self, decision_tokens)
+        elif authority == "queues" and decision_tokens:
+            queue_decision_delivery.validate(
+                self.project, self.role.name, [decisions[token] for token in decision_tokens])
         selected_ci = [token for token in tokens if token in ci_tokens]
         if selected_ci:
             ci_waits.validate_selection(self, selected_ci)
@@ -275,8 +281,8 @@ class ContextFinishMixin:
             if token in records or token in ci_tokens or token in proposal_tokens:
                 continue
             if token in decisions:
-                if self.shared_decisions:
-                    continue  # Validated as one bounded manifest batch above.
+                if self.shared_decisions or authority == "queues":
+                    continue  # Validated as one bounded batch above.
                 if self.project.insights._decision_token(self.role.name, decisions[token]) != token:
                     raise Denied("Decision acknowledgement binding changed")
             elif token in terminal:
