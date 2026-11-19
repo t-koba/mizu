@@ -120,7 +120,7 @@ name = "revise"
 from = ["pending", "accepted", "modified", "deferred", "rejected"]
 to = "pending"
 by = ["author"]
-fields = ["title", "body", "urgency"]
+fields = ["title", "body", "urgency", "holder"]
 [[kinds.insight.transitions]]
 name = "withdraw"
 from = ["pending", "deferred"]

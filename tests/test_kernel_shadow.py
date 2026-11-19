@@ -9,7 +9,7 @@ import support  # noqa: F401  (puts src on the path)
 from mizu.cli import _cmd_kernel_shadow, parser
 from mizu.config import load
 from mizu.errors import Denied
-from mizu.kernel_shadow import decision_object_id, insight_object_id
+from mizu.kernel_shadow import decision_object_id, insight_fields, insight_object_id
 from mizu.project import initialize
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +122,50 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertEqual(self.project.kernel_objects.read("insight", kernel_id)["state"], "accepted")
         self.assertTrue(self.project.insights.kernel_shadow.verify(insight, decision)["ok"])
         self.assertEqual(self.project.insights.read(insight["id"])["id"], "topic-one")
+
+    def test_readdress_projects_holder_and_keeps_decision_mirror_working(self):
+        insight = self.submit("b" * 32)
+        revised = self.project.insights.revise(
+            insight["id"], source="writer", title="Migrate proposals",
+            body="Mirror the accepted facts", base_snapshot=None,
+            expected_rev=1, addressee="observer")
+        self.assertEqual(revised["addressee"], "observer")
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["fields"]["holder"], "role:observer")
+        decision = self.project.insights.decide(
+            insight["id"], "accept", "Accepted by the new holder", "", "test-run",
+            expected_rev=2, work_item_intent="none")
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "accepted")
+        self.assertEqual(self.project.kernel_objects.read(
+            "decision", decision["decision_key"])["fields"]["action"], "accept")
+        self.assertTrue(self.project.insights.kernel_shadow.verify(revised, decision)["ok"])
+
+    def test_reprojection_repairs_field_divergence_on_submitted_insight(self):
+        insight = self.submit("a" * 32)
+        current = self.project.kernel_objects.read("insight", insight["id"])
+        self.project.kernel_objects.transition(
+            "insight", insight["id"], "revise", expected_rev=current["rev"],
+            fields={"title": "CORRUPTED", "body": "CORRUPTED", "urgency": "low"},
+            actor="role:writer")
+        divergent = self.project.insights.kernel_shadow.verify(insight)
+        self.assertFalse(divergent["ok"])
+        self.assertEqual(len(divergent["mismatches"]), 3)
+        args = parser().parse_args(["kernel-shadow", "shadow", insight["id"], "--reproject"])
+        report = _cmd_kernel_shadow(self.config, self.project, args)
+        self.assertTrue(report["verification"]["ok"])
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["fields"],
+                         insight_fields(insight))
+
+    def test_unparseable_defer_is_not_a_verification_divergence(self):
+        insight = self.submit("d" * 32)
+        decision = self.project.insights.decide(
+            insight["id"], "defer", "Wait", "revisit next Tuesday", "test-run",
+            expected_rev=1)
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "pending")
+        result = self.project.insights.kernel_shadow.verify(insight, decision)
+        self.assertTrue(result["ok"], result["mismatches"])
 
     def test_defer_then_withdraw_updates_state_and_clears_revisit(self):
         insight = self.submit("ab" * 16)

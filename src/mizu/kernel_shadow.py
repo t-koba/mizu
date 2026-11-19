@@ -140,7 +140,10 @@ class KernelShadow:
                     mismatch(f"insight field {key} differs")
             action = decision.get("action") if decision else None
             expected_state = _STATES.get(action) if action in _ACTIONS else None
-            if expected_state is not None and current["state"] != expected_state:
+            defer_without_instant = (action == "defer"
+                                     and instant_value(decision.get("revisit")) is None)
+            if (expected_state is not None and not defer_without_instant
+                    and current["state"] != expected_state):
                 mismatch(f"insight state is {current['state']}, expected {expected_state}")
             if action == "defer":
                 instant = instant_value(decision.get("revisit"))
@@ -172,12 +175,11 @@ class KernelShadow:
 
     def revised(self, record: Mapping[str, Any]) -> None:
         object_id = insight_object_id(record)
-        if record.get("rev", 1) < 2:
-            return
         self.submitted(record)
         current = self.objects.read("insight", object_id)
         fields = insight_fields(record)
-        updatable = {key: fields[key] for key in ("title", "body", "urgency") if key in fields}
+        updatable = {key: fields[key]
+                     for key in ("title", "body", "urgency", "holder") if key in fields}
         if all(current["fields"].get(key) == value for key, value in updatable.items()):
             return
         # Kernel revisions also record state transitions, so the legacy revision
@@ -205,7 +207,8 @@ class KernelShadow:
                 fields["revisit_at"] = None  # clear the superseded revisit timer
             if fields is not None:
                 actor = (principal(insight["source"]) if action == "withdraw"
-                         else principal(insight.get("addressee", "writer")))
+                         else current["fields"].get("holder",
+                                                    principal(insight.get("addressee", "writer"))))
                 self.objects.transition("insight", object_id, action,
                                         expected_rev=current["rev"], fields=fields, actor=actor)
         object_id = decision_object_id(record)
