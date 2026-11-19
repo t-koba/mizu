@@ -11,8 +11,10 @@ store is scanned.
 
 Schema: ``{enabled, counts: {insights, notices, role_questions, answers},
 insights, notices, role_questions, answers, mismatches: [{record, kind,
-result, mismatches}], truncated}``; the named counts repeat ``counts`` for
-direct readers. Bounds: live insight pages use
+result, mismatches}], truncated, answers_complete}``; the named counts repeat
+``counts`` for direct readers. ``answers_complete`` is false when any answer
+scan is exhausted or unreadable, with a bounded mismatch row, so a partial
+scan is never full stage-2 proof. Bounds: live insight pages use
 ``insight_tools.INSIGHT_RETRIEVAL_LIMIT``; each record scan uses
 ``[limits].operator_record_catalog_scan_entries``; mismatch rows use
 ``MAX_SHADOW_FAILURES`` and overflow sets ``truncated``. Trust: only the
@@ -39,7 +41,7 @@ def _counts() -> dict:
 def _report(enabled: bool) -> dict:
     counts = _counts()
     return {"enabled": enabled, "counts": counts, **counts,
-            "mismatches": [], "truncated": False}
+            "mismatches": [], "truncated": False, "answers_complete": True}
 
 
 def _note(report: dict, record: str, kind: str, result: dict | None = None,
@@ -95,11 +97,16 @@ def _insights(project, shadow, report: dict, insight_ids: set) -> None:
                 _note(report, insight_id, "insight",
                       reason=f"insight verification failed: {type(exc).__name__}")
             try:
-                answers = operator_records.insight_answers(project, insight_id)
+                answers, complete = operator_records.insight_answers(project, insight_id)
             except _READ_ERRORS as exc:
+                report["answers_complete"] = False
                 _note(report, insight_id, "answer",
                       reason=f"insight answers unavailable: {type(exc).__name__}")
                 continue
+            if not complete:
+                report["answers_complete"] = False
+                _note(report, insight_id, "answer",
+                      reason="insight answer scan incomplete; only an available prefix was examined")
             for record, _ in answers:
                 report["counts"]["answers"] += 1
                 try:
@@ -147,12 +154,16 @@ def _operator_records(project, shadow, report: dict, insight_ids: set,
                     _note(report, envelope["id"], "answer",
                           reason="answer subject is outside the bounded authoritative set")
     except _READ_ERRORS as exc:
+        report["answers_complete"] = False
         _note(report, "operator-records", "scan",
               reason=f"operator record scan failed: {type(exc).__name__}")
     finally:
         scan.close()
     if progress.entries_examined >= project.config.limits.operator_record_catalog_scan_entries:
         report["truncated"] = True
+        report["answers_complete"] = False
+        _note(report, "operator-records", "answer",
+              reason="operator record scan bound exhausted; answer coverage is incomplete")
 
 
 def _role_records(project, shadow, report: dict, record_answers: list) -> None:
@@ -197,12 +208,16 @@ def _role_records(project, shadow, report: dict, record_answers: list) -> None:
                 _note(report, envelope["id"], "answer",
                       reason=f"answer verification failed: {type(exc).__name__}")
     except _READ_ERRORS as exc:
+        report["answers_complete"] = False
         _note(report, "role-records", "scan",
               reason=f"role record scan failed: {type(exc).__name__}")
     finally:
         scan.close()
     if progress.entries_examined >= project.config.limits.operator_record_catalog_scan_entries:
         report["truncated"] = True
+        report["answers_complete"] = False
+        _note(report, "role-records", "answer",
+              reason="role record scan bound exhausted; answer coverage is incomplete")
 
 
 def audit(project) -> dict:

@@ -112,6 +112,7 @@ class KernelShadowAudit(unittest.TestCase):
         report = self.audit()
         self.assertTrue(report["enabled"])
         self.assertFalse(report["truncated"])
+        self.assertTrue(report["answers_complete"])
         self.assertEqual(report["mismatches"], [])
         self.assertEqual(report["counts"],
                          {"insights": 1, "notices": 1, "role_questions": 1, "answers": 2})
@@ -185,10 +186,33 @@ class KernelShadowAudit(unittest.TestCase):
                                   "counts": {"insights": 0, "notices": 0,
                                              "role_questions": 0, "answers": 0},
                                   "insights": 0, "notices": 0, "role_questions": 0,
-                                  "answers": 0, "mismatches": [], "truncated": False})
+                                  "answers": 0, "mismatches": [], "truncated": False,
+                                  "answers_complete": True})
         self.assertEqual(json.loads(json.dumps(report)), report)
         self.assertEqual(self.project.kernel_events.head(), head)
         self.assertEqual(self.tree(), before)
+
+    def test_lowered_answer_scan_bound_never_claims_full_proof(self):
+        insight, _, _, _, _ = self.populate()
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        with patch.object(self.shadow(), "answered",
+                          side_effect=OSError("transient answer failure")):
+            outside = self.answer(subject, event="outside-answer")
+        outside_id = answer_object_id(outside["record"])
+        self.assertEqual(self.project.kernel_objects.revisions("answer", outside_id), [])
+        self.project.config = dataclasses.replace(
+            self.project.config, limits=dataclasses.replace(
+                self.project.config.limits, operator_record_catalog_scan_entries=1))
+        with patch.object(self.shadow(), "verify_answer",
+                          wraps=self.shadow().verify_answer) as verify:
+            report = self.audit()
+        self.assertFalse(report["answers_complete"])
+        self.assertTrue(report["truncated"])
+        self.assertEqual(report["counts"]["answers"], verify.call_count)
+        self.assertTrue(any("incomplete" in message
+                            for row in self.rows(report, "answer")
+                            for message in row["mismatches"]))
+        self.assertEqual(self.project.kernel_objects.revisions("answer", outside_id), [])
 
     def test_insight_bound_marks_truncation_and_reports_outside_answer(self):
         first = self.insight(event="11" * 16)

@@ -244,33 +244,83 @@ def _project_answer(project, envelope, computed):
         shadow.note_failure("answer", envelope["id"], exc)
 
 
-def insight_answers(project, insight_id):
-    """Return full answer envelopes addressed to one exact insight (read-only).
+_ANSWER_SCAN_ERRORS = (Busy, ConfigError, Denied, LimitExceeded, OSError,
+                       ValueError, TypeError, KeyError, AttributeError)
 
-    The scan uses the configured operator-record catalog bound and never
-    repairs legacy metadata or consults kernel state.
+
+def _insight_answer_rows(shared, indexed, insight_id):
+    """Expand authenticated compact projections into full answer envelopes.
+
+    Returns ``(rows, complete)``: a digest-pinned read that fails leaves that
+    answer out and makes the result incomplete rather than silently shorter.
     """
+    rows = []
+    for projection, computed in indexed.values():
+        if (projection['kind'] != 'answer'
+                or projection['subject'].get('type') != 'insight'
+                or projection['subject'].get('id') != insight_id):
+            continue
+        try:
+            envelope, digest = shared.get(projection['id'], expected_digest=computed)
+        except _ANSWER_SCAN_ERRORS:
+            return rows, False
+        rows.append((envelope, digest))
+    return rows, True
+
+
+def _answer_prefix(shared, insight_id, scan_limit):
+    """Return the validated entries available under one bounded raw scan.
+
+    This is only an available prefix, never a completeness claim: callers must
+    pair it with ``complete=False``. It lets an explicit repair replay what can
+    still be verified when the fail-closed catalog refuses a full scan.
+    """
+    rows = []
+    scan = shared.records(namespace='operator', scan_limit=scan_limit)
+    try:
+        for envelope, computed in scan:
+            if (envelope['kind'] == 'answer'
+                    and envelope['subject'].get('type') == 'insight'
+                    and envelope['subject'].get('id') == insight_id):
+                rows.append((envelope, computed))
+    except _ANSWER_SCAN_ERRORS:
+        pass  # keep only the validated prefix; the caller reports it incomplete
+    finally:
+        scan.close()
+    return rows
+
+
+def insight_answers(project, insight_id):
+    """Return ``(rows, complete)`` for answers to one exact insight.
+
+    Completeness comes from the fail-closed operator-record catalog under the
+    configured scan bound, read-only and without repairing legacy metadata.
+    Exhaustion or an unsafe/unavailable scan returns the bounded verified
+    prefix with ``complete=False``; no rows never imply a complete empty set.
+    No kernel state is consulted.
+    """
+    scan_limit = project.config.limits.operator_record_catalog_scan_entries
     shared = store(project)
-    return [(envelope, computed)
-            for envelope, computed in shared.records(
-                namespace='operator',
-                scan_limit=project.config.limits.operator_record_catalog_scan_entries)
-            if envelope['kind'] == 'answer'
-            and envelope['subject'].get('type') == 'insight'
-            and envelope['subject'].get('id') == insight_id]
+    try:
+        with lock(project.root / 'locks' / 'operator-records.lock'):
+            indexed = catalog(shared, readonly=True, scan_limit=scan_limit)
+    except _ANSWER_SCAN_ERRORS:
+        return _answer_prefix(shared, insight_id, scan_limit), False
+    return _insight_answer_rows(shared, indexed, insight_id)
 
 
 def reproject_answers(project, insight_id):
-    """Replay one insight's answer projections through the contained mirror.
+    """Replay one insight's available answer prefix through the contained mirror.
 
-    Returns the replayed envelopes so a caller can verify the derived objects
-    observationally. A failed answer stays a bounded diagnostic and does not
-    stop the other replays.
+    Returns ``(replayed, complete)`` so callers can see whether the replay
+    covered every answer. On an incomplete scan only the bounded prefix is
+    replayed; a failed answer stays a bounded diagnostic and does not stop the
+    other replays.
     """
-    answers = insight_answers(project, insight_id)
+    answers, complete = insight_answers(project, insight_id)
     for envelope, computed in answers:
         _project_answer(project, envelope, computed)
-    return answers
+    return answers, complete
 
 
 def write(project, *, event_id, kind, body='', addressee=None, subject=None,

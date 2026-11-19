@@ -511,6 +511,48 @@ class QuestionAnswerShadow(unittest.TestCase):
         self.assertEqual(self.project.kernel_objects.read("question", question_id)["state"], "answered")
         self.assertEqual(records.store(self.project).get(answer["id"])[0], answer)
 
+    def test_out_of_prefix_answer_stays_missing_and_report_says_incomplete(self):
+        insight = self.insight_question(event="ic" * 16)
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        answers = []
+        for event in ("answer-prefix", "answer-outside"):
+            with patch.object(self.shadow(), "answered",
+                              side_effect=OSError("transient answer failure")):
+                answers.append(self.answer(subject, event=event))
+        ids = {answer_object_id(result["record"]) for result in answers}
+        self.assertEqual({answer_id: self.project.kernel_objects.revisions("answer", answer_id)
+                          for answer_id in ids}, {answer_id: [] for answer_id in ids})
+        self.project.config = dataclasses.replace(
+            self.project.config, limits=dataclasses.replace(
+                self.project.config.limits, operator_record_catalog_scan_entries=1))
+        with patch.object(records, "catalog", wraps=records.catalog) as catalog:
+            rows, complete = records.insight_answers(self.project, insight["id"])
+        self.assertFalse(complete)
+        self.assertEqual(catalog.call_args.kwargs, {"readonly": True, "scan_limit": 1})
+        self.assertEqual(len(rows), 1)  # a failed scan is not reported as zero answers
+        with patch.object(records, "catalog", side_effect=Denied("unsafe scan")):
+            denied_rows, denied_complete = records.insight_answers(self.project, insight["id"])
+        self.assertFalse(denied_complete)
+        self.assertEqual(len(denied_rows), 1)
+
+        report = self.cli_report(insight["id"], reproject=True)
+        self.assertFalse(report["answers_complete"])
+        self.assertEqual(len(report["answer_verification"]), len(rows) + 1)
+        self.assertFalse(report["answer_verification"][-1]["ok"])
+        self.assertIn("incomplete", report["answer_verification"][-1]["mismatches"][0])
+        replayed = {answer_id for answer_id in ids
+                    if self.project.kernel_objects.revisions("answer", answer_id)}
+        self.assertEqual(len(replayed), 1)
+        missing = ids - replayed
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(self.project.kernel_objects.revisions("answer", missing.pop()), [])
+
+        head = self.project.kernel_events.head()
+        plain = self.cli_report(insight["id"])
+        self.assertFalse(plain["answers_complete"])
+        self.assertFalse(plain["answer_verification"][-1]["ok"])
+        self.assertEqual(self.project.kernel_events.head(), head)
+
     def test_verify_report_observes_question_and_answer_without_writing(self):
         insight = self.insight_question(event="vf" * 16)
         subject = {"type": "insight", "id": insight["id"], "rev": 1}

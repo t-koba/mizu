@@ -540,17 +540,23 @@ def _cmd_kernel_shadow(config, project, args):
             shadow.questioned(insight)
         except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
             shadow.note_failure("reproject", insight["id"], exc)
-        answers = operator_records.reproject_answers(project, insight["id"])
+        answers, answers_complete = operator_records.reproject_answers(project, insight["id"])
     else:
-        answers = operator_records.insight_answers(project, insight["id"])
+        answers, answers_complete = operator_records.insight_answers(project, insight["id"])
+    answer_verification = ([shadow.verify_answer(record, insight)
+                            for record, _ in answers] if shadow is not None else [])
+    if not answers_complete:
+        answer_verification.append({
+            "kind": "answer", "object": "", "ok": False,
+            "mismatches": ["answer scan incomplete; verified only the available prefix"]})
     return {"project": project.name, "insight": insight["id"],
             "enabled": shadow is not None,
+            "answers_complete": answers_complete,
             "verification": shadow.verify(insight, decision) if shadow is not None else None,
             "question_verification": (
                 shadow.verify_question(insight, insight=insight)
                 if shadow is not None and insight.get("addressee") == "operator" else None),
-            "answer_verification": ([shadow.verify_answer(record, insight)
-                                     for record, _ in answers] if shadow is not None else []),
+            "answer_verification": answer_verification,
             "failures": [row for row in (shadow.failures if shadow is not None else [])
                          if row["insight"] == insight["id"]]}
 
