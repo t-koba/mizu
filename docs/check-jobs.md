@@ -221,7 +221,10 @@ tracks retained wait IDs (including waits for roles no longer configured). Recor
 when the index is built and in `mizu work-items PROJECT --audit` (section
 `check_jobs`), never on a read. Runner recovery acts only on jobs whose row
 shows a scope without its receipt; releasing a job directory removes its row. Wait creation/removal updates its
-row under the same check-job lock and crash-repair intent protocol.
+row under the same check-job lock and crash-repair intent protocol. Retained
+JSON reads use the managed bounded reader: link, reparse, size and malformed
+content still fail closed, while a runner's atomic replacement of a record
+yields one complete generation rather than a spurious read denial.
 Install and enable those units before
 enabling model use of the capability. Other platforms can invoke the same
 bounded command from an operator-managed runner; they do not yet have generated

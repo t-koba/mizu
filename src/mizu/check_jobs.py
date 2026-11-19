@@ -20,7 +20,7 @@ from pathlib import Path
 from .admission import check_slot_exclusion
 from .config import MAX_CHECK_INPUT_BOUND, MAX_WAIT_SECONDS, MEBIBYTE_BYTES
 from .errors import Busy, CaptureLimitExceeded, Denied, LimitExceeded
-from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, write_json, loads_finite, DIGEST, SCRIPT_MAX
+from .fs import text_preview, canonical, digest, lock, mkdir, now, read_json, safe_read, safe_read_managed, write_json, loads_finite, DIGEST, SCRIPT_MAX
 from .sandbox import Sandbox, cleanup, cleanup_refused, scratch_selection
 from .acceptance import MAX_CHECK_REQUEST_SEQUENCE, _digest, write_job
 
@@ -117,9 +117,9 @@ def purpose_label(purpose):
 
 
 def read_retained_json(project, relative):
-    """Read bounded, pinned retained state without following links."""
+    """Read bounded managed state without following links or partial writes."""
     try:
-        data = safe_read(project.root, relative, project.config.limits.file_bytes)
+        data = safe_read_managed(project.root, relative, project.config.limits.file_bytes)
     except FileNotFoundError:
         return None
     except (Denied, LimitExceeded, OSError) as exc:

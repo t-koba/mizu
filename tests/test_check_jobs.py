@@ -196,6 +196,28 @@ class JobTests(Fixture):
         self.assertEqual(outcomes[0]['id'], job['id'])
         self.assertTrue(output['accepted_for_current_source'])
 
+    def test_result_wait_tolerates_portable_atomic_replacement(self):
+        from mizu import fs
+        ctx, job = self.submit()
+        path = check_jobs.root(self.project) / job['id'] / 'job.json'
+        terminal = {**job, 'status': 'completed', 'passed': True}
+        original = fs._read_bounded
+        replaced = []
+
+        def replace_then_read(stream, maximum, observed_size):
+            data = original(stream, maximum, observed_size)
+            if not replaced:
+                replaced.append(True)
+                write_indexed_json(path, terminal)
+            return data
+
+        with patch.object(fs._platform, 'HAS_OPENAT', False), \
+                patch.object(fs._platform, 'HAS_DIR_FD', False), \
+                patch.object(fs, '_read_bounded', side_effect=replace_then_read):
+            result = check_jobs.result(ctx, job['id'], wait_seconds=2)
+        self.assertTrue(replaced)
+        self.assertEqual(result['status'], 'completed')
+
     def test_result_wait_seconds_bound_returns_non_terminal(self):
         ctx, job = self.submit()
         started = time.monotonic()
