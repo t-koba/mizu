@@ -159,7 +159,10 @@ class Stage2View(Fixture):
         self.assertEqual(len(revisit), 1)
         self.assertEqual(revisit[0]["id"], self.report["revisits"][0])
         self.assertEqual(revisit[0]["deliver_at"], REVISIT_AT)
-        self.assertEqual(revisit[0]["body"], DEFER_BODY)
+        decision = self.store.message(convert_legacy._message_id("decision", DEFER_ID, 1),
+                                      "operator")
+        self.assertEqual(revisit[0]["body"], decision["body"])
+        self.assertEqual({key: revisit[0]["body"][key] for key in DEFER_BODY}, DEFER_BODY)
         self.assertFalse(due["queues"]["decisions"]["delayed"])
         self.assertEqual(due["proposals"][0]["revisits"], [])
         self.assertEqual(due["questions"], before["questions"])

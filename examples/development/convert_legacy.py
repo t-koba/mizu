@@ -10,8 +10,9 @@ QueueStore appends, and those go through the queue declarations' existing write
 grants.
 
 The current live insight and its current effective decision become one proposal
-and (when present) one decision message. A deferral whose revisit carries an
-aware instant also becomes a delayed decision message from the writer to itself,
+and (when present) one decision message, both carrying the exact legacy
+decision-event metadata in declared optional fields. A deferral whose revisit
+carries an aware instant also becomes a delayed decision message from the writer to itself,
 referencing that proposal. Declared role questions become question messages,
 their exact authenticated answers become referencing answer messages, and
 operator notices become notice messages. A legacy answer to an insight
@@ -41,7 +42,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mizu import operator_records as legacy
 from mizu.config import load
-from mizu.errors import MizuError
+from mizu.errors import Denied, MizuError
 from mizu.fs import canonical, lock
 from mizu.kernel.queues import allows
 from mizu.kernel_shadow import instant_value
@@ -64,6 +65,9 @@ QUESTION_FIELDS = ("legacy_payload", "legacy_subject", "legacy_writer",
 RECORD_FIELDS = ("legacy_addressee", "legacy_subject", "legacy_writer",
                  "legacy_id", "legacy_digest", "legacy_action")
 NOTICE_FIELDS = (*RECORD_FIELDS, "legacy_target")
+PROPOSAL_LEGACY_FIELDS = ("legacy_insight", "legacy_rev", "legacy_source",
+                          "legacy_addressee", "legacy_evidence")
+DECISION_LEGACY_FIELDS = (*PROPOSAL_LEGACY_FIELDS, "legacy_event", "legacy_decided_at")
 PAGE = 1000
 MAX_PAGES = 1024
 ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -140,14 +144,54 @@ def _fields(project, queue: str, names: tuple[str, ...],
 
 
 def _copy(value: object, field, label: str, *, allow_empty: bool = False) -> str:
-    """Copy a declared string bound; never truncate or invent a missing value."""
+    """Copy a declared bound; never truncate or invent a missing value."""
     if not isinstance(value, str) or (not allow_empty and not value.strip()):
         raise ConversionError(f"{label} is missing or empty")
     if field.max is not None and len(value) > field.max:
         raise ConversionError(f"{label} exceeds the declared {field.max}-character bound")
     if field.values and value not in field.values:
         raise ConversionError(f"{label} is not a declared value")
+    try:
+        field.validate(value)
+    except Denied as exc:
+        raise ConversionError(f"{label} is not a declared {field.type}: {exc}") from exc
     return value
+
+
+def _evidence(value: object, label: str) -> list:
+    """Require the exact legacy evidence list shape before encoding it."""
+    if not isinstance(value, list) or any(not isinstance(entry, dict) for entry in value):
+        raise ConversionError(f"{label} is not a list of evidence entries")
+    return value
+
+
+def _legacy_metadata(summary, record, decision, declaration) -> dict[str, str]:
+    """Copy legacy decision-event metadata into one queue's declared fields.
+
+    The values come from the validated insight page, current record and
+    effective decision. Re-deriving them per queue enforces each queue's own
+    declared bounds; a missing or malformed value refuses the whole run.
+    """
+    insight_id = _identity(summary.get("id"), "Insight id")
+    rev = _revision(summary.get("rev"), "Insight revision")
+    fields = declaration.fields
+    metadata = {
+        "legacy_insight": _copy(insight_id, fields["legacy_insight"], "Legacy insight id"),
+        "legacy_rev": _copy(str(rev), fields["legacy_rev"], "Legacy insight revision"),
+        "legacy_source": _copy(summary.get("source"), fields["legacy_source"],
+                               "Legacy insight source"),
+        "legacy_addressee": _copy(summary.get("addressee"), fields["legacy_addressee"],
+                                  "Legacy insight addressee"),
+        "legacy_evidence": _copy(
+            _json(_evidence(record.get("evidence"), "Legacy evidence"), "Legacy evidence"),
+            fields["legacy_evidence"], "Legacy evidence")}
+    if decision is not None:
+        metadata["legacy_event"] = _copy(decision.get("decision_key"),
+                                         fields["legacy_event"], "Legacy decision event")
+        metadata["legacy_decided_at"] = _copy(decision.get("created_at"),
+                                              fields["legacy_decided_at"],
+                                              "Legacy decision instant")
+    return metadata
 
 
 def _text(value: object, field, label: str) -> str:
@@ -317,8 +361,8 @@ def _operator_messages(project, question_index, proposal_index, answer_decl, not
 
 
 def _plan(project) -> tuple[list[dict], dict]:
-    proposal_decl = _fields(project, PROPOSALS, ("title", "body"))
-    decision_decl = _fields(project, DECISIONS, ("action", "reason"))
+    proposal_decl = _fields(project, PROPOSALS, ("title", "body"), PROPOSAL_LEGACY_FIELDS)
+    decision_decl = _fields(project, DECISIONS, ("action", "reason"), DECISION_LEGACY_FIELDS)
     question_decl = _fields(project, QUESTIONS, ("question",), QUESTION_FIELDS)
     answer_decl = _fields(project, ANSWERS, ("body",), RECORD_FIELDS)
     notice_decl = _fields(project, NOTICES, ("body",), NOTICE_FIELDS)
@@ -356,10 +400,12 @@ def _plan(project) -> tuple[list[dict], dict]:
                 raise ConversionError(f"Ambiguous legacy insight {insight_id} at revision {rev}")
             proposal_id = _message_id("proposal", insight_id, rev)
             proposal_index[(insight_id, rev)] = proposal_id
+            proposal_metadata = _legacy_metadata(summary, record, None, proposal_decl)
             add({"queue": PROPOSALS, "id": proposal_id, "author": PROPOSAL_AUTHOR,
                  "refs": (), "body": {
                      "title": _text(record.get("title"), proposal_decl.fields["title"], "Title"),
-                     "body": _text(record.get("body"), proposal_decl.fields["body"], "Body")}})
+                     "body": _text(record.get("body"), proposal_decl.fields["body"], "Body"),
+                     **proposal_metadata}})
 
             decision = summary.get("decision")
             if decision is None:
@@ -370,7 +416,8 @@ def _plan(project) -> tuple[list[dict], dict]:
                 raise ConversionError(f"Decision for {insight_id} does not bind its current revision")
             action = _text(decision.get("action"), decision_decl.fields["action"], "Action")
             reason = _text(decision.get("reason"), decision_decl.fields["reason"], "Reason")
-            body = {"action": action, "reason": reason}
+            body = {"action": action, "reason": reason,
+                    **_legacy_metadata(summary, record, decision, decision_decl)}
             if action == "defer":
                 revisit = _text(decision.get("revisit"), decision_decl.fields["revisit"], "Revisit")
                 body["revisit"] = revisit

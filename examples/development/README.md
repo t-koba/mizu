@@ -34,6 +34,10 @@ carries its exact legacy revisit condition in the declared `revisit` field,
 whether or not it is an instant. A malformed instant refuses the run before any
 append.
 
+Converted proposals and decisions retain the exact legacy insight id,
+revision, source, addressee, current evidence, decision key and aware decision
+instant in declared optional fields for a queue-backed decision adapter; a
+delayed revisit carries the same decision metadata as its decision.
 Converted questions derive their required `question` from the exact legacy
 payload; the full payload, subject, authenticated writer, id and digest are
 retained in declared optional fields. Answers carry the exact legacy body and

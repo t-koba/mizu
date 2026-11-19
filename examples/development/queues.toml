@@ -10,6 +10,13 @@ wake = ["role:writer"]
 [queues.proposals.schema]
 title = {type = "string", max = 240, required = true}
 body = {type = "string", max = 65536, required = true}
+# Exact legacy decision-event metadata retained for a queue-backed decision
+# adapter: insight identity, revision and routing, plus current evidence.
+legacy_insight = {type = "id"}
+legacy_rev = {type = "string", max = 64}
+legacy_source = {type = "string", max = 65536}
+legacy_addressee = {type = "string", max = 65536}
+legacy_evidence = {type = "string", max = 65536}
 
 # The writer's decision on a proposal: refs = [proposal id].
 # A deferral is the same decision with a revisit written as a delayed message
@@ -21,6 +28,15 @@ read = ["role:*", "operator"]
 action = {type = "string", values = ["accept", "modify", "defer", "reject", "withdraw"], required = true}
 reason = {type = "string", max = 8192, required = true}
 revisit = {type = "string", max = 8192}
+# The same legacy metadata as proposals, plus the immutable decision key and
+# its aware instant; every decision and delayed revisit carries all of it.
+legacy_insight = {type = "id"}
+legacy_rev = {type = "string", max = 64}
+legacy_source = {type = "string", max = 65536}
+legacy_addressee = {type = "string", max = 65536}
+legacy_evidence = {type = "string", max = 65536}
+legacy_event = {type = "id"}
+legacy_decided_at = {type = "instant"}
 
 # Questions to the operator, and the operator's answers
 # (refs = [question id or converted insight proposal id]).

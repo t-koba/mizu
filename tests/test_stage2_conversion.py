@@ -6,6 +6,7 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import support  # noqa: F401  (puts src on the path)
 from support import Fixture
@@ -55,6 +56,9 @@ class Stage2Conversion(Fixture):
         self.project.insights.submit(source="worker", title="Legacy proposal",
                                      body="Legacy body", base_snapshot=snap["id"],
                                      insight_id=INSIGHT_ID)
+        self.project.insights.attach_evidence(
+            INSIGHT_ID, source="worker", text="Legacy evidence text", run="test-run",
+            expected_rev=1)
         self.project.insights.decide(INSIGHT_ID, "accept", "Reviewed", "", "test-run",
                                      expected_rev=1, work_item_intent="none")
 
@@ -63,8 +67,27 @@ class Stage2Conversion(Fixture):
         self.project.insights.submit(source="worker", title="Deferred proposal",
                                      body="Deferred body", base_snapshot=snap["id"],
                                      insight_id=insight_id)
+        self.project.insights.attach_evidence(
+            insight_id, source="worker", text="Deferred evidence text", run="test-run",
+            expected_rev=1)
         self.project.insights.decide(insight_id, "defer", "Need more evidence", revisit,
                                      "test-run", expected_rev=1)
+
+    def legacy_metadata(self, insight_id):
+        """Read the exact metadata the legacy API exposes for one insight."""
+        summary = next(item for item in self.project.insights.list_page(
+            scope="live", limit=1000)["items"] if item["id"] == insight_id)
+        record = self.project.insights.read(insight_id)
+        proposal = {
+            "legacy_insight": insight_id,
+            "legacy_rev": str(summary["rev"]),
+            "legacy_source": summary["source"],
+            "legacy_addressee": summary["addressee"],
+            "legacy_evidence": canonical(record["evidence"]).decode()}
+        decision = summary["decision"]
+        return proposal, {**proposal,
+                          "legacy_event": decision["decision_key"],
+                          "legacy_decided_at": decision["created_at"]}
 
     def convert(self, *flags):
         output = io.StringIO()
@@ -81,15 +104,21 @@ class Stage2Conversion(Fixture):
                          ([convert_legacy._message_id("proposal", INSIGHT_ID, 1)],
                           [convert_legacy._message_id("decision", INSIGHT_ID, 1)]))
 
+        proposal_metadata, decision_metadata = self.legacy_metadata(INSIGHT_ID)
         proposals = self.store.read("proposals", "operator")["messages"]
         decisions = self.store.read("decisions", "operator")["messages"]
         self.assertEqual(len(proposals), 1)
         self.assertEqual(len(decisions), 1)
         self.assertEqual(proposals[0]["id"], first["proposals"][0])
         self.assertEqual(proposals[0]["author"], "operator")
-        self.assertEqual(proposals[0]["body"], {"title": "Legacy proposal", "body": "Legacy body"})
+        self.assertEqual(proposals[0]["body"],
+                         {"title": "Legacy proposal", "body": "Legacy body",
+                          **proposal_metadata})
         self.assertEqual(decisions[0]["id"], first["decisions"][0])
-        self.assertEqual(decisions[0]["body"], {"action": "accept", "reason": "Reviewed"})
+        self.assertEqual(decisions[0]["body"],
+                         {"action": "accept", "reason": "Reviewed", **decision_metadata})
+        self.assertIn("Legacy evidence text", decision_metadata["legacy_evidence"])
+        self.assertRegex(decision_metadata["legacy_event"], r"[0-9a-f]{32}\Z")
         self.assertEqual(decisions[0]["refs"], [proposals[0]["id"]])
         self.assertEqual(self.store.message(decisions[0]["refs"][0], "operator"), proposals[0])
         self.assertEqual((self.store.read("proposals", "operator")["head"],
@@ -121,7 +150,10 @@ class Stage2Conversion(Fixture):
         delayed = [m for m in due["messages"] if m["id"] == revisit_id]
         self.assertEqual(len(delayed), 1)
         self.assertEqual(delayed[0]["deliver_at"], REVISIT_AT)
-        defer_body = {"action": "defer", "reason": "Need more evidence", "revisit": REVISIT_AT}
+        defer_metadata = self.legacy_metadata(DEFER_ID)[1]
+        defer_body = {"action": "defer", "reason": "Need more evidence", "revisit": REVISIT_AT,
+                      **defer_metadata}
+        self.assertIn("Deferred evidence text", defer_metadata["legacy_evidence"])
         self.assertEqual(delayed[0]["body"], defer_body)
         ordinary = [m for m in due["messages"] if m["id"] == decision_id]
         self.assertEqual(len(ordinary), 1)
@@ -144,7 +176,8 @@ class Stage2Conversion(Fixture):
                     if m["id"] == convert_legacy._message_id("decision", DEFER_ID, 1)]
         self.assertEqual(deferred[0]["body"],
                          {"action": "defer", "reason": "Need more evidence",
-                          "revisit": "when the next build finishes"})
+                          "revisit": "when the next build finishes",
+                          **self.legacy_metadata(DEFER_ID)[1]})
 
     def test_malformed_revisit_instant_refuses_before_any_write(self):
         self.add_deferral(DEFER_ID, "2099-13-01T00:00:00+00:00")
@@ -164,6 +197,58 @@ class Stage2Conversion(Fixture):
         self.assertEqual(len(report["decisions"]), 1)
         self.assertFalse((self.project.root / "queues").exists())
         self.assertEqual(tree_state(self.project.root), before)
+
+    def refuse_metadata(self, *, page=None, record=None):
+        """Run the real CLI against a legacy view with one field changed."""
+        before = tree_state(self.project.root)
+        real_project = convert_legacy.Project
+
+        def project_factory(config, name, *, read_only):
+            project = real_project(config, name, read_only=read_only)
+            if page is not None:
+                original_page = project.insights.list_page
+
+                def list_page(**kwargs):
+                    result = original_page(**kwargs)
+                    items = [(page(item) if item["id"] == INSIGHT_ID else item)
+                             for item in result["items"]]
+                    return {**result, "items": items}
+
+                project.insights.list_page = list_page
+            if record is not None:
+                original_read = project.insights.read
+
+                def read(insight_id):
+                    result = original_read(insight_id)
+                    return record(result) if insight_id == INSIGHT_ID else result
+
+                project.insights.read = read
+            return project
+
+        with mock.patch.object(convert_legacy, "Project", side_effect=project_factory):
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
+        self.assertEqual(code, 2)
+        self.assertFalse((self.project.root / "queues").exists())
+        self.assertEqual(tree_state(self.project.root), before)
+        return errors.getvalue()
+
+    def test_malformed_legacy_metadata_refuses_before_any_write(self):
+        cases = (
+            (lambda item: {**item, "source": None}, "Legacy insight source"),
+            (lambda item: {**item, "addressee": " "}, "Legacy insight addressee"),
+            (lambda item: {**item, "decision": {**item["decision"],
+                                               "decision_key": "g" * 32}},
+             "Legacy decision event"),
+            (lambda item: {**item, "decision": {**item["decision"],
+                                               "created_at": "2099-01-01T00:00:00"}},
+             "Legacy decision instant"),
+            (None, "Legacy evidence is not a list"),
+        )
+        for page, expected in cases:
+            with self.subTest(expected=expected):
+                record = (lambda value: {**value, "evidence": "not a list"}) if page is None else None
+                self.assertIn(expected, self.refuse_metadata(page=page, record=record))
 
     def test_malformed_legacy_record_refuses_before_any_write(self):
         from support import write_fixture_json
