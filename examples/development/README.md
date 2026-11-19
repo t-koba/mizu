@@ -112,6 +112,18 @@ The parity-proven adapter now lives in the production userland module
 compatibility shim that re-exports it so stage-2 comparison tests run
 unchanged. It reconstructs the non-shared `decision_delivery.pending` page from
 the converted `proposals`, `decisions` and `receipts` queues.
+
+## Record adapter and activation
+
+`src/mizu/queue_record_delivery.py` is the production userland adapter for
+questions, answers, notices and per-record acknowledgements. It uses the same
+trusted role actor and reads the declared `questions`, `answers`, `notices` and
+`record-receipts` queues. `examples/development/stage2_record_activate.py NAME`
+reapplies conversion, requires `stage2_verify.py` to pass for the decision six
+plus `record-receipts`, and publishes the separate create-only
+`record-authority.json` marker last. Absence keeps legacy record delivery;
+`"queues"` selects the adapter; a malformed marker or stale report fails closed.
+There is no runtime flag, actor argument or dual-write.
 `pending(project, role, *, actions=None, limit=None, include_insights=True,
 sources=None)` returns the same `shared`, `events`,
 `diagnostics`, `page` and `manifest` dictionary; it derives the queue actor as

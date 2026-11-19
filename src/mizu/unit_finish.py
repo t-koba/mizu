@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime as dt
 
 from . import (check_jobs, ci_waits, decision_delivery, operator_records, proposal_waits,
-               queue_decision_delivery, reviews, work_item_events)
+               queue_decision_delivery, queue_record_delivery, reviews, work_item_events)
 from . import wait_events as structured_wait_events
 from .config import role_progress_signals
 from .errors import Busy, Denied, LimitExceeded
@@ -276,7 +276,11 @@ class ContextFinishMixin:
         if selected_ci:
             ci_waits.validate_selection(self, selected_ci)
         proposal_waits.validate_selection(self, [token for token in tokens if token in proposal_tokens])
-        operator_records.validate(self, [token for token in tokens if token in records])
+        record_tokens = [token for token in tokens if token in records]
+        if queue_record_delivery.authority_kind(self.project.insights.root) == "queues":
+            queue_record_delivery.validate(self, record_tokens)
+        else:
+            operator_records.validate(self, record_tokens)
         for token in tokens:
             if token in records or token in ci_tokens or token in proposal_tokens:
                 continue

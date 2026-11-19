@@ -60,8 +60,10 @@ The host conversion writes per-role, per-record SharedRecords acknowledgements
 to `record-receipts`, never to another queue. A message carries the exact
 `ack_token`, `legacy_role`, `legacy_record_id` and `legacy_record_digest`, with
 a stable id derived from the role and token so an exact retry appends nothing.
-These are conversion metadata: reading them does not grant a role runtime
-acknowledgement authority or switch the legacy record path.
+Before activation these are conversion metadata only. After
+`stage2_record_activate.py` publishes the separate record marker, the queue
+adapter uses them for runtime acknowledgements; reading a message never grants
+a role a new capability.
 
 ## Converted receipts
 

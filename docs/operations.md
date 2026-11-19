@@ -175,8 +175,9 @@ mizu cleanup demo
   永続アーカイブ、Editor取り込み状態 ★
 - `decisions/`, `decision-history/`, `decision-authority.json`,
   `decision-activation-plan.json`, `decision-activation-report.json`,
-  `decision-cursors/`, `decision-receipts/`: 採否判断、判断履歴、判断権限・有効化
-  計画、カーソルと受領記録 ★
+  `decision-cursors/`, `decision-receipts/`, `record-authority.json`,
+  `record-activation-plan.json`, `record-activation-report.json`: 採否判断、判断履歴、判断権限・有効化
+  計画、記録権限と受領記録 ★
 - `work-items/`, `work-item-receipts/`, `obligation-receipts/`, `waits/`,
   `shared-records/`, `shared-record-receipts/`, `selection/`: 作業項目とその受領・
   待機・共有記録、選択状態 ★

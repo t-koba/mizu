@@ -153,8 +153,12 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
     Periodic discovery stays independent policy: timers and
     calendar entries keep their own schedules unchanged.
     """
+    from . import operator_records, queue_record_delivery
     from .operator_records import configuration as record_configuration
     operator_enabled = any(row['enabled'] and row['wake'] for row in record_configuration(config.operator_records).values())
+    root = getattr(getattr(project, "insights", None), "root", getattr(project, "root", None))
+    queued = (isinstance(root, Path)
+              and queue_record_delivery.authority_kind(root) == "queues")
     watches: dict[str, list[str]] = {}
     for name in project.roles:
         role = config.roles[name]
@@ -182,7 +186,13 @@ def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
             watches[name] = []
         watches[name].append(str(project.root / "inbox"))
         if operator_enabled:
-            watches[name].append(str(project.root / "shared-records" / "operator"))
+            if queued:
+                watches[name].extend(str(project.root / "queues" / queue / "messages")
+                                     for queue in (queue_record_delivery.ANSWERS,
+                                                   queue_record_delivery.NOTICES)
+                                     if queue in config.queues)
+            else:
+                watches[name].append(str(project.root / "shared-records" / "operator"))
         if unscheduled_on_change:
             # Coarse published-code pointer: the persisted level state whose
             # change wakes ``mizu run --event``; admission still compares the

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import json
 
+from . import authority_marker
 from .config import MAX_DECISION_RECONCILIATION_BYTES, role_decision_events_limit
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, digest, loads_finite, safe_read
@@ -15,38 +16,26 @@ PLAN_FILE = "decision-activation-plan.json"
 REPORT_FILE = "decision-activation-report.json"
 
 
-def authority(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
-    """Absent means legacy. An unsafe, malformed or partial marker never does."""
-    try:
-        (root / AUTHORITY_FILE).lstat()
-    except FileNotFoundError:
-        return None
-    raw = safe_read(root, AUTHORITY_FILE, 4096)
-    try:
-        marker = loads_finite(raw)
-        if (type(marker) is not dict or set(marker) != {"schema", "kind", "authority", "plan_digest", "report_digest"}
-                or type(marker["schema"]) is not int or marker["schema"] != 1
-                or marker["kind"] != "insight.decision"
-                or marker["authority"] not in ("shared", "queues")
-                or any(not isinstance(marker[key], str) or not DIGEST.fullmatch(marker[key])
-                       for key in ("plan_digest", "report_digest")) or canonical(marker) != raw):
-            raise ValueError("marker schema")
-    except (ValueError, TypeError, UnicodeError) as exc:
-        raise Denied("Invalid decision authority marker; reconciliation required") from exc
+def _marker(root, *, report_bytes):
     # The marker alone authorizes runtime delivery. Its report digest is checked
     # over the exact retained bytes, but the history-scale report body is not
     # parsed here: activation proves plan_digest before publication and a host
     # retry validates it against the retained body, while re-parsing on every
     # wake would charge that scale to each decision evaluation.
-    report_raw = safe_read(root, REPORT_FILE, report_bytes)
-    if digest(report_raw) != marker["report_digest"]:
-        raise Denied("Decision authority report digest mismatch")
-    return marker
+    return authority_marker.read(root, file=AUTHORITY_FILE, plan_file=PLAN_FILE,
+                                 report_file=REPORT_FILE, kind="insight.decision",
+                                 label="decision", report_bytes=report_bytes,
+                                 loads=loads_finite)
+
+
+def authority(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
+    """Absent means legacy. An unsafe, malformed or partial marker never does."""
+    return _marker(root, report_bytes=report_bytes)
 
 
 def authority_kind(root, *, report_bytes=MAX_DECISION_RECONCILIATION_BYTES):
     """Return the selected durable authority: None, "shared" or "queues"."""
-    marker = authority(root, report_bytes=report_bytes)
+    marker = _marker(root, report_bytes=report_bytes)
     return None if marker is None else marker["authority"]
 
 
@@ -57,13 +46,11 @@ def retained_report(root, marker, *, report_bytes=MAX_DECISION_RECONCILIATION_BY
     explicit host retries use the full body, while each wake stays independent
     of the report's history scale.
     """
-    raw = safe_read(root, REPORT_FILE, report_bytes)
-    if digest(raw) != marker["report_digest"]:
-        raise Denied("Decision authority report digest mismatch")
+    raw = authority_marker.report(root, marker, file=REPORT_FILE, label="decision",
+                                  report_bytes=report_bytes)
     if marker["authority"] != "shared":
-        plan_raw = safe_read(root, PLAN_FILE, report_bytes)
-        if digest(plan_raw) != marker["plan_digest"]:
-            raise Denied("Decision authority plan digest mismatch")
+        authority_marker.plan(root, marker, file=PLAN_FILE, label="decision",
+                              report_bytes=report_bytes)
     try:
         report = loads_finite(raw)
         if not isinstance(report, dict):

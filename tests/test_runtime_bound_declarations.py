@@ -265,6 +265,16 @@ POLICY_DEFAULTS = {
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
+    'authority_marker.py': {
+        'MARKER_BYTES': (
+            '4096', 'safety',
+            'authority markers / bounded canonical marker read for decision and record authority'),
+    },
+    'queue_record_delivery.py': {
+        'PENDING_ROWS': (
+            '20', 'safety',
+            'record delivery / fixed pending-page row cap for the queue-backed record adapter'),
+    },
     'protocol.py': {
         'KERNEL_FIELD_MAP_MAX': (
             '64', 'safety',
@@ -2192,9 +2202,12 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('claude.py', '_verify_staged_skill', 1, 0): (
         '1', 'safety',
         'Claude staged file skill / require exactly one reviewed SKILL.md entry; extras are untrusted'),
-    ('decision_delivery.py', 'authority', 1, 0): (
+    ('authority_marker.py', 'read', 1, 0): (
         '1', 'format',
-        'decision authority marker / exact schema version one selects the persisted marker contract'),
+        'authority markers / exact schema version one selects the persisted marker contract'),
+    ('queue_record_delivery.py', '_record_envelope', 1, 0): (
+        '32768', 'safety',
+        'record delivery / fixed legacy envelope byte ceiling before canonical reconstruction'),
     ('decision_delivery.py', 'page_bytes', 0, 0): (
         '1', 'configured policy',
         'shared decision page / configured per-role byte budget must be a positive integer'),
@@ -3661,7 +3674,7 @@ def sibling():
         for filename in (
                 'acceptance.py', 'bridge.py', 'check_jobs.py', 'ci_acceptance.py',
                 'ci_costs.py', 'ci_observation.py', 'ci_requests.py', 'ci_waits.py', 'ci_wake.py', 'claude.py',
-                'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py',
+                'authority_marker.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py',
                 'mcp_loop.py',
                 'mcp_proxy.py',
                 'continuations.py', 'delegation_jobs.py', 'engine_config.py', 'errors.py',
@@ -3674,6 +3687,7 @@ def sibling():
                 'pi_reselection.py', 'probes.py', 'project.py', 'admission.py', 'producer_admission.py',
                 'services.py', 'vcs.py',
                 'work_items.py', 'persistent_exec.py', 'sandbox.py', 'lineage.py',
+                'queue_record_delivery.py', 'record_reconciliation.py',
                 'operator_records.py', 'operator_record_index.py', 'work_order.py', 'distribution.py',
                 'budget.py', 'fs.py', 'role_state.py', 'snapshot.py'):
             tree = ast.parse((ROOT / filename).read_text(encoding='utf-8'))
@@ -3684,7 +3698,7 @@ def sibling():
                 'model_catalog.py', 'operator_records.py', 'operator_record_index.py',
                 'work_order.py', 'selection.py', 'probes.py', 'acceptance.py', 'budget.py',
                 'ci_acceptance.py', 'ci_observation.py', 'ci_costs.py', 'ci_requests.py',
-                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', 'role_state.py', 'snapshot.py'}
+                'ci_waits.py', 'ci_wake.py', 'claude.py', 'cli.py', 'codex.py', 'doctor.py', 'materialize.py', 'mcp_proxy.py', 'authority_marker.py', 'decision_delivery.py', 'decision_reconciliation.py', 'delegation_gates.py', 'distribution.py', 'fs.py', 'role_state.py', 'snapshot.py'}
                        else 2 if filename == 'admission.py' else 3)
             for site, expression in comparison_argument_inventory(
                     tree, minimum_magnitude=minimum).items():

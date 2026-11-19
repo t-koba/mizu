@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .delegation_jobs import DelegationJobs, _WorkspaceLease
 from . import (decision_delivery, delegation_gates, lineage, operator_records,
-               delivery_settlement, queue_decision_delivery)
+               delivery_settlement, queue_decision_delivery, queue_record_delivery)
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
@@ -173,6 +173,14 @@ MAX_READ_IDENTITIES = workspace_reads.MAX_READ_IDENTITIES
 OBSERVED_CURSOR_MAX_BYTES = 4096
 #: Bounded serialized size of the work items a CI request covers.
 MAX_COVERED_BYTES = 2048
+
+def _record_delivery(project):
+    """Select the shared record authority; a marker is checked on every use."""
+    root = getattr(project, "insights", None)
+    if root is not None and queue_record_delivery.authority_kind(root.root) == "queues":
+        return queue_record_delivery
+    return operator_records
+
 
 #: Re-exported for compatibility; evidence_records owns the exact bounds.
 EVIDENCE_UUID = evidence_records.EVIDENCE_UUID
@@ -1421,7 +1429,9 @@ class Context(ContextFinishMixin):
 
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
-        return write_role(self, args)
+        delivery = _record_delivery(self)
+        return (delivery.write_role(self, args) if delivery is not operator_records
+                else write_role(self, args))
 
     def _op_record_read(self, args: dict) -> dict:
         # Ack-token manifest reads stay byte-for-byte on the operator path;
@@ -1430,10 +1440,12 @@ class Context(ContextFinishMixin):
             if 'kind' in args or 'id' in args:
                 from .errors import Denied
                 raise Denied('Record read takes either ack_token or kind+id, not both')
-            return operator_records.read(self, args)
+            return _record_delivery(self).read(self, args)
         if {'kind', 'id'} <= set(args):
             from .host_records import read_role
-            return read_role(self, args)
+            delivery = _record_delivery(self)
+            return (delivery.read_role(self, args) if delivery is not operator_records
+                    else read_role(self, args))
         from .errors import Denied
         raise Denied('Record read requires either ack_token or kind+id')
 
@@ -2736,7 +2748,7 @@ class Engine(EngineAdmissionMixin):
             config=self.config if exact_snapshot_review else None, role_name=role_name)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
-        record_state = operator_records.pending(project, role)
+        record_state = _record_delivery(project).pending(project, role)
         decision_state = _decision_delivery_state(project, role_name, role)
         decision_events = decision_state["events"]
         receipt_diagnostics = decision_state["diagnostics"]
@@ -3322,7 +3334,7 @@ class Engine(EngineAdmissionMixin):
                     context.turn_authority_role = recovery_authority
                     context.spend_role = recovery_authority
                 decision_delivery.bind(context, dispatch_state['decision_state'])
-                operator_records.bind(context, dispatch_state['record_state'])
+                _record_delivery(project).bind(context, dispatch_state['record_state'])
                 write_json(run_dir / 'operator-record-delivery.json', context.operator_record_page)
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
@@ -3757,7 +3769,7 @@ class Engine(EngineAdmissionMixin):
                         write_json(project.root / "observed" / f"{role_name}.json", observed)
                 delivery_settlement.begin(context, finished)
                 selected_tokens = set(finished.get("ack_events", []))
-                operator_records.acknowledge(context, selected_tokens &
+                _record_delivery(project).acknowledge(context, selected_tokens &
                     {entry.ack_token for entry in context.operator_record_manifest})
                 delivery_settlement.succeeded(context, "operator")
                 selected_decisions = [e for e in context.decision_events if e["ack_token"] in selected_tokens]
@@ -4503,7 +4515,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             # A code-change/wait evaluation may name a placeholder role (for
             # example before admission resolves configuration). It cannot have
             # addressed operator records; don't let that suppress other causes.
-            value = (operator_records.due(project, role_name)
+            value = (_record_delivery(project).due(project, role_name)
                      if role_name is None or (role_name in project.roles
                                               and role_name in project.config.roles)
                      else False)

@@ -1,4 +1,4 @@
-# Stage-2 decision authority switch
+# Stage-2 authority switches
 
 This is example userland, not a kernel contract. Queue names, message meanings,
 roles, wakes and policy stay in `queues.toml`, `policies/stage2.md` and this
@@ -52,12 +52,30 @@ against the queue candidates and a stable id for idempotence. The legacy
 Insight receipt writer refuses its file write once authority is `"queues"`.
 `decision_read` tools and the shared branch are unchanged.
 
+## Record authority switch
+
+Record delivery has a separate `record-authority.json` marker with the same
+schema and fail-closed validation. Absence keeps the legacy question, answer,
+notice and per-record acknowledgement path. `"queues"` selects
+`mizu.queue_record_delivery`, which reconstructs those families from the
+declared `questions`, `answers`, `notices` and `record-receipts` queues with the
+same envelopes, ordering, diagnostics and token bindings.
+
+```sh
+python3 examples/development/stage2_record_activate.py config/config.toml --project NAME
+```
+
+The command rechecks the conversion and verification reports for all seven
+queues, then publishes the marker last. Decision and record authority markers
+are independent; a shared branch, a malformed marker or a stale report always
+takes precedence or refuses rather than falling back. Model tools never select
+either authority.
+
 ## Remaining slices
 
-Questions, answers and notices still use their record modules; their adapter
-and one-commit switch are separate. Shared branches for those families are
-removed only after the remaining switches, together with their imports. Until
-then the dedicated modules named in `docs/os-migration.md` stay in place.
+Shared branches for the record families are removed only after their own
+switch is verified, together with their imports. Until then the dedicated
+modules named in `docs/os-migration.md` stay in place.
 
 ## Invariants
 

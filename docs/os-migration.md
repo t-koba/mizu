@@ -39,9 +39,13 @@ acknowledgements use the declared `proposals`, `decisions` and `receipts`
 queues; there is no dual-write or runtime boolean flag. The production
 userland adapter is `src/mizu/queue_decision_delivery.py`; example queue names,
 schemas, roles and meanings stay in `examples/development/`. The shared
-authority branch keeps precedence and is unchanged. The remaining stage-2
-record families still switch in their own slice before the dedicated modules
-are deleted.
+authority branch keeps precedence and is unchanged. The record family has its
+own `record-authority.json` marker and `stage2_record_activate.py` gate. Once
+activated, questions, answers, notices and per-record acknowledgements are read
+and written through `questions`, `answers`, `notices` and `record-receipts` by
+`src/mizu/queue_record_delivery.py`, reconstructing the legacy shapes exactly.
+Shared record branches for those families remain only until their own switch is
+verified and the dedicated modules are deleted.
 
 ## Stages
 

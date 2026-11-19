@@ -131,8 +131,9 @@ legacy_order = {type = "string", max = 8}
 # Converted per-role, per-record SharedRecords acknowledgements. Host-writable
 # only; stable ids make an exact retry idempotent. These are conversion
 # messages: a future queue-backed record adapter could read them to suppress
-# already settled records and append settled receipts here, but this example
-# does not switch runtime record authority.
+# already settled records and append settled receipts here. After the separate
+# record-authority.json activation, the queue adapter uses them for runtime
+# acknowledgements instead of the legacy per-role receipt files.
 [queues."record-receipts"]
 write = ["host"]
 read = ["role:*", "operator", "host"]

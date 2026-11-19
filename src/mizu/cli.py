@@ -871,9 +871,14 @@ def _execute(config, args):
             raise ConfigError("Publisher record input exceeds frame bound")
         return write_publisher(Project(config, args.project), kind=args.kind,
                                subject=loads_finite(args.subject), payload=loads_finite(args.payload))
+    if args.command in ("record-questions", "record"):
+        from . import operator_records, queue_record_delivery
+        project = Project(config, args.project)
+        queued = queue_record_delivery.authority_kind(project.insights.root) == "queues"
     if args.command == "record-questions":
         from .operator_records import questions
-        return questions(Project(config, args.project), limit=args.limit, scan_limit=args.scan_limit)
+        return (queue_record_delivery.questions if queued else questions)(
+            project, limit=args.limit, scan_limit=args.scan_limit)
     if args.command == "record":
         from .operator_records import write
         record_subject = args.subject_kind is not None or args.subject_digest is not None
@@ -892,7 +897,8 @@ def _execute(config, args):
                        "id": args.subject_id, "digest": args.subject_digest}
         target = ({"id": args.target_id, "digest": args.target_digest}
                   if args.target_id is not None else None)
-        return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
+        return (queue_record_delivery.write if queued else write)(
+            project, event_id=args.id, kind=args.kind, body=args.body,
                      addressee=args.role, subject=subject, action=args.action, target=target)
     read_only = args.command in ("migrate-records", "migrate-work-items",
                                  "kernel-shadow-audit")
