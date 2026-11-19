@@ -770,6 +770,13 @@ replacement insight without implying rejected substance.
                                 "created_at": old.get("created_at")})
                 except (OSError, ValueError, TypeError, AttributeError, Denied):
                     pass
+                # A completed revise whose queue append was lost still has to
+                # reach the live reader. Replay the same stable-id envelope so
+                # an idempotent retry repairs the crash window; the append
+                # itself is a no-op once the proposal is already present.
+                writer = self.decision_queue_writer
+                if writer is not None and writer.active():
+                    writer.submit(_normalize(old))
                 return self._accepted(_normalize(old))
             stamped = now()
             archive = {**old, "rev": current_rev,

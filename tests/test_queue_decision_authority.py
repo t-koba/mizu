@@ -448,6 +448,51 @@ class QueueDecisionAuthority(unittest.TestCase):
             base_snapshot=None, expected_rev=2)
         self.assertEqual(self.assert_parity(identity), events)
 
+    def test_revise_replay_repairs_a_lost_proposal_append(self):
+        """A no-op retry re-appends the stable-id proposal after a lost write."""
+        self.activate()
+        identity = "8" * 32
+        self.live_submit(identity, "Before lost revise")
+        self.assertEqual([event.get("kind") for event in self.assert_parity(identity)],
+                         ["insight.pending"])
+
+        snap = self.project.snapshots.get()["id"]
+        revise = dict(source="worker", title="After lost revise",
+                      body="After lost revise body", base_snapshot=snap)
+        real_submit = self.project.insights.decision_queue_writer.submit
+        calls = {"n": 0}
+
+        def lose_first_append(record):
+            calls["n"] += 1
+            if calls["n"] == 1:  # Crash window: durable r2 write, no queue append.
+                return
+            return real_submit(record)
+
+        with mock.patch.object(self.project.insights.decision_queue_writer, "submit",
+                               side_effect=lose_first_append):
+            self.project.insights.revise(identity, expected_rev=1, **revise)
+        self.assertEqual([event["rev"] for event in self.legacy_page()["events"]
+                          if event.get("insight") == identity], [2])
+        stranded = [event["rev"] for event in decision_delivery.pending(self.project, self.role)["events"]
+                    if event.get("insight") == identity]
+        self.assertEqual(stranded, [1])
+
+        # An exact retry at the current revision is a no-op content-wise, but
+        # must replay the stable-id proposal and restore byte-identical parity.
+        retry = dict(revise, expected_rev=2)
+        self.project.insights.revise(identity, **retry)
+        events = self.assert_parity(identity)
+        self.assertEqual([event["rev"] for event in events], [2])
+        pid = queue_decision_delivery.message_id(queue_decision_delivery.PROPOSAL_KIND, identity, 2)
+        proposals = self.project.kernel_queues.read("proposals", "operator")["messages"]
+        self.assertEqual(sum(row["id"] == pid for row in proposals), 1)
+
+        # A second replay cannot append another row.
+        self.project.insights.revise(identity, **retry)
+        self.assertEqual(self.assert_parity(identity), events)
+        proposals = self.project.kernel_queues.read("proposals", "operator")["messages"]
+        self.assertEqual(sum(row["id"] == pid for row in proposals), 1)
+
     def test_decide_revise_withdraw_lifecycle_matches_legacy(self):
         self.activate()
         identity = "7" * 32
