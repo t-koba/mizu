@@ -12,3 +12,22 @@ nothing here specially.
 the kernel code. A queue is added here in the same change that switches its
 code path and deletes the dedicated module. `kinds.toml` belongs to the object
 store that stage 1 replaces and is deleted with it.
+
+## One-time legacy conversion
+
+`convert_legacy.py` is an operator-run example-userland command. It reads the
+current legacy insights and their effective decisions through the public
+Insight API and appends equivalent messages to the `proposals` and `decisions`
+queues declared in `queues.toml`. Archived revisions stay in the legacy store;
+nothing is rewritten and no runtime authority, route or capability changes.
+Decision messages use the queue's declared writer principal (`role:writer`) as
+historical authorship only.
+
+```sh
+python3 examples/development/convert_legacy.py config/config.toml --project NAME [--apply]
+```
+
+Message ids are derived from the legacy insight id and revision, so a repeat
+appends nothing. Without `--apply` the command is a dry run: it prints the
+planned ids and writes nothing. Malformed or ambiguous legacy input refuses the
+whole run before any append.
