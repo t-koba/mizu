@@ -1,0 +1,55 @@
+# Example userland queues (docs/kernel.md). Include from a deployment configuration.
+# Queue names, schemas and who reads or writes them are this example's choices;
+# what a reader does with a message is written in the role policy files.
+
+# Findings and proposals for the writer to judge.
+[queues.proposals]
+write = ["role:*", "operator", "host"]
+read = ["role:writer", "operator"]
+wake = ["role:writer"]
+[queues.proposals.schema]
+title = {type = "string", max = 240, required = true}
+body = {type = "string", max = 65536, required = true}
+
+# The writer's decision on a proposal: refs = [proposal id].
+# A deferral is the same decision with a revisit written as a delayed message
+# from the writer to itself.
+[queues.decisions]
+write = ["role:writer"]
+read = ["role:*", "operator"]
+[queues.decisions.schema]
+action = {type = "string", values = ["accept", "modify", "defer", "reject", "withdraw"], required = true}
+reason = {type = "string", max = 8192, required = true}
+
+# Questions to the operator, and the operator's answers (refs = [question id]).
+[queues.questions]
+write = ["role:*"]
+read = ["operator", "role:*"]
+[queues.questions.schema]
+question = {type = "string", max = 8192, required = true}
+context = {type = "string", max = 65536}
+default = {type = "string", max = 8192}
+
+[queues.answers]
+write = ["operator"]
+read = ["role:*", "operator"]
+wake = ["role:writer"]
+[queues.answers.schema]
+body = {type = "string", max = 65536, required = true}
+
+# Operator notices to roles.
+[queues.notices]
+write = ["operator", "host"]
+read = ["role:*", "operator"]
+wake = ["role:writer"]
+[queues.notices.schema]
+body = {type = "string", max = 65536, required = true}
+
+# Results written by the host's check runner.
+[queues.checks]
+write = ["host"]
+read = ["role:*", "operator"]
+wake = ["role:writer"]
+[queues.checks.schema]
+snapshot = {type = "digest", required = true}
+status = {type = "string", values = ["passed", "failed", "cancelled"], required = true}

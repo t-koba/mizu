@@ -7,176 +7,118 @@ policy files, and the kernel neither knows nor enforces it.
 
 ## What the kernel is and is not
 
-The kernel provides seven kinds of mechanism:
-
 | Part | Provides | Never decides |
 |---|---|---|
-| Units | Start, stop, interrupt and resume a unit of model work for a configured role; engine drivers, sessions, resource bounds, sandboxed execution, isolation, tool grants | Which role exists, what it should do, what a good result is |
-| Scheduler | Execution slots, the admission queue, cache-aware placement; wakes a role only on an event it subscribes to or at a known instant | Priorities between kinds of work, what counts as progress |
-| Objects | Typed, revisioned records whose kinds, fields, states, transitions, permissions and transition requirements are declared by configuration; content-addressed snapshots; command and check evidence | Which kinds exist, what their states mean, what completion requires |
-| Events | Every object creation and transition, every check completion and every driver notification is an ordered, named event; roles subscribe by name | Which events matter to whom |
+| Units | Start, stop, interrupt and resume a unit of model work for a configured role; engine drivers, sessions, resource bounds, sandboxed execution, isolation, tool grants; content-addressed workspace snapshots | Which role exists, what it should do, what a good result is |
+| Scheduler | Execution slots, the admission queue, cache-aware placement; wakes a role only when a message arrives in a queue it is woken by, or when a delayed message becomes due | Priorities between kinds of work, what counts as progress |
+| Queues | Named, declared message queues: authenticated append, durable per-reader cursors and acknowledgement, delayed delivery, references between messages | What a queue is for, what a message means, what any message "closes" or "completes" |
 | Accounting | Request budgets, token usage, time | Spending policy |
-| Drivers | Opaque operations on external systems (version control, CI, search, dependency materialisation) and their change notifications | Forge, CI, branch or review semantics |
+| Drivers | Opaque operations on external systems (version control, CI, search, dependency materialisation); what they observe arrives as messages in a configured queue | Forge, CI, branch or review semantics |
 | Tools | Model-facing operations over the parts above | How a model should behave |
 
 Rules for kernel code:
 
-- No role, purpose, record kind, state name, event name, branch name or
-  workflow appears in kernel code. Documented defaults for mechanism
-  parameters are fine; example configurations may ship under `examples/`.
-- The kernel enforces integrity only: authentication of the actor,
-  compare-and-swap on revisions, append-only history, fail-closed validation
-  of declared schemas, bounded reads and writes, isolation and grants.
+- No role, purpose, queue name, message kind, state, lifecycle, branch name or
+  workflow appears in kernel code. Proposals, decisions, questions, answers,
+  notices, work items, reviews, audits and completion are all deployment
+  policy: queues the deployment declares, and the role policy text that says
+  what to do with their messages.
+- The kernel has no notion of a record's state. Nothing is "open", "accepted",
+  "answered" or "done" to the kernel. A message is appended, delivered and
+  acknowledged; anything more is a reading of messages that roles, the
+  dashboard or operator tooling make.
+- Documented defaults for mechanism parameters are fine; example
+  configurations ship under `examples/`.
+- The kernel enforces integrity only: authentication of the author,
+  append-only history, fail-closed validation of declared message schemas,
+  bounded reads and writes, isolation, grants, budgets, and the single holder
+  of a writable workspace (a resource property, not a role type).
 - Model-facing text states facts: which tools exist, what each does, what an
   outcome causes. Instructions about behaviour belong to role policy files.
-- The kernel does no work on a fixed cadence. A daemon sleeps until an event
-  it subscribes to is appended or the earliest pending instant is reached.
-  External systems that cannot notify the host are observed by a driver, which
-  turns observed changes into events; the cost of an unchanged observation is
-  one bounded driver call.
+- The kernel does no work on a fixed cadence. A daemon sleeps until a message
+  arrives in a queue that wakes it or the earliest delayed message becomes
+  due. External systems that cannot notify the host are observed by a driver;
+  the cost of an unchanged observation is one bounded driver call.
 
-## Objects
+## Queues
 
-An object is one record of a declared kind.
+A queue is declared by the deployment:
+
+```toml
+[queues.proposals]
+write = ["role:*", "host", "operator"]   # principals that may append
+read = ["role:writer", "operator"]       # principals that may read and acknowledge
+wake = ["role:writer"]                   # readers woken by a new message (subset of read)
+retain_days = 30                         # default 30; see Retention
+[queues.proposals.schema]                # optional; without it the body is any bounded JSON object
+title = {type = "string", max = 200, required = true}
+body = {type = "string", max = 65536}
+```
+
+- Principals: `role:<name>` (an authenticated unit of that role), `role:*`
+  (any role), `host` (host components acting through the host: the check
+  runner, drivers, operator tooling), `operator` (an operator-authenticated CLI
+  call). The kernel binds the author; a message never names its own author.
+- Schema field types: `string` (`max`, optional `values`), `integer`
+  (`min`/`max`), `boolean`, `instant` (aware ISO time), `digest` (64 lowercase
+  hex), `id` (a message id), `principal`, and `list` of one of these
+  (`max_items`). `required` fields must be present. Unknown keys, unknown
+  types and options that do not apply to a type refuse the configuration.
+
+### Messages
 
 ```json
-{"kind": "<kind>", "id": "<id>", "rev": 3, "state": "<state>",
- "fields": {...}, "author": "<principal>", "created_at": "...",
- "updated_at": "...", "transition": "<name of the transition that made rev>",
- "actor": "<principal>"}
+{"queue": "<name>", "seq": 41, "id": "<32 hex>", "author": "<principal>",
+ "at": "<instant>", "deliver_at": "<instant or null>", "refs": ["<id>", ...],
+ "body": {...}}
 ```
 
-- `id` is 32 lowercase hex, generated by the kernel or supplied by the caller
-  at creation. A supplied id is create-only: if any revision of that kind/id
-  exists, creation is refused before any write or event. `rev` starts at 1 and
-  increases by one per transition or field update. Every revision is stored
-  create-only under `objects/<kind>/<id>/<rev>.json`; the highest is current.
-- Writes take the project record lock, check `expected_rev` (compare-and-swap)
-  and validate the new revision fully before publishing it. A failed write
-  publishes nothing.
-- Principals: `role:<name>` (an authenticated unit of that role), `host`
-  (operator CLIs and drivers acting through the host), `operator`
-  (an operator-authenticated CLI call). `author` is the creating principal;
-  `holder` is an optional field-level principal declared by the kind.
+- A message is immutable and stored create-only. `seq` is gap-free per queue.
+  `id` is generated by the kernel, or supplied by the writer for idempotent
+  retries: a supplied id that already exists with the same author and content
+  returns the existing message, and with different content is refused.
+- `refs` lists ids of earlier messages in any queue the author may read. The
+  kernel records them and offers lookup in both directions; it attaches no
+  meaning to a reference. An answer, a decision, a revision or a withdrawal is
+  simply a later message that refers to an earlier one, in whatever queue the
+  deployment declares for it.
+- `deliver_at` delays delivery: the message is stored at once but is neither
+  delivered nor wakes anyone before that instant. Delayed messages are the only
+  timers: a deferral, a revisit or a deadline is a message to oneself or to
+  another role with a delivery time.
 
-### Kind declarations
+### Delivery
 
-```toml
-[kinds.note]
-states = ["open", "closed"]
-initial = "open"
-create = ["role:writer", "operator"]       # principals allowed to create
-fields.title = {type = "string", max = 200, required = true}
-fields.body = {type = "string", max = 65536}
-fields.status = {type = "string", values = ["open", "closed"]}
-fields.evidence = {type = "ref", kinds = ["check"]}
-fields.due = {type = "instant", event = "note.due"}
+- Each reader principal has a durable cursor per queue: the last acknowledged
+  `seq`. A read returns due messages after the cursor, bounded per page.
+  Acknowledgement is explicit and monotonic; unacknowledged messages are
+  delivered again.
+- Appending a due message, or a delayed message becoming due, touches
+  `wake/<role>` for each role in the queue's `wake` list. The service manager
+  watches it (systemd PathChanged, launchd WatchPaths, or the resident daemon's
+  own watch). The scheduler sleeps until the next wake or the earliest
+  `deliver_at`.
 
-[[kinds.note.transitions]]
-name = "close"
-from = ["open"]
-to = "closed"
-by = ["author", "role:reviewer"]
-requires = [{ref = "evidence", state = ["passed"]}]
-fields = ["body"]                           # fields the transition may set
-emits = "note.closed"                       # default: "<kind>.<name>"
-```
+### Retention
 
-- `states` is a non-empty list of names; `initial` is one of them.
-- Field types: `string` (with `max`, and optionally `values`, a non-empty list
-  of unique lowercase names; every stored value must be one of them), `integer` (with
-  `min`/`max`), `boolean`, `instant` (aware ISO time), `ref` (an object id,
-  optionally restricted to `kinds`), `digest` (exactly 64 lowercase hex
-  characters), `list` of one of these (with `max_items`), and `principal`.
-  `required` fields must be present at creation. An option that does not apply
-  to a field's type refuses the configuration.
-- On creation, a `ref` field declaring `kinds` must name an existing object of
-  one of those kinds; a missing, wrong-kind or corrupt target is denied. This
-  check applies to creation only; transition requirements are evaluated when a
-  transition is requested, as described below.
-- A transition names the states it leaves (`from`, or `["*"]`), the state it
-  enters (`to`), the principals that may make it (`by`; `author` and
-  `holder` resolve against the object), the fields it may set, its
-  requirements, and the event it emits.
-- A transition `to` the same state is an update. Without a declared
-  transition no field can change after creation.
-- Unknown keys, unknown types, undeclared states and unreachable `initial`
-  states refuse the configuration.
+A message is removed once every reader in `read` has acknowledged it,
+`retain_days` have passed, and no retained message refers to it. Removal is
+done by the kernel when it next appends to or reads that queue; it never runs
+on a timer of its own. Retention is per-queue configuration with the default
+above; there is no total cap.
 
-### Requirements
+## Host writers
 
-A requirement is a predicate the kernel evaluates when a transition is
-requested. The transition is refused, naming the failed requirement, unless
-every requirement holds.
+Host components write through the same append operation, into queues the
+deployment names in their configuration:
 
-```toml
-requires = [
-  {ref = "evidence", state = ["passed"], where = {snapshot = "$snapshot"}},
-  {field = "summary", present = true},
-]
-```
+- the check runner writes each finished check's result (command, snapshot,
+  status, evidence digests);
+- each driver writes what it observes (for example CI results or a changed
+  remote ref);
+- operator tooling and the dashboard write operator messages.
 
-- `ref`: the field holds an object id; that object must exist, be of an
-  allowed kind, be in one of `state`, and match `where`.
-- `where` compares fields of the referenced object with literals,
-  `$field.<name>` (a field of the transitioning object) or `$snapshot` (the
-  actor's current published snapshot id).
-- `field ... present`: the field holds a non-null value after the transition.
-
-The kernel has no other built-in predicates. Evidence that a check passed is
-an object of a kind the deployment declares and the check runner writes.
-
-## Events
-
-- Each object creation emits `<kind>.created` (or the kind's declared
-  `created_event`), and each transition emits its declared event. The event is
-  appended to the project's event log in the same locked operation that
-  publishes the revision.
-- Event record: `{"seq": n, "name": "...", "kind": "...", "id": "...",
-  "rev": r, "from": "...", "to": "...", "actor": "...", "at": "..."}`.
-  `seq` is a gap-free per-project sequence. The log is append-only and stored
-  create-only under `events/<seq>.json`.
-- Host components emit events through the same append operation:
-  check completion (`check.<status>` style names are policy chosen by the
-  check kind), driver notifications (the driver names its events), instants
-  reaching their time (the field's declared `event`).
-- Event names are lowercase dotted names. The kernel attaches no meaning to
-  any name.
-
-### Subscriptions and delivery
-
-```toml
-[roles.reviewer]
-subscribe = ["note.closed", "check.*"]
-```
-
-- A role subscribes to event names; `*` matches one dotted component, `**`
-  matches any non-empty suffix and is valid only as the final component.
-  A non-terminal `**` is refused and never matches.
-- Each role has a durable cursor (the last acknowledged `seq`). A unit reads
-  the events after its cursor that match its subscriptions, bounded per page,
-  and acknowledges explicitly. Unacknowledged events are delivered again.
-- Appending an event that matches a role's subscription marks the role as
-  woken: the kernel touches `wake/<role>`, which the service manager watches
-  (systemd PathChanged, launchd WatchPaths, or the resident daemon's own
-  watch). No role is woken by a timer except at a declared instant.
-
-## Instants
-
-A field of type `instant` with an `event` name schedules that event for that
-instant. The scheduler keeps the earliest pending instant and sleeps until it,
-or until the next event, whichever comes first. A value is armed when first
-declared: a later revision carrying the same value leaves its pending timer
-alone, while a changed or removed value cancels that timer. A transition may
-clear an optional instant with a null value; a required instant cannot be
-cleared. When the instant
-passes, the kernel appends the event once and treats the value as consumed;
-later revisions carrying it forward do not arm it again. An unused value that is
-deliberately declared again is armed anew. The firing records consumption of
-that exact value while its reserved sequence and full event (including the
-timestamp) still guarantee publication; if the process stops or clearing the
-timer fails, recovery repeats that exact event without duplicating it, marks the
-value consumed and clears any stale timer.
+None of these queue names, and no message vocabulary, is known to the kernel.
 
 ## Finishing a unit
 
@@ -187,60 +129,42 @@ declared per role:
 [roles.writer.outcomes]
 continue = {readmit = true}
 wait = {readmit = false}
-done = {readmit = false}
 ```
 
 - `readmit = true` asks the scheduler to admit the role again as soon as a
-  slot is free. Otherwise the role sleeps until an event or instant wakes it.
-- The kernel attaches no other meaning to an outcome name. Requirements on
-  finishing (for example "a check object must have passed") are expressed as
-  requirements on the transitions the role makes, not on the outcome.
+  slot is free. Otherwise the role sleeps until a message wakes it.
+- A unit that is re-admitted on unchanged input and makes no progress is a
+  no-progress unit whatever outcome it chose; the configured no-progress
+  allowance, fresh-session recovery and parking apply.
+- The kernel attaches no other meaning to an outcome name.
 
 ## Tools
 
-The model-facing object and event tools are generic:
-
 | Tool | Effect |
 |---|---|
-| `objects_create(kind, fields, id?)` | Create an object of a declared kind if the caller may create it, with an optional caller-supplied id |
-| `objects_transition(kind, id, transition, expected_rev, fields)` | Make a declared transition; refused with the failed requirement named |
-| `objects_read(kind, id, rev?)` | Read the current or a given revision |
-| `objects_list(kind, state?, where?, cursor?, limit?)` | List current objects, bounded and paged |
-| `events_read(cursor?, limit?)` | Read subscribed events after the role's cursor, bounded |
-| `events_ack(seq)` | Advance the role's cursor |
+| `queue_write(queue, body, refs?, deliver_at?, id?)` | Append a message if the role may write to the queue |
+| `queue_read(queue, cursor?, limit?)` | Read due messages after the role's cursor (or after `cursor`), bounded; returns `next`, `head`, `more` |
+| `queue_ack(queue, seq)` | Advance the role's cursor |
+| `message_read(id)` | Read one message the role may read |
+| `message_refs(id, direction)` | List messages the role may read that refer to `id`, or that `id` refers to, bounded and paged |
 
-Grants: `objects` and `events` capabilities in the role's capability list;
-per-kind and per-transition principals in the kind declaration. No role holds
-either grant by default. The host binds the acting principal as `role:<name>`
-and binds every event read and acknowledgement to that role; tools carry no
-actor or role argument.
-
-Object ids are 32-hex strings: a caller-supplied `id` must match that grammar
-and be unused for the kind, while an absent `id` is generated by the kernel.
-`objects_list` orders by id;
-`cursor` is the last id of the previous page (`next`, exclusive), `state`
-filters by declared state name and `where` matches exact field values.
-`events_read` starts after the role's durable cursor, or after `cursor` (a
-previous page's `next`) when supplied, and returns `next`, `head` and `more`.
-Both pages default to 64 rows and are capped at 512; `objects_read` and
-`events_ack` refuse out-of-range revisions and sequences.
+Grants: the `queues` capability in the role's capability list, and the
+per-queue `write` and `read` principals. No role holds either by default. The
+host binds the acting principal; tools carry no actor or role argument. Pages
+default to 64 messages and are capped at 512.
 
 ## Drivers
 
 A driver is an operator-configured command speaking a JSON request/response
 protocol. The kernel passes requests and returns responses without
 interpreting provider concepts. A driver that observes an external system
-reports changes as events (`events` in its response); the kernel appends them
-under the driver's configured event prefix. Version control, CI, pull
-requests, publication and review are driver operations plus deployment
-policy; none of them is a kernel concept.
+returns observations, which the kernel appends to the driver's configured
+queue. Version control, CI, pull requests, publication and review are driver
+operations plus deployment policy; none of them is a kernel concept.
 
 ## Bounds
 
 Bounds are either fixed mechanism limits or configuration with documented
-defaults: object and field sizes, page sizes, event page sizes, log retention.
-Reads are bounded per response, never in total reachability. Current mechanism
-defaults are a 1 MiB + 4 KiB object record, a 64 KiB event and 100,000,000
-revisions per object; tool pages default to 64 rows and are capped at 512.
-A tool field map holds at most 64 properties; declared field types and their
-own bounds are authoritative.
+defaults: message and field sizes, page sizes, retention. Reads are bounded
+per response, never in total reachability. Current mechanism defaults are a
+1 MiB message body and pages of 64 messages capped at 512.
