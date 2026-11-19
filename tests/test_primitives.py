@@ -475,13 +475,16 @@ class FileTests(unittest.TestCase):
                 relative_parts(path)
 
     def test_windows_reserved_components_are_refused_with_or_without_extension(self):
-        reserved = ("CON", "con", "PRN", "AUX", "NUL",
+        reserved = ("CON", "con", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
                     *(f"COM{n}" for n in range(1, 10)),
                     *(f"LPT{n}" for n in range(1, 10)),
+                    *(f"COM{d}" for d in "\u00b9\u00b2\u00b3"),
+                    *(f"LPT{d}" for d in "\u00b9\u00b2\u00b3"),
                     "nul.txt", "NUL.tar.gz", "Con.fig", "dir/AUX.log",
-                    "ok/com1.txt/data", "NUL .txt")
+                    "ok/com1.txt/data", "NUL .txt", "conin$.cfg", "COM\u00b9.log",
+                    "dir/LPT\u00b2")
         ordinary = ("console", "COM0", "COM10", "LPT", "NULa", "nul-like",
-                    "a.nul", "dir/a.con.txt", "\u65e5/\u672c")
+                    "CONIN", "CONOUT", "a.nul", "dir/a.con.txt", "\u65e5/\u672c")
         with patch("mizu.fs._platform.IS_WINDOWS", True):
             for path in reserved:
                 with self.subTest(path=path), self.assertRaises(Denied):
