@@ -61,13 +61,13 @@ append.
 `stage2_view.py` is an operator-run, read-only projection of the queues above.
 It calls `QueueStore.read` with the `operator` principal for `proposals`,
 `decisions`, `questions`, `answers` and `notices`, then joins decisions and
-revisits to proposals and answers to questions by message refs. It prints JSON
-with each proposal's decision and due delayed revisits, each question's answer,
-the notice bodies, and every queue's `head` and `delayed` flag. Reads use an
-explicit cursor, bounded pages and a page-count bound; the command never
-acknowledges or appends, so repeated reads at the same instant agree. A message
-that is not yet due stops its queue's read and is reported as `delayed` rather
-than skipped.
+revisits to proposals and answers to questions or converted proposals by message
+refs. It prints JSON with each proposal's decision, answer and due delayed
+revisits, each question's answer, the notice bodies, and every queue's `head`
+and `delayed` flag. Reads use an explicit cursor, bounded pages and a page-count
+bound; the command never acknowledges or appends, so repeated reads at the same
+instant agree. A message that is not yet due stops its queue's read and is
+reported as `delayed` rather than skipped.
 
 ```sh
 python3 examples/development/stage2_view.py config/config.toml --project NAME [--at 2099-01-01T00:00:00+00:00]

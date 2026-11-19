@@ -13,7 +13,7 @@ are not silently skipped.
 
 The projection contains only fields carried by messages:
 
-    {"proposals": [{"id", "title", "body", "decision"?,
+    {"proposals": [{"id", "title", "body", "decision"?, "answer"?,
                     "revisits": [{"id", "deliver_at", "body"}, ...]}, ...],
      "questions": [{"id", "question", "context"?, "default"?,
                     "answer"?}, ...],
@@ -24,9 +24,10 @@ Optional message fields are omitted when absent. ``decision`` is the ordinary
 decision referring to a proposal (its ``body`` fields ``action``, ``reason``
 and, when present, ``revisit``); ``revisits`` holds the delayed messages
 referring to it that are due at ``now``. ``answer`` is the answering message's
-body. An ambiguous reference (more than one deciding decision or answer) is
-refused. The command is for an operator to inspect the project; it writes
-nothing and grants no capability.
+body, attached to the question or converted proposal named by its ``refs``.
+An ambiguous reference (more than one deciding decision or answer for one
+target) is refused. The command is for an operator to inspect the project;
+it writes nothing and grants no capability.
 """
 from __future__ import annotations
 
@@ -132,6 +133,9 @@ def project_view(project, now: str | None = None) -> dict:
             fields["decision"] = _fields(deciding, "decisions",
                                          ("action", "reason", "revisit"),
                                          ("action", "reason"))
+        answering = _one(answers, proposal_id, "answer")
+        if answering is not None:
+            fields["answer"] = dict(_body(answering, "answers"))
         fields["revisits"] = [
             {"id": item["id"], "deliver_at": item["deliver_at"],
              "body": dict(_body(item, "decisions"))}

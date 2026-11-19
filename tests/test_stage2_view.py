@@ -9,8 +9,10 @@ from unittest import mock
 from pathlib import Path
 
 import support  # noqa: F401  (puts src on the path)
-from support import Fixture
+from support import Fixture, stored_question_insight
+from mizu import operator_records as records
 from mizu.config import load
+from mizu.fs import canonical
 from mizu.kernel import QueueStore
 from mizu.project import Project
 
@@ -112,6 +114,41 @@ class Stage2View(Fixture):
 
         after = stage2_view.project_view(self.view_project, now=AFTER_REVISIT)
         self.assertEqual(after, due)
+
+    def test_converted_insight_answer_is_shown_on_its_proposal(self):
+        insight = stored_question_insight(self.project)
+        subject = {"type": "insight", "id": insight["id"], "rev": insight["rev"]}
+        answer = records.write(self.project, event_id="insight-answer", kind="answer",
+                               body="Legacy insight answer", subject=subject)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = convert_legacy.main([str(self.file), "--project", "sample", "--apply"])
+        self.assertEqual(code, 0)
+
+        view = stage2_view.project_view(self.view_project, now=REVISIT_AT)
+        proposals = {item["id"]: item for item in view["proposals"]}
+        proposal = proposals[self.proposal_id(insight["id"])]
+        self.assertEqual(proposal["answer"], {
+            "body": "Legacy insight answer",
+            "legacy_addressee": "worker",
+            "legacy_subject": canonical(subject).decode(),
+            "legacy_writer": "operator.cli",
+            "legacy_id": answer["record"]["id"],
+            "legacy_digest": answer["record_digest"],
+            "legacy_action": "publish"})
+        self.assertEqual(view["questions"], [
+            {"id": QUESTION_ID, "question": "Which source?", "context": "Stage 2",
+             "default": "kernel queues", "answer": {"body": "Use the declared queues."}}])
+        self.assertEqual(view, stage2_view.project_view(self.view_project, now=REVISIT_AT))
+
+    def test_ambiguous_proposal_answer_is_refused(self):
+        proposal_id = self.proposal_id(ACCEPT_ID)
+        for body in ("First answer", "Second answer"):
+            self.store.append("answers", {"body": body}, "operator", refs=[proposal_id],
+                              now=REVISIT_AT)
+        with self.assertRaisesRegex(stage2_view.ViewError,
+                                    f"Ambiguous answer for {proposal_id}"):
+            stage2_view.project_view(self.view_project, now=REVISIT_AT)
 
     def test_repeated_projection_acknowledges_nothing(self):
         first = stage2_view.project_view(self.view_project, now=REVISIT_AT)
