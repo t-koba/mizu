@@ -15,6 +15,7 @@ from .errors import Denied
 from .fs import canonical, digest
 
 _NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
+_HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _ACTIONS = frozenset(("accept", "modify", "defer", "reject", "withdraw"))
 _STATES = {"accept": "accepted", "modify": "modified", "defer": "deferred",
            "reject": "rejected", "withdraw": "withdrawn"}
@@ -32,6 +33,16 @@ def principal(value: Any) -> str:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise Denied("Unrepresentable kernel principal")
     return f"role:{name}"
+
+
+def insight_object_id(record: Mapping[str, Any]) -> str:
+    """Map one legal legacy insight ID to the kernel's fixed 32-hex identity."""
+    legacy = record["id"]
+    if not isinstance(legacy, str) or not legacy:
+        raise Denied("Invalid insight projection identity")
+    if _HEX_ID.fullmatch(legacy):
+        return legacy
+    return digest(canonical(["kernel-shadow", "insight", legacy]))[:32]
 
 
 def insight_fields(record: Mapping[str, Any]) -> dict:
@@ -64,7 +75,7 @@ def decision_fields(record: Mapping[str, Any]) -> dict:
     """Map one recorded decision to the declared kernel decision fields."""
     if record.get("action") not in _ACTIONS:
         raise Denied("Action is not a kernel decision")
-    fields = {"insight": record["id"], "revision": record["rev"],
+    fields = {"insight": insight_object_id(record), "revision": record["rev"],
               "action": record["action"], "reason": record["reason"]}
     scope = record.get("scope")
     if scope is not None:
@@ -116,7 +127,7 @@ class KernelShadow:
             mismatches.append(text)
 
         try:
-            current = self.objects.read("insight", insight_id)
+            current = self.objects.read("insight", insight_object_id(insight))
         except Denied as exc:
             mismatch(f"insight object unavailable: {type(exc).__name__}")
             current = None
@@ -148,14 +159,14 @@ class KernelShadow:
         return result
 
     def submitted(self, record: Mapping[str, Any]) -> None:
-        object_id = record["id"]
+        object_id = insight_object_id(record)
         if self.objects.revisions("insight", object_id):
             return
         self.objects.create("insight", insight_fields(record), principal(record["source"]),
                             object_id=object_id)
 
     def revised(self, record: Mapping[str, Any]) -> None:
-        object_id = record["id"]
+        object_id = insight_object_id(record)
         if record.get("rev", 1) < 2:
             return
         self.submitted(record)
@@ -175,7 +186,8 @@ class KernelShadow:
         if action not in _ACTIONS:
             return
         self.submitted(insight)
-        current = self.objects.read("insight", insight["id"])
+        object_id = insight_object_id(insight)
+        current = self.objects.read("insight", object_id)
         if current["state"] == "pending":
             fields = {}
             if action == "defer":
@@ -187,7 +199,7 @@ class KernelShadow:
             if fields is not None:
                 actor = (principal(insight["source"]) if action == "withdraw"
                          else principal(insight.get("addressee", "writer")))
-                self.objects.transition("insight", insight["id"], action,
+                self.objects.transition("insight", object_id, action,
                                         expected_rev=current["rev"], fields=fields, actor=actor)
         object_id = decision_object_id(record)
         fields = decision_fields(record)

@@ -9,7 +9,7 @@ import support  # noqa: F401  (puts src on the path)
 from mizu.cli import _cmd_kernel_shadow, parser
 from mizu.config import load
 from mizu.errors import Denied
-from mizu.kernel_shadow import decision_object_id
+from mizu.kernel_shadow import decision_object_id, insight_object_id
 from mizu.project import initialize
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,6 +105,23 @@ class KernelShadowProjection(unittest.TestCase):
         mirrored = self.project.kernel_objects.read("insight", insight["id"])
         self.assertEqual(mirrored["state"], "withdrawn")
         self.assertEqual(mirrored["actor"], "role:writer")
+
+    def test_non_hex_legacy_ids_project_under_deterministic_kernel_ids(self):
+        insight = self.submit("topic-one")
+        kernel_id = insight_object_id(insight)
+        self.assertEqual(len(kernel_id), 32)
+        self.assertRegex(kernel_id, r"\A[0-9a-f]{32}\Z")
+        self.assertNotEqual(kernel_id, insight["id"])
+        mirrored = self.project.kernel_objects.read("insight", kernel_id)
+        self.assertEqual(mirrored["fields"]["title"], insight["title"])
+        decision = self.project.insights.decide(
+            insight["id"], "accept", "Accepted", "", "test-run",
+            expected_rev=1, work_item_intent="none")
+        recorded = self.project.kernel_objects.read("decision", decision["decision_key"])
+        self.assertEqual(recorded["fields"]["insight"], kernel_id)
+        self.assertEqual(self.project.kernel_objects.read("insight", kernel_id)["state"], "accepted")
+        self.assertTrue(self.project.insights.kernel_shadow.verify(insight, decision)["ok"])
+        self.assertEqual(self.project.insights.read(insight["id"])["id"], "topic-one")
 
     def test_projection_failure_does_not_change_legacy_authority(self):
         with patch.object(self.project.kernel_objects, "create", side_effect=Denied("derived failure")):
