@@ -7,6 +7,8 @@ queue declarations and role policy on the kernel
 includes it from its own configuration and changes it freely. The kernel reads
 nothing here specially. The stage-2 meanings are written in
 [policies/stage2.md](policies/stage2.md).
+The remaining runtime authority switch is planned in
+[stage2_authority.md](stage2_authority.md).
 
 `queues.toml` grows stage by stage as
 [docs/os-migration.md](../../docs/os-migration.md) moves each workflow out of
