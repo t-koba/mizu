@@ -196,8 +196,9 @@ def parse_queues(raw: Any) -> Mapping[str, Queue]:
         # non-role principal cannot name one, so refuse it rather than
         # silently never waking anybody.
         for principal in wake:
-            if not principal.startswith("role:") or not allows(read, principal):
-                raise ConfigError(f"{where}.wake must name readers that are roles")
+            if (principal == "role:*" or not principal.startswith("role:")
+                    or not allows(read, principal)):
+                raise ConfigError(f"{where}.wake must name concrete reader roles")
         days = spec.get("retain_days", DEFAULT_RETAIN_DAYS)
         if type(days) is not int or days < 1:
             raise ConfigError(f"{where}.retain_days must be a positive integer")

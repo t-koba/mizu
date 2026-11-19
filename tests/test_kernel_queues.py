@@ -81,6 +81,7 @@ class QueueDeclarations(unittest.TestCase):
             base + 'wake = ["role:beta"]\n',
             base + 'wake = ["host"]\n',
             base + 'wake = ["role:*"]\n',
+            '[queues.q]\nwrite = ["host"]\nread = ["role:*"]\nwake = ["role:*"]\n',
             base + 'retain_days = 0\n',
             base + 'retain_days = -1\n',
             base + 'retain_days = "3"\n',
