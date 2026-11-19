@@ -44,6 +44,10 @@ from .kernel.queues import PAGE_MAX, allows
 PROPOSALS = "proposals"
 DECISIONS = "decisions"
 RECEIPTS = "receipts"
+#: Message-kind labels are part of the stable conversion identity, not queue names.
+PROPOSAL_KIND = "proposal"
+DECISION_KIND = "decision"
+REVISIT_KIND = "revisit"
 QUEUES = (PROPOSALS, DECISIONS, RECEIPTS)
 #: The complete example conversion gate, including the record families still
 #: owned by other stage-2 slices until their own switches.
@@ -708,7 +712,7 @@ class DecisionQueueWriter:
         if len(canonical(body)) > MAX_FRAME:  # transport frame, no new knob
             raise AdapterError("Proposal envelope exceeds the transport frame")
         self.project.kernel_queues.append(
-            PROPOSALS, body, "operator", id=message_id(PROPOSALS, identity, record["rev"]))
+            PROPOSALS, body, "operator", id=message_id(PROPOSAL_KIND, identity, record["rev"]))
 
     def decide(self, current, event, event_id: str) -> None:
         """Append the declared decision (and delayed revisit) for one event."""
@@ -716,7 +720,7 @@ class DecisionQueueWriter:
         action = event.get("action")
         if action not in DELIVERED_ACTIONS:
             raise AdapterError("Decision producer requires a delivered action")
-        proposal_id = message_id(PROPOSALS, current["id"], current["rev"])
+        proposal_id = message_id(PROPOSAL_KIND, current["id"], current["rev"])
         # A decision binds the exact proposal it answers. Read the stored
         # message rather than re-deriving metadata: evidence may have been
         # attached after the proposal was written, and conversion binds both
@@ -754,9 +758,9 @@ class DecisionQueueWriter:
         identity = current["id"]
         rev = current["rev"]
         store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
-                     id=message_id(DECISIONS, identity, rev))
+                     id=message_id(DECISION_KIND, identity, rev))
         if action == "defer":
             instant = _revisit_instant(event.get("revisit"))
             if instant is not None:
                 store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
-                             deliver_at=instant, id=message_id("revisit", identity, rev))
+                             deliver_at=instant, id=message_id(REVISIT_KIND, identity, rev))

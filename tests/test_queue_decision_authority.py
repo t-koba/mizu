@@ -26,6 +26,7 @@ import test_stage2_decision_adapter as stage2_tests  # noqa: E402  (fixture help
 ACCEPT_ID = stage2_tests.ACCEPT_ID
 ACTIONS = stage2_tests.ACTIONS
 PENDING_ID = stage2_tests.PENDING_ID
+OTHER_ID = stage2_tests.OTHER_ID
 
 
 class QueueDecisionAuthority(unittest.TestCase):
@@ -172,7 +173,7 @@ class QueueDecisionAuthority(unittest.TestCase):
         self.assertEqual(self.project.kernel_queues.read("proposals", "operator")["head"],
                          before_proposals + 1)
         self.assertEqual(queue[-1]["id"],
-                         queue_decision_delivery.message_id("proposals", identity, 1))
+                         queue_decision_delivery.message_id(queue_decision_delivery.PROPOSAL_KIND, identity, 1))
         page = decision_delivery.pending(self.project, role)
         pending = [event for event in page["events"] if event.get("insight") == identity]
         self.assertEqual(len(pending), 1)
@@ -196,7 +197,7 @@ class QueueDecisionAuthority(unittest.TestCase):
         self.assertEqual(self.project.kernel_queues.read("decisions", "operator")["head"],
                          before_decisions + 1)
         self.assertEqual(decisions[-1]["id"],
-                         queue_decision_delivery.message_id("decisions", identity, 1))
+                         queue_decision_delivery.message_id(queue_decision_delivery.DECISION_KIND, identity, 1))
         page = decision_delivery.pending(self.project, role)
         decision = [event for event in page["events"] if event.get("insight") == identity]
         self.assertEqual(len(decision), 1)
@@ -267,9 +268,9 @@ class QueueDecisionAuthority(unittest.TestCase):
         self.assertEqual(self.project.kernel_queues.read("decisions", "operator")["head"],
                          before + 2)
         ids = {row["id"] for row in decisions}
-        self.assertIn(queue_decision_delivery.message_id("decisions", identity, 1), ids)
+        self.assertIn(queue_decision_delivery.message_id(queue_decision_delivery.DECISION_KIND, identity, 1), ids)
         self.assertIn(queue_decision_delivery.message_id("revisit", identity, 1), ids)
-        proposal_id = queue_decision_delivery.message_id("proposals", identity, 1)
+        proposal_id = queue_decision_delivery.message_id(queue_decision_delivery.PROPOSAL_KIND, identity, 1)
         delayed = [row for row in decisions
                    if row["deliver_at"] == stage2_tests.REVISIT_AT and row["refs"] == [proposal_id]]
         self.assertEqual(len(delayed), 1)
@@ -289,6 +290,30 @@ class QueueDecisionAuthority(unittest.TestCase):
             self.project.insights.acknowledge_decisions("worker", [decision])
         self.assertEqual(self.receipts(), [])
         self.assertFalse((self.project.root / "decision-receipts" / "worker").exists())
+
+    def test_converted_insight_can_be_decided_after_activation(self):
+        """Conversion and live writes must share one stable message identity."""
+        self.activate()
+        proposal_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.PROPOSAL_KIND, OTHER_ID, 1)
+        before = {message["id"] for message in self.project.kernel_queues.read(
+            "proposals", "operator", cursor=0, now=stage2_verify.NOW)["messages"]}
+        self.assertIn(proposal_id, before)
+
+        self.project.insights.decide(
+            OTHER_ID, "accept", "Decide converted insight", "", "run-converted",
+            expected_rev=1, work_item_intent="none")
+
+        decision_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, OTHER_ID, 1)
+        decisions = self.project.kernel_queues.read(
+            "decisions", "operator", cursor=0, now=stage2_verify.NOW)["messages"]
+        row = next(message for message in decisions if message["id"] == decision_id)
+        self.assertEqual(row["refs"], [proposal_id])
+        self.assertEqual(decisions.count(row), 1)
+        page = decision_delivery.pending(self.project, self.role)
+        event = next(event for event in page["events"] if event.get("insight") == OTHER_ID)
+        self.assertEqual(event["action"], "accept")
 
     def test_complete_read_refuses_a_delayed_page_but_userland_keeps_prefix(self):
         """One reader serves both modes: only the administrative one fails closed."""
@@ -328,8 +353,10 @@ class QueueDecisionAuthority(unittest.TestCase):
         rows = self.project.kernel_queues.read(
             "decisions", "operator", now=stage2_verify.NOW)["messages"]
         ids = [row["id"] for row in rows]
-        revisit_id = queue_decision_delivery.message_id("revisit", defer_id, 1)
-        accept_message = queue_decision_delivery.message_id("decision", accept_id, 1)
+        revisit_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.REVISIT_KIND, defer_id, 1)
+        accept_message = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, accept_id, 1)
         self.assertEqual(rows[ids.index(revisit_id)]["deliver_at"], latest)
         self.assertLess(ids.index(revisit_id), ids.index(accept_message))
 

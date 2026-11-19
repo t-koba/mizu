@@ -71,6 +71,8 @@ from mizu.insights import CorruptDecisionReceipt
 from mizu.kernel.queues import allows
 from mizu.kernel_shadow import instant_value
 from mizu.project import Project
+from mizu.queue_decision_delivery import (DECISION_KIND, PROPOSAL_KIND, REVISIT_KIND,
+                                          message_id)
 from mizu.shared_records import (RECORD_BYTES, RECEIPT_BYTES, SharedRecords,
                                  _name, _token)
 
@@ -129,7 +131,9 @@ def _record_receipt_id(role: str, token: str) -> str:
 
 def _message_id(kind: str, identity: str, rev: int | str) -> str:
     """Stable id shared with the runtime producer, so conversion and live writes agree."""
-    from mizu.queue_decision_delivery import message_id
+    if kind not in (PROPOSAL_KIND, DECISION_KIND, REVISIT_KIND, "receipt", "question",
+                    "answer", "notice"):
+        raise ValueError(f"Unknown conversion message kind {kind!r}")
     return message_id(kind, identity, rev)
 
 
@@ -748,7 +752,7 @@ def _plan(project) -> tuple[list[dict], dict]:
                     or record.get("title") != summary.get("title")
                     or _revision(record.get("rev", 1), "Record revision") != rev):
                 raise ConversionError(f"Ambiguous legacy insight {insight_id} at revision {rev}")
-            proposal_id = _message_id("proposal", insight_id, rev)
+            proposal_id = _message_id(PROPOSAL_KIND, insight_id, rev)
             proposal_index[(insight_id, rev)] = proposal_id
             proposal_metadata = _legacy_metadata(summary, record, None, proposal_decl)
             add({"queue": PROPOSALS, "id": proposal_id, "author": PROPOSAL_AUTHOR,
@@ -774,12 +778,12 @@ def _plan(project) -> tuple[list[dict], dict]:
             if action == "defer":
                 revisit = _text(decision.get("revisit"), decision_decl.fields["revisit"], "Revisit")
                 body["revisit"] = revisit
-            add({"queue": DECISIONS, "id": _message_id("decision", insight_id, rev),
+            add({"queue": DECISIONS, "id": _message_id(DECISION_KIND, insight_id, rev),
                  "author": DECISION_AUTHOR, "refs": (proposal_id,), "body": dict(body)})
             if action == "defer":
                 instant = _revisit(decision.get("revisit"), "Revisit")
                 if instant is not None:
-                    add({"queue": DECISIONS, "id": _message_id("revisit", insight_id, rev),
+                    add({"queue": DECISIONS, "id": _message_id(REVISIT_KIND, insight_id, rev),
                          "author": DECISION_AUTHOR, "refs": (proposal_id,),
                          "deliver_at": instant, "body": dict(body)})
         if not page["has_more"]:
@@ -801,7 +805,7 @@ def _plan(project) -> tuple[list[dict], dict]:
         _identity(archived.get("id"), "Archived insight id")
         if _revision(archived.get("rev", 1), "Archived insight revision") != rev:
             raise ConversionError("Ambiguous legacy archived insight revision")
-        proposal_id = _message_id("proposal", insight_id, rev)
+        proposal_id = _message_id(PROPOSAL_KIND, insight_id, rev)
         proposal_index[(insight_id, rev)] = proposal_id
         add({"queue": PROPOSALS, "id": proposal_id, "author": PROPOSAL_AUTHOR,
              "refs": (), "body": {
