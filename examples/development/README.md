@@ -78,3 +78,21 @@ python3 examples/development/stage2_view.py config/config.toml --project NAME [-
 `--at` is an aware ISO instant used for delayed delivery; without it the kernel
 uses the current time. The reader imports no legacy insight or operator-record
 module and does not change runtime authority or routing.
+
+## Conversion gate
+
+`stage2_verify.py` is an operator-run, read-only migration gate. It recomputes
+the current plan with `convert_legacy._plan` and compares it with the five
+conversion queues on queue, id, author, body, ordered refs and delivery
+instant. Reads use the `operator` principal, an explicit cursor, bounded pages
+and a fixed far-future instant so delayed revisits are included; nothing is
+appended or acknowledged. Missing, extra or changed messages, duplicate ids
+and unreadable queues fail the gate.
+
+```sh
+python3 examples/development/stage2_verify.py config/config.toml --project NAME
+```
+
+It prints a JSON report (`project`, per-queue `checked` counts, `ok`,
+`differences`) and exits 0 on equality, 2 on refusal or mismatch. It writes
+nothing to legacy stores and changes no runtime authority.
