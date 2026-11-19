@@ -118,3 +118,6 @@ ack_token = {type = "digest", required = true}
 legacy_role = {type = "string", max = 256, required = true}
 legacy_action = {type = "string", values = ["accept", "modify", "defer", "reject", "pending"], required = true}
 legacy_reason = {type = "string", values = ["malformed_json", "invalid_receipt", "invalid_timestamp"]}
+# Fixed-width 8-hex enumeration index preserving legacy diagnostic order:
+# decision-history glob order then pending-envelope order.
+legacy_order = {type = "string", max = 8}

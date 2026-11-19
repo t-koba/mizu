@@ -50,10 +50,13 @@ over another message.
 
 The host writes converted legacy decision receipts to `receipts`; every role,
 the operator and the host may read them. A message carries the legacy token,
-role, inferred action and, for a corrupt receipt, its bounded reason. Receipts
+role, inferred action, fixed-width hex enumeration order and, for a corrupt
+receipt, its bounded reason. The order preserves legacy diagnostic order
+(decision-history glob order then pending-envelope order). Receipts
 are conversion facts, not kernel state: they do not grant, deny or acknowledge
 anything by themselves. A queue-backed reader may suppress the matching
-token's pending decision or attention and surface the legacy diagnostic.
+token's pending decision or attention and surface the legacy diagnostic in
+that order.
 
 ## Boundaries
 

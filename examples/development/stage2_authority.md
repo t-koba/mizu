@@ -80,9 +80,9 @@ cursor.
 
 Conversion retains the metadata this reconstruction needs: proposal instant,
 kind and urgency for `insight.pending` payloads, the declared `receipts`
-messages for per-token settlement and corrupt reasons, and the decision's exact
-history event id, decision key, run and canonical history record for
-acknowledgement tokens. The event id is the `decision-history` filename: for
+messages for per-token settlement, corrupt reasons and enumeration order, and
+the decision's exact history event id, decision key, run and canonical history
+record for acknowledgement tokens. The event id is the `decision-history` filename: for
 deferrals it is not the decision key. The whole record is retained because
 work-item-bearing decisions carry further token-bound fields. Messages whose
 metadata is malformed or does not bind its proposal are refused before any
@@ -91,11 +91,12 @@ event is built. Legacy page calls appear only in the comparison tests.
 Because the queue has no per-message filter and any configured role can be an
 insight addressee, the example `queues.toml` grants every role read of
 `proposals` and `receipts`; writes and wakes are unchanged. Conversion binds
-each receipt token to a current legacy candidate to infer its action, then
-uses the exact legacy receipt reader to classify settlement or one of the
-three corrupt reasons. The adapter suppresses settled candidates before
-applying limits and returns the legacy diagnostic shape for corrupt ones under
-the legacy cap; it never opens a legacy receipt file. This read slice does
+each receipt token to a current legacy candidate in legacy diagnostic order to
+infer its action and fixed-width hex order, then uses the exact legacy receipt
+reader to classify settlement or one of the three corrupt reasons. The adapter
+suppresses settled candidates before applying limits and returns the legacy
+diagnostic shape for corrupt ones ordered by that enumeration under the legacy
+cap; it never opens a legacy receipt file. This read slice does
 **not** switch a runtime call site, add a flag, dual-write or serve a
 shared-authority page; the shared store remains a later slice of the same
 switch.

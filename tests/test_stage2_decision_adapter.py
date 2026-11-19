@@ -264,10 +264,18 @@ class Stage2DecisionAdapter(Fixture):
         self.assertEqual(len(report["receipts"]), 2)
         stored = self.project.kernel_queues.read("receipts", "operator")["messages"]
         body_by_token = {message["body"]["ack_token"]: message["body"] for message in stored}
-        self.assertEqual(body_by_token, {
-            item["ack_token"]: {"ack_token": item["ack_token"], "legacy_role": "worker",
-                                "legacy_action": action, "legacy_reason": "malformed_json"}
-            for item, action in ((decision, "accept"), (pending, "pending"))})
+        self.assertEqual(set(body_by_token), {decision["ack_token"], pending["ack_token"]})
+        candidates = convert_legacy._receipt_candidates(self.project, "worker")
+        for item, action in ((decision, "accept"), (pending, "pending")):
+            body = body_by_token[item["ack_token"]]
+            self.assertEqual(body["ack_token"], item["ack_token"])
+            self.assertEqual(body["legacy_role"], "worker")
+            self.assertEqual(body["legacy_action"], action)
+            self.assertEqual(body["legacy_reason"], "malformed_json")
+            self.assertRegex(body["legacy_order"], r"[0-9a-f]{8}\Z")
+            self.assertEqual(body["legacy_order"], candidates[item["ack_token"]][2])
+            self.assertEqual(set(body), {"ack_token", "legacy_role", "legacy_action",
+                                         "legacy_reason", "legacy_order"})
         want, got = self.parity_page()
         expected = [{"event": item["event"], "ack_token": item["ack_token"],
                      "action": action, "reason": "malformed_json"}
@@ -277,6 +285,38 @@ class Stage2DecisionAdapter(Fixture):
         delivered = [event.get("insight") for event in got["events"]]
         self.assertNotIn(ACCEPT_ID, delivered)
         self.assertNotIn(PENDING_ID, delivered)
+
+    def test_two_corrupt_decisions_match_legacy_bytes_in_legacy_order(self):
+        """Two corrupt decision receipts stay byte-identical in legacy order."""
+        before = self.legacy_page()
+        first = next(event for event in before["events"]
+                     if event.get("insight") == ACCEPT_ID)
+        second = next(event for event in before["events"]
+                      if event.get("insight") == DEFER_ID)
+        parent = self.project.root / "decision-receipts" / "worker"
+        parent.mkdir(parents=True, exist_ok=True)
+        for event in (first, second):
+            (parent / f"{event['ack_token']}.json").write_bytes(b"{invalid-json")
+        report = self.convert()
+        self.assertEqual(len(report["receipts"]), 2)
+        stored = self.project.kernel_queues.read("receipts", "operator")["messages"]
+        orders = {message["body"]["ack_token"]: message["body"]["legacy_order"]
+                  for message in stored}
+        self.assertEqual(set(orders), {first["ack_token"], second["ack_token"]})
+        for order in orders.values():
+            self.assertRegex(order, r"[0-9a-f]{8}\Z")
+        candidates = convert_legacy._receipt_candidates(self.project, "worker")
+        for token, order in orders.items():
+            self.assertEqual(order, candidates[token][2])
+        want, got = self.parity_page()
+        self.assertEqual(canonical(want["diagnostics"]), canonical(got["diagnostics"]))
+        self.assertEqual(want, got)
+        self.assertEqual([item["ack_token"] for item in got["diagnostics"]],
+                         sorted([item["ack_token"] for item in got["diagnostics"]],
+                                key=lambda token: orders[token]))
+        delivered = [event.get("insight") for event in got["events"]]
+        self.assertNotIn(ACCEPT_ID, delivered)
+        self.assertNotIn(DEFER_ID, delivered)
 
     def test_diagnostics_cap_and_page_copy(self):
         before = self.legacy_page()

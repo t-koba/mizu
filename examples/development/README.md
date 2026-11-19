@@ -39,9 +39,11 @@ append.
 Receipt conversion feeds each token through the legacy receipt reader, so a
 settled receipt becomes a `receipts` message and the three corrupt-receipt
 reasons (`malformed_json`, `invalid_receipt`, `invalid_timestamp`) are retained
-as declared `legacy_reason` values. The action is inferred by binding the token
-to its current legacy decision event or pending envelope; a receipt no current
-candidate binds is reported as unbound and left unconverted. These messages are
+as declared `legacy_reason` values. The action and fixed-width hex enumeration
+order are inferred by binding the token to its current legacy decision event
+or pending envelope in legacy diagnostic order (decision-history glob order
+then pending-envelope order); a receipt no current candidate binds is reported
+as unbound and left unconverted. These messages are
 converted legacy receipts, not kernel state. Converted proposals and decisions
 retain the exact legacy insight id,
 revision, source, addressee, current evidence, decision key and aware decision

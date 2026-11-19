@@ -26,8 +26,10 @@ proposal; a revision that was not converted refuses the run. Legacy
 decision-receipt files become per-token ``receipts`` messages: the exact
 receipt reader classifies each token as settled or as one of its three
 corrupt reasons, and the token is bound to a current legacy candidate event to
-infer the action. Receipts that no current candidate binds are reported and
-left unconverted, since they cannot affect a legacy page. Historical
+infer the action and its legacy enumeration order (decision-history glob order
+then pending-envelope order, fixed-width hex). Receipts that no current
+candidate binds are reported and left unconverted, since they cannot affect a
+legacy page. Historical
 writers that differ from a queue's declared author are retained in the message
 body, never used to bypass a write grant. Message ids derive from legacy identity and content, so an exact
 replay appends nothing: QueueStore returns the existing message. All input is
@@ -69,7 +71,10 @@ RECEIPTS = "receipts"
 QUEUES = (PROPOSALS, DECISIONS, QUESTIONS, ANSWERS, NOTICES, RECEIPTS)
 RECEIPT_AUTHOR = "host"
 RECEIPT_FIELDS = ("ack_token", "legacy_role", "legacy_action")
-RECEIPT_OPTIONAL = ("legacy_reason",)
+RECEIPT_OPTIONAL = ("legacy_reason", "legacy_order")
+#: Fixed-width hex width for the legacy enumeration order; lexical == numeric.
+RECEIPT_ORDER_WIDTH = 8
+RECEIPT_ORDER_RE = re.compile(r"[0-9a-f]{8}\Z")
 DECISION_ACTIONS = frozenset({"accept", "modify", "defer", "reject"})
 PROPOSAL_AUTHOR = "operator"
 #: The declaration names role:writer as the decision writer; historical
@@ -217,25 +222,30 @@ def _receipt_files(root: Path) -> list[tuple[str, str]]:
     return result
 
 
-def _receipt_candidates(project, role: str) -> dict[str, tuple[str, str]]:
-    """Bind one role's current legacy candidates to (event id, action).
+def _receipt_candidates(project, role: str) -> dict[str, tuple[str, str, str]]:
+    """Bind one role's current legacy candidates to (event id, action, order).
 
     A receipt file carries no action. Its token is bound to a current decision
     payload or pending envelope instead, which is the exact candidate legacy
-    delivery uses; only that candidate can yield a receipt diagnostic.
+    delivery uses; only that candidate can yield a receipt diagnostic. The
+    order is the exact legacy diagnostic enumeration index: decision-history
+    in the same ``Path.glob("*.json")`` order legacy ``_scan_decision_delivery``
+    uses, then pending envelopes in the same ``_pending_insight_envelopes_locked``
+    order legacy pending diagnostics use. The index is fixed-width hex so
+    lexical order matches numeric order.
     """
     insights = project.insights
-    candidates: dict[str, tuple[str, str]] = {}
+    candidates: dict[str, tuple[str, str, str]] = {}
+    order = 0
     history = insights.root / "decision-history"
     if insight_archive._directory(history):
-        with os.scandir(history) as entries:
-            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
-        if len(names) > MAX_PAGES:
+        paths = list(history.glob("*.json"))
+        if len(paths) > MAX_PAGES:
             raise ConversionError("Legacy decision history exceeds the conversion scan bound")
-        for name in names:
+        for path in paths:
             try:
                 selected = insights._current_decision_event(
-                    history / name, DECISION_ACTIONS, sources="any")
+                    path, DECISION_ACTIONS, sources="any")
             except (Denied, LimitExceeded, OSError, ValueError, TypeError,
                     KeyError, AttributeError):
                 continue
@@ -247,7 +257,9 @@ def _receipt_candidates(project, role: str) -> dict[str, tuple[str, str]]:
                 token = insights._decision_token(role, payload)
             except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
                 continue
-            candidates[token] = (payload["event"], payload["action"])
+            candidates[token] = (payload["event"], payload["action"],
+                               f"{order:0{RECEIPT_ORDER_WIDTH}x}")
+            order += 1
     configured = set(project.roles) & project.config.roles.keys()
     try:
         envelopes = list(insights._pending_insight_envelopes_locked(configured, role))
@@ -262,7 +274,9 @@ def _receipt_candidates(project, role: str) -> dict[str, tuple[str, str]]:
             token = insights._decision_token(role, payload)
         except (Denied, OSError, ValueError, TypeError, KeyError, AttributeError):
             continue
-        candidates[token] = (payload["event"], "pending")
+        candidates[token] = (payload["event"], "pending",
+                               f"{order:0{RECEIPT_ORDER_WIDTH}x}")
+        order += 1
     return candidates
 
 
@@ -278,11 +292,14 @@ def _receipt_messages(project, declaration, bound_roles: dict) -> tuple[list[dic
         if candidate is None:
             unbound.append(token)
             continue
-        event, action = candidate
+        event, action, order = candidate
+        if not RECEIPT_ORDER_RE.fullmatch(order):
+            raise ConversionError("Legacy receipt order is not fixed-width hex")
         body = {
             "ack_token": _copy(token, fields["ack_token"], "Legacy receipt token"),
             "legacy_role": _copy(role, fields["legacy_role"], "Legacy receipt role"),
             "legacy_action": _copy(action, fields["legacy_action"], "Legacy receipt action"),
+            "legacy_order": _copy(order, fields["legacy_order"], "Legacy receipt order"),
         }
         try:
             received = project.insights._decision_received(
