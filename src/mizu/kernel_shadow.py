@@ -420,6 +420,10 @@ class KernelShadow:
         fields = insight_fields(record)
         updatable = {key: fields[key]
                      for key in ("title", "body", "urgency", "holder") if key in fields}
+        # A revised insight carries no revisit in the authoritative record, so
+        # superseding a deferred revision also retires its derived timer.
+        if current["fields"].get("revisit_at") is not None:
+            updatable["revisit_at"] = None
         if all(current["fields"].get(key) == value for key, value in updatable.items()):
             return
         # Kernel revisions also record state transitions, so the legacy revision

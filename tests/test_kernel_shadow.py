@@ -133,6 +133,46 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertIsNone(self.project.kernel_objects.next_instant())
         self.assertTrue(self.project.insights.kernel_shadow.verify(insight, replacement)["ok"])
 
+    def test_revise_after_defer_clears_projected_timer(self):
+        insight = self.submit("d5" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + moment,
+            "test-run", expected_rev=1)
+        revised = self.project.insights.revise(
+            insight["id"], source="writer", title="Revised proposal", body="New evidence",
+            base_snapshot=None, expected_rev=1)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(revised["rev"], 2)
+        self.assertEqual(mirrored["state"], "pending")
+        self.assertIsNone(mirrored["fields"].get("revisit_at"))
+        self.assertIsNone(self.project.kernel_objects.next_instant())
+        self.assertTrue(self.project.insights.kernel_shadow.verify(revised, None)["ok"])
+
+    def test_no_instant_defer_after_revise_verifies_and_reprojects(self):
+        insight = self.submit("d6" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + moment,
+            "test-run", expected_rev=1)
+        self.project.insights.revise(
+            insight["id"], source="writer", title="Revised proposal", body="New evidence",
+            base_snapshot=None, expected_rev=1)
+        revised = self.project.insights.read(insight["id"])
+        decision = self.project.insights.decide(
+            insight["id"], "defer", "Wait", "revisit next Tuesday", "test-run",
+            expected_rev=2)
+        shadow = self.project.insights.kernel_shadow
+        self.assertTrue(shadow.verify(revised, decision)["ok"],
+                        shadow.verify(revised, decision)["mismatches"])
+        args = parser().parse_args(["kernel-shadow", "shadow", insight["id"], "--reproject"])
+        report = _cmd_kernel_shadow(self.config, self.project, args)
+        self.assertTrue(report["verification"]["ok"], report["verification"]["mismatches"])
+        self.assertEqual(report["failures"], [])
+        self.assertEqual(self.project.kernel_objects.read(
+            "insight", insight["id"])["state"], "pending")
+        self.assertIsNone(self.project.kernel_objects.next_instant())
+
     def test_exact_defer_replay_does_not_duplicate_projection(self):
         insight = self.submit("d3" * 16)
         self.project.insights.decide(

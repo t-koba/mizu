@@ -122,7 +122,7 @@ name = "revise"
 from = ["pending", "accepted", "modified", "deferred", "rejected"]
 to = "pending"
 by = ["author"]
-fields = ["title", "body", "urgency", "holder"]
+fields = ["title", "body", "urgency", "holder", "revisit_at"]
 # A replacement defer without a representable instant retires the timer and
 # returns the insight to the declared base state.
 [[kinds.insight.transitions]]
