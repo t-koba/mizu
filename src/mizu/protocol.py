@@ -708,7 +708,7 @@ DEFINITIONS = {
                    obj({"seq": KERNEL_CURSOR_SCHEMA}, ("seq",))),
     "queue_write": ("Append a message to a declared queue. The host binds your role as author; "
                     "no author argument is accepted. Declared body fields only. An optional 32-hex "
-                    "id is create-only: an identical retry returns the existing message and different "
+                    "id is create-only: an identical retry returns the same message and different "
                     "content is refused. refs name earlier messages you may read; deliver_at delays "
                     "delivery. Each queue's write grant is enforced by the kernel.",
                     obj({"queue": KERNEL_NAME_SCHEMA, "body": KERNEL_FIELDS_SCHEMA,
