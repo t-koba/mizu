@@ -11,6 +11,7 @@ from unittest import mock
 import support  # noqa: F401  (puts src on the path)
 from support import Fixture
 from mizu import operator_records as records
+from mizu import record_reconciliation
 from mizu.config import load
 from mizu.fs import canonical
 from mizu.kernel import QueueStore
@@ -435,6 +436,64 @@ class Stage2QuestionConversion(Fixture):
             "legacy_action": "publish",
             "legacy_created_at": answer["record"]["created_at"]})
         self.assertEqual(self.store.message(proposal_id, "operator")["queue"], "proposals")
+
+    def test_archived_revision_answer_binds_its_exact_revision_proposal(self):
+        """An answer accepted against a retained r1 never follows the live r2."""
+        from support import history_write_json, stored_question_insight
+        insight = stored_question_insight(self.project)
+        root = self.project.root
+        archived = {**insight, "superseded_by_rev": 2,
+                    "superseded_at": insight["updated_at"]}
+        history_write_json(root / "insight-revisions" / f"{insight['id']}.r1.json", archived)
+        history_write_json(root / "inbox" / f"{insight['id']}.json",
+                           {**insight, "rev": 2, "title": "Legacy question rev 2",
+                            "body": "Q: Which? (rev 2)"})
+        self.assertEqual(self.project.insights.read(insight["id"])["rev"], 2)
+        self.assertEqual(self.project.insights.read_revision(insight["id"], 1), archived)
+        # The legacy operator accepted this answer against the archived question
+        # after revision 2 was already live.
+        subject = {"type": "insight", "id": insight["id"], "rev": 1}
+        answer = records.write(self.project, event_id="archived-question-answer",
+                               kind="answer", body="Legacy rev-1 answer", subject=subject)
+        answer_id = convert_legacy._message_id("answer", answer["record"]["id"],
+                                               answer["record_digest"])
+        proposal_id = convert_legacy._message_id("proposal", insight["id"], 1)
+        live_proposal_id = convert_legacy._message_id("proposal", insight["id"], 2)
+
+        messages, report = convert_legacy._plan(self.project)
+        self.assertIn(proposal_id, report["proposals"])
+        self.assertIn(live_proposal_id, report["proposals"])
+        self.assertEqual(report["proposals"].count(proposal_id), 1)
+        archived_proposal = next(m for m in messages if m["id"] == proposal_id)
+        self.assertEqual(archived_proposal["queue"], "proposals")
+        self.assertEqual(archived_proposal["author"], "operator")
+        self.assertEqual(archived_proposal["refs"], ())
+        self.assertEqual(archived_proposal["body"]["title"], archived["title"])
+        self.assertEqual(archived_proposal["body"]["body"], archived["body"])
+        self.assertEqual(archived_proposal["body"]["legacy_rev"], "1")
+        self.assertEqual(archived_proposal["body"]["legacy_kind"], "question")
+        answer_message = next(m for m in messages if m["id"] == answer_id)
+        self.assertEqual(answer_message["refs"], (proposal_id,))
+        ids = [m["id"] for m in messages]
+        self.assertLess(ids.index(proposal_id), ids.index(answer_id))
+
+        first = self.convert("--apply")
+        second = self.convert("--apply")
+        self.assertEqual(first, second)
+        self.assertEqual(first, {**report, "applied": True})
+        stored_answer = self.store.message(answer_id, "operator")
+        self.assertEqual(stored_answer["refs"], [proposal_id])
+        self.assertNotEqual(stored_answer["refs"], [live_proposal_id])
+        self.assertEqual(self.store.message(proposal_id, "operator")["body"],
+                         archived_proposal["body"])
+        gate = stage2_verify.verify(self.project, queues=convert_legacy.VERIFY_QUEUES)
+        self.assertTrue(gate["ok"], gate["differences"])
+        marker = record_reconciliation.activate_queue_record_delivery(
+            self.project, conversion=first, verification=gate)
+        self.assertEqual(marker["authority"], "queues")
+        retry = record_reconciliation.activate_queue_record_delivery(
+            self.project, conversion=first, verification=gate)
+        self.assertEqual(retry, marker)
 
     def test_answer_to_revised_insight_refuses_before_any_append(self):
         from support import history_write_json, stored_question_insight

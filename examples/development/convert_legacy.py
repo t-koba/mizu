@@ -25,7 +25,9 @@ question messages carrying the exact envelope ``kind`` and ``created_at`` instan
 authenticated answers become referencing answer messages, and operator
 notices become notice messages, both carrying the envelope ``created_at``. A
 legacy answer to an insight revision becomes an answer message referencing
-that revision's converted proposal; a revision that was not converted refuses the run. Legacy
+that revision's converted proposal. An answer naming a retained earlier revision
+converts that exact archived revision into its own stable proposal; a revision
+that is neither current nor retained refuses the run. Legacy
 decision-receipt files become per-token ``receipts`` messages: the exact
 receipt reader classifies each token as settled or as one of its three
 corrupt reasons, and the token is bound to a current legacy candidate event to
@@ -42,8 +44,8 @@ Historical writers that differ from a queue's declared author are retained in
 the message body, never used to bypass a write grant. Message ids derive from
 legacy identity and content, so an exact replay appends nothing: QueueStore
 returns the existing message. All input is validated before the first append; a malformed or unbindable record refuses the
-whole run. Archived revisions stay in the legacy archive; they are not silently
-reinvented here.
+whole run. Archived revisions stay in the legacy archive; conversion only
+projects them, never rewrites legacy authority.
 
 Run with --apply to write; without it the command only prints the plan.
 """
@@ -520,13 +522,31 @@ def _role_questions(project, declaration) -> tuple[list[dict], dict]:
     return messages, index
 
 
-def _insight_proposal_ref(subject, proposal_index, label):
-    """Bind an exact legacy insight answer subject to its converted proposal."""
+def _insight_subject(subject, label):
+    """Parse an exact legacy insight revision; never default to the live rev."""
     if (not isinstance(subject, dict) or set(subject) != {"type", "id", "rev"}
             or subject["type"] != "insight"):
         raise ConversionError(f"{label} does not address an insight revision")
-    insight_id = _identity(subject["id"], "Legacy answer insight id")
-    rev = _revision(subject["rev"], "Legacy answer insight revision")
+    return (_identity(subject["id"], "Legacy answer insight id"),
+            _revision(subject["rev"], "Legacy answer insight revision"))
+
+
+def _answer_insight_refs(indexed):
+    """Distinct retained revision subjects named by published legacy answers."""
+    refs = set()
+    for record_id, (envelope, _) in indexed.items():
+        if (envelope.get("kind") != "answer"
+                or envelope["payload"]["action"] != "publish"):
+            continue
+        subject = envelope.get("subject")
+        if isinstance(subject, dict) and subject.get("type") == "insight":
+            refs.add(_insight_subject(subject, f"Legacy answer {record_id}"))
+    return sorted(refs)
+
+
+def _insight_proposal_ref(subject, proposal_index, label):
+    """Bind an exact legacy insight answer subject to its converted proposal."""
+    insight_id, rev = _insight_subject(subject, label)
     proposal_id = proposal_index.get((insight_id, rev))
     if proposal_id is None:
         raise ConversionError(f"{label} does not bind a converted insight revision")
@@ -559,21 +579,29 @@ def _record_body(envelope, digest, declaration, fields, *, allow_empty=()):
     return body
 
 
-def _operator_messages(project, question_index, proposal_index, answer_decl, notice_decl):
+def _operator_records(project):
+    """Read the checked operator catalog once; None for an empty family."""
+    try:
+        with os.scandir(project.root / "shared-records" / "operator") as entries:
+            if not any(entry.is_file(follow_symlinks=False) for entry in entries):
+                return None  # A dry run creates no lock or index for an empty family.
+    except FileNotFoundError:
+        return None
+    shared = legacy.store(project)
+    with lock(project.root / "locks" / "operator-records.lock"):
+        indexed = legacy.catalog(shared, readonly=True, scan_limit=_scan_limit(project))
+    return shared, indexed
+
+
+def _operator_messages(records, question_index, proposal_index, answer_decl, notice_decl):
     """Enumerate authenticated answers and notices from the compact catalog.
 
     Answers bind to either an exact declared role question or an insight
     revision whose proposal was converted in this run.
     """
-    try:
-        with os.scandir(project.root / "shared-records" / "operator") as entries:
-            if not any(entry.is_file(follow_symlinks=False) for entry in entries):
-                return []  # A dry run creates no lock or index for an empty family.
-    except FileNotFoundError:
+    if records is None:
         return []
-    shared = legacy.store(project)
-    with lock(project.root / "locks" / "operator-records.lock"):
-        indexed = legacy.catalog(shared, readonly=True, scan_limit=_scan_limit(project))
+    shared, indexed = records
     messages = []
     for record_id in sorted(indexed):
         projection, digest = indexed[record_id]
@@ -762,10 +790,29 @@ def _plan(project) -> tuple[list[dict], dict]:
     else:
         raise ConversionError(f"Legacy insight enumeration exceeded {MAX_PAGES} pages")
 
+    operator_records = _operator_records(project)
+    refs = _answer_insight_refs(operator_records[1]) if operator_records is not None else ()
+    for insight_id, rev in refs:
+        if (insight_id, rev) in proposal_index:
+            continue  # The current live revision already has this exact proposal.
+        archived = project.insights.read_revision(insight_id, rev)
+        if archived is None:
+            raise ConversionError("Legacy answer does not bind a converted insight revision")
+        _identity(archived.get("id"), "Archived insight id")
+        if _revision(archived.get("rev", 1), "Archived insight revision") != rev:
+            raise ConversionError("Ambiguous legacy archived insight revision")
+        proposal_id = _message_id("proposal", insight_id, rev)
+        proposal_index[(insight_id, rev)] = proposal_id
+        add({"queue": PROPOSALS, "id": proposal_id, "author": PROPOSAL_AUTHOR,
+             "refs": (), "body": {
+                 "title": _text(archived.get("title"), proposal_decl.fields["title"], "Title"),
+                 "body": _text(archived.get("body"), proposal_decl.fields["body"], "Body"),
+                 **_legacy_metadata(archived, archived, None, proposal_decl)}})
+
     questions, question_index = _role_questions(project, question_decl)
     for message in questions:
         add(message)
-    for message in _operator_messages(project, question_index, proposal_index,
+    for message in _operator_messages(operator_records, question_index, proposal_index,
                                       answer_decl, notice_decl):
         add(message)
     receipt_messages, unbound = _receipt_messages(project, receipt_decl, {})

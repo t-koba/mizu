@@ -60,7 +60,9 @@ and `created_at` instant, and digest are retained in declared optional fields.
 Answers and notices retain the envelope `created_at` as well. Answers carry
 the exact legacy body and reference their converted question or, for an insight
 revision, that revision's
-converted proposal; notices carry their exact body, action and optional closure
+converted proposal. An answer naming a retained earlier revision converts that
+exact archived revision into its own proposal; the current live revision is
+never substituted. Notices carry their exact body, action and optional closure
 target. Legacy `operator.cli` authorship is retained in the body while the
 message author is the queue's granted principal. An answer that does not bind an
 exact declared role question or converted insight revision, a truncated
