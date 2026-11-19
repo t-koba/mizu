@@ -210,6 +210,40 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertEqual(divergent["mismatches"],
                          [f"decision object {decision_object_id(stale)} fields differ"])
 
+    def test_verify_detects_stale_decision_retired_timer_drift(self):
+        insight = self.submit("d9" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + moment,
+            "test-run", expected_rev=1)
+        revised = self.project.insights.revise(
+            insight["id"], source="writer", title="Revised proposal", body="New evidence",
+            base_snapshot=None, expected_rev=1)
+        shadow = self.project.insights.kernel_shadow
+        stale = self.project.insights.decision(insight["id"])
+        self.assertEqual(revised["rev"], 2)
+        self.assertEqual(stale["rev"], 1)
+
+        # A clean retired projection still verifies with the superseded decision.
+        self.assertTrue(shadow.verify(revised, stale)["ok"],
+                        shadow.verify(revised, stale)["mismatches"])
+
+        # Inject the old revisit instant back into the pending projection. Verify
+        # must flag the drift that the write path retired on revise.
+        object_id = insight_object_id(insight)
+        revision = self.project.kernel_objects.revisions("insight", object_id)[-1]
+        path = self.project.root / "objects" / "insight" / object_id / f"{revision:08d}.json"
+        record = json.loads(path.read_text())
+        self.assertEqual(record["state"], "pending")
+        self.assertIsNone(record["fields"].get("revisit_at"))
+        record["fields"]["revisit_at"] = moment
+        path.write_text(json.dumps(record))
+
+        result = shadow.verify(revised, stale)
+        self.assertFalse(result["ok"])
+        self.assertIn("superseded decision left a revisit instant on pending insight",
+                      result["mismatches"])
+
     def test_exact_defer_replay_does_not_duplicate_projection(self):
         insight = self.submit("d3" * 16)
         self.project.insights.decide(

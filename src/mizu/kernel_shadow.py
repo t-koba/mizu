@@ -287,6 +287,12 @@ class KernelShadow:
                     mismatch("insight revisit_at is set without an instant")
             if state_action == "withdraw" and current["fields"].get("revisit_at") is not None:
                 mismatch("withdrawn insight still has a revisit instant")
+            if (decision is not None and not decision_is_current(insight, decision)
+                    and current["state"] == "pending"
+                    and current["fields"].get("revisit_at") is not None):
+                # A superseded decision retired its timer on revise; a pending
+                # projection must not keep holding that revisit instant.
+                mismatch("superseded decision left a revisit instant on pending insight")
 
         if decision is not None and action in _ACTIONS:
             object_id = decision_object_id(decision)
