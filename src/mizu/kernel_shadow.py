@@ -1,8 +1,8 @@
 """Userland projection of authoritative records into declared kernel objects.
 
-The legacy insight and decision stores keep authority. This module only maps
-their recorded facts onto the generic kernel kinds declared by the deployment;
-it never reads a kernel object to decide legacy behaviour. A projection failure
+The legacy insight, decision and operator-record stores keep authority. This
+module only maps their facts onto kernel kinds declared by the deployment; it
+never reads a kernel object to decide legacy behaviour. A projection failure
 is therefore a derived-index failure, not a loss of the accepted record.
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from .errors import Denied
 from .fs import canonical, digest
+from .shared_records import RECORD_NAME_MAX_CHARS
 
 _NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -86,6 +87,29 @@ def decision_fields(record: Mapping[str, Any]) -> dict:
     revisit = instant_value(record.get("revisit"))
     if revisit is not None:
         fields["revisit"] = revisit
+    return fields
+
+
+def notice_object_id(record: Mapping[str, Any]) -> str:
+    """Map one accepted operator notice ID to a stable kernel object ID."""
+    legacy = record["id"]
+    if not isinstance(legacy, str) or not legacy:
+        raise Denied("Invalid notice projection identity")
+    return digest(canonical(["kernel-shadow", "notice", legacy]))[:32]
+
+
+def notice_fields(record: Mapping[str, Any], computed: str) -> dict:
+    """Map the declared subset of one operator notice to kernel object fields."""
+    payload = record["payload"]
+    fields = {"subject_digest": computed, "kind": record["kind"], "body": payload["body"]}
+    target = payload.get("target")
+    subject = record.get("subject")
+    source = target if target is not None else subject
+    reference = source.get("id") if isinstance(source, Mapping) else None
+    # The field is optional: an oversized reference is omitted rather than
+    # silently truncated into a different identity.
+    if isinstance(reference, str) and len(reference) <= RECORD_NAME_MAX_CHARS:
+        fields["reference"] = reference
     return fields
 
 
@@ -187,6 +211,17 @@ class KernelShadow:
         self.objects.transition("insight", object_id, "revise",
                                 expected_rev=current["rev"], fields=updatable,
                                 actor=principal(record["source"]))
+
+    def noticed(self, record: Mapping[str, Any], computed: str) -> None:
+        """Mirror one accepted operator notice as a create-only kernel object."""
+        object_id = notice_object_id(record)
+        fields = notice_fields(record, computed)
+        if self.objects.revisions("notice", object_id):
+            existing = self.objects.read("notice", object_id)
+            if existing["fields"] != fields:
+                raise Denied("Notice projection id was reused with different content")
+        else:
+            self.objects.create("notice", fields, "host", object_id=object_id)
 
     def decided(self, insight: Mapping[str, Any], record: Mapping[str, Any]) -> None:
         action = record.get("action")
