@@ -107,7 +107,11 @@ class Stage2Conversion(Fixture):
         delayed = [m for m in due["messages"] if m["id"] == revisit_id]
         self.assertEqual(len(delayed), 1)
         self.assertEqual(delayed[0]["deliver_at"], REVISIT_AT)
-        self.assertEqual(delayed[0]["body"], {"action": "defer", "reason": "Need more evidence"})
+        defer_body = {"action": "defer", "reason": "Need more evidence", "revisit": REVISIT_AT}
+        self.assertEqual(delayed[0]["body"], defer_body)
+        ordinary = [m for m in due["messages"] if m["id"] == decision_id]
+        self.assertEqual(len(ordinary), 1)
+        self.assertEqual(ordinary[0]["body"], defer_body)
         self.assertEqual(delayed[0]["refs"], [proposal_id])
         self.assertEqual(delayed[0]["author"], "role:writer")
         after = self.store.read("decisions", "operator", now=AFTER_REVISIT)
@@ -121,6 +125,12 @@ class Stage2Conversion(Fixture):
         self.assertEqual(report["decisions"],
                          [convert_legacy._message_id("decision", INSIGHT_ID, 1),
                           convert_legacy._message_id("decision", DEFER_ID, 1)])
+        decisions = self.store.read("decisions", "operator")["messages"]
+        deferred = [m for m in decisions
+                    if m["id"] == convert_legacy._message_id("decision", DEFER_ID, 1)]
+        self.assertEqual(deferred[0]["body"],
+                         {"action": "defer", "reason": "Need more evidence",
+                          "revisit": "when the next build finishes"})
 
     def test_malformed_revisit_instant_refuses_before_any_write(self):
         self.add_deferral(DEFER_ID, "2099-13-01T00:00:00+00:00")

@@ -154,15 +154,18 @@ def _plan(project) -> tuple[list[dict], dict]:
                 raise ConversionError(f"Decision for {insight_id} does not bind its current revision")
             action = _text(decision.get("action"), decision_decl.fields["action"], "Action")
             reason = _text(decision.get("reason"), decision_decl.fields["reason"], "Reason")
+            body = {"action": action, "reason": reason}
+            if action == "defer":
+                revisit = _text(decision.get("revisit"), decision_decl.fields["revisit"], "Revisit")
+                body["revisit"] = revisit
             add({"queue": DECISIONS, "id": _message_id("decision", insight_id, rev),
-                 "author": DECISION_AUTHOR, "refs": (proposal_id,),
-                 "body": {"action": action, "reason": reason}})
+                 "author": DECISION_AUTHOR, "refs": (proposal_id,), "body": dict(body)})
             if action == "defer":
                 instant = _revisit(decision.get("revisit"), "Revisit")
                 if instant is not None:
                     add({"queue": DECISIONS, "id": _message_id("revisit", insight_id, rev),
                          "author": DECISION_AUTHOR, "refs": (proposal_id,),
-                         "deliver_at": instant, "body": {"action": action, "reason": reason}})
+                         "deliver_at": instant, "body": dict(body)})
         if not page["has_more"]:
             break
         cursor = page["next_cursor"]

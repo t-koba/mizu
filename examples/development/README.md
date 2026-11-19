@@ -22,10 +22,11 @@ queues declared in `queues.toml`. Archived revisions stay in the legacy store;
 nothing is rewritten and no runtime authority, route or capability changes.
 Decision messages use the queue's declared writer principal (`role:writer`) as
 historical authorship only. A deferral whose revisit carries an aware instant
-also becomes a delayed decision message (same action and reason, referencing the
-converted proposal) due at exactly that instant; past instants are immediately
-due. A revisit with no instant has no delayed message, and a malformed one
-refuses the run before any append.
+also becomes a delayed decision message (same action, reason and revisit,
+referencing the converted proposal) due at exactly that instant; past instants
+are immediately due. Every converted defer decision carries its exact legacy
+revisit condition in the declared `revisit` field, whether or not it is an
+instant. A malformed instant refuses the run before any append.
 
 ```sh
 python3 examples/development/convert_legacy.py config/config.toml --project NAME [--apply]

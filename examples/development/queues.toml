@@ -20,6 +20,7 @@ read = ["role:*", "operator"]
 [queues.decisions.schema]
 action = {type = "string", values = ["accept", "modify", "defer", "reject", "withdraw"], required = true}
 reason = {type = "string", max = 8192, required = true}
+revisit = {type = "string", max = 8192}
 
 # Questions to the operator, and the operator's answers (refs = [question id]).
 [queues.questions]
