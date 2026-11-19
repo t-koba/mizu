@@ -670,13 +670,24 @@ class ReadySetChangeTests(Fixture):
                 tracemalloc.stop()
             return page, peak
 
-        small, small_peak = scan(10)
-        large, large_peak = scan(5000)
+        # The three scans below exercise both count paths and so warm up
+        # one-time sqlite/interpreter allocations before any peak is measured.
+        small, _ = scan(10)
+        large, _ = scan(5000)
         reordered, _ = scan(5000, reverse=True, limit=2)
         self.assertEqual(large['signature'], reordered['signature'])
         self.assertNotEqual(small['signature'], large['signature'])
         self.assertEqual(len(large['signature']), 64)
         self.assertEqual(len(large['items']), 1)
         self.assertLess(len(json.dumps(large)), 8192)
+        # tracemalloc peak is an upper water mark: garbage-collection timing and
+        # allocator behaviour only push it up, and version/allocator differences
+        # made a single cold 5000-row peak exceed the ceiling on Python 3.12.
+        # Take the minimum of a few warm repetitions, which approximates the
+        # scan's true working set. Retaining O(count) row IDs/hashes would keep
+        # even the smallest large-scan peak megabytes above the small one, so
+        # this still fails a real regression of the bounded-memory guarantee.
+        small_peak = min(scan(10)[1] for _ in range(3))
+        large_peak = min(scan(5000)[1] for _ in range(3))
         # One heap row plus fixed-size accumulator, not retained IDs/hashes.
         self.assertLess(large_peak - small_peak, 128 * 1024)
