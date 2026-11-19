@@ -492,7 +492,9 @@ class SharedSeedCreationTests(Fixture):
                 directory.mkdir(parents=True)
                 record = directory / filename
                 record.write_text("{}")
-                with self.assertRaisesRegex(Denied, "pre-existing history"):
+                expected = ("mizu migrate-work-items" if filename == "legacy.json"
+                            else "pre-existing history")
+                with self.assertRaisesRegex(Denied, expected):
                     self.decide(proposal, work_item_intent="create")
                 self.assert_no_decision(proposal)
                 self.assertEqual(record.read_text(), "{}")
@@ -506,7 +508,9 @@ class SharedSeedCreationTests(Fixture):
                 directory = self.project.root / "work-items" / item_id
                 directory.mkdir(parents=True)
                 (directory / filename).write_text("{}")
-                with self.assertRaisesRegex(Denied, "pre-existing history"):
+                expected = ("mizu migrate-work-items" if filename == "legacy.json"
+                            else "pre-existing history")
+                with self.assertRaisesRegex(Denied, expected):
                     store.create(idempotency_key=filename, title="Work", actor="worker")
                 self.assertFalse((directory / "create.json").exists())
                 self.assertEqual((directory / filename).read_text(), "{}")

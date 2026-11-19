@@ -167,11 +167,11 @@ class LegacyWorkItemTests(Fixture):
         source_bytes = source.read_bytes()
         item_id = f"wi_{event_id}"
         record = self.resolve_old(event_id)
-        doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
         old, new = self.old_sidecar(event_id), self.sidecar(event_id)
         raw = old.read_bytes()
         old.rename(new)
         forget_ledger(self.project.root)
+        doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
 
         self.assertEqual(self.store.get(item_id), doing)
         self.assertEqual(self.store.explain(item_id)["history"], [record["work_item"], doing])
@@ -211,7 +211,7 @@ class LegacyWorkItemTests(Fixture):
                      lambda: self.resolve(event_id, outcome="drop", title=None)):
             with self.assertRaisesRegex(Denied, "Ambiguous"):
                 read()
-        self.assertEqual(storage_audit(self.project)["work_item_events_skipped"], 1)
+        self.assertEqual(storage_audit(self.project)["work_item_events_skipped"], 2)
         self.project.set_control(paused=True)
         code, output, _ = self.migration_cli()
         report = json.loads(output)
@@ -296,7 +296,6 @@ class LegacyWorkItemTests(Fixture):
         write_json(current, event)
         item_id = f"wi_{opened}"
         seed = self.resolve_old(opened)["work_item"]
-        doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
         self.resolve_old(dropped, expected_action="modify", outcome="drop", title=None)
         already, _, _ = self.legacy(id="synthetic-already")
         self.resolve(already, outcome="drop", title=None)
@@ -341,6 +340,7 @@ class LegacyWorkItemTests(Fixture):
         self.assertEqual(identity(record_lock), lock_identity)
 
         forget_ledger(self.project.root)
+        doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
         self.assertEqual(self.store.explain(item_id)["history"], [seed, doing])
         self.assertTrue(self.store.page_open()["coverage_complete"])
         self.assertTrue(self.store.is_drop_only(f"wi_{dropped}"))
@@ -393,11 +393,11 @@ class LegacyWorkItemTests(Fixture):
         for event_id in opened:
             old, new = self.old_sidecar(event_id), self.sidecar(event_id)
             self.assertEqual((old.exists(), new.exists()), (old.parent not in attempts, old.parent in attempts))
-        forget_ledger(self.project.root)
-        self.assertEqual({item_id: self.store.get(item_id) for item_id in records}, records)
         self.assertEqual(self.migration_cli()[0], 0)
         retry = self.migration_apply()
         self.assertEqual((retry["ok"], retry["converted"], retry["already_current"]), (True, 1, 2))
+        forget_ledger(self.project.root)
+        self.assertEqual({item_id: self.store.get(item_id) for item_id in records}, records)
 
     def test_open_drop_coverage_audit_and_history_immutability(self):
         opened, event, path = self.legacy(reason="r" * 1400, body="NEVER COPY BODY")
@@ -640,6 +640,7 @@ class LegacyWorkItemTests(Fixture):
         with self.assertRaises(Denied):
             self.store.page_legacy()
         unsafe.unlink()
+        sidecar.rename(self.sidecar(event_id))
         for i in range(258):
             (sidecar.parent / f".new-{i:08d}").write_text("orphan")
         forget_ledger(self.project.root)
@@ -761,3 +762,123 @@ class LegacyWorkItemTests(Fixture):
         write_json(current_path, {**current, "work_item": None})
         with self.assertRaises(Denied):
             self.store.projection(f"wi_{event_id}")
+
+    def test_unconverted_legacy_is_refused_by_ordinary_readers(self):
+        event_id, _, source = self.legacy()
+        self.resolve_old(event_id)
+        item_id = f"wi_{event_id}"
+        old = self.old_sidecar(event_id)
+        old_bytes, source_bytes = old.read_bytes(), source.read_bytes()
+
+        with self.assertRaisesRegex(Denied, "mizu migrate-work-items"):
+            work_items_module._resolution_name(old.parent)
+        # The index was built while the sidecar still had the current name;
+        # warm and cold ordinary reads must both fail closed.
+        for label, read in (("get", lambda: self.store.get(item_id)),
+                            ("ready", self.store.page_ready),
+                            ("tool", lambda: self.context("worker").handle("work_items_read", {})),
+                            ("transition", lambda: self.store.transition(
+                                item_id, expected_rev=1, status="doing", actor="worker"))):
+            with self.subTest(read=label), self.assertRaisesRegex(Denied, "mizu migrate-work-items"):
+                read()
+        forget_ledger(self.project.root)
+        with self.assertRaisesRegex(Denied, "mizu migrate-work-items"):
+            self.store.get(item_id)
+        with self.assertRaisesRegex(Denied, "mizu migrate-work-items"):
+            self.store.page_ready()
+        self.assertEqual(old.read_bytes(), old_bytes)
+        self.assertEqual([path.name for path in old.parent.iterdir()], ["legacy.json"])
+        self.assertEqual(source.read_bytes(), source_bytes)
+
+    def test_host_preflight_reads_and_converts_legacy_resolutions(self):
+        opened, _, source = self.legacy()
+        dropped, _, _ = self.legacy(action="modify")
+        self.resolve_old(opened)
+        self.resolve_old(dropped, expected_action="modify", outcome="drop", title=None)
+        self.project.set_control(paused=True)
+        before = {path: path.read_bytes() for path in
+                  (source, self.old_sidecar(opened), self.old_sidecar(dropped))}
+
+        code, output, errors = self.migration_cli()
+        report = json.loads(output)
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual([report[name] for name in ("resolved_open", "resolved_drop", "unresolved")],
+                         [1, 1, 0])
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+        applied = self.migration_apply()
+        self.assertTrue(applied["ok"])
+        self.assertEqual([applied[name] for name in ("candidates", "renamed", "converted")], [2, 2, 2])
+        self.assertFalse(self.store._host_resolution_scan)
+        for event_id in (opened, dropped):
+            self.assertFalse(self.old_sidecar(event_id).exists())
+        self.assertEqual(before[source], source.read_bytes())
+        for event_id in (opened, dropped):
+            self.assertEqual(before[self.sidecar(event_id).with_name("legacy.json")],
+                             self.sidecar(event_id).read_bytes())
+
+    def test_converted_resolutions_keep_cas_and_ready_coverage(self):
+        opened, _, _ = self.legacy()
+        dropped, _, _ = self.legacy(action="modify")
+        self.resolve_old(opened)
+        self.resolve_old(dropped, expected_action="modify", outcome="drop", title=None)
+        self.project.set_control(paused=True)
+        self.assertTrue(self.migration_apply()["ok"])
+        forget_ledger(self.project.root)
+        item_id = f"wi_{opened}"
+
+        page = self.store.page_ready(role_name="worker")
+        self.assertTrue(page["coverage_complete"])
+        self.assertEqual((page["unseeded_decisions"], [row["id"] for row in page["items"]]),
+                         (0, [item_id]))
+        self.assertEqual(self.store.get(item_id)["rev"], 1)
+        doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+        ready = self.store.page_ready(role_name="worker")
+        self.assertEqual([(row["id"], row["rev"]) for row in ready["items"]], [(item_id, doing["rev"])])
+        with self.assertRaisesRegex(Denied, "re-read"):
+            self.store.transition(item_id, expected_rev=1, status="open", actor="worker")
+        self.store.transition(item_id, expected_rev=doing["rev"], status="dropped", actor="worker",
+                              reason="Retired after conversion")
+        final = self.store.page_ready(role_name="worker")
+        self.assertTrue(final["coverage_complete"])
+        self.assertEqual(final["items"], [])
+        self.assertTrue(self.store.page_open()["coverage_complete"])
+        self.assertTrue(self.store.is_drop_only(f"wi_{dropped}"))
+
+    def test_genuinely_unseeded_decision_still_resolves(self):
+        converted, _, _ = self.legacy()
+        self.resolve_old(converted)
+        unseeded, _, _ = self.legacy()
+        self.project.set_control(paused=True)
+        report = json.loads(self.migration_cli()[1])
+        self.assertEqual((report["ok"], report["unresolved"], report["resolved_open"]), (False, 1, 1))
+        self.assertTrue(report["dry_run"])
+
+        code, output, errors = self.reconcile_cli(
+            unseeded, "--outcome", "open", "--reason", "Still needed", "--title", "Unseeded work")
+        self.assertEqual((code, errors), (0, ""))
+        self.assertTrue(json.loads(output)["created"])
+        applied = self.migration_apply()
+        self.assertEqual((applied["ok"], applied["converted"], applied["already_current"]), (True, 1, 1))
+
+        forget_ledger(self.project.root)
+        page = self.store.page_open()
+        self.assertTrue(page["coverage_complete"])
+        self.assertEqual((page["unseeded_decisions"],
+                          sorted(row["id"] for row in page["items"])),
+                         (0, sorted((f"wi_{converted}", f"wi_{unseeded}"))))
+        self.assertEqual(self.store.get(f"wi_{unseeded}")["rev"], 1)
+
+    def test_work_item_migration_does_not_activate_host_receipt_authority(self):
+        from mizu.decision_delivery import authority
+        event_id, _, _ = self.legacy()
+        self.resolve_old(event_id)
+        self.project.set_control(paused=True)
+        self.assertIsNone(authority(self.project.root))
+
+        self.migration_cli()
+        self.assertTrue(self.migration_apply()["ok"])
+        forget_ledger(self.project.root)
+        self.assertTrue(self.store.page_ready()["coverage_complete"])
+        self.assertIsNone(authority(self.project.root))
+        self.assertFalse((self.project.root / "decision-authority.json").exists())

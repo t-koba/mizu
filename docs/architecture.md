@@ -1255,9 +1255,10 @@ Seeded events and explicit work-item intent are refused without changing the
 disposition.
 
 Under the shared insights lock, reconciliation exclusively creates
-`work-items/wi_<event-id>/decision-resolution.json`. Readers also accept
-`legacy.json` in that slot with the same envelope, but refuse
-both names coexisting. The immutable fields are `event_id`,
+`work-items/wi_<event-id>/decision-resolution.json`. Ordinary readers refuse an
+unconverted `legacy.json` with an actionable `mizu migrate-work-items` message;
+only the explicit host migration/preflight activation reads the old name, and
+both names coexisting still fail closed as ambiguous. The immutable fields are `event_id`,
 `event_sha256` (SHA-256 of the **canonical JSON** source event), `action`,
 `revision` (valid source revision or null), `outcome`, `actor`, `reason`, and
 `created_at` (reconciliation timestamp). An open sidecar additionally contains
@@ -1286,11 +1287,12 @@ and the absence of the old name, then syncs the item directory where supported.
 It never rewrites the seed, revisions, or decision records; drop-only coverage
 and explicit no-work decisions are unchanged. Renames are atomic per item, not
 across the batch. Apply stops on the first failure and reports the completed
-counts without record paths or contents. Both names remain readable in separate
-items, so a retry can count valid current names and continue with old names.
+counts without record paths or contents. Host preflight can count valid current
+names and continue with old names in separate items; ordinary readers stay
+fail-closed until conversion completes.
 
 `page_open`, `get`, and CAS transitions resolve open legacy seeds through that
-validated sidecar without changing decision history. Open resolutions replay
+converted, validated sidecar without changing decision history. Open resolutions replay
 normal revision history; drop resolutions count as covered but are never open
 items. Current legacy accept/modify records without a seed retain strict
 legacy-field validation and must match exactly one immutable history event for

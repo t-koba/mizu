@@ -121,7 +121,7 @@ def _scan(project, scan_limit, report, moves):
                     else:
                         raise Denied("Legacy drop is not the only work-item record")
                     if moves is not None and resolution is not None:
-                        name = _resolution_name(items / item_id)
+                        name = _resolution_name(items / item_id, allow_legacy=True)
                         if name == _LEGACY_RESOLUTION_NAME:
                             moves.append(item_id)
                         elif name == _CURRENT_RESOLUTION_NAME:
@@ -140,7 +140,7 @@ def _scan(project, scan_limit, report, moves):
                 try:
                     if ITEM_ID.fullmatch(entry.name) is None or not _directory(items / entry.name):
                         raise Denied("Invalid work-item directory entry")
-                    if _resolution_name(items / entry.name) is not None:
+                    if _resolution_name(items / entry.name, allow_legacy=True) is not None:
                         raise Denied("Work-item resolution has no eligible immutable decision source")
                 except _SOURCE_ERRORS:
                     report["ambiguous_or_corrupt"] += 1
@@ -169,7 +169,10 @@ def _plan(project, scan_limit, *, moves=None, locked=False) -> dict:
         report.update(dry_run=False, already_current=0, renamed=0, converted=0, errors=[])
     with contextlib.nullcontext() if locked else _record_snapshot(project):
         try:
-            _scan(project, scan_limit, report, moves)
+            # Explicit host activation: preflight/conversion is the only
+            # reader allowed to consume the old resolution filename.
+            with project.work_items.host_resolution_scan():
+                _scan(project, scan_limit, report, moves)
         except _ScanLimit:
             report.update(truncated=True, scan_complete=False)
         except _SOURCE_ERRORS:

@@ -561,9 +561,11 @@ Reconcile unresolved events with the host command above; repair or restore
 corrupt or ambiguous sources before applying.
 
 Apply renames each eligible `legacy.json` to `decision-resolution.json` without
-replacing a file or changing the bytes. Readers validate either name against
-the immutable decision but reject two names in one item directory or an unsafe
-link. Host reconciliation writes new records directly to `decision-resolution.json`.
+replacing a file or changing the bytes. Ordinary readers (including `get` and
+the ready page) refuse an unconverted old name with an actionable
+`mizu migrate-work-items` message; only the host preview/apply reads it, and
+both names in one item directory or an unsafe link still fail closed. Host
+reconciliation writes new records directly to `decision-resolution.json`.
 The apply report includes `candidates` (legacy names in the plan),
 `already_current`, `renamed` (successful renames), and `converted` (renames
 verified by read-back and followed by directory sync where supported). Apply
@@ -572,8 +574,9 @@ class (and OS error number if available). `ok: false` exits with status 1; a
 failed verification or sync can leave `renamed` greater than `converted`.
 
 To resume a conversion after interruption, run preview again and then rerun
-apply. Each item still has one atomic name, and current readers accept a mix
-of converted and unconverted items. Apply counts valid current names as
+apply. Each item still has one atomic name; host preflight accepts a mix of
+converted and unconverted items while ordinary readers keep refusing the
+unconverted ones. Apply counts valid current names as
 `already_current` and renames only those still using the old name. A successful
 retry with no remaining legacy names reports zero conversions.
 

@@ -84,6 +84,8 @@ _LEGACY_RESOLUTION_NAME = "legacy.json"
 _CURRENT_RESOLUTION_NAME = "decision-resolution.json"
 _RESOLUTION_NAMES = (_LEGACY_RESOLUTION_NAME, _CURRENT_RESOLUTION_NAME)
 _AMBIGUOUS_RESOLUTION_NAMES = "Ambiguous work-item decision resolution filenames"
+_UNMIGRATED_RESOLUTION = ("Unconverted legacy work-item resolution; run "
+                          "`mizu migrate-work-items` on a paused project before reading work items")
 _ORIGIN_COLUMNS = "n.id, n.valid, n.rev, d.insight_id, d.rev, d.action, d.linked"
 _ORIGIN_SELECT = "SELECT " + _ORIGIN_COLUMNS
 _ORIGIN_JOIN = ("LEFT JOIN insights n ON n.id = {key} "
@@ -215,12 +217,39 @@ def _present(path: Path) -> bool:
     return True
 
 
-def _resolution_name(directory: Path) -> str | None:
-    """Find the sole resolution entry without following the leaf or reading it."""
+def _resolution_name(directory: Path, *, allow_legacy: bool = False) -> str | None:
+    """Find the sole resolution entry without following the leaf or reading it.
+
+    Ordinary readers never consume an unconverted ``legacy.json``: they fail
+    closed with migration guidance. Only an explicit host migration scan may
+    opt in to the old name, and it still refuses ambiguous filename pairs.
+    """
     names = [name for name in _RESOLUTION_NAMES if _present(directory / name)]
     if len(names) > 1:
         raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
+    if names and names[0] == _LEGACY_RESOLUTION_NAME and not allow_legacy:
+        raise Denied(_UNMIGRATED_RESOLUTION)
     return names[0] if names else None
+
+
+def _unconverted_resolution(directory: Path) -> bool:
+    """Whether one item directory holds an unconverted resolution name."""
+    if not _present(directory / _LEGACY_RESOLUTION_NAME):
+        return False
+    if _present(directory / _CURRENT_RESOLUTION_NAME):
+        raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
+    return True
+
+
+def _unmigrated_resolution(root: Path) -> bool:
+    """Whether any item directory still holds an unconverted resolution name."""
+    directory = root / "work-items"
+    if not _directory(directory):
+        return False
+    with os.scandir(directory) as entries:
+        return any(ITEM_ID.fullmatch(entry.name) is not None
+                   and _unconverted_resolution(directory / entry.name)
+                   for entry in entries)
 
 
 class WorkItems:
@@ -255,6 +284,7 @@ class WorkItems:
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
         self.history_temporaries = history_temporaries
+        self._host_resolution_scan = False
         self._ledger = insights.ledger
         self._ledger.attach(ITEMS, self)
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
@@ -262,6 +292,32 @@ class WorkItems:
             raise Denied("Work-item doing limit must be an integer in [1, 100]")
         if type(stale_seconds) is not int or not 1 <= stale_seconds <= 31536000:
             raise Denied("Work-item stale threshold must be an integer in [1, 31536000]")
+
+    @contextlib.contextmanager
+    def host_resolution_scan(self):
+        """Host migration/preflight only: read old resolution names verbatim.
+
+        The flag is scoped and restored even on failure; ordinary readers keep
+        refusing unconverted names outside this explicit host activation.
+        """
+        previous = self._host_resolution_scan
+        self._host_resolution_scan = True
+        try:
+            yield
+        finally:
+            self._host_resolution_scan = previous
+
+    def _resolution(self, directory: Path) -> str | None:
+        return _resolution_name(directory, allow_legacy=self._host_resolution_scan)
+
+    def _require_migrated_item(self, item_id: str) -> None:
+        if (not self._host_resolution_scan
+                and _unconverted_resolution(self.root / "work-items" / item_id)):
+            raise Denied(_UNMIGRATED_RESOLUTION)
+
+    def _require_migrated_store(self) -> None:
+        if not self._host_resolution_scan and _unmigrated_resolution(self.root):
+            raise Denied(_UNMIGRATED_RESOLUTION)
 
     def _require_doing_capacity(self, actor: str) -> None:
         """Count the actor's doing items in the index; caller holds insights.lock."""
@@ -320,7 +376,7 @@ class WorkItems:
             return None
         if not _present(directory / "create.json"):
             return None
-        if _resolution_name(directory) is not None:
+        if self._resolution(directory) is not None:
             raise Denied("Direct work item carries legacy reconciliation")
         decision = self.root / "decision-history" / f"{item_id[3:]}.json"
         if _directory(decision.parent) and _present(decision):
@@ -387,7 +443,7 @@ class WorkItems:
         directory = self.root / "work-items" / item_id
         if _directory(directory.parent) and _directory(directory):
             revisions = self._history_revisions(item_id, recover=True)
-            if revisions or _present(directory / "create.json") or _resolution_name(directory) is not None:
+            if revisions or _present(directory / "create.json") or self._resolution(directory) is not None:
                 raise Denied("Work-item creation has pre-existing history")
             # _history_revisions already rejected unknown names and
             # unsafe/ambiguous temporaries; a recovered orphan leaves an empty
@@ -515,7 +571,7 @@ class WorkItems:
                         revisions = self._history_revisions(entry.name, recover=recover)
                         if entry.name in task_sources:
                             continue
-                        if revisions or _resolution_name(directory / entry.name) is not None:
+                        if revisions or self._resolution(directory / entry.name) is not None:
                             raise Denied("Work-item history has no immutable seed")
                     continue
                 revisions = self._history_revisions(entry.name, recover=recover)
@@ -599,7 +655,7 @@ class WorkItems:
         if revisions is _HISTORY_UNSET:
             if not _directory(directory.parent) or not _directory(directory):
                 return None
-        name = _resolution_name(directory)
+        name = self._resolution(directory)
         if name is None:
             if revisions is not _HISTORY_UNSET and revisions and "work_item" not in event:
                 raise Denied("Unresolved legacy event carries active history")
@@ -647,7 +703,7 @@ class WorkItems:
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
             return False
-        name = _resolution_name(directory)
+        name = self._resolution(directory)
         if name is None:
             return False
         with os.scandir(directory) as entries:
@@ -863,7 +919,7 @@ class WorkItems:
             seeds = task_seeds(event)
             for seed in seeds:
                 if seed["id"] == item_id:
-                    if _resolution_name(self.root / "work-items" / item_id) is not None:
+                    if self._resolution(self.root / "work-items" / item_id) is not None:
                         raise Denied("Task seed cannot carry legacy reconciliation")
                     if self._direct_record(item_id) is not None:
                         raise Denied("Conflicting task seed sources")
@@ -1561,6 +1617,7 @@ class WorkItems:
         """Return (item, doing start) with any derived blocked start, or raise."""
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
+        self._require_migrated_item(item_id)
         with self._ledger.read("items", locked=locked) as db:
             found = _rows(db, "SELECT item, doing_since, blocked_since FROM items WHERE id=?",
                           (item_id,))
@@ -1575,6 +1632,7 @@ class WorkItems:
     def _plain(self, item_id: str, *, locked: bool = False) -> dict:
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
+        self._require_migrated_item(item_id)
         with self._ledger.read("items", locked=locked) as db:
             found = _rows(db, "SELECT item FROM items WHERE id=?", (item_id,))
         if not found:
@@ -2252,6 +2310,7 @@ class WorkItems:
         """
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
+        self._require_migrated_store()
         record_question = self.record_question_lookup() if self.record_question_lookup is not None else None
         cursor_key = _open_cursor_key(cursor)
         if delivered_wait_resolution_tokens is None:
