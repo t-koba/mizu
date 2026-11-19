@@ -199,7 +199,10 @@ class LegacyWorkItemTests(Fixture):
 
     def test_coexisting_resolution_filenames_fail_closed(self):
         other, _, _ = self.legacy()
-        self.resolve_old(other, outcome="drop", title=None)
+        # Keep other converted while the reads are asserted: an unconverted
+        # sibling would let project-wide reads raise "Unconverted" before the
+        # ambiguous pair, depending on directory enumeration order.
+        self.resolve(other, outcome="drop", title=None)
         event_id, _, _ = self.legacy()
         self.resolve_old(event_id, outcome="drop", title=None)
         old, new = self.old_sidecar(event_id), self.sidecar(event_id)
@@ -211,6 +214,10 @@ class LegacyWorkItemTests(Fixture):
                      lambda: self.resolve(event_id, outcome="drop", title=None)):
             with self.assertRaisesRegex(Denied, "Ambiguous"):
                 read()
+
+        # Now make the sibling unconverted for the migration assertions.
+        self.sidecar(other).rename(self.old_sidecar(other))
+        forget_ledger(self.project.root)
         self.assertEqual(storage_audit(self.project)["work_item_events_skipped"], 2)
         self.project.set_control(paused=True)
         code, output, _ = self.migration_cli()
