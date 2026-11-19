@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from . import reviews
 from .config import FINISH_OUTCOMES, MAX_WAIT_SECONDS, Config, Role
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
@@ -160,7 +161,8 @@ INSIGHT_METADATA_SCHEMA = {
 }
 
 
-def finish_definition(outcomes: tuple[str, ...]) -> tuple[str, dict]:
+def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True) -> tuple[str, dict]:
+    """Describe finish; the typed verdict is advertised only to its holders."""
     can_wait = "wait" in outcomes
     description = (
         "End this work unit and release its model slot and workspace lock. A successful seal ends tool access.\n\n"
@@ -176,14 +178,15 @@ def finish_definition(outcomes: tuple[str, ...]) -> tuple[str, dict]:
         "Omitted events stay pending. Foreign, stale or undelivered tokens are refused before finish intent; "
         "CI and proposal merge waits require explicit tokens to acknowledge them.\n\n"
         "Use next_profile to recommend a profile for the following unit; next_reason requires next_profile. "
-        "The recommendation applies only while the task inputs match, under the operator's selector rules. "
-        "With review_verdict, seal approve or changes_requested for this run's input snapshot; the host binds "
-        "review identity and snapshot. Only configured reviewers' verdicts count for publication. "
-        "Report findings separately as insights; a summary cannot approve.")
+        "The recommendation applies only while the task inputs match, under the operator's selector rules."
+        + (" With review_verdict, seal approve or changes_requested for this run's input snapshot; the host binds "
+           "review identity and snapshot. Only configured reviewers' verdicts count for publication. "
+           "Report findings separately as insights; a summary cannot approve." if review_verdict else ""))
     properties = {
         "outcome": {"type": "string", "enum": list(outcomes)},
         "summary": text(12000), "state": text(32000),
-        "review_verdict": {"type": "string", "enum": ["approve", "changes_requested"]},
+        **({"review_verdict": {"type": "string", "enum": ["approve", "changes_requested"]}}
+           if review_verdict else {}),
         "wait_for_check": text(64),
         "release_checks": array(text(64), 32),
         "ack_events": array(text(64), 512),
@@ -783,8 +786,13 @@ def tool_definitions(capabilities: tuple[str, ...], *, role: Role | None = None,
                    if name not in capabilities and operation_allowed(name, capabilities)]
     tools = []
     for name in operations:
-        description, schema = (finish_definition(role.finish_outcomes)
-                               if name == "finish" and role is not None else DEFINITIONS[name])
+        if name == "finish" and role is not None:
+            # An unbound listing keeps the full manual; a bound role sees the
+            # seal only when the host authorizes it as an independent reviewer.
+            can_review = config is not None and reviews.authorized(config, role)
+            description, schema = finish_definition(role.finish_outcomes, review_verdict=can_review)
+        else:
+            description, schema = DEFINITIONS[name]
         if config is not None and (statement := config.tool_effects.get(name)):
             description += "\n\n" + statement
         tools.append({"name": "mizu_" + name, "operation": name,

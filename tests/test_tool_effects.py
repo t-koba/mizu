@@ -1,6 +1,7 @@
 from dataclasses import replace
 import json
 
+from mizu import reviews
 from mizu.config import load
 from mizu.errors import ConfigError
 from mizu.protocol import DEFINITIONS, finish_definition, tool_definitions
@@ -8,6 +9,13 @@ from support import Fixture
 
 
 class ToolEffectTests(Fixture):
+    @staticmethod
+    def expected_finish(role, config):
+        # A bound role only sees the typed verdict when a host config
+        # authorizes its review seal; an unbound listing keeps the full manual.
+        return finish_definition(role.finish_outcomes,
+                                 review_verdict=config is not None and reviews.authorized(config, role))
+
     def test_appends_verbatim_only_to_the_named_tool(self):
         statement = '  Warm the café cache for "offline" builds.  '
         with self.file.open('a', encoding='utf-8') as stream:
@@ -27,7 +35,7 @@ class ToolEffectTests(Fixture):
         for config in (None, self.config):
             for tool in tool_definitions(tuple(DEFINITIONS), role=role, config=config):
                 name = tool["operation"]
-                description, schema = (finish_definition(role.finish_outcomes) if name == "finish"
+                description, schema = (self.expected_finish(role, config) if name == "finish"
                                        else DEFINITIONS[name])
                 with self.subTest(configured=config is not None, name=name):
                     self.assertEqual(tool["description"].encode("utf-8"), description.encode("utf-8"))
@@ -39,7 +47,7 @@ class ToolEffectTests(Fixture):
             stream.write(f'\n[tool_effects]\nfinish = {json.dumps(statement)}\n')
         role = replace(self.config.roles["consult"], finish_outcomes=("done",))
         [finish] = tool_definitions(("finish",), role=role, config=load(self.file))
-        description, schema = finish_definition(role.finish_outcomes)
+        description, schema = self.expected_finish(role, load(self.file))
         self.assertEqual(finish["description"], description + "\n\n" + statement)
         self.assertEqual(finish["inputSchema"], schema)
 

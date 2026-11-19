@@ -25,7 +25,9 @@ class FinishOutcomeTests(Fixture):
         role = self.config.roles["consult"]
         self.assertEqual(role.finish_outcomes, ("continue", "wait", "blocked", "done"))
         [finish] = tool_definitions(("finish",), role=role)
-        self.assertEqual((finish["description"], finish["inputSchema"]), DEFINITIONS["finish"])
+        self.assertEqual((finish["description"], finish["inputSchema"]),
+                         finish_definition(role.finish_outcomes, review_verdict=False))
+        self.assertNotIn("review_verdict", finish["inputSchema"]["properties"])
         fields = finish["inputSchema"]["properties"]
         self.assertEqual(fields["outcome"]["enum"], ["continue", "wait", "blocked", "done"])
         self.assertIn("wait_for_check", fields)

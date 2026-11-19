@@ -13,6 +13,7 @@ from mizu.config import load
 from mizu.distribution import public_source_identity
 from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import read_json, write_json
+from mizu.protocol import DEFINITIONS, tool_definitions
 from mizu.publication import Publication
 from mizu.runtime import Engine, _on_change_observed
 from mizu.unit_prompts import prompt_for, prompt_delta_for
@@ -231,9 +232,13 @@ class ReviewVerdictTests(PublishFixture):
             goal=source["goal"], state="Same code, new review input", run=None,
             outcome="wait", summary="Successor", parent=source["id"])
         self.project.snapshots.publish(successor)
-        result = engine.run(self.project, "inspector", scheduled_invocation=True)
-        self.assertEqual(result.get("status"), "completed", result)
-        self.assertEqual(result["finish"]["review"]["reviewed_snapshot"], successor["id"])
+        # Both holders are bound to the reviewed digest, so the same-code
+        # successor needs no second verdict for either of them.
+        for name in ("inspector", "auditor"):
+            self.assertEqual(engine.run(self.project, name,
+                scheduled_invocation=True).get("skipped"), "unchanged")
+        self.assertEqual([saved["review"]["role"] for saved in self.approvals()], ["auditor"])
+        self.assertTrue(self.publish()["published"])
 
     def test_ungranted_reader_and_reviewer_name_cannot_seal(self):
         for name in ("searcher", "reviewer"):
@@ -292,7 +297,7 @@ class ReviewVerdictTests(PublishFixture):
         self.assertTrue(publication["published"])
         self.assertEqual(publication["review"], [read_json(saved)])
 
-    def test_exact_snapshot_reviewer_wakes_for_same_code_successor_only(self):
+    def test_reviewed_digest_skips_same_code_successor_and_rearms_on_change(self):
         roles = dict(self.config.roles)
         roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=True)
         self.config = dataclasses.replace(self.config, roles=roles)
@@ -300,11 +305,12 @@ class ReviewVerdictTests(PublishFixture):
 
         self.review()
         source = self.project.snapshots.get()
-        cursor = read_json(self.project.root / "observed" / "reviewer.json")
+        cursor_path = self.project.root / "observed" / "reviewer.json"
+        cursor = read_json(cursor_path)
         self.assertEqual(cursor["snapshot"], source["id"])
         self.assertEqual(cursor["review_receipt"], self.project.snapshots.get(
             cursor["review_receipt"])["id"])
-        # An exact review of the current input does not retrigger itself.
+        # A review of the current digest does not retrigger itself.
         same = Engine(self.config, driver=ScriptDriver()).run(
             self.project, "reviewer", scheduled_invocation=True)
         self.assertEqual(same.get("skipped"), "unchanged", same)
@@ -312,18 +318,25 @@ class ReviewVerdictTests(PublishFixture):
         successor = self.project.snapshots.create(
             {key: source[key] for key in ("files", "code_digest", "skipped", "bytes")},
             goal=source["goal"], state="New state, unchanged code", run=None,
-            outcome="wait", summary="New exact snapshot", parent=source["id"])
+            outcome="wait", summary="Same code, new snapshot", parent=source["id"])
         self.project.snapshots.publish(successor)
-        def approve_successor(ctx, *_):
-            ctx.handle("finish", {"outcome": "wait", "summary": "Reviewed successor.",
-                                  "review_verdict": "approve"})
-        result = Engine(self.config, driver=ScriptDriver(approve_successor)).run(
-            self.project, "reviewer", scheduled_invocation=True)
-        self.assertEqual(result.get("status"), "completed", result)
-        self.assertEqual(read_json(
-            self.project.root / "observed" / "reviewer.json")["snapshot"], successor["id"])
         self.assertEqual(Engine(self.config, driver=ScriptDriver()).run(
             self.project, "reviewer", scheduled_invocation=True).get("skipped"), "unchanged")
+        self.assertEqual(read_json(cursor_path), cursor)  # No verdict replaced.
+
+        # New code re-arms the reviewer: the stale approval cannot dedup it.
+        (self.project.workspace / "app.py").write_text("VALUE = 3\n")
+        changed = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=source["goal"], state="Changed code", run=None,
+            outcome="wait", summary="Changed code", parent=successor["id"])
+        self.project.snapshots.publish(changed)
+        self.assertFalse(_on_change_observed(cursor, changed, exact_snapshot=True,
+            project=self.project, config=self.config, role_name="reviewer"))
+        result = Engine(self.config, driver=ScriptDriver()).run(
+            self.project, "reviewer", scheduled_invocation=True)
+        self.assertEqual(result.get("status"), "completed", result)
+        self.assertNotIn("review", result["finish"])
 
     def test_verdictless_exact_review_remains_retryable_on_existing_schedule(self):
         roles = dict(self.config.roles)
@@ -396,18 +409,138 @@ class ReviewVerdictTests(PublishFixture):
         self.review(None, summary="approve")
         self.denied()
 
-    def test_exact_snapshot_not_just_same_code_and_live_tree_must_match(self):
+    def test_review_binding_requires_same_digest_and_live_tree(self):
         self.review()
         old = self.project.snapshots.get()
         capture = self.project.snapshots.capture_files(self.project.workspace)
         successor = self.project.snapshots.create(capture, goal=old["goal"], state="New state",
-            run=None, outcome="wait", summary="Same code, different exact snapshot", parent=old["id"])
+            run=None, outcome="wait", summary="Same code, new snapshot", parent=old["id"])
         self.project.snapshots.publish(successor)
+        # Same code and the same live tree: the earlier verdict still counts.
+        self.assertEqual(len(self.approvals()), 1)
+        self.assertTrue(self.publish()["published"])
+
+        # A changed live tree has a changed digest, which needs a new verdict.
+        (self.project.workspace / "app.py").write_text("VALUE = 3\n")
+        previous = self.project.snapshots.get()
+        changed = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=previous["goal"], state="Changed code", run=None,
+            outcome="wait", summary="Changed code", parent=previous["id"])
+        self.project.snapshots.publish(changed)
+        approve(self, "main", current_digest(self))
+        with self.assertRaisesRegex(Denied, "typed approval"):
+            self.approvals()
         self.denied()
         self.review()
+        self.assertTrue(self.publish()["published"])
+
+    def test_finish_tool_scopes_typed_verdict_to_authorized_reviewer(self):
+        for name in ("worker", "searcher", "consult"):
+            [finish] = tool_definitions(("finish",), role=self.config.roles[name], config=self.config)
+            self.assertNotIn("review_verdict", finish["inputSchema"]["properties"])
+            self.assertNotIn("review_verdict", finish["description"])
+            self.assertNotIn("a summary cannot approve", finish["description"])
+        reviewer = self.config.roles["reviewer"]
+        self.assertTrue(reviews.authorized(self.config, reviewer))
+        [finish] = tool_definitions(("finish",), role=reviewer, config=self.config)
+        self.assertEqual(finish["inputSchema"]["properties"]["review_verdict"],
+                         {"type": "string", "enum": ["approve", "changes_requested"]})
+        self.assertIn("seal approve or changes_requested", finish["description"])
+        self.assertIn("a summary cannot approve", finish["description"])
+        # Revoking the capability removes both even for that role name.
+        revoked = dataclasses.replace(reviewer, capabilities=tuple(
+            cap for cap in reviewer.capabilities if cap != "review_verdict"))
+        [finish] = tool_definitions(("finish",), role=revoked, config=self.config)
+        self.assertNotIn("review_verdict", finish["inputSchema"]["properties"])
+        self.assertNotIn("a summary cannot approve", finish["description"])
+        # Without a bound role/config the full manual and unscoped schema remain.
+        self.assertEqual(tool_definitions(("finish",))[0]["inputSchema"], DEFINITIONS["finish"][1])
+        open_config = dataclasses.replace(self.config, publication=dataclasses.replace(
+            self.config.publication, reviewer_role=""))
+        [finish] = tool_definitions(("finish",), role=reviewer, config=open_config)
+        self.assertIn("review_verdict", finish["inputSchema"]["properties"])
+
+    def test_state_only_republication_keeps_approval_and_skips_reviewer(self):
+        roles = dict(self.config.roles)
+        roles["reviewer"] = dataclasses.replace(roles["reviewer"], on_change=True)
+        self.config = dataclasses.replace(self.config, roles=roles)
+        self.project.config = self.config
+        self.review()
+        reviewed = self.project.snapshots.get()
+        cursor_path = self.project.root / "observed" / "reviewer.json"
+        cursor = read_json(cursor_path)
+        successor = self.project.snapshots.create(
+            {key: reviewed[key] for key in ("files", "code_digest", "skipped", "bytes")},
+            goal=reviewed["goal"], state="New state, same code", run=None,
+            outcome="wait", summary="State-only successor", parent=reviewed["id"])
+        self.project.snapshots.publish(successor)
+        self.assertNotEqual(successor["id"], reviewed["id"])
+        self.assertEqual(successor["code_digest"], reviewed["code_digest"])
+
+        self.assertEqual(self.publication_state()["cause"], "approved_queued")
+        self.assertEqual(len(self.approvals()), 1)
+        self.assertTrue(_on_change_observed(cursor, successor, exact_snapshot=True,
+            project=self.project, config=self.config, role_name="reviewer"))
+        self.assertEqual(Engine(self.config, driver=ScriptDriver()).run(
+            self.project, "reviewer", scheduled_invocation=True).get("skipped"), "unchanged")
+        self.assertEqual(read_json(cursor_path), cursor)
+        publication = self.publish()
+        self.assertTrue(publication["published"])
+        self.assertEqual(publication["review"][0]["review"]["reviewed_snapshot"], reviewed["id"])
+
+    def test_changed_digest_requires_new_verdict_and_rejects_old_approval(self):
+        self.review()
+        source = self.project.snapshots.get()
+        cursor_path = self.project.root / "observed" / "reviewer.json"
+        cursor = read_json(cursor_path)
         (self.project.workspace / "app.py").write_text("VALUE = 3\n")
+        changed = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace),
+            goal=source["goal"], state="Changed code", run=None,
+            outcome="wait", summary="Changed code", parent=source["id"])
+        self.project.snapshots.publish(changed)
         approve(self, "main", current_digest(self))
+        self.denied()  # The earlier approval names the old digest.
+        context = make_context(self, self.config, self.publisher, review=False)
+        with self.assertRaisesRegex(Denied, "typed approval"):
+            reviews.require_approvals(context, "0" * 64)
+
+        # Relabeling the cursor digest cannot promote an old-digest receipt.
+        forged = dict(cursor, code_digest=changed["code_digest"])
+        write_json(cursor_path, forged)
+        with self.assertRaisesRegex(Denied, "code digest"):
+            reviews.cursor_review(self.project, self.config, "reviewer", forged, changed)
         self.denied()
+        write_json(cursor_path, cursor)
+
+        self.review()
+        self.assertEqual(self.approvals()[0]["review"]["reviewed_snapshot"], changed["id"])
+        self.assertTrue(self.publish()["published"])
+
+    def test_review_identity_and_reviewed_snapshot_are_host_bound(self):
+        self.review()
+        source = self.project.snapshots.get()
+        cursor = read_json(self.project.root / "observed" / "reviewer.json")
+        self.assertEqual(reviews.cursor_review(
+            self.project, self.config, "reviewer", cursor, source)[1], cursor["review"])
+        with self.assertRaisesRegex(Denied, "code digest"):
+            reviews.cursor_review(self.project, self.config, "reviewer", cursor,
+                                  {**source, "code_digest": "0" * 64})
+        for expected_role in ("worker", "", "missing"):
+            with self.assertRaises(Denied):
+                reviews.cursor_review(self.project, self.config, expected_role, cursor, source)
+        for changed in (
+                {**cursor, "snapshot": "a" * 64},
+                {**cursor, "review_receipt": "b" * 64},
+                {**cursor, "code_digest": "c" * 64},
+                {**cursor, "review": {**cursor["review"], "role": "worker"}},
+                {**cursor, "review": {**cursor["review"], "run": "0" * 32}},
+                {**cursor, "review": {**cursor["review"], "reviewed_snapshot": "d" * 64}},
+                {**cursor, "review": {**cursor["review"], "verdict": "changes_requested"}}):
+            with self.subTest(changed=changed):
+                with self.assertRaises(Denied):
+                    reviews.cursor_review(self.project, self.config, "reviewer", changed, source)
 
     def test_identity_snapshot_and_authorization_are_not_caller_parameters(self):
         for name in ("worker", "searcher"):

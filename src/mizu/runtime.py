@@ -2741,11 +2741,11 @@ class Engine(EngineAdmissionMixin):
         """
         snapshot = project.snapshots.get()
         cursor = _role_cursor(project, role_name)
-        exact_snapshot_review = "review_verdict" in getattr(role, "capabilities", ())
+        review_holder = "review_verdict" in getattr(role, "capabilities", ())
         code_unchanged = role.on_change and _on_change_observed(
-            cursor, snapshot, exact_snapshot=exact_snapshot_review,
-            project=project if exact_snapshot_review else None,
-            config=self.config if exact_snapshot_review else None, role_name=role_name)
+            cursor, snapshot, exact_snapshot=review_holder,
+            project=project if review_holder else None,
+            config=self.config if review_holder else None, role_name=role_name)
         triggers = tuple(getattr(role, "decision_events", ()) or ())
         sources = getattr(role, "decision_sources", "own") or "own"
         record_state = _record_delivery(project).pending(project, role)
@@ -4333,12 +4333,14 @@ def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
                         project=None, config=None, role_name="") -> bool:
     """True when an ``on_change`` role completed its relevant observation.
 
-    Every review_verdict capability holder is bound to the exact input snapshot.
-    Its observation is complete only when the cursor resolves to a valid typed
-    review snapshot and create-only run receipt for that source. A verdict-less
-    attempt is not review completion; subsequent scheduled/event dispatches may
-    retry at their existing cadence, with no internal retry loop. Other roles
-    retain code-digest deduplication. Failure: never raises; invalid evidence is
+    A review_verdict capability holder is bound to the observed code digest:
+    its observation is complete only when the cursor resolves to a valid typed
+    review snapshot and create-only run receipt for that digest. The reviewed
+    snapshot stays recorded as evidence, so a same-code successor is unchanged
+    while a new digest re-arms review. A verdict-less attempt is not review
+    completion; subsequent scheduled/event dispatches may retry at their
+    existing cadence, with no internal retry loop. Other roles retain the same
+    code-digest deduplication. Failure: never raises; invalid evidence is
     treated as unseen.
 
     State-only republications do not schedule ordinary ``on_change`` roles.

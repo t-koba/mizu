@@ -1,10 +1,11 @@
-"""Typed review receipts, bound only by the host to a reader's input snapshot.
+"""Typed review receipts, bound by the host to the reviewed code digest.
 
-The observed cursor keeps the reviewed input snapshot separate from its
-immutable review-receipt snapshot. Only a validated typed receipt marks that
-input reviewed for scheduling; an observed attempt without a verdict remains
-pending. Neither prose, insights nor role-authored shared records are approval
-evidence.
+The observed cursor keeps the reviewed input snapshot as evidence alongside
+its immutable review-receipt snapshot. Only a validated typed receipt marks
+that code reviewed for scheduling and publication; an observed attempt without
+a verdict remains pending. A same-code successor needs no new verdict, while a
+changed digest does. Neither prose, insights nor role-authored shared records
+are approval evidence.
 """
 from __future__ import annotations
 
@@ -85,11 +86,14 @@ def record(context, finished):
 
 
 def cursor_review(project, config, expected_role: str, cursor, source):
-    """Return the exact typed review represented by a source cursor.
+    """Return the typed review validated for the source's code digest.
 
     expected_role is the trusted host-supplied scheduled or policy-selected
-    holder, never a model argument. The cursor is only complete when its
-    immutable snapshot and create-only run receipt both validate. A no-verdict observed attempt is not a review.
+    holder, never a model argument. The reviewed snapshot remains evidence of
+    what was read: the cursor, the review and the receipt's parent must name
+    the same snapshot, but a later same-code snapshot does not invalidate it.
+    The cursor is only complete when its immutable snapshot and create-only run
+    receipt both validate. A no-verdict observed attempt is not a review.
     """
     role = config.roles.get(expected_role)
     if not expected_role or role is None or not authorized(config, role):
@@ -106,13 +110,17 @@ def cursor_review(project, config, expected_role: str, cursor, source):
         raise Denied("Invalid review receipt reference")
     receipt = project.snapshots.get(receipt_id)
     review = check(receipt.get("review"))
+    reviewed = review["reviewed_snapshot"]
+    # Legacy cursors named the receipt in `snapshot`; current ones name the
+    # reviewed source and hold the receipt separately. The receipt's parent
+    # still binds both to the reviewed source.
+    cursor_source = reviewed if has_receipt_cursor else receipt_id
     if (receipt.get("id") != receipt_id or cursor.get("review") != review
-            or cursor.get("snapshot") != (source_id if has_receipt_cursor else receipt_id)
+            or cursor.get("snapshot") != cursor_source or receipt.get("parent") != reviewed
             or cursor.get("code_digest") != code_digest
-            or review["role"] != expected_role or review["reviewed_snapshot"] != source_id
-            or receipt.get("parent") != source_id or receipt.get("run") != review["run"]
+            or review["role"] != expected_role or receipt.get("run") != review["run"]
             or receipt.get("code_digest") != code_digest):
-        raise Denied("Review does not bind this exact source")
+        raise Denied("Review does not bind this code digest")
     saved = loads_finite(safe_read(
         project.root, f"runs/{review['run']}/review.json", RECORD_BYTES))
     if saved != {"snapshot": receipt_id, "review": review}:
@@ -182,15 +190,15 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
 
 
 def require_approvals(context, code_digest) -> tuple[dict, ...]:
-    """Consume selected holders' latest host-sealed exact-snapshot approvals.
+    """Consume selected holders' latest host-sealed approvals of this digest.
 
     Missing, unsafe, malformed, unauthorized or mismatched evidence contributes
     nothing; no scan/retry/fallback to older approvals. Human GO remains
     independently required by the caller. Reads are bounded per selected holder;
-    model arguments select neither identity nor reviewed snapshot.
+    model arguments select neither identity, reviewed snapshot nor digest.
     """
     holders, required = config.publication_review_requirement(context.config.publication)
-    denied = "Publication requires an authorized typed approval for the exact snapshot"
+    denied = "Publication requires an authorized typed approval for the reviewed code digest"
     if not holders or required < 1:
         raise Denied(denied)
     approvals = tuple(saved for receipt, review, saved in _current_reviews(context, holders)
