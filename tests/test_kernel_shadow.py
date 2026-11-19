@@ -246,19 +246,24 @@ class KernelShadowProjection(unittest.TestCase):
 
     def test_exact_defer_replay_does_not_duplicate_projection(self):
         insight = self.submit("d3" * 16)
-        self.project.insights.decide(
-            insight["id"], "defer", "Wait", "deadline at 2099-01-01T00:00:00+00:00",
-            "test-run", expected_rev=1)
-        replacement = self.project.insights.decide(
-            insight["id"], "defer", "Wait longer", "deadline at 2099-02-01T00:00:00+00:00",
-            "test-run", expected_rev=1)
-        shadow = self.project.insights.kernel_shadow
-        current = self.project.kernel_objects.read("insight", insight["id"])
-        head = self.project.kernel_events.head()
-        shadow.decided(insight, replacement)
-        replay = self.project.insights.decide(
-            insight["id"], "defer", "Wait longer", "deadline at 2099-02-01T00:00:00+00:00",
-            "test-run", expected_rev=1)
+        # An exact retry can land in a later second. Each disposition must
+        # still yield one event and one projection regardless of the clock.
+        moments = iter(["2026-01-01T00:00:01+00:00", "2026-01-01T00:00:02+00:00",
+                        "2026-01-01T00:00:03+00:00"])
+        with patch("mizu.insights.now", side_effect=lambda: next(moments)):
+            self.project.insights.decide(
+                insight["id"], "defer", "Wait", "deadline at 2099-01-01T00:00:00+00:00",
+                "test-run", expected_rev=1)
+            replacement = self.project.insights.decide(
+                insight["id"], "defer", "Wait longer", "deadline at 2099-02-01T00:00:00+00:00",
+                "test-run", expected_rev=1)
+            shadow = self.project.insights.kernel_shadow
+            current = self.project.kernel_objects.read("insight", insight["id"])
+            head = self.project.kernel_events.head()
+            shadow.decided(insight, replacement)
+            replay = self.project.insights.decide(
+                insight["id"], "defer", "Wait longer", "deadline at 2099-02-01T00:00:00+00:00",
+                "test-run", expected_rev=1)
         self.assertEqual(replay, replacement)
         self.assertEqual(self.project.kernel_objects.read("insight", insight["id"]), current)
         self.assertEqual(self.project.kernel_objects.revisions("insight", insight["id"]), [1, 2, 3])

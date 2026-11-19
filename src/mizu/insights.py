@@ -1286,6 +1286,17 @@ replacement insight without implying rejected substance.
             if prior is not None and prior.get("action") == "withdraw":
                 raise Denied("Insight withdrawn; revise the topic to reopen it")
             key = _decision_key(insight_id, rev)
+            if (prior is not None and prior.get("action") == "defer"
+                    and prior.get("reason") == reason and prior.get("revisit") == revisit
+                    and prior.get("run") == run):
+                # An exact defer retry must return the original event. A fresh
+                # timestamp would derive a second kernel decision object and
+                # event for one disposition, so a retry crossing a clock tick
+                # must stay the same no-op as a substantive keyed replay.
+                writer = self.decision_queue_writer
+                if writer is not None and writer.active():
+                    writer.decide(current, prior, key)
+                return prior
             event_path = self.root / "decision-history" / f"{key}.json"
             if event_path.exists() or event_path.is_symlink():
                 existing = json.loads(safe_read(self.root, f"decision-history/{key}.json", PREVIEW_BYTES))
