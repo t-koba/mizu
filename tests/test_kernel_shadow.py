@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import support  # noqa: F401  (puts src on the path)
+from mizu.cli import _cmd_kernel_shadow, parser
 from mizu.config import load
 from mizu.errors import Denied
 from mizu.kernel_shadow import decision_object_id
@@ -110,3 +111,31 @@ class KernelShadowProjection(unittest.TestCase):
             insight = self.submit("cc" * 16)
         self.assertEqual(self.project.insights.read(insight["id"])["title"], "Migrate proposals")
         self.assertEqual(self.project.kernel_objects.revisions("insight", insight["id"]), [])
+        failures = self.project.insights.kernel_shadow.failures
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["operation"], "submitted")
+        self.assertEqual(failures[0]["insight"], insight["id"])
+        self.assertEqual(failures[0]["error"], "Denied")
+
+    def test_verify_detects_divergence_and_operator_reprojection_repairs_it(self):
+        insight = self.submit("ff" * 16)
+        decision = self.project.insights.decide(
+            insight["id"], "accept", "Accepted", "", "test-run",
+            expected_rev=1, work_item_intent="none")
+        shadow = self.project.insights.kernel_shadow
+        self.assertTrue(shadow.verify(insight, decision)["ok"])
+        current = self.project.kernel_objects.read("insight", insight["id"])
+        self.project.kernel_objects.transition(
+            "insight", insight["id"], "revise", expected_rev=current["rev"],
+            fields={}, actor="role:writer")
+        divergent = shadow.verify(insight, decision)
+        self.assertFalse(divergent["ok"])
+        self.assertIn("insight state is pending, expected accepted", divergent["mismatches"])
+
+        args = parser().parse_args(["kernel-shadow", "shadow", insight["id"], "--reproject"])
+        report = _cmd_kernel_shadow(self.config, self.project, args)
+        self.assertTrue(report["enabled"])
+        self.assertTrue(report["verification"]["ok"])
+        self.assertEqual(report["failures"], [])
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["state"],
+                         "accepted")

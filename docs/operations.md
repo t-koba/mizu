@@ -471,6 +471,15 @@ mizu pause demo
 mizu migrate-records demo --apply  # requires a paused, quiescent project
 ```
 
+During the stage-2 migration, `mizu kernel-shadow <project> <insight>` compares
+one authoritative insight and its recorded decision with the derived kernel
+objects. It is read-only, accepts an insight ID prefix and prints a JSON report
+with `verification.ok` and any concrete mismatches. `mizu kernel-shadow
+<project> <insight> --reproject` explicitly replays the projection before
+verifying; it only writes kernel objects and never changes the authoritative
+legacy record. Projection failures are also retained as a bounded process-local
+`failures` list in the report.
+
 This operator command inspects only top-level `shared-records/*.json` in the
 project's private data directory. It examines at most 1,000 directory entries
 (including non-JSON entries), never recurses, and reports `truncated: true`

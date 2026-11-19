@@ -16,6 +16,9 @@ from .fs import canonical, digest
 
 _NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
 _ACTIONS = frozenset(("accept", "modify", "defer", "reject", "withdraw"))
+_STATES = {"accept": "accepted", "modify": "modified", "defer": "deferred",
+           "reject": "rejected", "withdraw": "withdrawn"}
+MAX_SHADOW_FAILURES = 32
 
 
 def principal(value: Any) -> str:
@@ -89,6 +92,60 @@ class KernelShadow:
 
     def __init__(self, objects):
         self.objects = objects
+        self.failures: list[dict] = []
+
+    def note_failure(self, operation: str, insight_id: str, exc: BaseException) -> None:
+        """Retain a bounded process-local record of a derived projection failure."""
+        reason = str(exc)[:256]
+        self.failures.append({"operation": operation, "insight": insight_id,
+                              "error": type(exc).__name__,
+                              "reason": reason if str(exc) == reason else reason[:253] + "..."})
+        del self.failures[:-MAX_SHADOW_FAILURES]
+
+    def clear_failures(self, insight_id: str) -> None:
+        self.failures = [row for row in self.failures if row["insight"] != insight_id]
+
+    def verify(self, insight: Mapping[str, Any], decision: Mapping[str, Any] | None = None) -> dict:
+        """Compare one authoritative fact pair with its derived kernel objects."""
+        insight_id = insight["id"]
+        result = {"insight": insight_id, "revision": insight.get("rev", 1),
+                  "ok": True, "mismatches": []}
+        mismatches = result["mismatches"]
+
+        def mismatch(text: str) -> None:
+            mismatches.append(text)
+
+        try:
+            current = self.objects.read("insight", insight_id)
+        except Denied as exc:
+            mismatch(f"insight object unavailable: {type(exc).__name__}")
+            current = None
+        if current is not None:
+            for key, value in insight_fields(insight).items():
+                if current["fields"].get(key) != value:
+                    mismatch(f"insight field {key} differs")
+            action = decision.get("action") if decision else None
+            expected_state = _STATES.get(action) if action in _ACTIONS else None
+            if expected_state is not None and current["state"] != expected_state:
+                mismatch(f"insight state is {current['state']}, expected {expected_state}")
+            if action == "defer":
+                instant = instant_value(decision.get("revisit"))
+                if instant is not None and current["fields"].get("revisit_at") != instant:
+                    mismatch("insight revisit_at differs")
+
+        action = decision.get("action") if decision else None
+        if decision is not None and action in _ACTIONS:
+            object_id = decision_object_id(decision)
+            expected = decision_fields(decision)
+            try:
+                recorded = self.objects.read("decision", object_id)
+            except Denied as exc:
+                mismatch(f"decision object {object_id} unavailable: {type(exc).__name__}")
+            else:
+                if recorded["fields"] != expected:
+                    mismatch(f"decision object {object_id} fields differ")
+        result["ok"] = not mismatches
+        return result
 
     def submitted(self, record: Mapping[str, Any]) -> None:
         object_id = record["id"]

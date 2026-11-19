@@ -220,6 +220,11 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
+    p = sub.add_parser("kernel-shadow", help="Verify one insight's derived kernel projection; no authority transfer")
+    p.add_argument("project", help="Managed project name")
+    p.add_argument("insight", help="Exact insight ID or unique prefix")
+    p.add_argument("--reproject", action="store_true",
+                   help="Replay the projection once before verifying (writes kernel objects only)")
     p = sub.add_parser("migrate-records", help="Preview flat shared record migration; dry-run unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Move verified records under quiescence")
@@ -505,6 +510,28 @@ def _cmd_storage(config, project, args):
     return audit(project)
 
 
+def _cmd_kernel_shadow(config, project, args):
+    insight = project.insights.read(args.insight)
+    shadow = project.insights.kernel_shadow
+    decision = project.insights.decision(insight["id"])
+    if args.reproject:
+        if shadow is None:
+            raise ConfigError("Kernel shadow is not enabled for this project")
+        shadow.clear_failures(insight["id"])
+        try:
+            shadow.submitted(insight)
+            shadow.revised(insight)
+            if decision is not None:
+                shadow.decided(insight, decision)
+        except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
+            shadow.note_failure("reproject", insight["id"], exc)
+    return {"project": project.name, "insight": insight["id"],
+            "enabled": shadow is not None,
+            "verification": shadow.verify(insight, decision) if shadow is not None else None,
+            "failures": [row for row in (shadow.failures if shadow is not None else [])
+                         if row["insight"] == insight["id"]]}
+
+
 def _cmd_migrate_records(config, project, args):
     from .record_migration import apply, plan
     return apply(project) if args.apply else plan(project)
@@ -628,7 +655,8 @@ _PROJECT_COMMANDS = {
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
     "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
     "usage": _cmd_usage, "backup": _cmd_backup,
-    "prune": _cmd_prune, "storage": _cmd_storage, "migrate-records": _cmd_migrate_records,
+    "prune": _cmd_prune, "storage": _cmd_storage, "kernel-shadow": _cmd_kernel_shadow,
+    "migrate-records": _cmd_migrate_records,
     "migrate-work-items": _cmd_migrate_work_items,
 }
 
@@ -826,7 +854,10 @@ def _execute(config, args):
                   if args.target_id is not None else None)
         return write(Project(config, args.project), event_id=args.id, kind=args.kind, body=args.body,
                      addressee=args.role, subject=subject, action=args.action, target=target)
-    project = Project(config, args.project, read_only=args.command in ("migrate-records", "migrate-work-items"))
+    read_only = args.command in ("migrate-records", "migrate-work-items")
+    if args.command == "kernel-shadow" and not getattr(args, "reproject", False):
+        read_only = True
+    project = Project(config, args.project, read_only=read_only)
     if args.command == "ci-acceptance":
         from .ci_acceptance import retain
         return retain(project, snapshot_id=args.snapshot, publication_id=args.publication_id,

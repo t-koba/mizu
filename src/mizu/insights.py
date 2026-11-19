@@ -527,8 +527,13 @@ class Insights:
             return
         try:
             getattr(self.kernel_shadow, operation)(*args)
-        except (Denied, OSError, ValueError, TypeError, KeyError):
-            return
+        except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
+            note = getattr(self.kernel_shadow, "note_failure", None)
+            if note is not None:
+                try:
+                    note(operation, args[0]["id"], exc)
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    pass
 
     def _work_item_store(self):
         # Standalone Insights readers need no ledger; mutation gets the same
@@ -1120,6 +1125,20 @@ replacement insight without implying rejected substance.
         if self._legacy_identity(matched):
             raise Denied("Insight body unavailable; legacy retention removed it before archival")
         raise Denied("Insight not found")
+
+    def decision(self, insight_id: str) -> dict | None:
+        """Read one recorded decision by exact insight ID, without prefix resolution."""
+        key = identifier(insight_id)
+        path = self.root / "decisions" / f"{key}.json"
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            record = json.loads(safe_read(self.root, f"decisions/{key}.json", PREVIEW_BYTES))
+        except (OSError, ValueError, RecursionError):
+            return None
+        if isinstance(record, dict) and record.get("id") == key:
+            return record
+        return None
 
     def scan_source(self, source: str) -> list[dict]:
         """Return every readable inbox record carrying the given source.

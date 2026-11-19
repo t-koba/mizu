@@ -51,7 +51,8 @@ a mechanism contract;
 `ci_wake.py`'s re-wake default is configured policy owned by
 `[vcs] ci_rewake_seconds`, and its record version is format, outside the
 name-scoped detector.
-The `lock_diagnostics.py`
+The `kernel_shadow.py` failure list is a bounded process-local diagnostic; it is
+not authoritative state. The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
 The `cli.py` module-level inventory is empty; its numeric page defaults are
@@ -579,6 +580,11 @@ DECLARATIONS = {
             '16', 'safety', 'insights / fixed append-only evidence entries per insight'),
         'MAX_EVIDENCE_CHARS': (
             '8192', 'safety', 'insights / fixed evidence text bound per entry'),
+    },
+    'kernel_shadow.py': {
+        'MAX_SHADOW_FAILURES': (
+            '32', 'safety',
+            'kernel shadow / bounded process-local projection failure diagnostics'),
     },
     'lock_diagnostics.py': {
         'MAX_LOCK_DIAGNOSTIC_ROWS': (
