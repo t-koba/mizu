@@ -25,10 +25,10 @@ decision referring to a proposal (its ``body`` fields ``action``, ``reason``
 and, when present, ``revisit``); ``revisits`` holds the delayed messages
 referring to it that are due at ``now``. ``answer`` is the answering message's
 body, attached to the question or converted proposal named by its ``refs``.
-An ambiguous reference (more than one deciding decision or answer for one
-target) is refused. An unresolved ref -- a decision ref that is not a proposal
-id or an answer ref that is not a proposal or question id -- is refused rather
-than ignored. The command is for an operator to inspect the project;
+Every decision and answer must name exactly one target. An unresolved ref --
+a decision ref that is not a proposal id or an answer ref that is not a
+proposal or question id -- is refused rather than ignored, as are missing or
+multiple refs and more than one deciding decision or answer for one target. The command is for an operator to inspect the project;
 it writes nothing and grants no capability.
 """
 from __future__ import annotations
@@ -109,12 +109,16 @@ def _referrers(messages: list[dict], name: str) -> dict:
 
 def _validate_refs(messages: list[dict], name: str, allowed: str,
                    ids: set[str]) -> None:
-    """Refuse a ref that cannot be resolved to one of the declared target ids."""
+    """Require exactly one ref that resolves to a declared target id."""
     for message in messages:
-        for ref in _refs(message, name):
-            if not isinstance(ref, str) or ref not in ids:
-                raise ViewError(f"{name} message {message.get('id')}: "
-                                f"unresolved ref {ref!r} is not a {allowed} id")
+        refs = _refs(message, name)
+        if len(refs) != 1:
+            raise ViewError(f"{name} message {message.get('id')}: "
+                            f"expected exactly one {allowed} ref, got {len(refs)}")
+        ref = refs[0]
+        if not isinstance(ref, str) or ref not in ids:
+            raise ViewError(f"{name} message {message.get('id')}: "
+                            f"unresolved ref {ref!r} is not a {allowed} id")
 
 
 def _one(index: dict[str, list[dict]], message_id: str, label: str,

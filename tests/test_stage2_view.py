@@ -117,15 +117,27 @@ class Stage2View(Fixture):
                     self.projection_with(queue, {"id": message_id, "refs": [ref],
                                                  "body": body})
 
-    def test_answer_with_multiple_valid_refs_stays_per_target(self):
+    def test_answer_with_multiple_valid_refs_is_refused(self):
         refs = [self.proposal_id(ACCEPT_ID), self.proposal_id(DEFER_ID)]
         self.store.append("answers", {"body": "Shared answer"}, "operator",
                           refs=refs, id="6" * 32, now=REVISIT_AT)
-        view = stage2_view.project_view(self.view_project, now=REVISIT_AT)
-        self.assertEqual([item["answer"] for item in view["proposals"]],
-                         [{"body": "Shared answer"}] * 2)
-        self.assertEqual(view["questions"][0]["answer"],
-                         {"body": "Use the declared queues."})
+        with self.assertRaisesRegex(stage2_view.ViewError,
+                                    "answers message " + "6" * 32 +
+                                    ": expected exactly one proposals or questions ref, got 2"):
+            stage2_view.project_view(self.view_project, now=REVISIT_AT)
+
+    def test_missing_refs_are_refused(self):
+        for queue, message_id, body, allowed in (
+                ("decisions", "no-decision-ref", {"action": "accept", "reason": "None"},
+                 "proposals"),
+                ("answers", "no-answer-ref", {"body": "No target"},
+                 "proposals or questions")):
+            with self.subTest(queue=queue):
+                with self.assertRaisesRegex(
+                        stage2_view.ViewError,
+                        rf"{queue} message {message_id}: "
+                        rf"expected exactly one {allowed} ref, got 0"):
+                    self.projection_with(queue, {"id": message_id, "refs": [], "body": body})
 
     def test_projection_maps_decisions_revisits_answers_and_notices(self):
         before = stage2_view.project_view(self.view_project, now=BEFORE_REVISIT)
