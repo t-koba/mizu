@@ -334,9 +334,28 @@ class Stage2DecisionAdapter(Fixture):
                 mock.patch.object(decision_delivery, "MAX_FRAME", 300):
             got = adapter.pending(self.project, self.role())
             legacy = decision_delivery.pending(self.project, self.role())
+        self.assertEqual(canonical(legacy), canonical(got))
         self.assertEqual(canonical(legacy["diagnostics"]), canonical(got["diagnostics"]))
         self.assertIsNotNone(got["page"])
-        self.assertEqual(got["page"]["diagnostics"], got["diagnostics"])
+        self.assertNotIn("diagnostics", got["page"])
+
+    def test_explicit_null_receipt_reason_refuses(self):
+        before = self.legacy_page()
+        decision = next(event for event in before["events"]
+                        if event.get("insight") == ACCEPT_ID)
+        self.project.insights.acknowledge_decisions("worker", [decision])
+        self.convert()
+        messages = (self.project.root / "queues" / "receipts" / "messages")
+        for path in sorted(messages.glob("*.json")):
+            message = json.loads(path.read_bytes())
+            if message["body"]["ack_token"] == decision["ack_token"]:
+                message["body"]["legacy_reason"] = None
+                path.write_bytes(canonical(message))
+                break
+        else:
+            self.fail("Converted receipt message not found")
+        with self.assertRaises(Denied):
+            adapter.pending(self.project, self.role())
 
     def test_oversized_receipt_refuses_the_whole_conversion(self):
         before = self.legacy_page()

@@ -185,14 +185,17 @@ class _ReceiptIndex:
             order = _field(project, RECEIPTS, "legacy_order", body, "Receipt")
             if not isinstance(order, str) or not ORDER_RE.fullmatch(order):
                 raise AdapterError("Converted receipt has an invalid legacy_order")
-            reason = body.get("legacy_reason")
-            if "legacy_reason" in body:
+            reason_present = "legacy_reason" in body
+            reason = None
+            if reason_present:
                 reason = _field(project, RECEIPTS, "legacy_reason", body, "Receipt")
+                if reason is None:
+                    raise AdapterError("Converted receipt has a null legacy_reason")
             if receipt_role != role_name:
                 continue
             if token in self.settled or token in self.corrupt:
                 raise AdapterError(f"Duplicate converted receipt for {token}")
-            if reason is None:
+            if not reason_present:
                 self.settled.add(token)
             else:
                 if action not in DELIVERED_ACTIONS | {RECEIPT_PENDING}:
@@ -474,8 +477,6 @@ def pending(project, role, *, actions=None, limit=None, include_insights=True,
                     break
             if len(delivered) < len(limited):
                 page = {"events": list(delivered), **legacy_summary(delivered)}
-                if diagnostics:
-                    page["diagnostics"] = list(diagnostics)
                 return dict(shared=False, events=delivered, diagnostics=diagnostics,
                             page=page, manifest=())
         events = delivered
