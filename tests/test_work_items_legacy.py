@@ -790,6 +790,34 @@ class LegacyWorkItemTests(Fixture):
         self.assertEqual([path.name for path in old.parent.iterdir()], ["legacy.json"])
         self.assertEqual(source.read_bytes(), source_bytes)
 
+    def test_warm_index_drop_resolution_is_refused_without_store_scan(self):
+        event_id, _, _ = self.legacy()
+        self.resolve(event_id, outcome="drop", title=None)
+        self.store.page_open()  # Ensure the drop-only decision is indexed before rename.
+        old, current = self.old_sidecar(event_id), self.sidecar(event_id)
+        current.rename(old)
+
+        readers = (self.store.page_ready, self.store.page_changes_readonly,
+                   self.store.page_closed_readonly, self.store.count_open_readonly,
+                   self.store.unseeded_decisions)
+        refusal = AssertionError("current-state read opened migration history")
+        with patch.object(self.store, "_read", side_effect=refusal), \
+                patch.object(self.store, "_history_revisions", side_effect=refusal), \
+                patch("mizu.work_items.os.scandir", side_effect=refusal):
+            for read in readers:
+                with self.subTest(read=read.__name__), self.assertRaisesRegex(
+                        Denied, "mizu migrate-work-items"):
+                    read()
+
+        # A rebuild must also refuse the old name, and succeeds once migrated.
+        forget_ledger(self.project.root)
+        with self.assertRaisesRegex(Denied, "mizu migrate-work-items"):
+            self.store.page_ready()
+        old.rename(current)
+        forget_ledger(self.project.root)
+        self.assertTrue(self.store.page_ready()["coverage_complete"])
+        self.assertTrue(self.store.audit()["consistent"])
+
     def test_host_preflight_reads_and_converts_legacy_resolutions(self):
         opened, _, source = self.legacy()
         dropped, _, _ = self.legacy(action="modify")

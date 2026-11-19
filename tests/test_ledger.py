@@ -25,11 +25,12 @@ def index_rows(root):
     with contextlib.closing(sqlite3.connect(Path(root) / ledger_module.NAME)) as db, db:
         items = db.execute(f"SELECT {', '.join(COLUMNS)} FROM items ORDER BY id").fetchall()
         unseeded = db.execute("SELECT event_id FROM unseeded ORDER BY event_id").fetchall()
+        legacy_drops = db.execute("SELECT event_id FROM legacy_drops ORDER BY event_id").fetchall()
         intents = db.execute("SELECT key FROM intents").fetchall()
         insights = db.execute("SELECT * FROM insights ORDER BY id").fetchall() if db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='insights'").fetchone() else []
         decisions = db.execute("SELECT * FROM decisions ORDER BY insight_id").fetchall() if insights else []
-    return items, unseeded, intents, insights, decisions
+    return items, unseeded, intents, insights, decisions, legacy_drops
 
 
 class LedgerPathTests(unittest.TestCase):
@@ -378,6 +379,7 @@ for _ in range(12):
             "items": 2, "unseeded_decisions": 0, "index": "complete", "consistent": True,
             "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
             "divergent_count": 0, "divergent_unseeded": [], "divergent_unseeded_count": 0,
+            "divergent_drops": [], "divergent_drop_count": 0,
             "insights": {"insights": 1, "decisions": 1, "index": "complete", "consistent": True,
                          "repaired": False, "corrupt": [], "corrupt_count": 0, "divergent": [],
                          "divergent_count": 0},

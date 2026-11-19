@@ -1,4 +1,4 @@
-"""Index domain of work items: one current row per item, plus unseeded decisions."""
+"""Index domain of work items, unresolved decisions, and legacy drops."""
 from __future__ import annotations
 
 import base64
@@ -25,6 +25,7 @@ CREATE INDEX items_open ON items(status, holder);
 CREATE INDEX items_closed ON items(status, updated_key DESC, id);
 CREATE INDEX items_origin ON items(origin_insight, origin_rev);
 CREATE TABLE unseeded(event_id TEXT PRIMARY KEY);
+CREATE TABLE legacy_drops(event_id TEXT PRIMARY KEY);
 CREATE TABLE item_changes(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     token_key BLOB NOT NULL, seq INTEGER NOT NULL CHECK(typeof(seq)='integer' AND seq>=0));
@@ -33,7 +34,7 @@ INSERT INTO item_changes VALUES (1, randomblob(32), 0);
 
 
 class _Items(Domain):
-    """Entries are ``("item", row)`` and ``("unseeded", event_id)``; keys are item IDs."""
+    """Entries are item rows, unseeded decisions, or dropped legacy resolutions."""
     resumable = True
 
     def done(self, db) -> set:
@@ -47,8 +48,12 @@ class _Items(Domain):
             if previous != tuple(value):
                 db.execute("UPDATE item_changes SET seq=seq+1")
                 db.execute(_INSERT, value)
-        else:
+        elif kind == "unseeded":
             db.execute("INSERT OR IGNORE INTO unseeded(event_id) VALUES (?)", (value,))
+        elif kind == "drop":
+            db.execute("INSERT OR IGNORE INTO legacy_drops(event_id) VALUES (?)", (value,))
+        else:
+            raise Denied("Invalid work-item index entry")
 
     def replace(self, db, key, entries) -> None:
         entries = list(entries)
@@ -59,6 +64,7 @@ class _Items(Domain):
                 # removes one, no old cursor may silently omit that deletion.
                 db.execute("UPDATE item_changes SET token_key=randomblob(32)")
         db.execute("DELETE FROM unseeded WHERE event_id=?", (key[3:],))
+        db.execute("DELETE FROM legacy_drops WHERE event_id=?", (key[3:],))
         for entry in entries:
             self.put(db, entry)
 
@@ -99,12 +105,13 @@ class _Items(Domain):
             payload + hmac.digest(key, b"work-items-v1" + payload, "sha256")).decode("ascii")
 
     def snapshot(self, db):
-        """Raw contents for an audit: ({id: row}, unseeded set)."""
+        """Raw contents for an audit: item rows and the two decision sets."""
         if db is None:
-            return {}, set()
+            return {}, set(), set()
         return ({row[0]: tuple(row) for row in db.execute(f"SELECT {', '.join(COLUMNS)} FROM items")},
-                {row[0] for row in db.execute("SELECT event_id FROM unseeded")})
+                {row[0] for row in db.execute("SELECT event_id FROM unseeded")},
+                {row[0] for row in db.execute("SELECT event_id FROM legacy_drops")})
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-ITEMS = _Items("items", 2, _TABLES)
+ITEMS = _Items("items", 3, _TABLES)
