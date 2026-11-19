@@ -280,7 +280,7 @@ class Objects:
     def _holds(self, kind: Kind, requirement, proposed: Mapping[str, Any], snapshot: str | None) -> bool:
         values = proposed["fields"]
         if requirement.field is not None:
-            return requirement.field in values
+            return requirement.field in values and values[requirement.field] is not None
         target_id = values.get(requirement.ref)
         if target_id is None:
             return False

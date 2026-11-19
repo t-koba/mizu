@@ -583,6 +583,19 @@ class ExampleInsightLifecycle(unittest.TestCase):
             self.objects.transition("insight", insight["id"], "revise", expected_rev=3,
                                     fields={}, actor="role:writer")
 
+    def test_present_requirements_reject_null_field_clears(self):
+        insight = self.submit()
+        with self.assertRaises(Denied):  # a deferred insight must keep its revisit instant
+            self.objects.transition("insight", insight["id"], "defer", expected_rev=1,
+                                    fields={"revisit_at": None}, actor="role:reviewer")
+        self.assertEqual(self.objects.read("insight", insight["id"])["state"], "pending")
+        proposal = self.objects.create("proposal", {"title": "t", "body": "b",
+                                                    "holder": "role:reviewer"}, "role:writer")
+        with self.assertRaises(Denied):  # a decision must carry its reason
+            self.objects.transition("proposal", proposal["id"], "accept", expected_rev=1,
+                                    fields={"reason": None}, actor="role:reviewer")
+        self.assertEqual(self.objects.read("proposal", proposal["id"])["state"], "pending")
+
     def test_defer_instant_fires_once(self):
         soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
         insight = self.submit()

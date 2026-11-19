@@ -121,7 +121,7 @@ requires = [
 - `where` compares fields of the referenced object with literals,
   `$field.<name>` (a field of the transitioning object) or `$snapshot` (the
   actor's current published snapshot id).
-- `field ... present`: the field is set after the transition.
+- `field ... present`: the field holds a non-null value after the transition.
 
 The kernel has no other built-in predicates. Evidence that a check passed is
 an object of a kind the deployment declares and the check runner writes.
