@@ -11,7 +11,7 @@ from support import Fixture
 from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.kernel import QueueStore, parse_queues
-from mizu.kernel.queues import PAGE_MAX
+from mizu.kernel.queues import MAX_REFS, PAGE_MAX
 from mizu.project import Project
 
 DECLARATIONS = tomllib.loads('''
@@ -313,6 +313,35 @@ class QueueStoreTests(unittest.TestCase):
             self.store.ack("checks", reader, message["seq"])
         self.store.read("checks", "host")
         self.assertEqual(self.store.message(message["id"], "role:alpha"), message)
+
+    def test_refused_append_does_not_poison_recovery(self):
+        from mizu.fs import atomic_write, canonical
+        target = self.store.append("notes", {}, "role:alpha")
+        for index in range(MAX_REFS):
+            self.store.append("notes", {"n": index}, "role:alpha", refs=[target["id"]])
+        with self.assertRaisesRegex(Denied, "Reference index is full"):
+            self.store.append("notes", {"n": MAX_REFS}, "role:alpha", refs=[target["id"]])
+        intent = self.root / "queues" / "intent.json"
+        self.assertFalse(intent.exists())
+        page = self.store.read("notes", "role:alpha", limit=1)
+        self.assertEqual(len(page["messages"]), 1)
+        self.assertEqual(self.store.ack("notes", "role:alpha", page["messages"][0]["seq"]), 1)
+        self.assertEqual(self.store.append("notes", {}, "role:alpha")["seq"], MAX_REFS + 2)
+
+    def test_poisoned_intent_is_discarded_without_wedging_the_store(self):
+        from mizu.fs import atomic_write, canonical
+        target = self.store.append("notes", {}, "role:alpha")
+        for index in range(MAX_REFS):
+            self.store.append("notes", {"n": index}, "role:alpha", refs=[target["id"]])
+        intent = self.root / "queues" / "intent.json"
+        poison = {"queue": "notes", "seq": MAX_REFS + 2, "id": "f" * 32,
+                  "author": "role:alpha", "at": "2026-01-01T00:00:00+00:00",
+                  "deliver_at": None, "refs": [target["id"]], "body": {}}
+        atomic_write(intent, canonical({"message": poison}))
+        with self.assertRaisesRegex(Denied, "Reference index is full"):
+            self.store.read("notes", "role:alpha", limit=1)
+        self.assertFalse(intent.exists())
+        self.assertEqual(self.store.append("notes", {}, "role:alpha")["seq"], MAX_REFS + 2)
 
     def test_interrupted_append_is_completed_on_recovery(self):
         first = self.store.append("notes", {}, "role:alpha")

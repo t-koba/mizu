@@ -382,6 +382,17 @@ class QueueStore:
         path = self.root / self._relative("refs", target, "to.json")
         atomic_write(path, canonical(entries))
 
+    def _prepare_publish(self, message: Mapping) -> None:
+        """Refuse deterministic publish failures before recording an intent."""
+        for ref in message["refs"]:
+            entries = self._refs_to(ref)
+            if (len(entries) >= MAX_REFS
+                    and not any(isinstance(entry, Mapping) and entry.get("id") == message["id"]
+                                for entry in entries)):
+                raise Denied("Reference index is full")
+        for principal in self.queues[message["queue"]].wake:
+            identifier(principal[5:])
+
     def _due(self, message: Mapping, stamp: dt.datetime) -> bool:
         value = message.get("deliver_at")
         return value is None or _instant(value, "deliver_at") <= stamp
@@ -410,7 +421,15 @@ class QueueStore:
         intent = self._read_json(self._relative("intent.json"))
         if not isinstance(intent, Mapping) or not isinstance(intent.get("message"), Mapping):
             raise Denied("Corrupt queue append intent")
-        self._publish(dict(intent["message"]), _instant(clock(), "now"))
+        try:
+            self._prepare_publish(intent["message"])
+            self._publish(dict(intent["message"]), _instant(clock(), "now"))
+        except Denied:
+            # Denied is deterministic: a message that cannot be published must
+            # not wedge every later operation on replay. Transient I/O failures
+            # are not Denied and keep the intent for true crash recovery.
+            path.unlink(missing_ok=True)
+            raise
         path.unlink()
 
     def append(self, queue: str, body: Mapping, actor: str, *, refs=None, deliver_at=None,
@@ -447,6 +466,7 @@ class QueueStore:
                        "author": actor, "at": stamp.isoformat(timespec="seconds"),
                        "deliver_at": None if deliver is None else deliver_at,
                        "refs": list(ref_ids), "body": values}
+            self._prepare_publish(message)
             atomic_write(self.root / self._relative("intent.json"), canonical({"message": message}))
             self._recover()
             self._retain(declaration.name, declaration, stamp)
