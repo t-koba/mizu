@@ -76,6 +76,31 @@ class Stage2Verify(unittest.TestCase):
         self.assertEqual(report["checked"]["notices"], {"planned": 1, "stored": 2})
         self.assertIn("mismatch: 1 difference(s)", errors)
 
+    def test_extra_message_after_old_sentinel_fails_the_gate(self):
+        self.convert("--apply")
+        extra = "a" * 32
+        just_after_old_sentinel = "9999-12-31T23:59:59.000001+00:00"
+        self.store.append("notices", {"body": "Beyond the old sentinel"}, "operator",
+                          id=extra, now=just_after_old_sentinel)
+        code, report, errors = self.verify()
+        self.assertEqual(code, 2)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["differences"],
+                         [{"kind": "extra", "queue": "notices", "id": extra}])
+        self.assertEqual(report["checked"]["notices"], {"planned": 1, "stored": 2})
+        self.assertIn("mismatch: 1 difference(s)", errors)
+
+    def test_delayed_page_refuses_the_gate(self):
+        self.convert("--apply")
+        with mock.patch.object(stage2_verify, "_read_queue",
+                               side_effect=stage2_verify.VerifyError(
+                                   "notices read is incomplete: a message is still delayed")):
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = stage2_verify.main([str(self.file), "--project", "sample"])
+        self.assertEqual(code, 2)
+        self.assertIn("still delayed", errors.getvalue())
+
     def test_changed_message_fails_the_gate(self):
         self.convert("--apply")
         notice = self.store.read("notices", "operator")["messages"][0]

@@ -4,8 +4,9 @@
 This is example userland, not kernel code: it recomputes the current legacy
 conversion plan with ``convert_legacy._plan`` and compares it with the declared
 queues, including converted receipts, as stored. Every read uses the ``operator`` principal, an
-explicit cursor and a fixed far-future instant, so delayed revisits are
-included and the result does not depend on the clock. Nothing is appended,
+explicit cursor and the latest representable instant, so delayed revisits are
+included and the result does not depend on the clock. A read that still reports
+a delayed message refuses the gate rather than comparing a prefix. Nothing is appended,
 acknowledged or advanced. A record is compared on its queue, id, author,
 body, order-sensitive refs and delivery instant (``None`` for immediate);
 missing, extra and changed messages are reported as a deterministic list.
@@ -36,8 +37,8 @@ from mizu.project import Project  # noqa: E402
 
 QUEUES = convert_legacy.QUEUES
 READER = "operator"
-#: Later than any four-digit-year revisit, and aware so delivery is total.
-NOW = "9999-12-31T23:59:59+00:00"
+#: The latest representable instant, so every storable revisit is due.
+NOW = "9999-12-31T23:59:59.999999+00:00"
 PAGE = stage2_view.PAGE
 MAX_PAGES = stage2_view.MAX_PAGES
 FIELDS = ("queue", "id", "author", "body", "refs", "deliver_at")
@@ -103,7 +104,9 @@ def _read_queue(store, name: str) -> list[dict]:
         if not isinstance(rows, list):
             raise VerifyError(f"{name} returned a malformed page")
         messages.extend(rows)
-        if page["delayed"] or not page["more"]:
+        if page["delayed"]:
+            raise VerifyError(f"{name} read is incomplete: a message is still delayed")
+        if not page["more"]:
             return messages
         following = page["next"]
         if type(following) is not int or following <= cursor:
