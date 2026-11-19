@@ -188,16 +188,36 @@ class QueueStoreTests(unittest.TestCase):
     def test_delayed_delivery_and_wake_files(self):
         self.store.append("tasks", BODY, "role:alpha", deliver_at=instant(1))
         self.assertFalse((self.root / "wake" / "alpha").exists())
-        self.assertEqual(self.store.read("tasks", "role:alpha")["messages"], [])
-        due = self.store.append("tasks", BODY, "role:alpha", deliver_at=instant(-1))
+        blocked = self.store.read("tasks", "role:alpha")
+        self.assertEqual(blocked["messages"], [])
+        self.assertTrue(blocked["delayed"])
+        self.store.append("tasks", BODY, "role:alpha", deliver_at=instant(-1))
         self.assertIn('"at"', (self.root / "wake" / "alpha").read_text(encoding="utf-8"))
         self.assertFalse((self.root / "wake" / "beta").exists())
         page = self.store.read("tasks", "role:alpha")
-        self.assertEqual([m["id"] for m in page["messages"]], [due["id"]])
+        self.assertEqual(page["messages"], [])  # head-of-line: first message is not due
+        self.assertTrue(page["delayed"])
         self.store.append("checks", {"snapshot": "s"}, "host", deliver_at=instant(-1))
         self.assertTrue((self.root / "wake" / "alpha").exists())
         with self.assertRaises(Denied):
             self.store.append("tasks", BODY, "role:alpha", deliver_at="2020-01-01T00:00:00")
+
+    def test_read_and_ack_never_cross_an_undelivered_delayed_message(self):
+        now = "2026-01-01T00:00:00+00:00"
+        later = "2026-01-02T00:00:00+00:00"
+        first = self.store.append("notes", {}, "role:alpha", deliver_at=later, now=now)
+        second = self.store.append("notes", {}, "role:alpha", now=now)
+        blocked = self.store.read("notes", "role:alpha", now=now)
+        self.assertEqual((blocked["messages"], blocked["next"], blocked["head"],
+                          blocked["more"], blocked["delayed"]), ([], 0, 2, True, True))
+        with self.assertRaisesRegex(Denied, "undelivered message"):
+            self.store.ack("notes", "role:alpha", second["seq"], now=now)
+        ready = self.store.read("notes", "role:alpha", now=later)
+        self.assertEqual([m["id"] for m in ready["messages"]], [first["id"], second["id"]])
+        self.assertEqual((ready["next"], ready["head"], ready["more"], ready["delayed"]),
+                         (2, 2, False, False))
+        self.assertEqual(self.store.ack("notes", "role:alpha", second["seq"], now=later), 2)
+        self.assertEqual(self.store.read("notes", "role:alpha", now=later)["messages"], [])
 
     def test_cursors_and_acks_are_durable_and_monotonic(self):
         first = self.store.append("notes", {}, "role:alpha")

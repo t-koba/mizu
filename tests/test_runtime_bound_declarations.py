@@ -2011,6 +2011,12 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('kernel/queues.py', 'QueueStore._retain', 1, 0): (
         'stop + 1', 'mechanism',
         'kernel queues / retention window ends at the bounded derived stop sequence'),
+    ('kernel/queues.py', 'QueueStore.ack', 0, 0): (
+        'current + 1', 'mechanism',
+        'kernel queues / acknowledgement checks messages after the durable cursor'),
+    ('kernel/queues.py', 'QueueStore.ack', 1, 0): (
+        'seq + 1', 'mechanism',
+        'kernel queues / acknowledgement checks the requested sequence inclusively'),
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         'LEGACY_CHECK_REQUEST_SEQUENCE_COUNT', 'safety',
         'check jobs / reconstruct the bounded legacy sequence space before indexed allocation'),

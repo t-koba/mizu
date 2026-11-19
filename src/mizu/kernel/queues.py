@@ -460,35 +460,46 @@ class QueueStore:
         value = stored.get("seq") if isinstance(stored, Mapping) else None
         return value if type(value) is int and value >= 0 else 0  # corrupt cursors license no removal
 
-    def read(self, queue: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT) -> dict:
+    def read(self, queue: str, actor: str, *, cursor=None, limit=PAGE_DEFAULT,
+             now=None) -> dict:
         declaration = self._grant(queue, actor, write=False)
         if type(limit) is not int or not 1 <= limit <= PAGE_MAX:
             raise Denied(f"limit must be from 1 to {PAGE_MAX}")
         if cursor is not None and (type(cursor) is not int or cursor < 0):
             raise Denied("cursor must be a nonnegative sequence")
-        stamp = _instant(clock(), "now")
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         with self._locked():
             head = self._head(declaration.name)
             if cursor is not None and cursor > head:
                 raise Denied("cursor is beyond the queue head")
             seq = self._cursor(declaration.name, actor) if cursor is None else cursor
-            rows = []
+            rows, delayed = [], False
             while seq < head and len(rows) < limit:
-                seq += 1
-                message = self._message(declaration.name, seq)
-                if message is not None and self._due(message, stamp):
+                candidate = seq + 1
+                message = self._message(declaration.name, candidate)
+                if message is not None and not self._due(message, stamp):
+                    delayed = True  # head-of-line: no cursor may cross it
+                    break
+                if message is not None:
                     rows.append(message)
+                seq = candidate
             self._retain(declaration.name, declaration, stamp)
-            return {"messages": rows, "next": seq, "head": head, "more": seq < head}
+            return {"messages": rows, "next": seq, "head": head,
+                    "more": seq < head, "delayed": delayed}
 
-    def ack(self, queue: str, actor: str, seq: int) -> int:
+    def ack(self, queue: str, actor: str, seq: int, *, now=None) -> int:
         declaration = self._grant(queue, actor, write=False)
         if type(seq) is not int or seq < 0:
             raise Denied("acknowledged sequence must be nonnegative")
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
         with self._locked():
             if seq > self._head(declaration.name):
                 raise Denied("acknowledged sequence is beyond the queue head")
             current = self._cursor(declaration.name, actor)
+            for candidate in range(current + 1, seq + 1):
+                message = self._message(declaration.name, candidate)
+                if message is None or not self._due(message, stamp):
+                    raise Denied("Cannot acknowledge an undelivered message")
             if seq > current:
                 atomic_write(self._cursor_path(declaration.name, actor), canonical({"seq": seq}))
                 return seq

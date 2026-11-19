@@ -91,8 +91,13 @@ body = {type = "string", max = 65536}
 
 - Each reader principal has a durable cursor per queue: the last acknowledged
   `seq`. A read returns due messages after the cursor, bounded per page.
-  Acknowledgement is explicit and monotonic; unacknowledged messages are
-  delivered again.
+  `next` never crosses a message that is not due yet: delivery is a contiguous
+  run from the cursor, so a delayed message blocks later messages for that
+  reader. A read stopped at one reports `delayed: true`, `next` at the last
+  delivered message and `more: true`; wake on the message's due time to resume.
+  Acknowledgement is explicit and monotonic; a `seq` whose prefix contains a
+  not-yet-due message is refused, and unacknowledged messages are delivered
+  again.
 - Appending a due message, or a delayed message becoming due, touches
   `wake/<role>` for each role in the queue's `wake` list. The service manager
   watches it (systemd PathChanged, launchd WatchPaths, or the resident daemon's
@@ -143,7 +148,7 @@ wait = {readmit = false}
 | Tool | Effect |
 |---|---|
 | `queue_write(queue, body, refs?, deliver_at?, id?)` | Append a message if the role may write to the queue |
-| `queue_read(queue, cursor?, limit?)` | Read due messages after the role's cursor (or after `cursor`), bounded; returns `next`, `head`, `more` |
+| `queue_read(queue, cursor?, limit?)` | Read due messages after the role's cursor (or after `cursor`), bounded; returns `next`, `head`, `more`, `delayed` |
 | `queue_ack(queue, seq)` | Advance the role's cursor |
 | `message_read(id)` | Read one message the role may read |
 | `message_refs(id, direction)` | List messages the role may read that refer to `id`, or that `id` refers to, bounded and paged |

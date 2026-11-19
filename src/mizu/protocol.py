@@ -717,7 +717,7 @@ DEFINITIONS = {
                         ("queue", "body"))),
     "queue_read": ("Read due messages from a declared queue after your role's durable cursor, or "
                    "after cursor when supplied. Reads are bounded; next, head and more locate the "
-                   "page. A read does not advance the cursor. The host binds the role and the queue's "
+                   "page, including a delayed flag when delivery stops at a not-yet-due message. A read does not advance the cursor. The host binds the role and the queue's "
                    "read grant is enforced by the kernel.",
                    obj({"queue": KERNEL_NAME_SCHEMA,
                         "cursor": KERNEL_CURSOR_SCHEMA,
