@@ -521,6 +521,7 @@ def _cmd_storage(config, project, args):
 def _cmd_kernel_shadow(config, project, args):
     # Lazy: only this operator command needs the record helpers.
     from . import operator_records
+    from .kernel_shadow import published_answer
 
     insight = project.insights.read(args.insight)
     shadow = project.insights.kernel_shadow
@@ -543,19 +544,28 @@ def _cmd_kernel_shadow(config, project, args):
         answers, answers_complete = operator_records.reproject_answers(project, insight["id"])
     else:
         answers, answers_complete = operator_records.insight_answers(project, insight["id"])
+    subject = {"type": "insight", "id": insight["id"],
+               "rev": insight.get("rev", 1)}
+    answered = published_answer(answers, subject, answers_complete)
     answer_verification = ([shadow.verify_answer(record, insight)
                             for record, _ in answers] if shadow is not None else [])
     if not answers_complete:
         answer_verification.append({
             "kind": "answer", "object": "", "ok": False,
             "mismatches": ["answer scan incomplete; verified only the available prefix"]})
+    question_verification = None
+    if shadow is not None and insight.get("addressee") == "operator":
+        question_verification = shadow.verify_question(insight, insight=insight,
+                                                       answered=answered)
+        if answered is None:
+            question_verification["mismatches"].append(
+                "answer scan incomplete; question answer state is unknown")
+            question_verification["ok"] = False
     return {"project": project.name, "insight": insight["id"],
             "enabled": shadow is not None,
             "answers_complete": answers_complete,
             "verification": shadow.verify(insight, decision) if shadow is not None else None,
-            "question_verification": (
-                shadow.verify_question(insight, insight=insight)
-                if shadow is not None and insight.get("addressee") == "operator" else None),
+            "question_verification": question_verification,
             "answer_verification": answer_verification,
             "failures": [row for row in (shadow.failures if shadow is not None else [])
                          if row["insight"] == insight["id"]]}

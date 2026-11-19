@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from . import host_records, insight_tools, operator_records
 from .errors import Denied, LimitExceeded
-from .kernel_shadow import MAX_SHADOW_FAILURES
+from .kernel_shadow import MAX_SHADOW_FAILURES, published_answer
 from .shared_records import ScanProgress
 
 _READ_ERRORS = (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError)
@@ -90,9 +90,6 @@ def _insights(project, shadow, report: dict, insight_ids: set) -> None:
             try:
                 _check(report, insight_id, "insight",
                        shadow.verify(insight, decision))
-                if insight.get("addressee") == "operator":
-                    _check(report, insight_id, "question",
-                           shadow.verify_question(insight, insight=insight))
             except _READ_ERRORS as exc:
                 _note(report, insight_id, "insight",
                       reason=f"insight verification failed: {type(exc).__name__}")
@@ -107,6 +104,20 @@ def _insights(project, shadow, report: dict, insight_ids: set) -> None:
                 report["answers_complete"] = False
                 _note(report, insight_id, "answer",
                       reason="insight answer scan incomplete; only an available prefix was examined")
+            if insight.get("addressee") == "operator":
+                subject = {"type": "insight", "id": insight_id,
+                           "rev": insight.get("rev", 1)}
+                answered = published_answer(answers, subject, complete)
+                if answered is None:
+                    _note(report, insight_id, "question",
+                          reason="insight answer scan incomplete; question answer state is unknown")
+                try:
+                    _check(report, insight_id, "question",
+                           shadow.verify_question(insight, insight=insight,
+                                                  answered=answered))
+                except _READ_ERRORS as exc:
+                    _note(report, insight_id, "question",
+                          reason=f"question verification failed: {type(exc).__name__}")
             for record, _ in answers:
                 report["counts"]["answers"] += 1
                 try:
@@ -123,8 +134,9 @@ def _insights(project, shadow, report: dict, insight_ids: set) -> None:
 
 
 def _operator_records(project, shadow, report: dict, insight_ids: set,
-                      record_answers: list) -> None:
-    """Verify noticed answers and notice objects under the configured bound."""
+                      record_answers: list) -> bool:
+    """Verify notices and collect role answers; return answer-scan completeness."""
+    complete = True
     shared = operator_records.store(project)
     progress = ScanProgress()
     scan = shared.records(
@@ -154,6 +166,7 @@ def _operator_records(project, shadow, report: dict, insight_ids: set,
                     _note(report, envelope["id"], "answer",
                           reason="answer subject is outside the bounded authoritative set")
     except _READ_ERRORS as exc:
+        complete = False
         report["answers_complete"] = False
         _note(report, "operator-records", "scan",
               reason=f"operator record scan failed: {type(exc).__name__}")
@@ -161,12 +174,15 @@ def _operator_records(project, shadow, report: dict, insight_ids: set,
         scan.close()
     if progress.entries_examined >= project.config.limits.operator_record_catalog_scan_entries:
         report["truncated"] = True
+        complete = False
         report["answers_complete"] = False
         _note(report, "operator-records", "answer",
               reason="operator record scan bound exhausted; answer coverage is incomplete")
+    return complete
 
 
-def _role_records(project, shadow, report: dict, record_answers: list) -> None:
+def _role_records(project, shadow, report: dict, record_answers: list,
+                  answers_complete: bool) -> None:
     """Verify declared role questions and answers that address them."""
     policies = host_records.configuration(project.config.record_kinds)
     if not any(row["route"] == "operator_question" for row in policies.values()):
@@ -188,9 +204,15 @@ def _role_records(project, shadow, report: dict, record_answers: list) -> None:
                 continue
             report["counts"]["role_questions"] += 1
             questions[envelope["id"]] = computed
+            subject = {"type": "record", "kind": envelope["kind"],
+                       "id": envelope["id"], "digest": computed}
+            answered = published_answer(record_answers, subject, answers_complete)
+            if answered is None:
+                _note(report, envelope["id"], "question",
+                      reason="answer scan incomplete; question answer state is unknown")
             try:
                 _check(report, envelope["id"], "question",
-                       shadow.verify_question(envelope, computed))
+                       shadow.verify_question(envelope, computed, answered=answered))
             except _READ_ERRORS as exc:
                 _note(report, envelope["id"], "question",
                       reason=f"question verification failed: {type(exc).__name__}")
@@ -229,7 +251,8 @@ def audit(project) -> dict:
     insight_ids = set()
     record_answers = []
     _insights(project, shadow, report, insight_ids)
-    _operator_records(project, shadow, report, insight_ids, record_answers)
-    _role_records(project, shadow, report, record_answers)
+    answers_complete = _operator_records(project, shadow, report, insight_ids,
+                                         record_answers)
+    _role_records(project, shadow, report, record_answers, answers_complete)
     report.update(report["counts"])
     return report

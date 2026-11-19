@@ -88,6 +88,13 @@ class KernelShadowAudit(unittest.TestCase):
         notice = self.notice()
         return insight, answer, asked, record_answer, notice
 
+    def corrupt_state(self, kind, object_id, state):
+        """Tamper with the stored revision itself, not with a read result."""
+        path = self.project.root / "objects" / kind / object_id / "00000001.json"
+        record = json.loads(path.read_text())
+        record["state"] = state
+        path.write_text(json.dumps(record))
+
     def corrupted(self, kind, object_id, field, value):
         read = self.project.kernel_objects.read
 
@@ -227,6 +234,34 @@ class KernelShadowAudit(unittest.TestCase):
         self.assertEqual([row["record"] for row in rows], [orphan["record"]["id"]])
         self.assertIn("outside the bounded authoritative set", rows[0]["mismatches"][0])
         self.assertEqual(first["id"], "11" * 16)
+
+    def test_undecided_insight_state_corruption_is_reported(self):
+        insight = self.insight(event="ud" * 16)
+        self.assertIsNone(self.project.insights.decision(insight["id"]))
+        self.assertEqual(self.audit()["mismatches"], [])
+        self.corrupt_state("insight", insight_object_id(insight), "accepted")
+        rows = self.rows(self.audit(), "insight")
+        self.assertEqual([row["record"] for row in rows], [insight["id"]])
+        self.assertIn("expected pending", rows[0]["mismatches"][0])
+
+    def test_unanswered_insight_question_state_corruption_is_reported(self):
+        insight = self.insight(event="uq" * 16)
+        self.assertEqual(self.audit()["mismatches"], [])
+        self.corrupt_state("question", insight_question_object_id(insight), "answered")
+        rows = self.rows(self.audit(), "question")
+        self.assertEqual([row["record"] for row in rows], [insight["id"]])
+        self.assertIn("question state is answered, expected pending",
+                      rows[0]["mismatches"])
+
+    def test_unanswered_role_question_state_corruption_is_reported(self):
+        asked = self.ask()
+        self.assertEqual(self.audit()["mismatches"], [])
+        object_id = record_question_object_id(asked["record"], asked["record_digest"])
+        self.corrupt_state("question", object_id, "answered")
+        rows = self.rows(self.audit(), "question")
+        self.assertEqual([row["record"] for row in rows], [asked["record"]["id"]])
+        self.assertIn("question state is answered, expected pending",
+                      rows[0]["mismatches"])
 
     def test_command_is_read_only(self):
         insight, answer, _, _, notice = self.populate()

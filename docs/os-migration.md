@@ -57,7 +57,12 @@ the daemon (4 onward).
 
 Authentication of authors, append-only history, fail-closed validation,
 bounded reads, sandbox isolation, grants, budgets and the single-holder
-property of a writable workspace are kernel integrity and stay.
+property of a writable workspace are kernel integrity and stay. While the
+legacy object-shadow verifiers remain in place, they check declared base states
+as well as event-driven terminal states: an insight without a decision and a
+question without a published answer must remain `pending`, while a `defer`
+without a parseable revisit instant is a recorded decision whose projected
+state legitimately stays `pending`.
 
 ## Done
 

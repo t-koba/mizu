@@ -1,5 +1,6 @@
 """Authoritative legacy insight/decision writes mirror into declared kernel objects."""
 import dataclasses
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,13 @@ class KernelShadowProjection(unittest.TestCase):
         return self.project.insights.submit(
             source="writer", title="Migrate proposals", body="Mirror the accepted facts",
             base_snapshot=None, insight_id=insight_id, addressee="reviewer", urgency="high")
+
+    def corrupt_state(self, kind, object_id, state):
+        """Tamper with the stored revision itself, not with a read result."""
+        path = (self.project.root / "objects" / kind / object_id / "00000001.json")
+        record = json.loads(path.read_text())
+        record["state"] = state
+        path.write_text(json.dumps(record))
 
     def test_submit_revise_and_decide_project_into_kernel(self):
         insight = self.submit("aa" * 16)
@@ -156,6 +164,39 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertTrue(report["verification"]["ok"])
         self.assertEqual(self.project.kernel_objects.read("insight", insight["id"])["fields"],
                          insight_fields(insight))
+
+    def test_undecided_insight_state_change_on_disk_is_detected(self):
+        insight = self.submit("ud" * 16)
+        shadow = self.project.insights.kernel_shadow
+        self.assertIsNone(self.project.insights.decision(insight["id"]))
+        self.assertTrue(shadow.verify(insight)["ok"])
+        self.corrupt_state("insight", insight_object_id(insight), "accepted")
+        result = shadow.verify(insight)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mismatches"],
+                         ["insight state is accepted, expected pending"])
+        args = parser().parse_args(["kernel-shadow", self.project.name, insight["id"]])
+        report = _cmd_kernel_shadow(self.config, self.project, args)
+        self.assertFalse(report["verification"]["ok"])
+        self.assertIn("insight state is accepted, expected pending",
+                      report["verification"]["mismatches"])
+        self.assertEqual(self.project.insights.read(insight["id"])["id"], insight["id"])
+
+    def test_defer_without_revisit_keeps_pending_base_state_on_disk(self):
+        insight = self.submit("df" * 16)
+        decision = self.project.insights.decide(
+            insight["id"], "defer", "Wait", "revisit next Tuesday", "test-run",
+            expected_rev=1)
+        path = (self.project.root / "objects" / "insight" / insight_object_id(insight)
+                / "00000001.json")
+        self.assertEqual(json.loads(path.read_text())["state"], "pending")
+        shadow = self.project.insights.kernel_shadow
+        self.assertTrue(shadow.verify(insight, decision)["ok"])
+        self.corrupt_state("insight", insight_object_id(insight), "deferred")
+        result = shadow.verify(insight, decision)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mismatches"],
+                         ["insight state is deferred, expected pending"])
 
     def test_unparseable_defer_is_not_a_verification_divergence(self):
         insight = self.submit("d" * 32)

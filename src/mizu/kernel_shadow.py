@@ -75,6 +75,27 @@ def instant_value(value: Any) -> str | None:
     return None
 
 
+def published_answer(answers, subject: Mapping[str, Any], complete: bool) -> bool | None:
+    """Derive the authoritative answered signal for one exact question.
+
+    ``answers`` holds validated answer envelopes or ``(envelope, digest)``
+    rows. Only an exact subject with a ``publish`` action answers a question;
+    ``complete`` reports whether that answer set was fully scanned. None means
+    no published answer was seen in an incomplete set, so verification must not
+    assume the question is still pending.
+    """
+    for row in answers:
+        record = row[0] if isinstance(row, (tuple, list)) else row
+        candidate = record.get("subject")
+        if not isinstance(candidate, Mapping) or any(
+                candidate.get(key) != value for key, value in subject.items()):
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, Mapping) and payload.get("action") == "publish":
+            return True
+    return False if complete else None
+
+
 def decision_fields(record: Mapping[str, Any]) -> dict:
     """Map one recorded decision to the declared kernel decision fields."""
     if record.get("action") not in _ACTIONS:
@@ -230,11 +251,13 @@ class KernelShadow:
                 if current["fields"].get(key) != value:
                     mismatch(f"insight field {key} differs")
             action = decision.get("action") if decision else None
-            expected_state = _STATES.get(action) if action in _ACTIONS else None
-            defer_without_instant = (action == "defer"
-                                     and instant_value(decision.get("revisit")) is None)
-            if (expected_state is not None and not defer_without_instant
-                    and current["state"] != expected_state):
+            # Without a projected terminal state the declared base state is
+            # the only state the mirror can legitimately hold. A defer without
+            # a parseable revisit instant is recorded but stays pending.
+            expected_state = _STATES.get(action) if action in _ACTIONS else "pending"
+            if action == "defer" and instant_value(decision.get("revisit")) is None:
+                expected_state = "pending"
+            if current["state"] != expected_state:
                 mismatch(f"insight state is {current['state']}, expected {expected_state}")
             if action == "defer":
                 instant = instant_value(decision.get("revisit"))
@@ -303,8 +326,15 @@ class KernelShadow:
         return result
 
     def verify_question(self, record: Mapping[str, Any], computed: str | None = None,
-                        insight: Mapping[str, Any] | None = None) -> dict:
-        """Compare one authoritative question with its projected kernel object."""
+                        insight: Mapping[str, Any] | None = None,
+                        answered: bool | None = None) -> dict:
+        """Compare one authoritative question with its projected kernel object.
+
+        ``answered`` is the authoritative answer signal: False requires the
+        declared base state ``pending``, True keeps field verification without
+        demanding that base state, and None leaves the state unchecked when the
+        caller cannot establish a complete answer set.
+        """
         result = {"kind": "question", "object": "", "ok": False, "mismatches": []}
         mismatches = result["mismatches"]
         try:
@@ -327,6 +357,8 @@ class KernelShadow:
         current = self._read_projection("question", object_id, mismatches)
         if current is not None:
             self._compare_fields("question", expected, current, mismatches)
+            if answered is False:
+                self._check_state("question", current, "pending", mismatches)
         result["ok"] = not mismatches
         return result
 
