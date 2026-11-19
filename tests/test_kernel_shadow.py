@@ -123,6 +123,23 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertTrue(self.project.insights.kernel_shadow.verify(insight, decision)["ok"])
         self.assertEqual(self.project.insights.read(insight["id"])["id"], "topic-one")
 
+    def test_defer_then_withdraw_updates_state_and_clears_revisit(self):
+        insight = self.submit("ab" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait", "deadline at " + moment, "test-run",
+            expected_rev=1)
+        self.assertEqual(self.project.kernel_objects.next_instant(), moment)
+        record = self.project.insights.withdraw(
+            insight["id"], source="writer", reason="Not needed", expected_rev=1)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["state"], "withdrawn")
+        self.assertIsNone(mirrored["fields"].get("revisit_at"))
+        self.assertIsNone(self.project.kernel_objects.next_instant())
+        decision = self.project.kernel_objects.read("decision", decision_object_id(record))
+        self.assertEqual(decision["fields"]["action"], "withdraw")
+        self.assertTrue(self.project.insights.kernel_shadow.verify(insight, record)["ok"])
+
     def test_projection_failure_does_not_change_legacy_authority(self):
         with patch.object(self.project.kernel_objects, "create", side_effect=Denied("derived failure")):
             insight = self.submit("cc" * 16)

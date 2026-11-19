@@ -19,6 +19,9 @@ _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _ACTIONS = frozenset(("accept", "modify", "defer", "reject", "withdraw"))
 _STATES = {"accept": "accepted", "modify": "modified", "defer": "deferred",
            "reject": "rejected", "withdraw": "withdrawn"}
+_FROM_STATES = {"accept": ("pending", "deferred"), "modify": ("pending", "deferred"),
+                "defer": ("pending",), "reject": ("pending", "deferred"),
+                "withdraw": ("pending", "deferred")}
 MAX_SHADOW_FAILURES = 32
 
 
@@ -143,6 +146,8 @@ class KernelShadow:
                 instant = instant_value(decision.get("revisit"))
                 if instant is not None and current["fields"].get("revisit_at") != instant:
                     mismatch("insight revisit_at differs")
+            if action == "withdraw" and current["fields"].get("revisit_at") is not None:
+                mismatch("withdrawn insight still has a revisit instant")
 
         action = decision.get("action") if decision else None
         if decision is not None and action in _ACTIONS:
@@ -188,7 +193,7 @@ class KernelShadow:
         self.submitted(insight)
         object_id = insight_object_id(insight)
         current = self.objects.read("insight", object_id)
-        if current["state"] == "pending":
+        if current["state"] in _FROM_STATES.get(action, ()):
             fields = {}
             if action == "defer":
                 instant = instant_value(record.get("revisit"))
@@ -196,6 +201,8 @@ class KernelShadow:
                     fields = None  # the decision still projects; the state needs an instant
                 else:
                     fields["revisit_at"] = instant
+            if action == "withdraw" and current["fields"].get("revisit_at") is not None:
+                fields["revisit_at"] = None  # clear the superseded revisit timer
             if fields is not None:
                 actor = (principal(insight["source"]) if action == "withdraw"
                          else principal(insight.get("addressee", "writer")))

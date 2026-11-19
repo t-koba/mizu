@@ -167,7 +167,9 @@ A field of type `instant` with an `event` name schedules that event for that
 instant. The scheduler keeps the earliest pending instant and sleeps until it,
 or until the next event, whichever comes first. A value is armed when first
 declared: a later revision carrying the same value leaves its pending timer
-alone, while a changed or removed value cancels that timer. When the instant
+alone, while a changed or removed value cancels that timer. A transition may
+clear an optional instant with a null value; a required instant cannot be
+cleared. When the instant
 passes, the kernel appends the event once and treats the value as consumed;
 later revisions carrying it forward do not arm it again. An unused value that is
 deliberately declared again is armed anew. The firing records consumption of

@@ -126,6 +126,7 @@ name = "withdraw"
 from = ["pending", "deferred"]
 to = "withdrawn"
 by = ["author"]
+fields = ["revisit_at"]
 
 # A decision is a separate create-only record, never edited in place. The host
 # writes it after the addressed holder's transition above; the operator may also
@@ -145,7 +146,9 @@ fields.revision = {type = "integer", min = 1, required = true}
 fields.action = {type = "string", max = 32, required = true, values = ["accept", "modify", "defer", "reject", "withdraw"]}
 fields.reason = {type = "string", max = 8192, required = true}
 fields.scope = {type = "string", max = 65536}
-fields.revisit = {type = "instant", event = "decision.revisit"}
+# The active revisit timer belongs to the insight object; the decision keeps
+# the instant as data so a later terminal state can retire it cleanly.
+fields.revisit = {type = "instant"}
 
 # Stage-2 userland declarations for the kernel migration. These kinds prove the
 # declared mechanism in tests; no production role routes questions, answers or

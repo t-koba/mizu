@@ -90,6 +90,10 @@ class Field:
     def validate(self, value: Any) -> Any:
         """Return the value if it conforms to the declared type, else refuse."""
         where = f"field {self.name}"
+        if value is None:
+            if self.required:
+                raise Denied(f"{where} is required")
+            return None  # an optional value may be cleared by a declared transition
         if self.type == "string":
             if not isinstance(value, str) or len(value) > (self.max or STRING_MAX):
                 raise Denied(f"{where} must be a string of at most {self.max or STRING_MAX} characters")
@@ -173,7 +177,7 @@ class Kind:
     def instant_events(self, values: Mapping[str, Any]) -> list[tuple[str, str, str]]:
         """(field, instant, event) for every set instant field that declares an event."""
         return [(name, values[name], field.event) for name, field in self.fields.items()
-                if field.type == "instant" and field.event and name in values]
+                if field.type == "instant" and field.event and values.get(name) is not None]
 
 
 def _field(name: str, raw: Any, where: str, *, nested: bool = False) -> Field:
