@@ -121,6 +121,80 @@ class QueueRecordAuthority(conversion_tests.Stage2QuestionConversion):
             canonical(queue_record_delivery.questions(
                 self.project, limit=10, scan_limit=1000)))
 
+    def test_post_activation_writes_are_exact_and_retry_idempotent(self):
+        conversion, verification = self.gate()
+        self.activate(conversion, verification)
+
+        def rows(queue):
+            return self.project.kernel_queues.read(queue, "operator", cursor=0,
+                                                   limit=512)["messages"]
+
+        answers_before = rows(queue_record_delivery.ANSWERS)
+        notices_before = rows(queue_record_delivery.NOTICES)
+        answer_args = dict(event_id="live-answer", kind="answer", body="Live answer",
+                           subject=self.subject)
+        answer = queue_record_delivery.write(self.project, **answer_args)
+        answer_rows = [row for row in rows(queue_record_delivery.ANSWERS)
+                       if row["body"]["legacy_id"] == answer["record"]["id"]]
+        self.assertEqual(len(answer_rows), 1)
+        self.assertEqual(answer_rows[0]["author"], "operator")
+        self.assertEqual(answer_rows[0]["refs"], [self.ids()[0]])
+        self.assertEqual(answer_rows[0]["body"]["legacy_digest"], answer["record_digest"])
+        self.assertEqual(answer, queue_record_delivery.write(self.project, **answer_args))
+        self.assertEqual(rows(queue_record_delivery.ANSWERS)[len(answers_before):], answer_rows)
+
+        notice_args = dict(event_id="live-notice", kind="operator.notice",
+                           body="Live notice", addressee="worker")
+        notice = queue_record_delivery.write(self.project, **notice_args)
+        notice_rows = [row for row in rows(queue_record_delivery.NOTICES)
+                       if row["body"]["legacy_id"] == notice["record"]["id"]]
+        self.assertEqual(len(notice_rows), 1)
+        self.assertEqual(notice_rows[0]["author"], "operator")
+        self.assertEqual(notice_rows[0]["refs"], [])
+        self.assertEqual(notice_rows[0]["body"]["legacy_digest"], notice["record_digest"])
+        self.assertEqual(notice, queue_record_delivery.write(self.project, **notice_args))
+        self.assertEqual(rows(queue_record_delivery.NOTICES)[len(notices_before):], notice_rows)
+
+        records, _ = queue_record_delivery._load(self.project, "operator")
+        for result, queue in ((answer, queue_record_delivery.ANSWERS),
+                              (notice, queue_record_delivery.NOTICES)):
+            row = next(row for row in records if row["id"] == result["record"]["id"])
+            self.assertEqual((row["queue"], row["kind"], row["digest"], row["envelope"]),
+                             (queue, result["record"]["kind"], result["record_digest"],
+                              result["record"]))
+        self.assertEqual(queue_record_delivery.QUEUE_BY_KIND, {
+            "answer": queue_record_delivery.ANSWERS,
+            "operator.notice": queue_record_delivery.NOTICES})
+
+        for kind in ("role.question", "operator.notice.", "unknown"):
+            with self.subTest(kind=kind), self.assertRaises(Denied):
+                queue_record_delivery.write(self.project, event_id="bad", kind=kind,
+                                            body="No", addressee="worker")
+
+    def test_read_role_matches_legacy_path_for_own_record_after_activation(self):
+        conversion, verification = self.gate()
+        self.activate(conversion, verification)
+        worker = replace(self.config.roles["worker"], capabilities=(
+            *self.config.roles["worker"].capabilities, "record_read"))
+        self.config = replace(self.config, roles={**self.config.roles, "worker": worker})
+        context = self.context("worker")
+        args = {"kind": "role.question", "id": "question1"}
+        legacy = host_records.read_role(context, args)
+        queued = queue_record_delivery.read_role(context, args)
+        self.assertEqual(legacy, queued)
+        self.assertEqual((queued["record_id"], queued["record_digest"]),
+                         (self.question_record["id"], self.question_digest))
+        self.assertEqual(json.loads(queued["text"]), self.question_record)
+
+        created = queue_record_delivery.write_role(context, {
+            "kind": "role.question", "id": "live-question", "subject": "{}",
+            "payload": json.dumps(conversion_tests.QUESTION_PAYLOAD)})
+        live = queue_record_delivery.read_role(context, {
+            "kind": "role.question", "id": "live-question"})
+        self.assertEqual((live["record_id"], live["record_digest"]),
+                         (created["record"]["id"], created["record_digest"]))
+        self.assertEqual(json.loads(live["text"]), created["record"])
+
     def test_converted_receipts_suppress_and_replay_is_idempotent(self):
         role = self.config.roles["worker"]
         page, manifest = operator_records.pending(self.project, role)

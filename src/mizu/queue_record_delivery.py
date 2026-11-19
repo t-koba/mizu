@@ -35,6 +35,8 @@ QUEUES = (QUESTIONS, ANSWERS, NOTICES, RECORD_RECEIPTS)
 #: The decision gate's original six plus the record receipts queue.
 VERIFY_QUEUES = (*CONVERSION_QUEUES, RECORD_RECEIPTS)
 KIND_BY_QUEUE = {ANSWERS: "answer", NOTICES: "operator.notice"}
+#: Kind -> queue view of the same single declaration, for trusted kind inputs.
+QUEUE_BY_KIND = {kind: queue for queue, kind in KIND_BY_QUEUE.items()}
 
 AUTHORITY_FILE = "record-authority.json"
 PLAN_FILE = "record-activation-plan.json"
@@ -410,7 +412,8 @@ def read_role(context, args):
     if not isinstance(raw_id, str):
         raise Denied("Expected a bounded record name")
     record_id = _name(f"role/{context.role.name}/{kind}/{raw_id}")
-    records, _ = _load(context.project, writer)
+    # The envelope writer stays dotted; the kernel queue actor is role:<name>.
+    records, _ = _load(context.project, f"role:{context.role.name}")
     row = _by_id(records, record_id)
     if (row is None or row["queue"] != QUESTIONS or row["kind"] != kind
             or row["envelope"]["writer"] != writer):
@@ -499,6 +502,8 @@ def write(project, *, event_id, kind, body="", addressee=None, subject=None,
     policy = operator_records.configuration(project.config.operator_records)
     if not isinstance(kind, str) or kind not in policy or not policy[kind]["enabled"]:
         raise Denied("Operator record kind is disabled or undeclared")
+    if kind not in QUEUE_BY_KIND:
+        raise Denied("Operator record kind has no declared queue")
     subject = {} if subject is None else subject
     records, _ = _load(project, "operator")
     if kind == "answer":
@@ -509,7 +514,7 @@ def write(project, *, event_id, kind, body="", addressee=None, subject=None,
     elif subject:
         operator_records._question(project, subject)
     envelope_id = f"operator/{project.name}/{event_id}"
-    existing, _ = _store_message(project, KIND_BY_QUEUE[kind], envelope_id, "operator")
+    existing, _ = _store_message(project, QUEUE_BY_KIND[kind], envelope_id, "operator")
     created_at = now()
     if existing is not None:
         old = existing["envelope"]
@@ -543,7 +548,7 @@ def write(project, *, event_id, kind, body="", addressee=None, subject=None,
                     and other.get("id") == target["id"]):
                 raise Denied("Notice already closed by another event")
     computed = digest(canonical(envelope))
-    queue = KIND_BY_QUEUE[kind]
+    queue = QUEUE_BY_KIND[kind]
     declaration = project.config.queues[queue]
     fields = declaration.fields
     message_body = {
