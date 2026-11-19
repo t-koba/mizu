@@ -5,7 +5,8 @@ decisions, questions and answers, notices, work and its completion, checks) as
 queue declarations and role policy on the kernel
 ([docs/kernel.md](../../docs/kernel.md)). It is an example: a deployment
 includes it from its own configuration and changes it freely. The kernel reads
-nothing here specially.
+nothing here specially. The stage-2 meanings are written in
+[policies/stage2.md](policies/stage2.md).
 
 `queues.toml` grows stage by stage as
 [docs/os-migration.md](../../docs/os-migration.md) moves each workflow out of
