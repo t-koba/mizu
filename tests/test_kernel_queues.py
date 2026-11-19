@@ -307,6 +307,18 @@ class QueueStoreTests(unittest.TestCase):
         with self.assertRaises(Denied):
             self.store.message(target["id"], "role:alpha")
 
+    def test_ack_crosses_retention_removed_prefix(self):
+        old = self.store.append("notes", {}, "role:alpha", now=OLD)
+        for reader in ("role:alpha", "operator"):
+            self.store.ack("notes", reader, old["seq"])
+        current = self.store.append("notes", {}, "role:alpha")
+        self.assertFalse((self.root / "queues" / "notes" / "messages"
+                          / f"{old['seq']:020d}.json").exists())
+        page = self.store.read("notes", "operator")
+        self.assertEqual([row["seq"] for row in page["messages"]], [current["seq"]])
+        self.assertEqual(self.store.ack("notes", "operator", current["seq"]), current["seq"])
+        self.assertEqual(self.store.read("notes", "operator")["messages"], [])
+
     def test_wildcard_reader_never_loses_a_message_to_retention(self):
         message = self.store.append("checks", {}, "host", now=OLD)
         for reader in ("host", "role:alpha", "operator"):

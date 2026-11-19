@@ -97,7 +97,8 @@ body = {type = "string", max = 65536}
   delivered message and `more: true`; wake on the message's due time to resume.
   Acknowledgement is explicit and monotonic; a `seq` whose prefix contains a
   not-yet-due message is refused, and unacknowledged messages are delivered
-  again.
+  again. Messages already removed by retention leave a gap that acknowledgement
+  skips, matching the reads that crossed it.
 - Appending a due message, or a delayed message becoming due, touches
   `wake/<role>` for each role in the queue's `wake` list. The service manager
   watches it (systemd PathChanged, launchd WatchPaths, or the resident daemon's

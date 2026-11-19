@@ -519,7 +519,11 @@ class QueueStore:
             current = self._cursor(declaration.name, actor)
             for candidate in range(current + 1, seq + 1):
                 message = self._message(declaration.name, candidate)
-                if message is None or not self._due(message, stamp):
+                if message is None:
+                    # Retention removes only messages every reader had already
+                    # acknowledged; a gap is proof of delivery, not the reverse.
+                    continue
+                if not self._due(message, stamp):
                     raise Denied("Cannot acknowledge an undelivered message")
             if seq > current:
                 atomic_write(self._cursor_path(declaration.name, actor), canonical({"seq": seq}))
