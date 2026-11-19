@@ -10,7 +10,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from . import record_migration, storage, work_item_migration
+from . import insight_identity_migration, record_migration, storage, work_item_migration
 from .errors import Denied, MizuError
 from .fs import digest, mkdir, sync_dir, write_json
 from .project import Project
@@ -77,6 +77,9 @@ def convert(config, projects: list[Path], release: Path) -> list[dict]:
         "migrate-records": (record_migration.flat_records_present, record_migration.plan, record_migration.apply),
         "migrate-work-items": (work_item_migration.legacy_resolutions_present,
                                work_item_migration.plan, work_item_migration.apply),
+        "migrate-insight-identities": (insight_identity_migration.present,
+                                       insight_identity_migration.plan,
+                                       insight_identity_migration.apply),
     }
     root = config.data / "migration-backups"
     attempt = root / f"{digest(os.fsencode(release))[:16]}-{time.time_ns()}"

@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ROOT
-from mizu import install_migration, operator_records, record_migration, storage, work_item_migration
+from mizu import (install_migration, insight_identity_migration, operator_records,
+                  record_migration, storage, work_item_migration)
 from mizu.errors import Denied
 from mizu.fs import canonical, digest, held, lock, read_json, write_json
 
@@ -87,15 +88,16 @@ class InstallMigrationTests(Fixture):
         receipt = self.project.root / 'decision-receipts/reviewer' / f"{event['ack_token']}.json"
         source_bytes = {path: path.read_bytes() for path in (identity, receipt)}
         with (patch.object(storage, 'backup') as backup, patch.object(record_migration, 'apply') as records,
-              patch.object(work_item_migration, 'apply') as work):
+              patch.object(work_item_migration, 'apply') as work,
+              patch.object(insight_identity_migration, 'apply') as identities):
             result = self.promote()
         backup.assert_not_called()
         records.assert_not_called()
         work.assert_not_called()
+        identities.assert_not_called()  # A live identity file is not a tombstone.
         self.assertEqual(result['status'], 'promoted')
         self.assertEqual(result['migrations'], [])
-        self.assertEqual(set(result['uncovered_families']),
-                         {'insight-identities-and-tombstones', 'decision-receipts'})
+        self.assertEqual(set(result['uncovered_families']), {'decision-receipts'})
         for path, raw in source_bytes.items():
             self.assertEqual(path.read_bytes(), raw)
         self.assertIn('data, side effects and budgets are unchanged', result['note'])
@@ -141,8 +143,7 @@ class InstallMigrationTests(Fixture):
         self.assertIn('Listed migrations were applied after verified backups', result['note'])
         self.assertNotIn('Only code', result['note'])
         self.assertEqual(result['status'], 'promoted')
-        self.assertEqual(set(result['uncovered_families']),
-                         {'insight-identities-and-tombstones', 'decision-receipts'})
+        self.assertEqual(set(result['uncovered_families']), {'decision-receipts'})
         self.assertEqual(row['status'], 'converted')
         receipt = read_json(Path(row['receipt']))
         self.assertEqual(receipt, row)

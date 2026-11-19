@@ -731,6 +731,14 @@ migration** runs under `insights.lock`, before capturing the page high-water:
   start a fresh traversal to include them. The database, tombstones and marker
   travel together through normal backup/restore.
 
+Promotion registers the same import as `migrate-insight-identities`: preflight
+inventories only identities without a live or archived body using a no-recovery
+archive read. Apply runs under project quiescence and `insights.lock`, is
+idempotent for rows and the marker, and verifies each imported tombstone's exact
+row bytes inside the commit. Source identity files are not removed, because the
+runtime still uses them for live insights; their legacy reader stays until a
+separate change moves those writes to the archive.
+
 A tombstone summary contains `id`, `body_unavailable: true`, validated
 `created_at`, and `rev` **only if explicitly recorded in the identity** (no
 assumed revision 1). It has no invented title, body, source, origin, evidence,
@@ -1059,11 +1067,14 @@ mizu smoke --live
 
 Use the candidate release's installer. With the configured projects stopped,
 promotion performs bounded checks for flat shared records and legacy work-item
-resolution filenames before switching `current`. Staging does not touch project
-data. Promotion uses the same bounds as the migration commands: 1,000 top-level
-shared-record entries and 10,000 entries per work-item scan. An unreadable or
-incomplete scan blocks promotion; the installer does not raise the bounds or
-skip a project on retry.
+resolution filenames, and verifies retained insight identities before importing
+missing archive tombstones, before switching `current`. Staging does not touch
+project data. Promotion uses the same bounds as the migration commands: 1,000
+top-level shared-record entries and 10,000 entries per work-item scan. Identity
+conversion streams `insight-ids/` under the project lock and uses the archive's
+existing 4,096-byte pinned read per identity. An unreadable or incomplete scan
+blocks promotion; the installer does not raise the bounds or skip a project on
+retry.
 
 If a conversion is needed, pause the affected project and leave services
 stopped. The installer creates one project archive per affected project, then

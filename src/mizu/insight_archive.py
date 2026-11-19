@@ -203,6 +203,50 @@ def _body(raw: bytes | str, key: str) -> None:
     identifier(record.get("source"))
 
 
+_MIGRATION = "legacy-identities-v1"
+
+
+def _tombstone(value: dict) -> bytes:
+    record = {"id": value["id"], "body_unavailable": True, "created_at": value["created_at"]}
+    if "rev" in value:
+        record["rev"] = value["rev"]
+    return canonical(record)
+
+
+def _live_identity_body(root: Path, key: str, has_inbox: bool) -> bool:
+    """Validate an existing inbox body before treating it as a live candidate."""
+    if not has_inbox:
+        return False
+    live = root / "inbox" / f"{key}.json"
+    try:
+        live.lstat()
+    except FileNotFoundError:
+        return False
+    _body(safe_read(root, f"inbox/{key}.json", MAX_FRAME), key)
+    return True
+
+
+def _identity_entries(root: Path) -> list[tuple[str, dict, Path]]:
+    """Validate every pinned retained identity; refuse unexpected entries."""
+    directory = root / "insight-ids"
+    if not _directory(directory):
+        return []
+    entries = []
+    try:
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                if not entry.name.endswith(".json"):
+                    raise Denied("Unexpected insight identity entry; repair before retry")
+                key = identifier(entry.name[:-5])
+                value = identity(root, key)
+                if value is None:
+                    raise Denied("Insight identity disappeared during migration")
+                entries.append((key, value, Path(entry.path)))
+    except OSError as exc:
+        raise Denied("Unsafe insight identity directory") from exc
+    return entries
+
+
 def _migrate_identities(root: Path, db) -> None:
     """One scan, one commit under insights.lock; cancellation rolls back all rows.
 
@@ -212,14 +256,14 @@ def _migrate_identities(root: Path, db) -> None:
     db.execute("BEGIN IMMEDIATE")
     try:
         db.execute("CREATE TABLE IF NOT EXISTS insight_migrations (name TEXT PRIMARY KEY)")
-        if not db.execute("SELECT 1 FROM insight_migrations WHERE name='legacy-identities-v1'").fetchone():
+        if not db.execute("SELECT 1 FROM insight_migrations WHERE name=?", (_MIGRATION,)).fetchone():
             has_inbox = _directory(root / "inbox")
             if _directory(root / "insight-ids"):
                 # Stream entries and propagate errors instead of dropping candidates.
                 with os.scandir(root / "insight-ids") as entries:
                     for entry in entries:
                         _import_identity(root, db, Path(entry.path), has_inbox)
-            db.execute("INSERT INTO insight_migrations (name) VALUES ('legacy-identities-v1')")
+            db.execute("INSERT INTO insight_migrations (name) VALUES (?)", (_MIGRATION,))
         db.commit()
     except BaseException:
         db.rollback()
@@ -233,14 +277,7 @@ def _import_identity(root: Path, db, path: Path, has_inbox: bool) -> None:
     value = identity(root, key)
     if value is None:
         raise Denied("Insight identity disappeared during migration")
-    # Validate any existing live file before treating it as a body.
-    live = root / "inbox" / path.name
-    try:
-        info = live.lstat() if has_inbox else None
-    except FileNotFoundError:
-        info = None
-    if info is not None:
-        _body(safe_read(root, f"inbox/{path.name}", MAX_FRAME), key)
+    if _live_identity_body(root, key, has_inbox):
         return
     archived = db.execute("SELECT rev, record FROM insights WHERE id=? ORDER BY rev DESC LIMIT 1",
                           (key,)).fetchone()
@@ -248,11 +285,69 @@ def _import_identity(root: Path, db, path: Path, has_inbox: bool) -> None:
         if archived[0] != 0:
             _body(archived[1], key)
         return
-    tombstone = {"id": key, "body_unavailable": True, "created_at": value["created_at"]}
-    if "rev" in value:
-        tombstone["rev"] = value["rev"]
     db.execute("INSERT INTO insights (id, rev, record, decision, identity) VALUES (?, 0, ?, 'null', ?)",
-               (key, canonical(tombstone).decode(), canonical(value).decode()))
+               (key, _tombstone(value).decode(), canonical(value).decode()))
+
+
+def identity_conversion_state(root: Path) -> dict:
+    """Read-only, no-recovery inventory of identities still needing conversion.
+
+    A live inbox body or any archived row is already represented; only an
+    identity whose body was removed before archival needs a tombstone row.
+    """
+    entries = _identity_entries(root)
+    has_inbox = _directory(root / "inbox")
+    pending = []
+    with _immutable_connect(root) as db:
+        for key, _, _ in entries:
+            if _live_identity_body(root, key, has_inbox):
+                continue
+            row = db.execute("SELECT 1 FROM insights WHERE id=? LIMIT 1", (key,)).fetchone() if db else None
+            if row is None:
+                pending.append(key)
+    return {"entries_examined": len(entries), "pending": pending}
+
+
+def convert_identities(root: Path) -> dict:
+    """Import retained identities into verified archive tombstones.
+
+    The caller holds insights.lock on a paused, quiescent project. Every import
+    is idempotent, so a retry after a crash adds no duplicate rows. Read-back
+    verification and the completion marker share the same transaction as the
+    imports; any refusal rolls the whole conversion back.
+    """
+    entries = _identity_entries(root)
+    has_inbox = _directory(root / "inbox")
+    report = dict(entries_examined=len(entries), candidates=0, converted=0,
+                  conflicts=[], errors=[], ok=True, scan_complete=True, truncated=False)
+    with _connect(root, write=True) as db:
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS insight_migrations (name TEXT PRIMARY KEY)")
+            for key, _, path in entries:
+                if (not _live_identity_body(root, key, has_inbox)
+                        and db.execute("SELECT 1 FROM insights WHERE id=? LIMIT 1",
+                                       (key,)).fetchone() is None):
+                    report["candidates"] += 1
+                before = db.total_changes
+                _import_identity(root, db, path, has_inbox)
+                if db.total_changes > before:
+                    report["converted"] += 1
+            db.execute("INSERT OR IGNORE INTO insight_migrations (name) VALUES (?)", (_MIGRATION,))
+            for key, value, _ in entries:
+                if _live_identity_body(root, key, has_inbox):
+                    continue
+                archived = db.execute("SELECT rev, record, identity FROM insights "
+                                      "WHERE id=? ORDER BY rev DESC LIMIT 1", (key,)).fetchone()
+                if archived is None:
+                    raise Denied("Converted insight identity is missing from the archive")
+                if archived[0] != 0:
+                    _body(archived[1], key)
+                    continue
+                if (archived[1] != _tombstone(value).decode()
+                        or archived[2] != canonical(value).decode()):
+                    raise Denied("Converted insight identity failed read-back verification")
+    sync_dir(root)
+    return report
 
 
 def page(root: Path, *, limit: int, after: int = 0, high_water: int | None = None) -> tuple:

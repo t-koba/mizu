@@ -314,8 +314,6 @@ def promote(args, release: Path):
     result = {
         "status": "promoted", "release": str(release), "migrations": migrations,
         "uncovered_families": {
-            "insight-identities-and-tombstones": (
-                "Promotion does not convert this family; the runtime still reads and writes insight-ids/."),
             "decision-receipts": (
                 "Promotion does not assess or convert this family; reconciliation is a separate route-bound host operation."),
         },
