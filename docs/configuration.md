@@ -2911,7 +2911,11 @@ in `evidence/publication-keys`, not a receipt-directory scan. The index records
 a content digest for every receipt, a stamp of the publications directory and
 an `incomplete` flag. A missing index resolves no key; a stamp or content
 mismatch, a corrupt index or an incomplete rebuild raises `Denied`, never
-treating changed evidence as absence.
+treating changed evidence as absence. One CI poll loads that inventory, stamp
+and indexed receipt bytes once for all its distinct keys and reuses only that
+call-local observation; the next poll builds a fresh one. The observation keeps
+the candidate validation and SHA checks of a single-key lookup, and never
+enumerates receipt names.
 
 Every receipt write compares the index with the directory as observed before
 the writer's own file was written (for an identical replay, before the replay

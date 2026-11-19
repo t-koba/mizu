@@ -1633,6 +1633,64 @@ class PublicationCiWaitTests(CiWaitFixture):
             self.assertEqual(self.store.get(item['id']), item)
 
 
+    def test_poll_reads_one_key_inventory_for_distinct_keys_per_tick(self):
+        self.block("inventory-first")
+        self.block("inventory-second")
+        child = self.descendant("inventory child")
+        self.receipt_for()
+        self.publish_descendant(child)
+        for tick in range(2):
+            with (patch.object(Publication, "key_observation",
+                               wraps=Publication.key_observation) as observations,
+                  patch.object(Publication, "_read_key_index",
+                               wraps=Publication._read_key_index) as indexes,
+                  patch.object(Publication, "_validated_receipt",
+                               wraps=Publication._validated_receipt) as validations):
+                result, adapter = self.poll(reader=Mock(
+                    side_effect=lambda settings, op, params: {
+                        "checks": self.rows("pending", sha=params["sha"])}))
+            with self.subTest(tick=tick):
+                self.assertTrue(result["ok"], result)
+                self.assertEqual((observations.call_count, indexes.call_count), (1, 1))
+                # Both distinct keys validate a candidate from that one scan;
+                # read_receipt's follow-up validation is a separate call.
+                self.assertEqual(sum("observed" in call.kwargs
+                                     for call in validations.call_args_list), 2)
+                self.assertEqual(adapter.call_count, 1)
+
+    def test_poll_builds_a_fresh_inventory_after_a_same_name_change(self):
+        item = self.block()
+        child = self.descendant("fresh observation child")
+        receipt = self.publish_descendant(child)
+        result, _ = self.poll()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["observed"], 1)
+        path = self.project.root / "evidence" / "publications" / (
+            receipt["publication_id"] + ".external.json")
+        path.write_bytes(b"{}")
+        with patch.object(Publication, "key_observation",
+                          wraps=Publication.key_observation) as observations:
+            result, adapter = self.poll()
+        self.assertGreaterEqual(observations.call_count, 1)  # the poll's own batch
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["observed"], 0)
+        adapter.assert_not_called()
+        # A reused observation would still see the old receipt and freeze it.
+        with self.assertRaises(Denied):
+            ci_waits.evidence(self.store, item)
+
+    def test_poll_cannot_skip_candidate_validation(self):
+        self.block()
+        self.receipt_for()
+        with patch.object(Publication, "_validated_receipt",
+                          side_effect=Denied("candidate refused")) as validations:
+            result, adapter = self.poll()
+        self.assertEqual(validations.call_count, 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["observed"], 0)
+        adapter.assert_not_called()
+
+
 class HolderOnlyCiWaitTests(CiWaitFixture):
     repository = "e" * 64
 

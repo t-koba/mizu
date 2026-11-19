@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import test_ci_waits as existing
 
 from test_ci_waits import CiWaitFixture, SHA
-from mizu import ci_waits, vcs
+from mizu import ci_waits, publication, vcs
 from mizu.errors import Denied
 from mizu.fs import read_json
 from mizu.project import Project
@@ -398,9 +398,13 @@ class ChangePublicationSafetyTests(CiWaitFixture):
         reader.assert_not_called()
         self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
         self.assertEqual(lookups.call_count, 1)
-        lookups.assert_called_once_with(self.store.root, "published",
-                                        self.snapshot["code_digest"],
-                                        policy=self.store.publication_evidence)
+        # One call-local key observation serves the whole tick; the lookup
+        # remains the single-key entry point with the same exact key.
+        call = lookups.call_args
+        self.assertEqual(call.args, (self.store.root, "published",
+                                     self.snapshot["code_digest"]))
+        self.assertEqual(call.kwargs["policy"], self.store.publication_evidence)
+        self.assertIsInstance(call.kwargs["observation"], publication.ReceiptKeyObservation)
 
     def test_new_descendant_after_empty_page_is_enrolled(self):
         item = self.block()

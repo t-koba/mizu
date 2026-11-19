@@ -1008,17 +1008,39 @@ class Publication:
                 "truncated": len(matches) > len(page), "scan_stopped": scan_stopped}
 
     @classmethod
+    def key_observation(cls, project_root: Path, *,
+                        policy: PublicationEvidence | None = None) -> ReceiptKeyObservation:
+        """Create a lazy, call-local observation of the writer-owned key index.
+
+        No I/O happens here. The first answer loads the index, compares the
+        receipt-directory stamp once and checks every indexed receipt's
+        SHA-256 against its bounded no-follow byte read; later keys reuse that
+        one bounded observation. The result is owned by the caller and is never
+        kept on the module or on a project/store object: each poll or other
+        coherent observation builds a fresh one.
+        """
+        return ReceiptKeyObservation(
+            project_root, policy if policy is not None else PublicationEvidence())
+
+    @classmethod
     def receipt_for_key(cls, project_root: Path, branch: str, code_digest: str, *,
-                        policy: PublicationEvidence) -> str | None:
+                        policy: PublicationEvidence,
+                        observation: ReceiptKeyObservation | None = None) -> str | None:
         """Resolve the one receipt bound to a branch and whole-capture digest.
 
         Schema: a publication ID, or ``None`` for zero or ambiguous evidence.
-        Bounds: the writer-owned index is one bounded fixed-path read; every
-        indexed receipt is re-read with its create-only bound and the receipt
-        directory stamp is compared before any key is resolved. There is no
-        directory enumeration. The byte read checked against the index digest
-        is passed to receipt validation, whose process-local reuse is keyed by
-        those exact bytes; no metadata witness authorizes validation reuse.
+        ``observation`` optionally supplies one call-local key inventory (see
+        ``key_observation``) shared by several distinct keys; without it a
+        fresh inventory is used for this call. It must belong to the same
+        project root and policy, or the key is refused.
+        Bounds: on a fresh observation the writer-owned index is one bounded
+        fixed-path read; every indexed receipt is read once with its create-only
+        bound and the receipt directory stamp is compared before any key is
+        resolved. A supplied observation answers all its keys from those
+        reads. There is no directory enumeration. The byte read checked against
+        the index digest is passed to receipt validation, whose process-local
+        reuse is keyed by those exact bytes; no metadata witness authorizes
+        validation reuse.
         Trust: the index is written only by the receipt writer. A missing index
         means completeness cannot be established and resolves nothing. A stamp
         or content mismatch, an incomplete rebuild, a corrupt index or a
@@ -1031,39 +1053,13 @@ class Publication:
         check_branch(branch)
         if not isinstance(code_digest, str) or not DIGEST.fullmatch(code_digest):
             raise Denied("Invalid code digest for publication listing")
-        store = cls._receipt_store(project_root)
-        index = cls._read_key_index(store, policy)
-        if index is None:
-            return None
-        if index["stamp"] != _directory_stamp(store.root):
-            raise Denied("Publication evidence changed")
-        if index["incomplete"]:
-            raise Denied("Publication evidence scan incomplete")
-        keys = [key for key in index["keys"]
-                if key["branch"] == branch and key["code_digest"] == code_digest]
-        candidate = (keys[0]["publication_ids"][0]
-                     if len(keys) == 1 and len(keys[0]["publication_ids"]) == 1 else None)
-        observed = {}
-        for entry in index["entries"]:
-            name = _receipt_file_name(entry["publication_id"], entry["kind"])
-            try:
-                raw = safe_read(store.root, name, RECORD_BYTES)
-            except FileNotFoundError as exc:
-                raise Denied("Publication evidence changed") from exc
-            sha = digest(raw)
-            if sha != entry["sha256"]:
-                raise Denied("Publication evidence changed")
-            if candidate is not None and entry["publication_id"] == candidate:
-                observed[entry["kind"]] = (raw, sha)
-        if candidate is None:
-            return None
-        publication_id = candidate
-        store.id = publication_id
-        receipt = cls._validated_receipt(store, publication_id,
-                                         observed=observed or None)
-        if receipt["code_digest"] != code_digest or receipt["branch"] != branch:
-            return None
-        return publication_id
+        if observation is None:
+            observation = cls.key_observation(project_root, policy=policy)
+        elif (not isinstance(observation, ReceiptKeyObservation)
+              or observation.root != Path(project_root)
+              or observation.policy != policy):
+            raise Denied("Invalid publication key observation")
+        return observation.resolve(branch, code_digest)
 
     def complete(self, intent: dict, published_sha: str, observation=None) -> dict:
         if not isinstance(published_sha, str) or not SHA.fullmatch(published_sha):
@@ -1076,3 +1072,68 @@ class Publication:
         cls._write_with_key_index(self, receipt, "receipt",
                                   PublicationEvidence(), before_stamp)
         return receipt
+
+
+class ReceiptKeyObservation:
+    """One bounded, call-local answer set for writer-indexed receipt keys.
+
+    The first answer reads the index once, pins its directory stamp and checks
+    the SHA-256 of every indexed receipt against one bounded no-follow read of
+    its bytes. Later answers resolve distinct (branch, code_digest) keys from
+    those same bytes with the ordinary candidate validation. Only the bytes of
+    unambiguous candidates are retained; all other reads are checked and
+    discarded. Bounds are those of the index (``policy.record_limit`` entries
+    and keys) and ``RECORD_BYTES`` per receipt. No receipt-directory
+    enumeration, long-lived process cache or cross-poll reuse is introduced:
+    the observation dies with the call that owns it.
+    """
+
+    def __init__(self, project_root, policy):
+        self.root = Path(project_root)
+        self.policy = policy
+        self._loaded = False
+        self._keys = {}
+        self._observed = {}
+
+    def _load(self):
+        if self._loaded:
+            return
+        store = Publication._receipt_store(self.root)
+        index = Publication._read_key_index(store, self.policy)
+        if index is not None:
+            if index["stamp"] != _directory_stamp(store.root):
+                raise Denied("Publication evidence changed")
+            if index["incomplete"]:
+                raise Denied("Publication evidence scan incomplete")
+            for key in index["keys"]:
+                self._keys.setdefault(
+                    (key["branch"], key["code_digest"]), []).extend(key["publication_ids"])
+            candidates = {ids[0] for ids in self._keys.values() if len(ids) == 1}
+            for entry in index["entries"]:
+                name = _receipt_file_name(entry["publication_id"], entry["kind"])
+                try:
+                    raw = safe_read(store.root, name, RECORD_BYTES)
+                except FileNotFoundError as exc:
+                    raise Denied("Publication evidence changed") from exc
+                sha = digest(raw)
+                if sha != entry["sha256"]:
+                    raise Denied("Publication evidence changed")
+                if entry["publication_id"] in candidates:
+                    self._observed[entry["publication_id"]] = {entry["kind"]: (raw, sha)}
+        self._loaded = True
+
+    def resolve(self, branch, code_digest) -> str | None:
+        """Resolve one exact key from this observation's pinned inventory."""
+        self._load()
+        ids = self._keys.get((branch, code_digest), ())
+        if len(ids) != 1:
+            return None
+        publication_id = ids[0]
+        observed = self._observed.get(publication_id)
+        if observed is None:
+            raise Denied("Publication evidence changed")
+        store = Publication._receipt_store_for_id(self.root, publication_id)
+        receipt = Publication._validated_receipt(store, publication_id, observed=observed)
+        if receipt["code_digest"] != code_digest or receipt["branch"] != branch:
+            return None
+        return publication_id

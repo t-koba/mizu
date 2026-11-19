@@ -77,7 +77,8 @@ def normalize_publication(value, *, snapshots, branch=None, stored=False):
     return result
 
 
-def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_distance=None):
+def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_distance=None,
+               receipt_keys=None):
     if wait["kind"] == "ci":
         return wait
     target = wait
@@ -99,6 +100,12 @@ def _resolved(store, wait, observed_snapshot=None, *, receipt_cache=None, wait_d
     key = (wait["branch"], target["code_digest"])
     if receipt_cache is not None and key in receipt_cache:
         publication_id = receipt_cache[key]
+    elif receipt_keys is not None:
+        # One call-local key inventory answers every distinct key of this
+        # observation; corruption and out-of-band changes still fail closed.
+        publication_id = Publication.receipt_for_key(
+            store.root, wait["branch"], target["code_digest"],
+            policy=store.publication_evidence, observation=receipt_keys)
     else:
         # The writer-owned key index resolves one exact receipt or none;
         # corruption and out-of-band changes fail closed. Exceptions escape
@@ -837,13 +844,14 @@ def _candidates(store, item, descendants, *, newest_first=False, wait_distance=N
             yield sid, sid
 
 
-def _candidate_wait(store, wait, candidate, *, receipt_cache=None, wait_distance=None):
+def _candidate_wait(store, wait, candidate, *, receipt_cache=None, wait_distance=None,
+                     receipt_keys=None):
     observed = None
     if candidate is not None:
         snapshot = store.snapshots.get(candidate)
         observed = {"snapshot_id": snapshot["id"], "code_digest": snapshot["code_digest"]}
     return _resolved(store, wait, observed, receipt_cache=receipt_cache,
-                     wait_distance=wait_distance)
+                     wait_distance=wait_distance, receipt_keys=receipt_keys)
 
 
 def _poll_error_code(exc):
@@ -857,7 +865,8 @@ def _poll_error_code(exc):
     return "invalid"
 
 
-def _poll_candidates(store, descendants, errors, limit, *, receipt_cache=None, distances=None):
+def _poll_candidates(store, descendants, errors, limit, *, receipt_cache=None, distances=None,
+                      receipt_keys=None):
     """Stream eligible receipt-resolved candidates, retaining no waiter list."""
     for item in _items(store):
         try:
@@ -879,7 +888,8 @@ def _poll_candidates(store, descendants, errors, limit, *, receipt_cache=None, d
                         distances[sid] = store.snapshots._descendant_distance_from(sid)
                     wait_distance = distances[sid]
                 wait = _candidate_wait(store, item["wait"], candidate,
-                                       receipt_cache=receipt_cache, wait_distance=wait_distance)
+                                       receipt_cache=receipt_cache, wait_distance=wait_distance,
+                                       receipt_keys=receipt_keys)
                 if wait is not None:
                     yield item, candidate, wait
             except (Denied, LimitExceeded, OSError, ValueError) as exc:
@@ -894,7 +904,7 @@ class _Enrollment:
     The polling writer prunes revisions, vanished candidates and settled items.
     Absence means enrollment/retry is needed, including after interrupted writes.
     """
-    def __init__(self, store, epoch, *, receipt_cache=None):
+    def __init__(self, store, epoch, *, receipt_cache=None, receipt_keys=None):
         self.store, self.epoch = store, epoch
         self.cached_item, self.cached_keys = None, set()
         self.directory = store.root / "ci-wait-observations"
@@ -914,7 +924,8 @@ class _Enrollment:
                 continue
             keys = set()
             for _, candidate in _candidates(store, item, True):
-                wait = _candidate_wait(store, item["wait"], candidate, receipt_cache=receipt_cache)
+                wait = _candidate_wait(store, item["wait"], candidate,
+                                       receipt_cache=receipt_cache, receipt_keys=receipt_keys)
                 if wait is not None:
                     keys.add(self.key(candidate, wait))
             old = self._read(item)
@@ -1057,6 +1068,10 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
     errors = []
     store = project.work_items
     receipt_cache, distances = {}, {}  # Never retain resolutions across poll ticks.
+    # One lazy key inventory per tick: distinct keys share its single index,
+    # stamp and receipt-byte observation; a later poll builds a fresh one.
+    receipt_keys = Publication.key_observation(
+        store.root, policy=store.publication_evidence)
     descendants = config.vcs.get("ci_wait_descendants", True)
     try:
         enrollment = None
@@ -1070,7 +1085,8 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                     if epoch is not None:
                         raise Denied("Invalid CI observation epoch")
                     epoch = state["ci_changes_epoch"] = uuid.uuid4().hex
-                enrollment = _Enrollment(store, epoch, receipt_cache=receipt_cache)
+                enrollment = _Enrollment(store, epoch, receipt_cache=receipt_cache,
+                                         receipt_keys=receipt_keys)
                 page = _change_page(config, state, limit, changes_reader)
             except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError) as exc:
                 errors.append(_poll_error_code(exc))
@@ -1086,7 +1102,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
         scan_errors = []
         for item, candidate, wait in _poll_candidates(
                 store, descendants, scan_errors, limit,
-                receipt_cache=receipt_cache, distances=distances):
+                receipt_cache=receipt_cache, distances=distances, receipt_keys=receipt_keys):
             target = (wait["branch"], wait["sha"])
             invalidated = (page is not None and wait["branch"] in page["branches"]
                            and target > page_after)
@@ -1144,7 +1160,8 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
         # for no effect. Its only other contribution, scan_errors, is already
         # collected by the first pass over the same unchanged store.
         candidates = (_poll_candidates(store, descendants, scan_errors, limit,
-                                       receipt_cache=receipt_cache, distances=distances)
+                                       receipt_cache=receipt_cache, distances=distances,
+                                       receipt_keys=receipt_keys)
                       if targets else ())
         for item, candidate, wait in candidates:
             target = (wait["branch"], wait["sha"])

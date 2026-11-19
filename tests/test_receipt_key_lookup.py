@@ -332,3 +332,102 @@ class ReceiptKeyLookupTests(Fixture):
         foreign = self.record(code_digest=OTHER_DIGEST)
         with patch.object(Publication, "receipt_for_key", return_value=foreign["publication_id"]):
             self.assertIsNone(ci_waits._resolved(store, wait))
+
+    def observation(self, policy=None):
+        return Publication.key_observation(
+            self.root, policy=self.policy if policy is None else policy)
+
+    def test_batch_answers_distinct_keys_from_one_index_stamp_and_byte_scan(self):
+        first = self.record()
+        second = self.record(code_digest=OTHER_DIGEST)
+        with patch.object(Publication, "_read_key_index",
+                          wraps=Publication._read_key_index) as index_reads, \
+                patch.object(publication, "_directory_stamp",
+                             wraps=publication._directory_stamp) as stamps, \
+                patch.object(publication, "safe_read",
+                             wraps=publication.safe_read) as byte_reads, \
+                patch.object(Publication, "_validated_receipt",
+                             wraps=Publication._validated_receipt) as validations:
+            observation = self.observation()
+            self.assertEqual(observation.resolve(BRANCH, DIGEST), first["publication_id"])
+            self.assertEqual(observation.resolve(BRANCH, OTHER_DIGEST), second["publication_id"])
+            self.assertIsNone(observation.resolve(BRANCH, "e" * 64))
+            self.assertIsNone(observation.resolve("unpublished", DIGEST))
+        self.assertEqual(index_reads.call_count, 1)
+        self.assertEqual(stamps.call_count, 1)
+        self.assertEqual(byte_reads.call_count, 3)  # the index and two receipts
+        self.assertEqual(validations.call_count, 2)
+
+    def test_single_key_entry_point_reuses_one_observation(self):
+        first = self.record()
+        second = self.record(code_digest=OTHER_DIGEST, published_sha=OTHER_SHA)
+        observation = self.observation()
+        with patch.object(Publication, "_read_key_index",
+                          wraps=Publication._read_key_index) as index_reads:
+            for code_digest, expected in ((DIGEST, first), (OTHER_DIGEST, second),
+                                          ("e" * 64, None)):
+                self.assertEqual(
+                    Publication.receipt_for_key(
+                        self.root, BRANCH, code_digest, policy=self.policy,
+                        observation=observation),
+                    expected["publication_id"] if expected else None)
+        self.assertEqual(index_reads.call_count, 1)
+
+    def test_observation_is_bound_to_its_project_root_and_policy(self):
+        self.record()
+        observation = self.observation()
+        with self.assertRaises(Denied):
+            Publication.receipt_for_key(self.root, BRANCH, DIGEST,
+                                        policy=self.policy, observation=object())
+        with self.assertRaises(Denied):
+            Publication.receipt_for_key(self.root / "other", BRANCH, DIGEST,
+                                        policy=self.policy, observation=observation)
+        with self.assertRaises(Denied):
+            Publication.receipt_for_key(self.root, BRANCH, DIGEST,
+                                        policy=PublicationEvidence(record_limit=1),
+                                        observation=observation)
+
+    def test_same_name_change_fails_closed_for_every_key_in_a_fresh_batch(self):
+        matching = self.record()
+        unrelated = self.record(code_digest=OTHER_DIGEST)
+        observation = self.observation()
+        self.assertEqual(observation.resolve(BRANCH, DIGEST), matching["publication_id"])
+        path = self.directory / (unrelated["publication_id"] + ".external.json")
+        path.write_bytes(b"{}")
+        for branch, code_digest in ((BRANCH, DIGEST), (BRANCH, OTHER_DIGEST),
+                                    (BRANCH, "e" * 64)):
+            with self.subTest(branch=branch, code_digest=code_digest):
+                with self.assertRaises(Denied):
+                    self.observation().resolve(branch, code_digest)
+        # The earlier observation stays bound to the bytes it verified, so a
+        # later answer cannot silently adopt the changed file.
+        self.assertEqual(observation.resolve(BRANCH, OTHER_DIGEST),
+                         unrelated["publication_id"])
+
+    def test_fresh_observation_sees_a_rebuilt_index(self):
+        matching = self.record()
+        old = self.record(code_digest=OTHER_DIGEST)
+        observation = self.observation()
+        self.assertEqual(observation.resolve(BRANCH, OTHER_DIGEST), old["publication_id"])
+        (self.directory / (old["publication_id"] + ".external.json")).unlink()
+        replacement = self.record(code_digest="e" * 64)
+        fresh = self.observation()
+        self.assertIsNone(fresh.resolve(BRANCH, OTHER_DIGEST))
+        self.assertEqual(fresh.resolve(BRANCH, DIGEST), matching["publication_id"])
+        self.assertEqual(fresh.resolve(BRANCH, "e" * 64), replacement["publication_id"])
+        self.assertEqual(observation.resolve(BRANCH, OTHER_DIGEST), old["publication_id"])
+
+    def test_batch_validates_the_candidate_with_index_witnessed_bytes(self):
+        receipt = self.record()
+        observation = self.observation()
+        with patch.object(Publication, "_validated_receipt",
+                          side_effect=Denied("candidate refused")) as validate:
+            with self.assertRaises(Denied):
+                observation.resolve(BRANCH, DIGEST)
+        self.assertEqual(validate.call_count, 1)
+        with patch.object(Publication, "_validated_receipt",
+                          wraps=Publication._validated_receipt) as validate:
+            self.assertEqual(observation.resolve(BRANCH, DIGEST), receipt["publication_id"])
+        raw, sha = validate.call_args.kwargs["observed"]["external"]
+        self.assertEqual(raw, canonical(receipt))
+        self.assertEqual(sha, digest(canonical(receipt)))
