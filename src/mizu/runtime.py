@@ -104,7 +104,7 @@ from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
 from .vcs_upstream_poll import poll_upstream, refresh_upstream
 # Keep the existing runtime imports available to callers.
 from .unit_finish import (ContextFinishMixin, _progress_obligations_digest, _READY_WORK_UNSET,
-                          _progress_record, _writer_next_task)
+                          _deferred_until_due, _progress_record, _writer_next_task)
 from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             _decision_task, _open_backlog, _prompt_capture_limit,
                             _prompt_clock, _prompt_research_state, _prompt_run_identity,
@@ -268,8 +268,11 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
     full signature reports ready-set change; schema-4–6 writer progress separately
     qualifies resolution wakes by exact item/revision tokens actually shown in
     the opening pages. Legacy progress retains its conservative changed-set
-    fallback because it has no delivery tokens. The progress role and fingerprint
-    scope prevent an observer from consuming another role's ready-work signal.
+    fallback because it has no delivery tokens. A holder-deferred deadline has
+    no membership signal when it passes, so its private full-scan instant is
+    compared as well; missing or malformed instants count as due. The progress
+    role and fingerprint scope prevent an observer from consuming another role's
+    ready-work signal.
     """
     if role is not None and "work_items_transition" not in role.capabilities:
         return False, False, False
@@ -304,6 +307,10 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
             changed = present
         else:
             changed = signature != previous["ready_work_signature"]
+            if not changed and "_earliest_deferred_until" in page:
+                # A passed holder deadline keeps the same membership and ID
+                # signature. Its instant is the only change we can observe.
+                changed = _deferred_until_due(page["_earliest_deferred_until"])
         if delivered_tokens is not None:
             resolution_changed = page.get("_wait_resolution_undelivered")
             if type(resolution_changed) is not bool:
