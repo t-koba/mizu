@@ -791,25 +791,45 @@ class LegacyWorkItemTests(Fixture):
         self.assertEqual(source.read_bytes(), source_bytes)
 
     def test_warm_index_drop_resolution_is_refused_without_store_scan(self):
-        event_id, _, _ = self.legacy()
-        self.resolve(event_id, outcome="drop", title=None)
+        """Warm reads trust the index; a rebuild detects an out-of-band old name."""
+        addressed, _, _ = self.legacy()
+        item_id = f"wi_{addressed}"
+        self.resolve(addressed)
+        dropped, _, _ = self.legacy()
+        self.resolve(dropped, outcome="drop", title=None)
         self.store.page_open()  # Ensure the drop-only decision is indexed before rename.
-        old, current = self.old_sidecar(event_id), self.sidecar(event_id)
+        old, current = self.old_sidecar(dropped), self.sidecar(dropped)
         current.rename(old)
 
-        readers = (self.store.page_ready, self.store.page_changes_readonly,
-                   self.store.page_closed_readonly, self.store.count_open_readonly,
-                   self.store.unseeded_decisions)
         refusal = AssertionError("current-state read opened migration history")
+        original = work_items_module._unconverted_resolution
+
+        def no_drop_probe(directory):
+            if directory == old.parent:
+                raise AssertionError("warm read probed the renamed drop resolution")
+            return original(directory)
+
+        readers = (("ready", self.store.page_ready),
+                   ("changes", self.store.page_changes_readonly),
+                   ("closed", self.store.page_closed_readonly),
+                   ("count", self.store.count_open_readonly),
+                   ("unseeded", self.store.unseeded_decisions),
+                   ("current", lambda: self.store.current(item_id)))
         with patch.object(self.store, "_read", side_effect=refusal), \
                 patch.object(self.store, "_history_revisions", side_effect=refusal), \
-                patch("mizu.work_items.os.scandir", side_effect=refusal):
-            for read in readers:
-                with self.subTest(read=read.__name__), self.assertRaisesRegex(
-                        Denied, "mizu migrate-work-items"):
+                patch("mizu.work_items.os.scandir", side_effect=refusal), \
+                patch("mizu.work_items._unconverted_resolution", side_effect=no_drop_probe):
+            for label, read in readers:
+                with self.subTest(read=label):
                     read()
 
-        # A rebuild must also refuse the old name, and succeeds once migrated.
+        # A transition validates the addressed item's own resolution, not the
+        # indexed drop's renamed sidecar.
+        with patch("mizu.work_items._unconverted_resolution", side_effect=no_drop_probe):
+            doing = self.store.transition(item_id, expected_rev=1, status="doing", actor="worker")
+        self.assertEqual(doing["id"], item_id)
+
+        # A rebuild must still refuse the old name, and succeeds once migrated.
         forget_ledger(self.project.root)
         with self.assertRaisesRegex(Denied, "mizu migrate-work-items"):
             self.store.page_ready()
@@ -817,6 +837,38 @@ class LegacyWorkItemTests(Fixture):
         forget_ledger(self.project.root)
         self.assertTrue(self.store.page_ready()["coverage_complete"])
         self.assertTrue(self.store.audit()["consistent"])
+
+    def test_current_read_probes_are_independent_of_retained_drops(self):
+        """Fixed-size reads probe a fixed set of directories as drops accumulate."""
+        addressed, _, _ = self.legacy()
+        item_id = f"wi_{addressed}"
+        self.resolve(addressed)
+        self.store.page_open()  # The addressed item is indexed in every case.
+        original = work_items_module._unconverted_resolution
+        counts = {"current": {}, "page_ready": {}}
+        added = 0
+        for retained in (0, 8, 32):
+            while added < retained:
+                event_id, _, _ = self.legacy()
+                self.resolve_old(event_id, outcome="drop", title=None)
+                added += 1
+            with self.store._ledger.read("items", locked=False) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM legacy_drops").fetchone()[0], retained)
+            for label, read in (("current", lambda: self.store.current(item_id)),
+                                ("page_ready", lambda: self.store.page_ready(limit=1))):
+                seen = []
+
+                def counting(directory, _original=original, _seen=seen):
+                    _seen.append(directory)
+                    return _original(directory)
+
+                with patch("mizu.work_items._unconverted_resolution", side_effect=counting):
+                    read()
+                counts[label][retained] = len(seen)
+        for label, by_count in counts.items():
+            with self.subTest(read=label):
+                self.assertEqual(by_count[0], by_count[8], by_count)
+                self.assertEqual(by_count[8], by_count[32], by_count)
 
     def test_host_preflight_reads_and_converts_legacy_resolutions(self):
         opened, _, source = self.legacy()

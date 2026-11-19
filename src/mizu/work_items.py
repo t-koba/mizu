@@ -5,8 +5,14 @@ hash-bound legacy sidecars. Each successful CAS appends one full state under
 insights.lock, never a pointer, after replaying and validating the item's
 whole chain. Current-state reads come only from the ledger index
 (:mod:`mizu.ledger`), which every write updates in its critical section; no
-read replays history. Full-chain validation runs at write time, when the
-index is built from the files, and in :meth:`WorkItems.audit`. Origin
+read replays history. Resolution filenames are validated when the index is
+built or restored from files (including the migration preflight), not on each
+read: a warm index is trusted, so an out-of-band rename of a resolution to an
+old-format ``legacy.json`` is refused at the next rebuild or migration rather
+than detected by a store scan on every read. The derived ``legacy_drops``
+table records build-time drop evidence for audit and index parity; it is not
+a per-read guard. Full-chain validation runs at write time, when the index is
+built from the files, and in :meth:`WorkItems.audit`. Origin
 staleness, hold ages and wait liveness are computed from current records on
 every read. Retrying a committed CAS requires a re-read. Same-status events
 require a scope/reference change, held-open release, or delivery binding; only
@@ -22,7 +28,6 @@ import heapq
 import json
 import os
 import re
-import sqlite3
 import stat
 from pathlib import Path
 
@@ -305,25 +310,10 @@ class WorkItems:
                 and _unconverted_resolution(self.root / "work-items" / item_id)):
             raise Denied(_UNMIGRATED_RESOLUTION)
 
-    def _require_migrated_drops(self, db) -> None:
-        """Check indexed drop-only resolutions without scanning work-item directories."""
-        if self._host_resolution_scan:
-            return
-        try:
-            for (event_id,) in db.execute("SELECT event_id FROM legacy_drops"):
-                if (not isinstance(event_id, str)
-                        or _DECISION_EVENT_NAME.fullmatch(event_id + ".json") is None):
-                    raise Denied("Invalid legacy drop index entry")
-                if _unconverted_resolution(self.root / "work-items" / f"wi_{event_id}"):
-                    raise Denied(_UNMIGRATED_RESOLUTION)
-        except sqlite3.DatabaseError as exc:
-            raise Denied("Ledger index unreadable") from exc
-
     def _require_doing_capacity(self, actor: str) -> None:
         """Count the actor's doing items in the index; caller holds insights.lock."""
         limit = self.doing_limits.get(actor, self.doing_limit)
         with self._ledger.read("items", locked=True) as db:
-            self._require_migrated_drops(db)
             count = _rows(db, "SELECT COUNT(*) FROM items WHERE status='doing' AND holder=?",
                           (actor,))[0][0]
         if count >= limit:
@@ -339,7 +329,6 @@ class WorkItems:
 
     def _count_open(self, *, locked: bool) -> int:
         with self._ledger.read("items", locked=locked) as db:
-            self._require_migrated_drops(db)
             return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('open', 'doing', 'blocked')")[0][0]
 
     def count_open(self) -> int:
@@ -1611,6 +1600,8 @@ class WorkItems:
         return self._ledger.write("items", item_ids, hint=source_event)
 
     # Current state: every read below comes from the index, never from history.
+    # Warm reads trust that index; old-format resolution filenames are refused
+    # at rebuild/migration time (see the module docstring), not probed per read.
 
     @staticmethod
     def _decode(raw, since=None, blocked_since=None):
@@ -1625,7 +1616,6 @@ class WorkItems:
             raise Denied("Invalid work-item ID")
         self._require_migrated_item(item_id)
         with self._ledger.read("items", locked=locked) as db:
-            self._require_migrated_drops(db)
             found = _rows(db, "SELECT item, doing_since, blocked_since FROM items WHERE id=?",
                           (item_id,))
         if not found:
@@ -1641,7 +1631,6 @@ class WorkItems:
             raise Denied("Invalid work-item ID")
         self._require_migrated_item(item_id)
         with self._ledger.read("items", locked=locked) as db:
-            self._require_migrated_drops(db)
             found = _rows(db, "SELECT item FROM items WHERE id=?", (item_id,))
         if not found:
             raise Denied("Work item has no immutable seed")
@@ -1655,7 +1644,6 @@ class WorkItems:
                 raise Denied("Invalid work-item status filter")
             query += f" WHERE status IN ({', '.join('?' * len(statuses))})"
         with self._ledger.read("items", locked=False) as db:
-            self._require_migrated_drops(db)
             found = _rows(db, query + " ORDER BY id", tuple(statuses or ()))
         items = [json.loads(raw) for (raw,) in found]
         for item in items:
@@ -1665,7 +1653,6 @@ class WorkItems:
     def unseeded_decisions(self) -> int:
         """Count legacy accept/modify decisions that no reconciliation resolved."""
         with self._ledger.read("items", locked=False) as db:
-            self._require_migrated_drops(db)
             return _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
 
     def origin_sources(self) -> dict:
@@ -2310,7 +2297,6 @@ class WorkItems:
     def _active_rows(self, *, locked: bool):
         """Yield the unseeded count, then stream every active row in ID order."""
         with self._ledger.read("items", "insights", locked=locked) as db:
-            self._require_migrated_drops(db)
             yield _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
             yield from db.execute(
                 f"SELECT i.item, i.doing_since, i.blocked_since, {_ORIGIN_COLUMNS} FROM items i "
@@ -2571,7 +2557,6 @@ class WorkItems:
         if type(limit) is not int or not 0 <= limit <= MAX_CLOSED_PAGE_ROWS:
             raise Denied("Closed work-item page limit must be an integer in [0, 100]")
         with self._ledger.read("items", locked=not readonly) as db:
-            self._require_migrated_drops(db)
             total = _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('done', 'dropped')")[0][0]
             newest = _rows(db, "SELECT item FROM items WHERE status IN ('done', 'dropped') "
                                "ORDER BY updated_key DESC, id LIMIT ?", (limit,))
@@ -2604,7 +2589,6 @@ class WorkItems:
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         with self._ledger.read("items", locked=False, durable=True) as db:
-            self._require_migrated_drops(db)
             key, after, fence = ITEMS.change_position(db, cursor)
             found = _rows(db, "SELECT change_seq, item, doing_since, blocked_since FROM items "
                           "WHERE change_seq>? AND change_seq<=? ORDER BY change_seq LIMIT ?",
