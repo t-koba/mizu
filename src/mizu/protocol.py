@@ -724,7 +724,8 @@ DEFINITIONS = {
                         "limit": {"type": "integer", "minimum": 1, "maximum": QUEUE_PAGE_MAX}},
                        ("queue",))),
     "queue_ack": ("Advance your role's durable cursor in a declared queue to seq; a seq above the "
-                  "queue head is refused and cursors only move forward. The host binds the role.",
+                  "queue head or whose prefix contains a not-yet-due message is refused, and cursors "
+                  "only move forward. The host binds the role.",
                   obj({"queue": KERNEL_NAME_SCHEMA, "seq": KERNEL_CURSOR_SCHEMA},
                       ("queue", "seq"))),
     "message_read": ("Read one message by its 32-hex id if your role may read its queue. The host "
