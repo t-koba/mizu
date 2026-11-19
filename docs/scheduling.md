@@ -126,11 +126,10 @@ null for no delivered input). A writer `continue`/`bounded` finish that parks
 reanchors its signature to the validated complete empty finish-time inventory,
 so dispositions made in that unit do not cause a redundant self-wake. Any ready
 work remaining at that check refuses those finishes; work becoming ready after
-it remains new input. A writer-selected `wait` or `blocked` finish normally
-leaves the signature unanchored so the ready-work observation re-admits the
-role. The one exception is a whole ready set of this holder's own deadlines
-still in the future: the opening signature is kept and the earliest deadline is
-the wake. Neither case anchors a new set. Finish-time `ready_work` remains the
+it remains new input. A writer-selected `wait` or `blocked` finish leaves the
+signature unanchored so the ready-work observation re-admits the role, even when
+every ready row is this holder's own future deadline; unchanged units count
+toward no-progress handling. Neither case anchors a new set. Finish-time `ready_work` remains the
 separate True/False/null idle diagnostic, not an admission cursor.
 
 A writable role with both `work_order` and `work_items_transition` also records
@@ -164,9 +163,11 @@ busy admission, failed delivery and restart leave unseen causes discoverable.
 There is no separate store, generic ready-set cursor, acknowledgement, or
 additional event type; existing `ready_work` subscriptions use this signature.
 
-An unchanged set after `wait` parks until independent input, wait expiry or
-another genuine wake; unchanged ready work does not bypass the existing
-requirement for new actionable input or a writer handoff for `continue`/`bounded`. Additions, removals
+An unchanged set anchored after a finish parks until independent input, wait
+expiry or another genuine wake; a `wait` or `blocked` finish with ready work
+clears its signature, so that work re-admits and advances no-progress handling
+rather than parking on the same set. `continue`/`bounded` still require new
+actionable input or a writer handoff. Additions, removals
 (including the last item), replacements with equal totals, and blocked-wait
 satisfaction change membership and wake once after delivery. Claiming the same
 ID or rewriting its other metadata does not. A new terminal evidence binding
@@ -233,10 +234,10 @@ work does not block the role. A progress-backed new `next_step` may instead hand
 immediately under the existing validation rules. A writer-selected `wait` or
 `blocked` finish is instead accepted with role-eligible ready work: the host
 normally leaves the progress ready-set signature unanchored so the existing
-ready-work observation re-admits the role, without requiring any item transition.
-If every ready row is this holder's own future deadline, the opening signature
-stays anchored and the role parks until that instant passes or other input
-changes. A host-imposed bounded yield may likewise retain ready work.
+ready-work observation re-admits the role, without requiring any item transition,
+even when every ready row is this holder's own future deadline. Repeated
+unchanged finishes count toward no-progress recovery/parking instead of waiting
+for the deadline instant. A host-imposed bounded yield may likewise retain ready work.
 
 Ready-work presence alone never authorizes a timed re-admission, for either
 `wait` or no-progress `continue`/`bounded` records. Ready-set changes still wake

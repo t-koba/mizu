@@ -2,7 +2,6 @@
 import dataclasses
 import datetime as dt
 import json
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, forget_ledger, stored_question_insight
@@ -15,7 +14,7 @@ from mizu.fs import now, read_json
 from support import history_write_json as write_json
 from mizu.runtime import (Engine, _progress_self_admits, _writer_wait_liveness,
                            _writer_wait_sources, prompt_for, should_run)
-from mizu.unit_finish import _deferred_until_due
+from mizu.runtime import _deferred_until_due
 from mizu.work_item_waits import holder_only
 
 
@@ -679,11 +678,15 @@ class WriterParkingTests(Fixture):
             item["id"], expected_rev=item["rev"], actor="worker",
             status="blocked", wait={"kind": "deadline", "at": at})
 
-    def test_future_holder_deadline_keeps_the_opening_signature_until_due(self):
+    def test_future_holder_deadline_clears_signature_and_counts_no_progress(self):
+        from mizu.project import idle_with_open_work
+        from mizu.snapshot import no_progress_recovery_due
+        from mizu.work_item_waits import holder_only
         at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat(
             timespec="seconds")
         item = self.block_deadline("future deadline", at)
         store = self.project.work_items
+        self.quiet_baseline()
         before = store.page_ready(role_name="worker")
         self.assertEqual([row["id"] for row in before["items"]], [item["id"]])
         self.assertEqual(before["_earliest_deferred_until"], at)
@@ -691,32 +694,36 @@ class WriterParkingTests(Fixture):
 
         def finish_wait(ctx, *_):
             runs.append(ctx.run_dir.name)
-            self.finish(ctx, "wait")
+            self.finish(ctx, "wait", state=ctx.snapshot["state"])
 
         engine = Engine(self.config, driver=ScriptDriver(finish_wait))
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
-        snapshot = self.project.snapshots.get()
-        self.assertIs(snapshot["progress"]["ready_work"], True)
-        self.assertEqual(snapshot["progress"]["ready_work_signature"], before["signature"])
-        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        first = self.project.snapshots.get()
+        self.assertIs(first["progress"]["ready_work"], True)
+        self.assertIsNone(first["progress"]["ready_work_signature"])
+        self.assertEqual(first["progress"]["no_progress_count"], 1)
+
+        # The same deadline remains visible under an unchanged membership
+        # signature, so the second unchanged finish advances the streak just
+        # like any other ready work instead of parking until the instant.
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        second = self.project.snapshots.get()
+        self.assertEqual(second["progress"]["no_progress_count"], 2)
+        self.assertIsNone(second["progress"]["ready_work_signature"])
+        self.assertTrue(no_progress_recovery_due(second["progress"], "wait", self.config, "worker"))
+        self.assertTrue(should_run(self.project, second, role_name="worker"))
+        idle = idle_with_open_work(second)
+        self.assertTrue(idle["active"])
+        self.assertEqual(idle["reason"], "no_progress_with_ready_work")
         after = store.page_ready(role_name="worker")
-        self.assertEqual([row["id"] for row in after["items"]], [item["id"]])
         self.assertEqual(after["signature"], before["signature"])
-
-        class LaterDatetime(dt.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                moment = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)
-                return moment if tz is not None else moment.replace(tzinfo=None)
-
-        # The membership and signature stay identical; only the observed
-        # deadline instant has passed.
-        with patch("mizu.unit_finish.dt", SimpleNamespace(
-                datetime=LaterDatetime, timezone=dt.timezone)):
-            self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
-        self.assertEqual([row["id"] for row in store.page_ready(role_name="worker")["items"]],
-                         [item["id"]])
-        self.assertEqual(len(runs), 1)
+        self.assertEqual([row["id"] for row in after["items"]], [item["id"]])
+        self.assertEqual(after["items"][0]["deferred_until"], at)
+        self.assertEqual(after["_earliest_deferred_until"], at)
+        self.assertEqual(store.get(item["id"])["status"], "blocked")
+        self.assertEqual(holder_only(store, store.get(item["id"]), second,
+                                     writer_roles={"worker"}), "sole_holder_deadline")
+        self.assertEqual(len(runs), 2)
 
     def test_malformed_deferred_instant_is_due(self):
         for value in (None, "", "not-a-time", "2030-01-01T00:00:00"):

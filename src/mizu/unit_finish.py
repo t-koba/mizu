@@ -13,36 +13,6 @@ from .snapshot import (PROGRESS_SIGNALS, WRITER_HANDOFF_PROGRESS_SIGNALS,
 from .work_items import MAX_OPEN_PAGE_ROWS
 
 
-def _deferred_until_due(value) -> bool:
-    """True unless ``value`` is a parsable future timezone-aware instant.
-
-    A holder-deferred deadline carries no membership change when it passes, so
-    observers compare its instant instead. Missing and malformed instants fail
-    closed as due rather than silently parking the role.
-    """
-    if not isinstance(value, str) or not value:
-        return True
-    try:
-        moment = dt.datetime.fromisoformat(value)
-        if moment.tzinfo is None:
-            return True
-        return moment <= dt.datetime.now(dt.timezone.utc)
-    except (ValueError, TypeError, OverflowError):
-        return True
-
-
-def _all_holder_deadlines_future(page: dict, role_name: str) -> bool:
-    """True when every ready row is this holder's own future deadline."""
-    rows = page.get("items")
-    if (not isinstance(rows, list) or not rows
-            or any(not isinstance(row, dict) for row in rows)):
-        return False
-    return all(row.get("holder") == role_name
-               and "deferred_until" in row
-               and not _deferred_until_due(row["deferred_until"])
-               for row in rows)
-
-
 def _progress_obligations_digest(obligations) -> str:
     """Digest only stable identity fields for the bounded pending-obligation view."""
     rows = []
@@ -223,10 +193,9 @@ class ContextFinishMixin:
         A host-imposed bounded seal is an automatic yield and may retain ready
         work. A validated next_step handoff is not parking. A wait or blocked
         finish with ready work is accepted: no empty-set signature is anchored,
-        so the existing ready-work observation re-admits this role. The one
-        exception is a whole ready set of this holder's deadlines still in the
-        future: the opening signature is kept and the deferred instant, not a
-        membership change, becomes the wake. Other finishes require a complete
+        so the existing ready-work observation re-admits this role and an
+        unchanged unit counts toward no-progress handling. Other finishes
+        require a complete
         empty role-scoped inventory under the page API maximum. Unknown waits
         and overflow are evidence gaps, never dispositions.
         """
@@ -256,12 +225,10 @@ class ContextFinishMixin:
             raise Denied("Ready evidence unavailable or incomplete at finish.") from exc
         if page["total"]:
             if finished["outcome"] in ("wait", "blocked"):
-                if not _all_holder_deadlines_future(page, self.role.name):
-                    # The opening prompt anchored a signature; clear it so the
-                    # next observation sees present ready work and re-admits.
-                    self.ready_work_signature = None
-                # Otherwise keep exactly what this unit was shown: every row
-                # is its own future deadline and the instant is the wake.
+                # Clear the opening signature so the next observation sees
+                # present ready work and re-admits, including holder-deferred
+                # items that stay visible in this role's ready set.
+                self.ready_work_signature = None
                 return
             ids = ", ".join(str(row.get("id", "unknown"))[:64] for row in page["items"][:3])
             raise Denied(f"{page['total']} ready item(s), including {ids}.")

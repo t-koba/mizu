@@ -104,12 +104,30 @@ from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
 from .vcs_upstream_poll import poll_upstream, refresh_upstream
 # Keep the existing runtime imports available to callers.
 from .unit_finish import (ContextFinishMixin, _progress_obligations_digest, _READY_WORK_UNSET,
-                          _deferred_until_due, _progress_record, _writer_next_task)
+                          _progress_record, _writer_next_task)
 from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             _decision_task, _open_backlog, _prompt_capture_limit,
                             _prompt_clock, _prompt_research_state, _prompt_run_identity,
                             _prompt_tool_surface, _ready_work_age,
                             _ready_work_projection, prompt_delta_for, prompt_for)
+
+
+def _deferred_until_due(value) -> bool:
+    """True unless ``value`` is a parsable future timezone-aware instant.
+
+    A holder-deferred deadline carries no membership change when it passes, so
+    observers compare its instant instead. Missing and malformed instants fail
+    closed as due rather than silently parking the role.
+    """
+    if not isinstance(value, str) or not value:
+        return True
+    try:
+        moment = dt.datetime.fromisoformat(value)
+        if moment.tzinfo is None:
+            return True
+        return moment <= dt.datetime.now(dt.timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        return True
 
 
 def _normalized_wake_generation(value) -> str:
