@@ -573,6 +573,17 @@ class WriterParkingTests(Fixture):
         return self.project.work_items.create(
             actor="worker", idempotency_key=key, title=key)["record"]["work_item"]
 
+    def quiet_baseline(self):
+        """Publish the current ready set as the input-quiet opening snapshot."""
+        current = self.project.snapshots.get()
+        baseline = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+            state="Now: Ready work is visible.\nNext: Inspect it", run=None, outcome="wait",
+            summary="Input-quiet baseline", wake_at=dt.datetime.now(dt.timezone.utc).timestamp() + 3600,
+            inbox_seen=self.project.insights.generation(),
+            wake_generation=self.project.control()["wake_generation"], parent=current["id"])
+        self.project.snapshots.publish(baseline)
+
     def finish(self, ctx, outcome="wait", **extra):
         return ctx.handle("finish", {"outcome": outcome, "summary": "Disposition check",
                                     "state": "Now: observed.\nNext: Inspect the remaining work",
@@ -620,6 +631,47 @@ class WriterParkingTests(Fixture):
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         self.assertEqual(len(runs), 2)
         self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
+
+    def test_repeated_wait_with_ready_work_counts_and_stays_visible(self):
+        from mizu.project import idle_with_open_work
+        self.ready("repeated ready")
+        self.quiet_baseline()
+        def finish_wait(ctx, *_):
+            self.finish(ctx, "wait", state=ctx.snapshot["state"])
+        engine = Engine(self.config, driver=ScriptDriver(finish_wait))
+        engine.run(self.project, "worker")
+        first = self.project.snapshots.get()
+        engine.run(self.project, "worker")
+        second = self.project.snapshots.get()
+        self.assertEqual((first["progress"]["no_progress_count"],
+                          second["progress"]["no_progress_count"]), (1, 2))
+        for snapshot in (first, second):
+            self.assertIs(snapshot["progress"]["ready_work"], True)
+            self.assertIsNone(snapshot["progress"]["ready_work_signature"])
+            idle = idle_with_open_work(snapshot)
+            self.assertTrue(idle["active"])
+            self.assertEqual(idle["reason"], "no_progress_with_ready_work")
+        # The counted streak does not consume the ready work or its wake.
+        self.assertTrue(should_run(self.project, second, role_name="worker"))
+
+    def test_ready_set_change_starts_new_streak(self):
+        item = self.ready("then gone")
+        self.quiet_baseline()
+        def finish_wait(ctx, *_):
+            self.finish(ctx, "wait", state=ctx.snapshot["state"])
+        engine = Engine(self.config, driver=ScriptDriver(finish_wait))
+        engine.run(self.project, "worker")
+        first = self.project.snapshots.get()
+        self.project.work_items.transition(item["id"], expected_rev=1, actor="worker",
+                                           status="dropped", reason="Handled")
+        engine.run(self.project, "worker")
+        second = self.project.snapshots.get()
+        self.assertEqual(first["progress"]["no_progress_count"], 1)
+        self.assertEqual(second["progress"]["no_progress_count"], 1)
+        self.assertIs(first["progress"]["ready_work"], True)
+        self.assertIs(second["progress"]["ready_work"], False)
+        self.assertNotEqual(first["progress"]["ready_work_signature"],
+                            second["progress"]["ready_work_signature"])
 
     def block_deadline(self, key, at):
         item = self.ready(key)

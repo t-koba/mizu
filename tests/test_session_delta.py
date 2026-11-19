@@ -171,7 +171,10 @@ class SessionDeltaTests(Fixture):
         from mizu.errors import LimitExceeded
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(roles["worker"], capabilities=("files", "read", "finish"))
-        self.config = dataclasses.replace(self.config, roles=roles)
+        # This grant-transition fixture is not a session-recovery test: keep
+        # repeated empty waits from rotating before the delta resume is read.
+        limits = dataclasses.replace(self.config.limits, no_progress_recovery_after=100)
+        self.config = dataclasses.replace(self.config, roles=roles, limits=limits)
         self.project = Project(self.config, "sample")
         for resumed in (False, True):
             with self.subTest(resumed=resumed):
@@ -222,7 +225,10 @@ class SessionDeltaTests(Fixture):
         from mizu.fs import write_json
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(roles["worker"], capabilities=("files", "read", "finish"))
-        self.config = dataclasses.replace(self.config, roles=roles)
+        # Keep the bounded grant notice under test; no-progress rotation of a
+        # counted wait would otherwise force a full prompt first.
+        limits = dataclasses.replace(self.config.limits, no_progress_recovery_after=100)
+        self.config = dataclasses.replace(self.config, roles=roles, limits=limits)
         self.project = Project(self.config, "sample")
         for bound in ("drain", "requests"):
             with self.subTest(bound=bound):

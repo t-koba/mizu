@@ -43,6 +43,8 @@ def _exclude_matcher(excludes):
 
 PROGRESS_SIGNALS = ("tool", "code", "state", "decision", "insight", "input")
 WRITER_HANDOFF_PROGRESS_SIGNALS = ("tool", "code", "decision", "insight")
+#: Finish outcomes subject to the unchanged-input no-progress policy.
+NO_PROGRESS_OUTCOMES = ("continue", "bounded", "wait", "blocked")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 # The two opening pages are each bounded to at most 100 rows.
 MAX_WAIT_RESOLUTION_TOKENS = 200
@@ -226,9 +228,13 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
         role_config = _role_config
         if set(value["selected"]) != set(selected) or value["role"] != role:
             return "reevaluate"
-        if outcome not in ("continue", "bounded"):
+        if outcome not in NO_PROGRESS_OUTCOMES:
             return "not_applicable"
-        if getattr(role_config, "workspace", None) == "write":
+        writer = getattr(role_config, "workspace", None) == "write"
+        if not writer and outcome not in ("continue", "bounded"):
+            # Allowance and backoff are a read-only continuation policy.
+            return "not_applicable"
+        if writer:
             if any(name in value["selected"] and value["signals"][name]
                    for name in WRITER_HANDOFF_PROGRESS_SIGNALS):
                 return "progress_requires_next"
@@ -253,13 +259,13 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
 
 def no_progress_recovery_due(value: dict | None, outcome: str, config,
                              role_name: str | None = None) -> bool:
-    """Whether a matching empty continuation requires a fresh session next time.
+    """Whether a matching no-progress finish requires a fresh session next time.
 
     This is an admission-independent signal: it never schedules a run. A
     persistent session rotates only when another trigger already admits a
     unit, so recovery cannot create a no-progress spin.
     """
-    if value is None or outcome not in ("continue", "bounded"):
+    if value is None or outcome not in NO_PROGRESS_OUTCOMES:
         return False
     try:
         validate_progress(value)
@@ -267,6 +273,8 @@ def no_progress_recovery_due(value: dict | None, outcome: str, config,
         role = value["role"] if role_name is None else role_name
         roles = getattr(config, "roles", None)
         role_config = roles.get(role) if isinstance(roles, dict) else None
+        if getattr(role_config, "workspace", None) != "write":
+            return False
         try:
             selected = tuple(role_progress_signals(config, role_config))
         except Exception:

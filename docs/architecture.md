@@ -365,7 +365,10 @@ red CI presence do not count repeatedly: pending obligations are fingerprinted
 by stable identity, so a newly offered obligation counts once while unchanged
 visibility does not reset the streak. Finish alone is
 not progress. The default `no_progress_continuations = 0` therefore parks after
-the first `continue`/`bounded` unit without a selected progress signal. A
+the first `continue`/`bounded` unit without a selected progress signal. Every
+later unit with the same input observation advances the bounded streak whatever
+its finish outcome; progress or a changed observation, including a changed
+ready-work signature, starts a new streak. A
 missing-finish continuation may still use the full work grant when no tool was
 called; otherwise it remains finish-only. Operators may allow 0–100
 consecutive no-progress continuations for read-only on-change roles; writers do
@@ -381,7 +384,8 @@ Holder-only waits surface as open ready work and progress-backed continuations
 require a validated `next_step` handoff; neither changes the daemon poll cadence
 or bypasses other gates. `no_progress_recovery_after = 2`
 rotates a persistent writer conversation to a fresh generation on the next
-independently admitted dispatch after two empty writer snapshots; it does not
+independently admitted dispatch after two unchanged-input empty writer
+snapshots with a `wait`, `blocked`, `continue` or `bounded` outcome; it does not
 admit or schedule a run. `mizu status` exposes whether that recovery threshold
 is due and the count, so parked empty work is visible while awaiting its next
 trigger; these fields are evidence, not a scheduler verdict.

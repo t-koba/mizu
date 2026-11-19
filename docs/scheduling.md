@@ -410,7 +410,9 @@ The progress field uses the existing validated bounded progress schema and
 state, decision, insight and delivered role-input signals are recorded; code
 progress is always false. State comparison uses a digest of the role's last
 completion state, not another role's state. The consecutive no-progress count
-saturates at 101. A progressful `continue`/`bounded` completion can self-admit
+saturates at 101 and advances on every outcome whose input observation is
+unchanged; progress or a changed observation starts a new streak.
+A progressful `continue`/`bounded` completion can self-admit
 an ordinary on-change dispatch; an empty continuation replaces that evidence
 and parks at the configured allowance/backoff. A fresh routed event or
 operator wake can still admit parked work. Existing configuration defaults,

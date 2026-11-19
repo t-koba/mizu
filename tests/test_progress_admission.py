@@ -455,6 +455,70 @@ class ProgressAdmissionTests(Fixture):
                 self.assertFalse(repeated["progress"]["signals"]["input"])
                 self.assertEqual(repeated["progress"]["no_progress_count"], 1)
 
+    def _publish_progress(self, progress, outcome):
+        current = self.project.snapshots.get()
+        snapshot = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+            state="Now: unchanged input.\nNext: Inspect the result", run=None, outcome=outcome,
+            summary="Counted no-progress finish", wake_at=4102444800,
+            inbox_seen=self.project.insights.generation(),
+            wake_generation=self.project.control().get("wake_generation", ""),
+            progress=progress, parent=current["id"])
+        self.project.snapshots.publish(snapshot)
+        return self.project.snapshots.get()
+
+    def test_unchanged_input_wait_and_blocked_finishes_count_and_park(self):
+        selected = tuple(DEFAULT_PROGRESS_SIGNALS)
+        signals = {name: False for name in PROGRESS_SIGNALS}
+        digest = _progress_obligations_digest(())
+        signature = self.project.work_items.page_ready(role_name="worker")["signature"]
+        args = dict(obligations_digest=digest, ready_work=False,
+                    ready_work_signature=signature)
+        first = _progress_record({}, "worker", selected, signals, "wait", **args)
+        second = _progress_record({"progress": first}, "worker", selected, signals, "wait", **args)
+        blocked = _progress_record({"progress": second}, "worker", selected, signals, "blocked", **args)
+        self.assertEqual([item["no_progress_count"] for item in (first, second, blocked)], [1, 2, 3])
+        self.assertFalse(no_progress_recovery_due(first, "wait", self.config, "worker"))
+        self.assertTrue(no_progress_recovery_due(second, "wait", self.config, "worker"))
+        self.assertTrue(no_progress_recovery_due(blocked, "blocked", self.config, "worker"))
+        # Recovery and disposition follow the recorded input, not an outcome name.
+        self.assertFalse(no_progress_recovery_due(blocked, "done", self.config, "worker"))
+        self.assertEqual(progress_disposition(blocked, "blocked", self.config, "worker"),
+                         "parked_no_progress")
+        observer = self._record(role="searcher", count=2)
+        self.assertEqual(progress_disposition(observer, "wait", self.config, "searcher"),
+                         "not_applicable")
+        snapshot = self._publish_progress(blocked, "blocked")
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        status = self.project.status()["progress"]
+        self.assertEqual(status["disposition"], "parked_no_progress")
+        self.assertEqual(status["recovery"]["status"], "due")
+        self.assertEqual(status["recovery"]["no_progress_count"], 3)
+
+    def test_progress_and_input_changes_restart_wait_streak(self):
+        selected = tuple(PROGRESS_SIGNALS)
+        signals = {name: False for name in PROGRESS_SIGNALS}
+        digest = _progress_obligations_digest(())
+        args = dict(obligations_digest=digest, ready_work=False, ready_work_signature="1" * 64)
+        previous = _progress_record({}, "worker", selected, signals, "wait", **args)
+        self.assertEqual(previous["no_progress_count"], 1)
+        for name in PROGRESS_SIGNALS:
+            with self.subTest(signal=name):
+                progressed = _progress_record(
+                    {"progress": previous}, "worker", selected, {**signals, name: True}, "wait", **args)
+                self.assertTrue(progressed["has_progress"])
+                self.assertEqual(progressed["no_progress_count"], 0)
+        for changed in ({"ready_work_signature": "2" * 64},
+                        {"obligations_digest": "3" * 64},
+                        {"ready_work": True}):
+            with self.subTest(changed=changed):
+                restarted = _progress_record({"progress": previous}, "worker", selected, signals,
+                                             "wait", **{**args, **changed})
+                self.assertFalse(restarted["has_progress"])
+                self.assertEqual(restarted["no_progress_count"], 1)
+        unchanged = _progress_record({"progress": previous}, "worker", selected, signals, "wait", **args)
+        self.assertEqual(unchanged["no_progress_count"], 2)
+
     def test_explicit_wakes_dispatch_on_change_writer_with_unchanged_code(self):
         roles = dict(self.config.roles)
         roles["worker"] = dataclasses.replace(roles["worker"], on_change=True)
@@ -515,7 +579,9 @@ class ProgressAdmissionTests(Fixture):
         self.assertFalse(empty_policy["has_progress"])
         self.assertEqual(empty_policy["no_progress_count"], 1)
         carried = _progress_record({"progress": second}, "worker", selected, no_progress, "wait")
-        self.assertEqual(carried["no_progress_count"], 7)
+        self.assertEqual(carried["no_progress_count"], 8)
+        blocked = _progress_record({"progress": carried}, "worker", selected, no_progress, "blocked")
+        self.assertEqual(blocked["no_progress_count"], 9)
 
     def test_allowance_backoff_policy_reassessment_and_role_scope(self):
         parked = self._parked_snapshot(count=1)
@@ -943,6 +1009,9 @@ class ReadOnlyProgressTests(Fixture):
         self.assertEqual(self.run_observer()["skipped"], "unchanged")
         cursor = self.cursor()
         cursor["progress"]["no_progress_count"] = 101
+        # The admitting wake is already the record's input signal, so this
+        # unit observes unchanged input and exercises saturation, not a reset.
+        cursor["progress"]["signals"]["input"] = True
         write_json(self.project.root / "observed" / "reviewer.json", cursor)
         self.project.set_control(wake_generation="next-empty-unit")
         self.run_observer(outcome="bounded")

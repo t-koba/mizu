@@ -62,6 +62,37 @@ def _progress_obligations_digest(obligations) -> str:
 _READY_WORK_UNSET: object = object()
 
 
+def _progress_input_unchanged(previous: dict, signals: dict, obligations_digest: str,
+                              ready_work, ready_work_signature, wait_resolution_tokens,
+                              wait_resolution_high_water) -> bool:
+    """Whether a finish observes the same bounded input facts as ``previous``.
+
+    Outcome is deliberately absent: a wait or blocked finish carries the same
+    input evidence as a continuation, so only changed observations start a new
+    streak. Fields omitted by legacy callers cannot prove a change and are
+    ignored.
+    """
+    if previous.get("obligations_digest") != obligations_digest:
+        return False
+    if any(previous["signals"][name] != bool(signals.get(name, False))
+           for name in PROGRESS_SIGNALS):
+        return False
+    if ("ready_work" in previous and ready_work is not _READY_WORK_UNSET
+            and previous["ready_work"] != ready_work):
+        return False
+    if ("ready_work_signature" in previous and ready_work_signature is not _READY_WORK_UNSET
+            and previous["ready_work_signature"] != ready_work_signature):
+        return False
+    if ("wait_resolution_tokens" in previous and wait_resolution_tokens is not _READY_WORK_UNSET
+            and previous["wait_resolution_tokens"] != list(wait_resolution_tokens)):
+        return False
+    if ("wait_resolution_high_water" in previous
+            and wait_resolution_high_water is not _READY_WORK_UNSET
+            and previous["wait_resolution_high_water"] != dict(wait_resolution_high_water)):
+        return False
+    return True
+
+
 def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None,
                     ready_work: bool | None | object = _READY_WORK_UNSET,
@@ -69,6 +100,10 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
                     wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET,
                     wait_resolution_high_water: dict | object = _READY_WORK_UNSET) -> dict:
     """Build compact unit evidence and its bounded consecutive no-progress count.
+
+    Every finish outcome with no selected progress signal and unchanged input
+    advances the streak; progress or a genuine input change restarts it. The
+    outcome never decides whether input changed.
 
     ``ready_work`` is the bounded ``page_ready(limit=1)`` existence probe
     taken at writer run completion (True/False) or None when that probe was
@@ -83,26 +118,25 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     receipt admits an old proof on an unrelated ready-set change. Historical
     schemas 6–7 remain readable but new records never carry wait conversions.
     """
+    obligations_digest = obligations_digest or _progress_obligations_digest(())
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
     previous_count = 0
     if isinstance(previous, dict):
         try:
             validate_progress(previous)
-            if previous["role"] == role_name and set(previous["selected"]) == set(selected):
+            if (previous["role"] == role_name and set(previous["selected"]) == set(selected)
+                    and _progress_input_unchanged(
+                        previous, signals, obligations_digest, ready_work, ready_work_signature,
+                        wait_resolution_tokens, wait_resolution_high_water)):
                 previous_count = previous["no_progress_count"]
         except Denied:
             # Snapshot loading validates persisted records; direct callers with
             # malformed records rebase rather than trusting their counter.
             previous_count = 0
-    count = previous_count
-    if has_progress:
-        count = 0
-    elif outcome in ("continue", "bounded"):
-        # 101 is one above the largest allowed continuation policy and is
-        # sufficient to preserve the parked disposition without unbounded growth.
-        count = min(101, previous_count + 1)
-    obligations_digest = obligations_digest or _progress_obligations_digest(())
+    # 101 is one above the largest allowed continuation policy and is
+    # sufficient to preserve the parked disposition without unbounded growth.
+    count = 0 if has_progress else min(101, previous_count + 1)
     if (wait_resolution_high_water is not _READY_WORK_UNSET
             and wait_resolution_tokens is _READY_WORK_UNSET):
         raise Denied("Wait-resolution high water requires exact delivery tokens")

@@ -756,6 +756,48 @@ class EngineTests(Fixture):
         self.assertFalse(should_run(self.project, snap, current_time=snap["wake_at"] - 1))
         self.assertTrue(should_run(self.project, snap, current_time=snap["wake_at"] + 1))
 
+    def test_unchanged_wait_streak_rotates_persistent_session_without_admitting(self):
+        from mizu.engine_config import effective, session_generation, session_record, save_session
+        from mizu.runtime import session_prompt
+        from mizu.snapshot import no_progress_recovery_due
+        config = dataclasses.replace(self.config, limits=dataclasses.replace(
+            self.config.limits, no_progress_recovery_after=2))
+        self.config = config
+        self.project.config = config
+        base = self.project.snapshots.get()
+        baseline = self.project.snapshots.create(
+            self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
+            state="Now: Unchanged.\nNext: Keep waiting", run=None, outcome="wait",
+            summary="Input-quiet baseline", wake_at=time.time() + 3600,
+            inbox_seen=self.project.insights.generation(),
+            wake_generation=self.project.control()["wake_generation"], parent=base["id"])
+        self.project.snapshots.publish(baseline)
+        def finish_wait(ctx, prompt, profile):
+            ctx.handle("finish", {"outcome": "wait", "summary": "Still waiting",
+                                  "state": ctx.snapshot["state"]})
+        engine = Engine(config, driver=ScriptDriver(finish_wait))
+        engine.run(self.project, "worker")
+        first = self.project.snapshots.get()
+        self.assertEqual(first["progress"]["no_progress_count"], 1)
+        ctx = self.context("worker")
+        settings = effective(config, ctx.role, ctx.role.profile)
+        path, _ = session_record(ctx, ctx.role.profile, settings)
+        save_session(path, "test-session", {"tokens": 0})
+        engine.run(self.project, "worker")
+        second = self.project.snapshots.get()
+        self.assertEqual(second["outcome"], "wait")
+        self.assertEqual(second["progress"]["no_progress_count"], 2)
+        self.assertTrue(no_progress_recovery_due(second["progress"], "wait", config, "worker"))
+        # A due rotation is diagnostic on a parked snapshot, never an admission.
+        self.assertFalse(should_run(self.project, second, role_name="worker", config=config))
+        self.assertEqual(self.project.status()["progress"]["recovery"]["status"], "due")
+        ctx = self.context("worker")
+        _, mode, _, rotation, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
+        self.assertEqual(mode, "full")
+        self.assertIn("no-progress units 2 >=2", rotation["reason"])
+        self.assertEqual(session_generation(path.parent), 1)
+        self.assertFalse(path.exists())
+
     def test_code_change_wait_wakes_writer(self):
         snap = self.project.snapshots.get()
         proposal = self.project.insights.submit(source="worker", title="Risk", body="evidence",
