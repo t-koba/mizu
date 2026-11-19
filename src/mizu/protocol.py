@@ -668,12 +668,12 @@ DEFINITIONS = {
                     "Use the cursor and offset in the result's continue field.",
                     obj({"cursor": text(32), "offset": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}},
                         ("cursor", "offset"))),
-    "objects_create": ("Create an object of a declared kind. The host binds your role as the actor; "
-                       "no actor may be supplied. Fields are checked against the kind's declared types "
-                       "and required fields; undeclared kinds and fields are refused. Creation appends "
+    "objects_create": ("Create an object of a declared kind. Your role is bound as actor, not by "
+                       "argument. Declared fields only. An optional 32-hex id is create-only: a used "
+                       "kind/id is refused without a write; else one is generated. Creation appends "
                        "the kind's created event.",
-                       obj({"kind": KERNEL_NAME_SCHEMA, "fields": KERNEL_FIELDS_SCHEMA},
-                           ("kind", "fields"))),
+                       obj({"kind": KERNEL_NAME_SCHEMA, "fields": KERNEL_FIELDS_SCHEMA,
+                            "id": KERNEL_ID_SCHEMA}, ("kind", "fields"))),
     "objects_transition": ("Make a declared transition on an object. Supply expected_rev from a read; a "
                            "stale revision, a transition not allowed from the current state, a principal "
                            "the kind does not permit, or an unmet requirement is refused, naming the "

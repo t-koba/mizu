@@ -197,6 +197,30 @@ class KernelTools(Fixture):
                 "objects_create", {"kind": "note", "fields": {"title": "t"}})
         self.assertEqual(self.project.kernel_events.head(), 1)
 
+    def test_objects_create_accepts_an_unused_caller_supplied_id(self):
+        ctx = self.context("worker")
+        object_id = "ef" * 16
+        note = ctx.handle("objects_create", {"kind": "note", "fields": {"title": "t"},
+                                             "id": object_id})
+        self.assertEqual(note["id"], object_id)
+        self.assertEqual(ctx.handle("objects_read", {"kind": "note", "id": object_id}), note)
+        self.assertEqual(self.project.kernel_objects.revisions("note", object_id), [1])
+        head = self.project.kernel_events.head()
+        for bad in ("bad", "EF" * 16, object_id + "0", None):
+            with self.subTest(bad=bad):
+                for call in (ctx.handle, ctx.dispatch):
+                    with self.assertRaises(Denied):
+                        call("objects_create", {"kind": "note", "fields": {"title": "t"}, "id": bad})
+        for call in (ctx.handle, ctx.dispatch):
+            with self.assertRaisesRegex(Denied, "already exists"):
+                call("objects_create", {"kind": "note", "fields": {"title": "other"}, "id": object_id})
+        self.assertEqual(self.project.kernel_events.head(), head)
+        self.assertEqual(self.project.kernel_objects.revisions("note", object_id), [1])
+        self.assertEqual(ctx.handle("objects_read", {"kind": "note", "id": object_id}), note)
+        with self.assertRaises(Denied):  # grants and the bound actor are unchanged
+            ctx.handle("objects_create", {"kind": "note", "fields": {"title": "t"},
+                                          "id": "12" * 16, "actor": "operator"})
+
     def test_event_append_wakes_every_matching_subscriber(self):
         ctx = self.context("worker")
         wake = self.project.root / "wake"

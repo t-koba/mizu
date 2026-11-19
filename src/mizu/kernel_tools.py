@@ -24,7 +24,8 @@ def _actor(context) -> str:
 
 def objects_create(context, args: dict) -> dict:
     _gate(context, "objects_create", args)
-    return context.project.kernel_objects.create(args["kind"], args["fields"], _actor(context))
+    return context.project.kernel_objects.create(args["kind"], args["fields"], _actor(context),
+                                                 args.get("id"))
 
 
 def objects_transition(context, args: dict) -> dict:

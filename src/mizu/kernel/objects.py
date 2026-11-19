@@ -130,7 +130,10 @@ class Objects:
         return {"objects": rows, "next": last if more else None}
 
     # -- writes -----------------------------------------------------------------------------
-    def create(self, kind_name: str, fields: Mapping[str, Any], actor: str) -> dict:
+    def create(self, kind_name: str, fields: Mapping[str, Any], actor: str,
+               object_id: str | None = None) -> dict:
+        if object_id is not None and not (isinstance(object_id, str) and _ID.fullmatch(object_id)):
+            raise Denied("Invalid object id")
         kind, actor = self._kind(kind_name), self._actor(actor)
         if actor not in kind.create:
             raise Denied(f"{actor} may not create {kind_name}")
@@ -138,12 +141,15 @@ class Objects:
         missing = [name for name, field in kind.fields.items() if field.required and name not in values]
         if missing:
             raise Denied(f"Missing required fields: {', '.join(missing)}")
-        object_id = secrets.token_hex(16)
+        if object_id is None:
+            object_id = secrets.token_hex(16)
         stamp = now()
         record = {"kind": kind_name, "id": object_id, "rev": 1, "state": kind.initial,
                   "fields": values, "author": actor, "actor": actor, "transition": None,
                   "created_at": stamp, "updated_at": stamp}
         with self._locked():
+            if self.revisions(kind_name, object_id):
+                raise Denied(f"{kind_name} {object_id} already exists")
             self._check_refs(kind, values)
             self._publish(kind, record, event=kind.created_event, previous_state=None)
         return record

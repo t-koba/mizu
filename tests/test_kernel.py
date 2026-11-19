@@ -115,6 +115,79 @@ class Kernel(unittest.TestCase):
         with self.assertRaises(Denied):  # a corrupt target is not a valid ref
             self.objects.create("task", {"title": "t", "evidence": check["id"]}, "role:alpha")
 
+    def test_supplied_identity_is_deterministic_and_create_only(self):
+        object_id = "ab" * 16
+        made = self.objects.create("task", {"title": "t"}, "role:alpha", object_id=object_id)
+        self.assertEqual(made["id"], object_id)
+        self.assertEqual(self.objects.revisions("task", object_id), [1])
+        self.assertEqual(self.objects.read("task", object_id, 1), made)
+        self.assertEqual(self.objects.read("task", object_id), made)
+        self.assertEqual((self.root / "objects" / "task" / object_id / "00000001.json").is_file(), True)
+        claimed = self.objects.transition("task", object_id, "claim", expected_rev=1,
+                                          fields={"holder": "role:beta"}, actor="role:beta")
+        head = self.log.head()
+        for actor in ("role:alpha", "operator"):
+            with self.subTest(actor=actor), self.assertRaisesRegex(Denied, "already exists"):
+                self.objects.create("task", {"title": "different"}, actor, object_id)
+        self.assertEqual(self.log.head(), head)  # a refused create publishes no event
+        self.assertEqual(self.objects.revisions("task", object_id), [1, 2])
+        self.assertEqual(self.objects.read("task", object_id), claimed)
+        self.assertFalse((self.root / "objects" / "intent.json").exists())
+        self.assertEqual([self.log.read(seq)["id"] for seq in range(1, head + 1)],
+                         [object_id, object_id])
+        other = self.objects.create("check", {"snapshot": "s"}, "host", object_id)
+        self.assertEqual(other["id"], object_id)  # identity is scoped to its kind
+
+    def test_malformed_supplied_identity_is_denied_before_io(self):
+        for bad in ("", "a" * 31, "0" * 33, "A" * 32, "g" * 32, "0" * 31 + "/", 12, ["0"] * 32):
+            with self.subTest(bad=bad):
+                with patch.object(self.objects, "_locked", side_effect=AssertionError("lock taken")), \
+                     patch("mizu.kernel.objects.secrets.token_hex",
+                           side_effect=AssertionError("id generated")):
+                    with self.assertRaisesRegex(Denied, "object id"):
+                        self.objects.create("task", {"title": "t"}, "role:alpha", object_id=bad)
+        self.assertFalse((self.root / "objects").exists())
+        self.assertFalse((self.root / "events").exists())
+        self.assertFalse((self.root / "locks").exists())
+
+    def test_generated_identity_behavior_is_unchanged(self):
+        with patch("mizu.kernel.objects.secrets.token_hex", return_value="cd" * 16) as token:
+            made = self.objects.create("task", {"title": "t"}, "role:alpha")
+        token.assert_called_once_with(16)
+        self.assertEqual(made["id"], "cd" * 16)
+        self.assertEqual(self.objects.read("task", "cd" * 16), made)
+        first = self.objects.create("task", {"title": "a"}, "operator")
+        second = self.objects.create("task", {"title": "b"}, "operator")
+        for row in (first, second):
+            self.assertRegex(row["id"], r"^[0-9a-f]{32}$")
+        self.assertNotEqual(first["id"], second["id"])
+
+    def test_supplied_identity_reads_and_list_are_bounded(self):
+        fixed = "00" * 16
+        self.objects.create("task", {"title": "tagged"}, "operator", fixed)
+        with patch("mizu.kernel.objects.secrets.token_hex", side_effect=("11" * 16, "22" * 16)):
+            second = self.objects.create("task", {"title": "second"}, "operator")
+            third = self.objects.create("task", {"title": "third"}, "operator")
+        self.assertEqual(self.objects.read("task", fixed, 1)["id"], fixed)
+        with self.assertRaises(Denied):
+            self.objects.read("task", fixed, 2)
+        page = self.objects.list("task", limit=1)
+        self.assertEqual([obj["id"] for obj in page["objects"]], [fixed])
+        self.assertEqual(page["next"], fixed)  # the last id scanned, exclusive on the next page
+        page = self.objects.list("task", limit=1, after=page["next"])
+        self.assertEqual([obj["id"] for obj in page["objects"]], [second["id"]])
+        self.assertEqual(page["next"], second["id"])
+        page = self.objects.list("task", limit=1, after=page["next"])
+        self.assertEqual([obj["id"] for obj in page["objects"]], [third["id"]])
+        self.assertIsNone(page["next"])
+        filtered = self.objects.list("task", where={"title": "tagged"}, limit=1)
+        self.assertEqual([obj["id"] for obj in filtered["objects"]], [fixed])
+        for limit in (0, 513):
+            with self.subTest(limit=limit), self.assertRaises(Denied):
+                self.objects.list("task", limit=limit)
+        with self.assertRaises(Denied):
+            self.objects.list("task", after="bad")
+
     def test_field_values_are_enforced(self):
         self.objects.create("task", {"title": "t", "priority": "high"}, "role:alpha")
         with self.assertRaisesRegex(Denied, "priority"):
