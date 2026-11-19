@@ -26,7 +26,9 @@ and, when present, ``revisit``); ``revisits`` holds the delayed messages
 referring to it that are due at ``now``. ``answer`` is the answering message's
 body, attached to the question or converted proposal named by its ``refs``.
 An ambiguous reference (more than one deciding decision or answer for one
-target) is refused. The command is for an operator to inspect the project;
+target) is refused. An unresolved ref -- a decision ref that is not a proposal
+id or an answer ref that is not a proposal or question id -- is refused rather
+than ignored. The command is for an operator to inspect the project;
 it writes nothing and grants no capability.
 """
 from __future__ import annotations
@@ -105,6 +107,16 @@ def _referrers(messages: list[dict], name: str) -> dict:
     return index
 
 
+def _validate_refs(messages: list[dict], name: str, allowed: str,
+                   ids: set[str]) -> None:
+    """Refuse a ref that cannot be resolved to one of the declared target ids."""
+    for message in messages:
+        for ref in _refs(message, name):
+            if not isinstance(ref, str) or ref not in ids:
+                raise ViewError(f"{name} message {message.get('id')}: "
+                                f"unresolved ref {ref!r} is not a {allowed} id")
+
+
 def _one(index: dict[str, list[dict]], message_id: str, label: str,
          predicate=None) -> dict | None:
     matches = [message for message in index.get(message_id, ())
@@ -118,6 +130,11 @@ def project_view(project, now: str | None = None) -> dict:
     """Project the declared queues as stage-2 facts, using ``now`` for delivery."""
     store = project.kernel_queues
     reads = {name: _read_queue(store, name, now) for name in QUEUES}
+    proposal_ids = {message["id"] for message in reads["proposals"][0]}
+    question_ids = {message["id"] for message in reads["questions"][0]}
+    _validate_refs(reads["decisions"][0], "decisions", "proposals", proposal_ids)
+    _validate_refs(reads["answers"][0], "answers", "proposals or questions",
+                   proposal_ids | question_ids)
     decisions = _referrers(reads["decisions"][0], "decisions")
     answers = _referrers(reads["answers"][0], "answers")
 

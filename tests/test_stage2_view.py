@@ -74,6 +74,59 @@ class Stage2View(Fixture):
     def proposal_id(self, insight_id):
         return convert_legacy._message_id("proposal", insight_id, 1)
 
+    def projection_with(self, queue: str, message: dict) -> dict:
+        """Inject one observed message without writing to a durable queue."""
+        original = stage2_view._read_queue
+
+        def read(store, name, now):
+            messages, meta = original(store, name, now)
+            return ([*messages, message] if name == queue else messages), meta
+
+        with mock.patch.object(stage2_view, "_read_queue", side_effect=read):
+            return stage2_view.project_view(self.view_project, now=REVISIT_AT)
+
+    def test_dangling_decision_ref_is_refused(self):
+        missing = "d" * 32
+        with self.assertRaisesRegex(stage2_view.ViewError,
+                                    rf"decisions message dangling-decision: "
+                                    rf"unresolved ref '{missing}' is not a proposals id"):
+            self.projection_with("decisions", {
+                "id": "dangling-decision", "refs": [missing],
+                "body": {"action": "accept", "reason": "Missing target"}})
+
+    def test_dangling_answer_ref_is_refused(self):
+        missing = "e" * 32
+        with self.assertRaisesRegex(stage2_view.ViewError,
+                                    rf"answers message dangling-answer: "
+                                    rf"unresolved ref '{missing}' is not a proposals or questions id"):
+            self.projection_with("answers", {
+                "id": "dangling-answer", "refs": [missing],
+                "body": {"body": "Missing target"}})
+
+    def test_wrong_direction_refs_are_refused(self):
+        cases = (("decisions", "wrong-decision", QUESTION_ID, "proposals",
+                  {"action": "accept", "reason": "Wrong target"}),
+                 ("answers", "wrong-answer", NOTICE_ID, "proposals or questions",
+                  {"body": "Wrong target"}))
+        for queue, message_id, ref, allowed, body in cases:
+            with self.subTest(queue=queue):
+                with self.assertRaisesRegex(
+                        stage2_view.ViewError,
+                        rf"{queue} message {message_id}: "
+                        rf"unresolved ref '{ref}' is not a {allowed} id"):
+                    self.projection_with(queue, {"id": message_id, "refs": [ref],
+                                                 "body": body})
+
+    def test_answer_with_multiple_valid_refs_stays_per_target(self):
+        refs = [self.proposal_id(ACCEPT_ID), self.proposal_id(DEFER_ID)]
+        self.store.append("answers", {"body": "Shared answer"}, "operator",
+                          refs=refs, id="6" * 32, now=REVISIT_AT)
+        view = stage2_view.project_view(self.view_project, now=REVISIT_AT)
+        self.assertEqual([item["answer"] for item in view["proposals"]],
+                         [{"body": "Shared answer"}] * 2)
+        self.assertEqual(view["questions"][0]["answer"],
+                         {"body": "Use the declared queues."})
+
     def test_projection_maps_decisions_revisits_answers_and_notices(self):
         before = stage2_view.project_view(self.view_project, now=BEFORE_REVISIT)
         proposals = {item["id"]: item for item in before["proposals"]}

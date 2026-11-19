@@ -64,10 +64,12 @@ It calls `QueueStore.read` with the `operator` principal for `proposals`,
 revisits to proposals and answers to questions or converted proposals by message
 refs. It prints JSON with each proposal's decision, answer and due delayed
 revisits, each question's answer, the notice bodies, and every queue's `head`
-and `delayed` flag. Reads use an explicit cursor, bounded pages and a page-count
-bound; the command never acknowledges or appends, so repeated reads at the same
-instant agree. A message that is not yet due stops its queue's read and is
-reported as `delayed` rather than skipped.
+and `delayed` flag. Every decision ref must resolve to a proposal id and every
+answer ref to a proposal or question id; an unresolved ref refuses the view
+instead of being silently ignored. Reads use an explicit cursor, bounded pages
+and a page-count bound; the command never acknowledges or appends, so repeated
+reads at the same instant agree. A message that is not yet due stops its
+queue's read and is reported as `delayed` rather than skipped.
 
 ```sh
 python3 examples/development/stage2_view.py config/config.toml --project NAME [--at 2099-01-01T00:00:00+00:00]
