@@ -24,6 +24,13 @@ over another message.
 - A later decision referring to an earlier one is data for the deployment's
   readers. The kernel records the reference but attaches no withdrawal,
   supersession or state transition to it.
+- A delayed revisit is a hint, not authority. On delivery the consumer
+  rechecks the current decision chain through `message_refs`: the proposal the
+  revisit refers to and the messages referring to that proposal. If a later
+  decision has superseded the deferral, the consumer acknowledges the stale
+  revisit and does not act on its action or reason; there is no cancel or
+  withdrawal to issue. A stale revisit in a shared queue still wakes readers
+  when due and blocks a contiguous read until then.
 
 ## Questions and answers
 

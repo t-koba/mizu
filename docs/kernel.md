@@ -85,7 +85,11 @@ body = {type = "string", max = 65536}
 - `deliver_at` delays delivery: the message is stored at once but is neither
   delivered nor wakes anyone before that instant. Delayed messages are the only
   timers: a deferral, a revisit or a deadline is a message to oneself or to
-  another role with a delivery time.
+  another role with a delivery time. A delayed revisit is a hint, not
+  authority: deployment consumers recheck the current decision chain with
+  `message_refs` and may acknowledge a stale revisit without acting. The kernel
+  has no withdraw or cancel, so a pending revisit still wakes its readers when
+  due and blocks a contiguous read until then.
 
 ### Delivery
 
