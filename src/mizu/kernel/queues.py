@@ -405,8 +405,9 @@ class QueueStore:
                      canonical({"queue": queue, "seq": seq}), exclusive=True)
         if seq > self._stored_head(queue):
             atomic_write(self.root / self._relative(queue, "head.json"), canonical({"seq": seq}))
-        if self._due(message, stamp):
-            for principal in self.queues[queue].wake:
+        declaration = self.queues.get(queue)
+        if self._due(message, stamp) and declaration is not None:
+            for principal in declaration.wake:
                 role = identifier(principal[5:])
                 wake = self.root / "wake" / role
                 mkdir(wake.parent)

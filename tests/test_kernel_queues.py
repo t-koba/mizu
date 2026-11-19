@@ -360,15 +360,23 @@ class QueueStoreTests(unittest.TestCase):
 
     def test_delayed_intent_for_removed_queue_recovers_without_wedging(self):
         from mizu.fs import atomic_write, canonical
-        atomic = self.root / "queues" / "intent.json"
-        message = {"queue": "checks", "seq": 1, "id": "b" * 32, "author": "host",
-                   "at": "2026-01-01T00:00:00+00:00", "deliver_at": "2099-01-01T00:00:00+00:00",
-                   "refs": [], "body": {}}
-        atomic_write(atomic, canonical({"message": message}))
-        reduced = QueueStore(self.root, parse_queues({"notes": DECLARATIONS["notes"]}))
-        self.assertEqual(reduced.read("notes", "role:alpha")["messages"], [])
-        self.assertFalse(atomic.exists())
-        self.assertEqual(reduced.append("notes", {}, "role:alpha")["seq"], 1)
+        # Both sides of the delivery instant: a due replay must also finish
+        # without the declaration it would otherwise use to emit wakes.
+        for deliver_at in (instant(1), instant(-1)):
+            with self.subTest(deliver_at=deliver_at), tempfile.TemporaryDirectory() as work:
+                root = Path(work)
+                atomic = root / "queues" / "intent.json"
+                message = {"queue": "checks", "seq": 1, "id": "b" * 32, "author": "host",
+                           "at": "2026-01-01T00:00:00+00:00", "deliver_at": deliver_at,
+                           "refs": [], "body": {}}
+                atomic_write(atomic, canonical({"message": message}))
+                reduced = QueueStore(root, parse_queues({"notes": DECLARATIONS["notes"]}))
+                self.assertEqual(reduced.read("notes", "role:alpha")["messages"], [])
+                self.assertFalse(atomic.exists())
+                self.assertTrue((root / "queues" / "checks" / "messages"
+                                 / f"{message['seq']:020d}.json").exists())
+                self.assertFalse((root / "wake" / "alpha").exists())
+                self.assertEqual(reduced.append("notes", {}, "role:alpha")["seq"], 1)
 
     def test_interrupted_append_is_completed_on_recovery(self):
         first = self.store.append("notes", {}, "role:alpha")
