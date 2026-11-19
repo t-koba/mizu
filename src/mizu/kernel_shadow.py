@@ -261,8 +261,11 @@ class KernelShadow:
                 mismatch(f"insight state is {current['state']}, expected {expected_state}")
             if action == "defer":
                 instant = instant_value(decision.get("revisit"))
-                if instant is not None and current["fields"].get("revisit_at") != instant:
-                    mismatch("insight revisit_at differs")
+                if instant is not None:
+                    if current["fields"].get("revisit_at") != instant:
+                        mismatch("insight revisit_at differs")
+                elif current["fields"].get("revisit_at") is not None:
+                    mismatch("insight revisit_at is set without an instant")
             if action == "withdraw" and current["fields"].get("revisit_at") is not None:
                 mismatch("withdrawn insight still has a revisit instant")
 
@@ -500,6 +503,24 @@ class KernelShadow:
             self.objects.create("decision", fields, "host", object_id=decision_id)
         object_id = insight_object_id(insight)
         current = self.objects.read("insight", object_id)
+        actor = (principal(insight["source"]) if action == "withdraw"
+                 else current["fields"].get("holder",
+                                            principal(insight.get("addressee", "writer"))))
+        if action == "defer" and current["state"] == "deferred":
+            # A repeated defer at the same legacy revision supersedes the
+            # earlier revisit. Only a changed instant lands a new kernel
+            # revision, so an exact replay stays a no-op and an operator
+            # reprojection can repair a timer left by the old behaviour.
+            instant = instant_value(record.get("revisit"))
+            if instant is None:
+                self.objects.transition("insight", object_id, "defer_clear",
+                                        expected_rev=current["rev"],
+                                        fields={"revisit_at": None}, actor=actor)
+            elif current["fields"].get("revisit_at") != instant:
+                self.objects.transition("insight", object_id, "defer",
+                                        expected_rev=current["rev"],
+                                        fields={"revisit_at": instant}, actor=actor)
+            return
         if current["state"] not in _FROM_STATES.get(action, ()):
             return
         state_fields = {}
@@ -510,8 +531,5 @@ class KernelShadow:
             state_fields["revisit_at"] = instant
         if action == "withdraw" and current["fields"].get("revisit_at") is not None:
             state_fields["revisit_at"] = None  # clear the superseded revisit timer
-        actor = (principal(insight["source"]) if action == "withdraw"
-                 else current["fields"].get("holder",
-                                            principal(insight.get("addressee", "writer"))))
         self.objects.transition("insight", object_id, action,
                                 expected_rev=current["rev"], fields=state_fields, actor=actor)

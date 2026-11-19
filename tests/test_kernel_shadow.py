@@ -102,6 +102,85 @@ class KernelShadowProjection(unittest.TestCase):
         self.assertEqual(mirrored["fields"]["revisit_at"], moment)
         self.assertEqual(self.project.kernel_objects.next_instant(), moment)
 
+    def test_second_defer_replaces_projected_revisit_instant(self):
+        insight = self.submit("d1" * 16)
+        first = "2099-01-01T00:00:00+00:00"
+        second = "2099-02-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + first,
+            "test-run", expected_rev=1)
+        replacement = self.project.insights.decide(
+            insight["id"], "defer", "Wait for evidence", "deadline at " + second,
+            "test-run", expected_rev=1)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["state"], "deferred")
+        self.assertEqual(mirrored["fields"]["revisit_at"], second)
+        self.assertEqual(self.project.kernel_objects.next_instant(), second)
+        self.assertTrue(self.project.insights.kernel_shadow.verify(insight, replacement)["ok"])
+
+    def test_second_defer_without_instant_clears_projected_timer(self):
+        insight = self.submit("d2" * 16)
+        moment = "2099-01-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait for the reviewer", "deadline at " + moment,
+            "test-run", expected_rev=1)
+        replacement = self.project.insights.decide(
+            insight["id"], "defer", "Wait", "revisit next Tuesday", "test-run",
+            expected_rev=1)
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["state"], "pending")
+        self.assertIsNone(mirrored["fields"].get("revisit_at"))
+        self.assertIsNone(self.project.kernel_objects.next_instant())
+        self.assertTrue(self.project.insights.kernel_shadow.verify(insight, replacement)["ok"])
+
+    def test_exact_defer_replay_does_not_duplicate_projection(self):
+        insight = self.submit("d3" * 16)
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait", "deadline at 2099-01-01T00:00:00+00:00",
+            "test-run", expected_rev=1)
+        replacement = self.project.insights.decide(
+            insight["id"], "defer", "Wait longer", "deadline at 2099-02-01T00:00:00+00:00",
+            "test-run", expected_rev=1)
+        shadow = self.project.insights.kernel_shadow
+        current = self.project.kernel_objects.read("insight", insight["id"])
+        head = self.project.kernel_events.head()
+        shadow.decided(insight, replacement)
+        replay = self.project.insights.decide(
+            insight["id"], "defer", "Wait longer", "deadline at 2099-02-01T00:00:00+00:00",
+            "test-run", expected_rev=1)
+        self.assertEqual(replay, replacement)
+        self.assertEqual(self.project.kernel_objects.read("insight", insight["id"]), current)
+        self.assertEqual(self.project.kernel_objects.revisions("insight", insight["id"]), [1, 2, 3])
+        self.assertEqual(self.project.kernel_events.head(), head)
+
+    def test_reproject_repairs_stale_revisit_timer(self):
+        insight = self.submit("d4" * 16)
+        first = "2099-01-01T00:00:00+00:00"
+        second = "2099-02-01T00:00:00+00:00"
+        self.project.insights.decide(
+            insight["id"], "defer", "Wait", "deadline at " + first, "test-run",
+            expected_rev=1)
+        shadow = self.project.insights.kernel_shadow
+        with patch.object(self.project.kernel_objects, "transition",
+                          side_effect=Denied("derived transition failure")):
+            stale = self.project.insights.decide(
+                insight["id"], "defer", "Wait longer", "deadline at " + second,
+                "test-run", expected_rev=1)
+        self.assertEqual(self.project.kernel_objects.read(
+            "insight", insight["id"])["fields"]["revisit_at"], first)
+        self.assertEqual(self.project.kernel_objects.next_instant(), first)
+        self.assertEqual(shadow.failures[-1]["operation"], "decided")
+        shadow.clear_failures(insight["id"])
+        args = parser().parse_args(["kernel-shadow", "shadow", insight["id"], "--reproject"])
+        report = _cmd_kernel_shadow(self.config, self.project, args)
+        self.assertTrue(report["verification"]["ok"], report["verification"]["mismatches"])
+        self.assertEqual(report["failures"], [])
+        mirrored = self.project.kernel_objects.read("insight", insight["id"])
+        self.assertEqual(mirrored["state"], "deferred")
+        self.assertEqual(mirrored["fields"]["revisit_at"], second)
+        self.assertEqual(self.project.kernel_objects.next_instant(), second)
+        self.assertTrue(shadow.verify(insight, stale)["ok"])
+
     def test_withdrawal_projects_state_and_decision(self):
         insight = self.submit("ee" * 16)
         record = self.project.insights.withdraw(

@@ -103,9 +103,11 @@ name = "modify"
 from = ["pending", "deferred"]
 to = "modified"
 by = ["holder"]
+# A later defer at the same legacy revision replaces the armed revisit; only
+# the userland shadow projects it, the kernel just applies the declaration.
 [[kinds.insight.transitions]]
 name = "defer"
-from = ["pending"]
+from = ["pending", "deferred"]
 to = "deferred"
 by = ["holder"]
 fields = ["revisit_at"]
@@ -121,6 +123,15 @@ from = ["pending", "accepted", "modified", "deferred", "rejected"]
 to = "pending"
 by = ["author"]
 fields = ["title", "body", "urgency", "holder"]
+# A replacement defer without a representable instant retires the timer and
+# returns the insight to the declared base state.
+[[kinds.insight.transitions]]
+name = "defer_clear"
+from = ["deferred"]
+to = "pending"
+by = ["holder"]
+fields = ["revisit_at"]
+
 [[kinds.insight.transitions]]
 name = "withdraw"
 from = ["pending", "deferred"]
