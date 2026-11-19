@@ -281,11 +281,13 @@ def _stamp(event: dict) -> dt.datetime:
 
 
 def pending(project, role, *, actions=None, limit=None, include_insights=True,
-            sources="own") -> dict:
+            sources=None) -> dict:
     """Reconstruct the legacy decision page for one trusted role from queues."""
     if not isinstance(role.name, str) or role.name == "operator":
         raise Denied("Operator insights belong to the human host inbox")
     name = identifier(role.name)
+    if sources is None:
+        sources = getattr(role, "decision_sources", "own") or "own"
     if sources not in ("own", "any"):
         raise Denied("Decision event sources must be own or any")
     wanted_actions = role.decision_events if actions is None else actions

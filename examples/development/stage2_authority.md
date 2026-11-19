@@ -66,10 +66,11 @@ Each slice is independently verified and snapshot-bound.
 `stage2_decision_adapter.py` is an example-userland module, outside
 `src/mizu/kernel/`. Its only entry point is
 `pending(project, role, *, actions=None, limit=None, include_insights=True,
-sources="own")`; it returns the legacy dictionary (`shared`, `events`,
+sources=None")`; it returns the legacy dictionary (`shared`, `events`,
 `diagnostics`, `page`, `manifest`) and accepts no actor or principal. The actor
 presented to `QueueStore` is always `role:<role.name>` from the trusted role
-object. It reads only the declared `proposals` and `decisions` queues from
+object. An omitted `sources` follows `role.decision_sources`, or `own` when
+unset, exactly as the legacy call does. It reads only the declared `proposals` and `decisions` queues from
 sequence one with the kernel page size and the stage-2 page-count bound, and
 never acknowledges, appends or advances a cursor.
 

@@ -90,9 +90,11 @@ module and does not change runtime authority or routing.
 `stage2_decision_adapter.py` is a read-only example-userland reconstruction of
 the legacy `decision_delivery.pending` page from the converted `proposals` and
 `decisions` queues. `pending(project, role, *, actions=None, limit=None,
-include_insights=True, sources="own")` returns the same `shared`, `events`,
+include_insights=True, sources=None)` returns the same `shared`, `events`,
 `diagnostics`, `page` and `manifest` dictionary; it derives the queue actor as
 `role:<role.name>` from the supplied trusted role and accepts no principal.
+An omitted `sources` follows `role.decision_sources`, or `own` when unset,
+exactly as the legacy call does.
 Reads use explicit bounded cursors from sequence one, never acknowledge or
 append, and refuse malformed or unbound converted metadata. Proposal instant,
 kind and urgency and the decision's history event id, key, run and canonical

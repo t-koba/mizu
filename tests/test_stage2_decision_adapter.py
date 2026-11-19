@@ -78,10 +78,17 @@ class Stage2DecisionAdapter(Fixture):
 
     def parity(self, **kwargs):
         """Compare canonical bytes of the legacy and queue-backed pages."""
-        role = kwargs.pop("role", None) or self.role()
-        legacy = {key: value for key, value in kwargs.items() if key != "sources"}
-        want = decision_delivery.pending(self.project, role, **legacy)
-        got = adapter.pending(self.project, role, **kwargs)
+        role = kwargs.pop("role", None)
+        sources = kwargs.pop("sources", None)
+        if role is None:
+            role = self.role(sources=sources or "own")
+        elif sources is not None:
+            role = replace(role, decision_sources=sources)
+        want = decision_delivery.pending(self.project, role, **kwargs)
+        if sources is None:
+            got = adapter.pending(self.project, role, **kwargs)
+        else:
+            got = adapter.pending(self.project, role, sources=sources, **kwargs)
         self.assertEqual(canonical(want), canonical(got))
         self.assertEqual(want, got)
         return got
@@ -111,6 +118,18 @@ class Stage2DecisionAdapter(Fixture):
         self.assertNotIn(REVIEWER_ID, [event["insight"] for event in own["events"]])
         any_page = self.parity(role=self.role(sources="any"), sources="any")
         self.assertIn(REVIEWER_ID, [event["insight"] for event in any_page["events"]])
+
+    def test_runtime_call_default_sources_follow_role_configuration(self):
+        for sources in ("own", "any"):
+            with self.subTest(sources=sources):
+                role = self.role(sources=sources)
+                want = decision_delivery.pending(self.project, role)
+                got = adapter.pending(self.project, role)
+                self.assertEqual(canonical(want), canonical(got))
+                self.assertEqual(want, got)
+        role = self.role(sources="any")
+        self.assertIn(REVIEWER_ID, [event["insight"] for event in
+                                    adapter.pending(self.project, role)["events"]])
 
     def test_limits_truncation_and_no_insights(self):
         for limit in (1, 2, 3, 10):
