@@ -9,8 +9,8 @@ from unittest import mock
 
 import support  # noqa: F401  (puts src and tests on the path)
 from mizu.fs import canonical
-from test_stage2_conversion import (BEFORE_REVISIT, DEFER_ID, REVISIT_AT,
-                                    Stage2QuestionConversion)
+from test_stage2_conversion import BEFORE_REVISIT, DEFER_ID, REVISIT_AT
+import test_stage2_conversion as conversion_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "examples" / "development"))
@@ -24,7 +24,7 @@ class Stage2Verify(unittest.TestCase):
     """Reuse the stage-2 conversion fixture without inheriting its test cases."""
 
     def setUp(self):
-        source = Stage2QuestionConversion(methodName="runTest")
+        source = conversion_tests.Stage2QuestionConversion(methodName="runTest")
         source.setUp()
         self.addCleanup(source.doCleanups)
         self.fixture = source
