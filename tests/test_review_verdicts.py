@@ -85,6 +85,34 @@ class ReviewVerdictTests(PublishFixture):
             "cause": "changes_requested", "verdict": "changes_requested", "reviewer": "reviewer",
             "finding_insights": [pending["id"], *(row["id"] for row in findings[:15])]})
 
+    def test_changes_requested_findings_follow_verdict_to_same_code_successor(self):
+        # A same-code successor inherits a rejecting verdict by digest. The
+        # findings were filed against the snapshot the reviewer actually read,
+        # so they must stay linked after the verdict carries forward.
+        self.review("changes_requested")
+        reviewed = self.project.snapshots.get()
+        finding = self.project.insights.submit(source="reviewer", base_snapshot=reviewed["id"],
+            title="Review finding", body="Material finding")
+        successor = self.project.snapshots.create(
+            {key: reviewed[key] for key in ("files", "code_digest", "skipped", "bytes")},
+            goal=reviewed["goal"], state="New state, unchanged code", run=None,
+            outcome="wait", summary="Same code successor", parent=reviewed["id"])
+        self.project.snapshots.publish(successor)
+        ctx = self.context()  # Current snapshot is now the same-code successor.
+        self.assertNotEqual(ctx.snapshot["id"], reviewed["id"])
+        self.assertEqual(ctx.snapshot["code_digest"], reviewed["code_digest"])
+        self.assertEqual(reviews.publication_state(ctx, pending_insights=[finding],
+            open_insights={"ids": [finding["id"]]}), {
+                "cause": "changes_requested", "verdict": "changes_requested",
+                "reviewer": "reviewer", "finding_insights": [finding["id"]]})
+        # A finding filed against the successor itself is not the review's finding.
+        other = self.project.insights.submit(source="reviewer", base_snapshot=successor["id"],
+            title="Unrelated", body="Not reviewed")
+        self.assertEqual(reviews.publication_state(ctx,
+            pending_insights=[finding, other],
+            open_insights={"ids": [finding["id"], other["id"]]})["finding_insights"],
+            [finding["id"]])
+
     def test_full_and_delta_prompts_project_publication_state(self):
         self.review("changes_requested")
         ctx = self.context()

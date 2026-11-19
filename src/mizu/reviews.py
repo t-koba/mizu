@@ -158,13 +158,13 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
         except (OSError, ValueError, TypeError, AttributeError, RecursionError, Denied, LimitExceeded):
             pass  # An unavailable receipt is not proof of publication.
 
-    source_id = context.snapshot["id"]
     holders, required = config.publication_review_requirement(context.config.publication)
     if not holders or required < 1:
         return {**state, "cause": "review_not_configured"}
 
     approvals = set()
     rejecting_holder = None
+    reviewed_snapshot = None
     for _, review, _ in _current_reviews(context, holders):
         if review["verdict"] == "approve":
             approvals.add(review["role"])
@@ -172,6 +172,11 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
                 return {**state, "cause": "approved_queued"}
         elif rejecting_holder is None:
             rejecting_holder = review["role"]
+            # Findings are filed against the snapshot the reviewer actually
+            # reviewed, which a same-code successor need not be. Correlate on
+            # that reviewed snapshot, not the successor's id, so a rejection
+            # that carries forward also carries its linked findings.
+            reviewed_snapshot = review["reviewed_snapshot"]
     if rejecting_holder is None:
         return state
 
@@ -179,7 +184,8 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
     open_ids = set(open_insights["ids"])
     findings = {}
     for row in pending_insights:
-        if row.get("source") == rejecting_holder and row.get("base_snapshot") == source_id:
+        if (row.get("source") == rejecting_holder
+                and row.get("base_snapshot") == reviewed_snapshot):
             finding_id = row.get("id")
             if isinstance(finding_id, str) and finding_id in open_ids:
                 findings[finding_id] = None
