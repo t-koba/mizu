@@ -193,10 +193,12 @@ class ContextFinishMixin:
 
         A host-imposed bounded seal is an automatic yield and may retain ready
         work. A validated next_step handoff is not parking. A wait or blocked
-        finish with ready work is accepted: no empty-set signature is anchored,
-        so the existing ready-work observation re-admits this role and an
-        unchanged unit counts toward no-progress handling. Other finishes
-        require a complete
+        finish with ready work is accepted: the prompt-bound ready-input
+        signature is kept, so the row stays visible but an unchanged retry is
+        not a fresh wake. Both admission gates compare that real identity, and
+        the unchanged unit counts toward no-progress handling, fresh-session
+        recovery and parking until the set changes or an independent wake
+        arrives. Other finishes require a complete
         empty role-scoped inventory under the page API maximum. Unknown waits
         and overflow are evidence gaps, never dispositions.
         """
@@ -226,10 +228,11 @@ class ContextFinishMixin:
             raise Denied("Ready evidence unavailable or incomplete at finish.") from exc
         if page["total"]:
             if finished["outcome"] in ("wait", "blocked"):
-                # Clear the opening signature so the next observation sees
-                # present ready work and re-admits, including holder-deferred
-                # items that stay visible in this role's ready set.
-                self.ready_work_signature = None
+                # Keep the signature captured with this unit's ready input.
+                # An unchanged row remains visible but is not fresh progress:
+                # both admission gates and the no-progress record compare the
+                # real ready identity, so unchanged retries reach the existing
+                # recovery threshold and park until a genuine change or wake.
                 return
             ids = ", ".join(str(row.get("id", "unknown"))[:64] for row in page["items"][:3])
             raise Denied(f"{page['total']} ready item(s), including {ids}.")

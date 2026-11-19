@@ -262,7 +262,8 @@ ready only for their holder. Unsatisfied waits are not ready. Admission compares
 the full role-eligible set, including exact receipt-route terminal evidence
 bindings, to the set shown in the last unit input, using a bounded fingerprint from
 the existing locked ledger scan (progress schema 3). Persistent unchanged ready
-work is not a recurring wake: a writer `wait` parks, while ID additions,
+work is not a recurring wake: a writer `wait` or `blocked` finish keeps its
+delivered signature, counts no progress and parks, while ID additions,
 removals/replacements and wait satisfaction wake. The signature is captured
 with the full/delta prompt, not at finish, so new work during a run remains
 pending. Legacy missing signatures admit nonempty sets for reassessment;

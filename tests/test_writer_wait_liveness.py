@@ -12,8 +12,8 @@ from mizu.config import wait_writer_roles
 from mizu.errors import Busy, Denied, LimitExceeded
 from mizu.fs import now, read_json
 from support import history_write_json as write_json
-from mizu.runtime import (Engine, _progress_self_admits, _writer_wait_liveness,
-                           _writer_wait_sources, prompt_for, should_run)
+from mizu.runtime import (Engine, _progress_self_admits, _ready_work_observation,
+                           _writer_wait_liveness, _writer_wait_sources, prompt_for, should_run)
 from mizu.runtime import _deferred_until_due
 from mizu.work_item_waits import holder_only
 
@@ -64,6 +64,9 @@ class WriterWaitTests(Fixture):
 
         for outcome in ('wait', 'blocked'):
             with self.subTest(outcome=outcome):
+                # Unchanged holder-ready work is not a wake: each disposition
+                # needs its own independent trigger, even across outcomes.
+                self.project.set_control(wake_generation=f'delegated-{outcome}')
                 def finish(ctx, *_):
                     result = ctx.handle('finish', {'outcome': outcome, 'summary': 'Replan code work',
                                                    'state': 'Now: prerequisite work remains'})
@@ -74,8 +77,9 @@ class WriterWaitTests(Fixture):
                     self.assertIs(result['finish']['wait_liveness'], False)
                 snapshot = self.project.snapshots.get()
                 self.assertIs(snapshot['progress']['ready_work'], True)
-                self.assertIsNone(snapshot['progress']['ready_work_signature'])
-                self.assertTrue(should_run(self.project, snapshot, role_name='worker'))
+                self.assertEqual(snapshot['progress']['ready_work_signature'],
+                                 store.page_ready(role_name='worker')['signature'])
+                self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
                 self.assert_holder_only_open(item)
 
         # Editing alone does not satisfy the wait; only a published digest does.
@@ -610,7 +614,7 @@ class WriterParkingTests(Fixture):
                 self.assert_unsealed(ctx)
         self.assertEqual(self.project.work_items.get(item["id"])["status"], "doing")
 
-    def test_wait_with_ready_work_reopens_without_item_transition(self):
+    def test_wait_with_ready_work_parks_until_new_work_without_item_transition(self):
         item = self.ready("pending work")
         runs = []
         def finish_wait(ctx, *_):
@@ -620,38 +624,92 @@ class WriterParkingTests(Fixture):
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         snapshot = self.project.snapshots.get()
         self.assertIs(snapshot["progress"]["ready_work"], True)
-        # No empty-set signature is anchored, so the ready-work observation
-        # re-admits this role without a procedural disposition requirement.
-        self.assertIsNone(snapshot["progress"]["ready_work_signature"])
+        signature = self.project.work_items.page_ready(role_name="worker")["signature"]
+        self.assertEqual(snapshot["progress"]["ready_work_signature"], signature)
         self.assertNotIn('_earliest_deferred_until',
                          self.project.work_items.page_ready(role_name="worker"))
         self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
+        # The real input identity is recorded: the row is still shown, but an
+        # unchanged set is not a fresh wake in either admission gate.
+        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+        # Both the daemon gate and engine dispatch consume this same fact.
+        self.assertFalse(_ready_work_observation(
+            self.project, snapshot, self.config.roles["worker"])[0])
+        self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"],
+                         "no-event")
+        self.assertEqual(len(runs), 1)
+        self.assertTrue(json.loads(prompt_for(self.context()))["ready_work"]["items"])
+        # New independent work changes the identity and admits once more;
+        # neither row needed a procedural disposition.
+        extra = self.ready("new independent work")
         self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         self.assertEqual(len(runs), 2)
-        self.assertEqual(self.project.work_items.get(item["id"])["status"], "open")
+        for row in (item, extra):
+            self.assertEqual(self.project.work_items.get(row["id"])["status"], "open")
 
-    def test_repeated_wait_with_ready_work_counts_and_stays_visible(self):
+    def test_repeated_wait_with_ready_work_counts_recovers_and_parks(self):
         from mizu.project import idle_with_open_work
-        self.ready("repeated ready")
+        from mizu.snapshot import no_progress_recovery_due
+        item = self.ready("repeated ready")
         self.quiet_baseline()
+        signature = self.project.work_items.page_ready(role_name="worker")["signature"]
         def finish_wait(ctx, *_):
             self.finish(ctx, "wait", state=ctx.snapshot["state"])
         engine = Engine(self.config, driver=ScriptDriver(finish_wait))
-        engine.run(self.project, "worker")
-        first = self.project.snapshots.get()
-        engine.run(self.project, "worker")
-        second = self.project.snapshots.get()
-        self.assertEqual((first["progress"]["no_progress_count"],
-                          second["progress"]["no_progress_count"]), (1, 2))
-        for snapshot in (first, second):
+        for expected in (1, 2, 3):
+            self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+            snapshot = self.project.snapshots.get()
+            self.assertEqual(snapshot["progress"]["no_progress_count"], expected)
+            self.assertEqual(snapshot["progress"]["ready_work_signature"], signature)
             self.assertIs(snapshot["progress"]["ready_work"], True)
-            self.assertIsNone(snapshot["progress"]["ready_work_signature"])
             idle = idle_with_open_work(snapshot)
             self.assertTrue(idle["active"])
             self.assertEqual(idle["reason"], "no_progress_with_ready_work")
-        # The counted streak does not consume the ready work or its wake.
-        self.assertTrue(should_run(self.project, second, role_name="worker"))
+            # A counted row stays visible in the prompt and the page, but it
+            # is no longer a wake in either admission gate.
+            self.assertEqual([row["id"] for row in
+                              json.loads(prompt_for(self.context()))["ready_work"]["items"]],
+                             [item["id"]])
+            self.assertEqual(self.project.work_items.page_ready(role_name="worker")["signature"],
+                             signature)
+            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
+            self.assertFalse(_ready_work_observation(
+                self.project, snapshot, self.config.roles["worker"])[0])
+            # The configured fresh-session allowance is reached and retained;
+            # it never becomes its own admission.
+            self.assertEqual(no_progress_recovery_due(
+                snapshot["progress"], "wait", self.config, "worker"), expected >= 2)
+
+    def test_parked_ready_work_admits_once_on_work_change_or_wake(self):
+        self.ready("parked ready")
+        self.quiet_baseline()
+        runs = []
+        def finish_wait(ctx, *_):
+            runs.append(ctx.run_dir.name)
+            self.finish(ctx, "wait", state=ctx.snapshot["state"])
+        engine = Engine(self.config, driver=ScriptDriver(finish_wait))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        parked = self.project.snapshots.get()
+        self.assertFalse(should_run(self.project, parked, role_name="worker"))
+
+        # One independent work change is one wake, without a disposition.
+        self.ready("independent addition")
+        self.assertTrue(should_run(self.project, parked, role_name="worker"))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        changed = self.project.snapshots.get()
+        self.assertNotEqual(changed["progress"]["ready_work_signature"],
+                            parked["progress"]["ready_work_signature"])
+        self.assertFalse(should_run(self.project, changed, role_name="worker"))
+
+        # An operator wake is independent of the ready identity and also
+        # admits once; repeating that generation is not another wake.
+        self.project.set_control(wake_generation="recheck-ready")
+        self.assertTrue(should_run(self.project, changed, role_name="worker"))
+        self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
+        self.assertEqual(len(runs), 3)
+        woken = self.project.snapshots.get()
+        self.assertFalse(should_run(self.project, woken, role_name="worker"))
 
     def test_ready_set_change_starts_new_streak(self):
         item = self.ready("then gone")
@@ -678,7 +736,7 @@ class WriterParkingTests(Fixture):
             item["id"], expected_rev=item["rev"], actor="worker",
             status="blocked", wait={"kind": "deadline", "at": at})
 
-    def test_future_holder_deadline_clears_signature_and_counts_no_progress(self):
+    def test_future_holder_deadline_keeps_signature_and_counts_no_progress(self):
         from mizu.project import idle_with_open_work
         from mizu.snapshot import no_progress_recovery_due
         from mizu.work_item_waits import holder_only
@@ -700,18 +758,19 @@ class WriterParkingTests(Fixture):
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         first = self.project.snapshots.get()
         self.assertIs(first["progress"]["ready_work"], True)
-        self.assertIsNone(first["progress"]["ready_work_signature"])
+        self.assertEqual(first["progress"]["ready_work_signature"], before["signature"])
         self.assertEqual(first["progress"]["no_progress_count"], 1)
+        self.assertFalse(should_run(self.project, first, role_name="worker"))
 
-        # The same deadline remains visible under an unchanged membership
-        # signature, so the second unchanged finish advances the streak just
-        # like any other ready work instead of parking until the instant.
+        # The same deadline remains visible under its real membership
+        # signature; the second unchanged finish advances the streak and
+        # parks the role instead of waiting for the deadline instant.
         self.assertEqual(engine.run(self.project, "worker")["status"], "completed")
         second = self.project.snapshots.get()
         self.assertEqual(second["progress"]["no_progress_count"], 2)
-        self.assertIsNone(second["progress"]["ready_work_signature"])
+        self.assertEqual(second["progress"]["ready_work_signature"], before["signature"])
         self.assertTrue(no_progress_recovery_due(second["progress"], "wait", self.config, "worker"))
-        self.assertTrue(should_run(self.project, second, role_name="worker"))
+        self.assertFalse(should_run(self.project, second, role_name="worker"))
         idle = idle_with_open_work(second)
         self.assertTrue(idle["active"])
         self.assertEqual(idle["reason"], "no_progress_with_ready_work")
