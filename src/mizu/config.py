@@ -24,7 +24,7 @@ CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
                           "work_items_read", "work_items_create", "work_items_transition", "work_items_reopen", "work_order", "result_read",
-                          "objects", "events", "queues"})
+                          "queues"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: Binary MiB unit for configured limits converted to byte counts.
 MEBIBYTE_BYTES = 1024 * 1024
@@ -362,7 +362,7 @@ ROOT_KEYS = frozenset({
     "selectors", "include", "workspace_cache",
     "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
-    "project_import", "doctor", "completion_evidence", "kinds", "queues"})
+    "project_import", "doctor", "completion_evidence", "queues"})
 
 
 def _load_merged(top: Path) -> dict:
@@ -1183,19 +1183,9 @@ def publication_policy(raw: dict) -> PublicationPolicy:
         reviewer_role=reviewer_role, reviewers=reviewers, required_approvals=required)
 
 
-def _kernel_kinds(raw):
-    from .kernel import parse_kinds
-    return parse_kinds(raw)
-
-
 def _kernel_queues(raw):
     from .kernel import parse_queues
     return parse_queues(raw)
-
-
-def _kernel_subscriptions(raw, where):
-    from .kernel import parse_subscriptions
-    return parse_subscriptions(raw, where)
 
 
 def publication_review_requirement(policy: PublicationPolicy) -> tuple[tuple[str, ...], int]:
@@ -1424,8 +1414,6 @@ class Config:
 
     #: Declared host publisher record kinds (publication results).
     record_kinds: dict = dataclasses.field(default_factory=dict)
-    #: Kernel object kinds declared by the deployment (docs/kernel.md).
-    kinds: dict = dataclasses.field(default_factory=dict)
     #: Kernel message queues declared by the deployment (docs/kernel.md).
     queues: dict = dataclasses.field(default_factory=dict)
     usage: Usage = dataclasses.field(default_factory=Usage)
@@ -2102,7 +2090,6 @@ def load(file: Path) -> Config:
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
                                                 "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors,
                   workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), record_kinds=kinds,
-                  kinds=_kernel_kinds(data.get("kinds", {})),
                   queues=queues,
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),

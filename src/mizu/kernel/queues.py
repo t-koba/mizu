@@ -31,7 +31,6 @@ from typing import Any, Iterator, Mapping
 
 from ..errors import ConfigError, Denied
 from ..fs import atomic_write, canonical, identifier, loads_finite, lock, mkdir, now as clock, safe_read
-from .kinds import NAME
 
 #: Mechanism bounds: one MiB body (docs/kernel.md), pages of 64 capped at 512,
 #: bounded reference indexes and retention work per append/read.
@@ -43,6 +42,8 @@ MAX_REFS = 512
 MAX_RETENTION_SCAN = 256
 DEFAULT_RETAIN_DAYS = 30
 INTEGER_LIMIT = (1 << 63) - 1
+#: Queue and field names: lowercase identifiers.
+NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}\Z")
 
 #: Queue principals include the role wildcard; an actor is always concrete.
 PRINCIPAL = re.compile(r"(?:role:(?:\*|[a-z][a-z0-9_-]{0,62})|host|operator)\Z")
