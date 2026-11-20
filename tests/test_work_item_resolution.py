@@ -749,7 +749,7 @@ class WaitResolutionTests(Fixture):
         context = self.context()
         write_json(self.project.root / 'health/worker.json', {'consecutive_missing_finish': 2})
         run_dir = context.run_dir
-        with patch('mizu.runtime.prompt_for', return_value='prompt'):
+        with patch('mizu.unit_prompts.prompt_for', return_value='prompt'):
             self.assertIsNone(session_prompt(context, context.role, run_dir)[3])
             opened = self.store.get(item['id'])
             self.store.transition(item['id'], expected_rev=opened['rev'], status='open', actor='reviewer')

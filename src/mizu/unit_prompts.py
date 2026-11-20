@@ -6,8 +6,9 @@ plus their tightly coupled bounded projection helpers and exact
 unit-opening statement. Snapshot proof and its diagnostic are projected together
 for both prompt variants.
 
-Session selection, rotation/recovery/fallback policy (:func:`runtime.session_prompt`
-and below), work-ready scheduling (``work_readiness._has_ready_work`` and
+Session selection and its rotation/recovery/fallback policy
+(:func:`session_prompt`) now also live here, re-exported by ``runtime``.
+Work-ready scheduling (``work_readiness._has_ready_work`` and
 ``work_readiness._ready_work_changed``, re-exported by ``runtime``, plus
 ``role_admission.should_run``, re-exported by ``runtime``), admission and the
 scheduler stay in ``runtime``. This module also owns the display-only ready
@@ -19,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import acceptance, check_jobs, prompt_sections, reviews
@@ -27,6 +29,9 @@ from .errors import ConfigError, Denied
 from .fs import DIGEST, canonical, digest, read_json
 from .protocol import _writer_continuation_contract, tool_definitions
 from .report import previous as _previous_report
+from .snapshot import (missing_finish_recovery_due, missing_finish_streak,
+                       no_progress_recovery_due)
+from .work_readiness import _has_ready_work
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, never a runtime cycle.
     from .runtime import Context
@@ -726,3 +731,126 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "run": _prompt_run_identity(context),
                        **_prompt_clock(context)})),
                       ensure_ascii=False)
+
+
+def session_prompt(context: Context, role, run_dir: Path) -> tuple:
+    """Choose the full or delta prompt for this dispatch.
+
+    Schema: peeks at the content-bound session record for the role profile;
+    returns ``(prompt, mode, session_key, rotation, session_dir)`` where mode
+    is ``"full"`` or ``"delta"`` and rotation is the ``rotation.json`` record
+    (or None). Bounds: prompt-state and rotation evidence are small JSON
+    files; pending lists follow ``[limits] pending_insights``. Trust: local
+    session state only. Retry/cancellation: peeking never raises (any failure
+    falls back to the full prompt and empty identity), except an enforcing
+    due rotation, which propagates so the unit fails before model dispatch
+    instead of admitting the old conversation. No-progress recovery also
+    rotates a due persistent session before dispatch, even if its session
+    record is missing. Missing-finish recovery likewise rotates a persistent
+    session whose consecutive-missing-finish streak reached
+    ``[limits] missing_finish_recovery_after`` when the filtered ready-work
+    scan still shows actionable (open/doing) work without structured waits;
+    a queue with no ready work never rotates. Evidence: rotations write
+    ``rotation.json``; dispatches record the mode in ``prompt_projection.json``;
+    failed rotations are stored
+    in the run ``error.json`` by the Engine caller. Failure: a due rotation removes
+    ``session.json`` so the next dispatch mints a fresh provider session
+    while the published snapshot and composed policy reload unchanged; a
+    missing record otherwise takes the full prompt.
+    """
+    from .engine_config import (effective, read_prompt_state, rotate_session,
+                                rotation_due, session_record)
+    if getattr(context, "ephemeral", False):
+        return prompt_for(context), "full", "", None, None
+    try:
+        settings = effective(context.config, role, role.profile)
+    except Exception:
+        return prompt_for(context), "full", "", None, None
+    if settings.get("session") != "persistent":
+        return prompt_for(context), "full", "", None, None
+    try:
+        path, saved = session_record(context, role.profile, settings)
+    except Exception:
+        return prompt_for(context), "full", "", None, None
+    session_dir = path.parent
+    key = session_dir.name
+    progress = context.snapshot.get("progress")
+    recovery_due = no_progress_recovery_due(
+        progress, context.snapshot.get("outcome", ""), context.config, context.role.name)
+    recovery_reason = (
+        f"no-progress units {progress['no_progress_count']} "
+        f">={context.config.limits.no_progress_recovery_after}") if recovery_due else None
+    missing_recovery_due = False
+    missing_reason = None
+    try:
+        health_record = read_json(context.project.root / "health" / f"{context.role.name}.json", {})
+        if isinstance(health_record, dict) and missing_finish_recovery_due(health_record, context.config):
+            streak = missing_finish_streak(health_record)
+            if _has_ready_work(context.project, context.role):
+                missing_recovery_due = True
+                missing_reason = (
+                    f"missing-finish units {streak} "
+                    f">={context.config.limits.missing_finish_recovery_after}")
+    except Exception:
+        missing_recovery_due = False
+        missing_reason = None
+    if saved is None:
+        if recovery_due:
+            record = rotate_session(path, run_dir, recovery_reason)
+            return prompt_for(context), "full", key, record, session_dir
+        if missing_recovery_due:
+            record = rotate_session(path, run_dir, missing_reason)
+            return prompt_for(context), "full", key, record, session_dir
+        return prompt_for(context), "full", key, None, session_dir
+    try:
+        due, reason = rotation_due(context.config.limits, path, saved,
+                                   settings.get("engine", "unknown"))
+    except Exception:
+        due, reason = False, ""
+    if due:
+        # A due rotation enforces a configured bound: its failure must fail
+        # the work unit before model dispatch (Engine records error.json),
+        # never substitute a full prompt and admit the old conversation.
+        record = rotate_session(path, run_dir, reason)
+        return prompt_for(context), "full", key, record, session_dir
+    if recovery_due:
+        record = rotate_session(path, run_dir, recovery_reason)
+        return prompt_for(context), "full", key, record, session_dir
+    if missing_recovery_due:
+        record = rotate_session(path, run_dir, missing_reason)
+        return prompt_for(context), "full", key, record, session_dir
+    try:
+        from . import work_order as _plan
+        opening = _plan._capture_opening(context)
+    except Exception:
+        return prompt_for(context), "full", key, None, session_dir
+    last = None
+    try:
+        # Freeze the displayed inventory before consulting the resume cursor.
+        # An arrival after this capture stays out of both the delta and the
+        # work-order generation, and will be offered from the next opening.
+        current_generation = context.project.insights.generation()
+        last = read_prompt_state(session_dir)
+        insights_delivered = last is not None and (
+            "sections" not in last
+            or (isinstance(last["sections"], list)
+                and all(isinstance(section, str) for section in last["sections"])
+                and "insights" in last["sections"]))
+        if (last is not None
+                and insights_delivered
+                and last.get("inbox_generation") == current_generation
+                and last.get("snapshot") == context.snapshot["id"]):
+            pending: list = []
+        else:
+            pending = opening["pending_insights"]
+    except Exception:
+        # If the resume cursor cannot prove that the inventory is unchanged,
+        # re-offer the bounded captured rows rather than silently omit them.
+        pending = opening["pending_insights"]
+    try:
+        prior_rows = session_row_details(context, last, saved, session_dir)
+        transition = session_grant_transition(context, last, saved, session_dir)
+        prompt = prompt_delta_for(context, pending, grant_transition=transition, prior_rows=prior_rows)
+        return prompt, "delta", key, None, session_dir
+    except Exception:
+        return prompt_for(context), "full", key, None, session_dir

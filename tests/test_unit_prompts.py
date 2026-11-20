@@ -10,9 +10,9 @@ MOVED = ("MAX_READY_WORK_AGE_SECONDS",
          "_prompt_clock", "_prompt_research_state", "_decision_task",
          "_open_backlog", "_prompt_tool_surface", "_prompt_run_identity",
          "_prompt_capture_limit", "_ready_work_age", "_ready_work_projection",
-         "prompt_for", "prompt_delta_for")
+         "prompt_for", "prompt_delta_for", "session_prompt")
 STAYS_IN_RUNTIME = ("_reject_constant", "_has_ready_work", "_ready_work_changed",
-                    "session_prompt", "should_run")
+                    "should_run")
 
 
 class UnitPromptSeamTests(Fixture):
@@ -30,12 +30,15 @@ class UnitPromptSeamTests(Fixture):
             if callable(value):
                 self.assertEqual(value.__module__, "mizu.unit_prompts", name)
 
-    def test_scheduling_and_session_lifecycle_stay_in_runtime(self):
+    def test_scheduling_stays_in_runtime(self):
         import mizu.runtime as runtime
         import mizu.unit_prompts as unit_prompts
+        import mizu.work_readiness as work_readiness
         for name in STAYS_IN_RUNTIME:
             self.assertTrue(hasattr(runtime, name), name)
-            self.assertFalse(hasattr(unit_prompts, name), name)
+            self.assertNotEqual(getattr(runtime, name).__module__, "mizu.unit_prompts", name)
+        # Session selection imports the readiness probe; it does not re-home it.
+        self.assertIs(unit_prompts._has_ready_work, work_readiness._has_ready_work)
 
     def test_both_import_paths_build_the_same_full_and_delta(self):
         import mizu.runtime as runtime
