@@ -45,7 +45,7 @@ from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
                      role_policy_bytes, role_progress_signals, role_requests_per_run,
                      role_run_seconds, role_tools_per_run,
                      role_work_item_events_limit, role_wrap_up_requests,
-                     role_wrap_up_tools, wait_writer_roles)
+                     role_wrap_up_tools)
 from .decision_idle import (_DECISION_IDLE_CACHE, _DECISION_IDLE_CACHE_LIMIT,
                             _empty_decision_state, _decision_delivery_state,
                             _decision_policy_signature, _decision_source_fingerprint)
@@ -74,7 +74,7 @@ from .errors import (AuthorityGrantMismatch, Busy, Cancelled, CaptureLimitExceed
                       ProtocolError)
 from .fs import (canonical, digest, loads_finite, lock, mkdir, now, read_json, relative_parts,
                    safe_read, safe_write, sync_dir, write_json, PREVIEW_BYTES, READ_PAGE_CHARS, page,
-                   text_preview, DIGEST, ID)
+                   text_preview, ID)
 from .project import Project
 from .readiness_witness import settled as witness_settled, witness as state_witness
 from .snapshot import (MAX_MISSING_FINISH_STREAK,
