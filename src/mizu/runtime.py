@@ -59,6 +59,7 @@ from .context_web_tools import ContextWebToolsMixin
 from .context_check_tools import ContextCheckToolsMixin
 from .context_read_tools import ContextReadToolsMixin
 from .context_role_tools import ContextRoleToolsMixin
+from .context_join_tools import ContextJoinToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -461,7 +462,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextKernelToolsMixin, ContextInsightToolsMixin,
                 ContextEvidenceMixin, ContextWebToolsMixin,
                 ContextCheckToolsMixin, ContextReadToolsMixin,
-                ContextRoleToolsMixin):
+                ContextRoleToolsMixin, ContextJoinToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -1506,28 +1507,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             record["approval"] = approval["insight"]
         return observe(record)
 
-    def _op_consult(self, args: dict) -> dict:
-        if self.consult is None:
-            raise Denied("Nested consultation is disabled")
-        self.joins_idle.clear()
-        self._activity_change(lambda: setattr(self, "_activity_join", "consult"), count="join:consult")
-        try:
-            return self.consult(self, args)
-        finally:
-            self._activity_change(lambda: setattr(self, "_activity_join", None))
-            self.joins_idle.set()
-
-    def _op_delegate(self, args: dict) -> dict:
-        if self.delegate is None:
-            raise Denied("Nested delegation is disabled")
-        self.joins_idle.clear()
-        self._activity_change(lambda: setattr(self, "_activity_join", "delegate"), count="join:delegate")
-        try:
-            return self.delegate(self, args)
-        finally:
-            self._activity_change(lambda: setattr(self, "_activity_join", None))
-            self.joins_idle.set()
-
     def _op_report(self, args: dict) -> dict:
         self.commentary = args
         write_json(self.run_dir / "commentary.json", args)
@@ -1569,7 +1548,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "vcs_request": _op_vcs_request,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
         "materialize": ContextRoleToolsMixin._op_materialize,
-        "consult": _op_consult, "delegate": _op_delegate, "report": _op_report,
+        "consult": ContextJoinToolsMixin._op_consult, "delegate": ContextJoinToolsMixin._op_delegate, "report": _op_report,
         "research_read": ContextRoleToolsMixin._op_research_read, "research": ContextRoleToolsMixin._op_research,
         "finish": ContextFinishMixin._op_finish,
     }
