@@ -17,16 +17,24 @@ pi-durable lock は ws 8.22.0 → 8.21.0、undici 8.10.2 → 8.12.3、minimatch 
 install して SDK・durable・replay の各 gate を通過させた。両 lock で非 Pi パッケージの解決版の
 変更は `grok-mermaid` 0.2.3 → `lovely-mermaid` 0.3.3 のみ（1.5.1 の Mermaid 描画拡張に伴う）。
 1.5.1 と 1.5.2 の差分をレビューし、Mizu が使う公開入口に契約破壊がないことを確認した（詳細は下記 Pi 節）。
+2026-11-20 に同日公開された最新 stable の Pi 1.6.0 へ追随し、両 adapter の Pi 依存を同じリリースへ固定した。
+両 lock は trusted materialize で再生成し、承認済み offline npm cache から `npm ci` で実装物を
+install して SDK・durable・replay の各 gate を通過させた。非 Pi パッケージの解決版の変更は
+pi lock で `@google/genai` 2.21.0 → 2.32.0、`@types/node` 26.6.3 → 26.6.6、`openai` 7.19.0 → 7.59.0、
+`undici` 8.12.3 → 8.12.4、`ws` 8.22.0 → 8.23.0、pi-durable lock で `@google/genai` 2.21.0 → 2.32.0、
+`@types/node` 26.6.4 → 26.6.6、`openai` 7.19.0 → 7.59.0、`undici` 8.12.3 → 8.12.4 である
+（`undici` 8.12.4 は 6 件の GHSA 勧告を修正）。1.5.2 と 1.6.0 の差分をレビューし、Mizu が使う
+公開入口に契約破壊がないことを確認した（詳細は下記 Pi 節）。
 実行物のバージョンは証跡であり、
 Mizu が旧実行物を判定・変換・拒否するための条件ではない。内部の設定・bridge・保存記録には
 世代番号を持たせない。
 
 ## Pi
 
-[1.5.2 の変更履歴](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/CHANGELOG.md)、
-[公開 SDK](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/sdk.md)、
-[拡張 API](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/extensions.md)、
-[RPC](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/rpc.md)
+[1.6.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/CHANGELOG.md)、
+[公開 SDK](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/sdk.md)、
+[拡張 API](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/extensions.md)、
+[RPC](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc.md)
 を参照した。v1.0.1 から v1.0.4 の差分を評価し、Mizu が使う公開入口
 （`ModelRuntime`、`createAgentSession`、`runRpcMode`、設定・拡張・型）に
 契約破壊がないことを確認してから固定した。v1.0.4 から v1.1.0 の差分も同様に評価した：
@@ -72,6 +80,22 @@ Mizu の契約に影響しない。
 pi-durable は 1.5.1 で `Tx.submission(id)`、会話単位の compaction 設定、JSONL の read-only open などを
 追加し、SQLite commit を効率化した。1.5.2 に durable 側の変更はない。いずれも SQLite schema v2 と
 `pi.live` / `pi.tool` v3 を変更しないため、移行手順の更新は不要である。
+1.6.0 の coding-agent は extension の `render()` が `readonly string[]` を返すようになり、
+Component の出力を書き換える extension はコピーしてから変更する必要がある; Mizu の launcher は
+extension component を描画しない。find tool の path pattern が探索ディレクトリ基準になり、
+`src/*.ts` は `pkg/src/a.ts` に一致しなくなった; Mizu は find tool を使わない。
+1.6.0 は provider の既定モデルを GPT-6.2 Sol へ変更するが、Mizu は `models.json` / bundled catalog で
+利用モデルを明示固定し、provider 既定には依存しない。
+pi-durable 1.6.0 は `pi.tool` を v4、`pi.generation` を v3 へ進める。1.6.0 が書き込んだ store は
+前方のみで、古い Harness は新しい task を `task_too_old` としてブロックし、`until` のない sleep を
+期限切れとして扱う。SQLite schema v2 自体は変わらないが、1.6.0 で開いた DB は 1.5.x 以前へ
+downgrade できないため、1.5.0 の forward-only と同様に downgrade には事前バックアップの復元が必要
+（`store_compat` は 1 のまま）。code mode の namespace は名前プレフィクスではなく extension から得る
+ようになり、`Extension.namespace`（`ToolNamespace`: `{ name, description, instructions? }`）がその
+extension の tool をまとめる。`CodemodeNamespace` とその `prefix`、`namespaceOf`、
+`CodemodeToolOptions.namespaces` は fallback なしで削除された。Mizu の launcher は `defineTool` で
+bridge tool を直接登録し namespace / exposure を指定しないため影響を受けず、operator の設定も
+codemode namespace / prefix を指定しない。`pi.live` は文書名として残る。
 
 pi-durable の launcher は Pi 自身の `ModelRuntime` で固定モデルを解決する。
 解決元は pi と同じ二つ: 同梱カタログと engine directory の `models.json`。
