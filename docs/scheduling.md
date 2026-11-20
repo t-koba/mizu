@@ -256,9 +256,10 @@ only project-assigned `workspace = "write"` role with an independent dispatch
 route (`event_wakes`, `daemon`, `interval_seconds` or `calendar`). A
 delegated-only second writer does not make the wait external. Holder-only waits
 are open role-eligible work in the ready set; this projection does not transition
-the stored item or grant timer re-admission. A holder-only `deadline` keeps its
-bound visible as `deferred_until` in the ready row, so the holder sees work it
-deferred rather than blocked backpressure. Held CI waits use a separate
+the stored item or grant timer re-admission. A holder-only `deadline` stays
+ordinary held-open work in the holder's ready set with no date label and no wake
+when its bound passes: the role may act on its own open work at any time, and a
+timer grants it no special standing. Held CI waits use a separate
 [exact absence and requester test](#exact-sha-work-item-ci-waits).
 
 A role asks the operator through a
@@ -276,7 +277,8 @@ for unknown evidence. Pending dependencies, pending object or proposal waits,
 future deadlines held by another party, and code-change waits with another
 independently dispatched project writer remain external sources. A holder-only
 future deadline is self-resolvable deferred work, not an external source: it
-stays in the holder's ready set as `deferred_until` and reports `false` here.
+stays in the holder's ready set as ordinary open work, with no date label or
+date-based wake, and reports `false` here.
 Admission rechecks current liveness.
 Check discovery and the configured work-item prompt page bound the local reads;
 incomplete, ambiguous, corrupt or unreadable evidence cannot prove absence.

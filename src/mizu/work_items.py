@@ -2137,11 +2137,8 @@ class WorkItems:
         CI holder-only readiness requires the independent requester grant and
         fresh exact local absence evidence. Otherwise CI/proposal waits are ready
         only from their validated terminal route, independent of event ack.
-        For role-scoped ready pages holding a sole-holder deadline, the private
-        ``_earliest_deferred_until`` reports the earliest such instant (None for
-        a malformed one) over the full eligible scan; other reads keep their
-        public shape. Legacy unseeded decisions remain explicit coverage gaps,
-        never inferred ready work. Unreadable
+        Legacy unseeded decisions remain explicit coverage gaps, never inferred
+        ready work. Unreadable
         liveness (``unknown``) excludes only that blocked item and never
         releases it; known ready rows are still returned with
         ``coverage_complete`` false and a bounded ``unknown_blocked`` count,
@@ -2238,8 +2235,6 @@ class WorkItems:
                         ("blocked_since", "blocked_age_seconds")})
             if wait_liveness is not None:
                 row["wait_liveness"] = wait_liveness
-        if "deferred_until" in view:
-            row["deferred_until"] = view["deferred_until"]
         if "description" in item:
             preview, clipped = text_preview(item["description"], 1024)
             row["description_preview"] = preview
@@ -2378,14 +2373,6 @@ class WorkItems:
         resolution_count = 0
         resolution_max = None
         order_sum = 0
-        # Holder-owned deadlines are visible as deferred work until they pass,
-        # but their ID-only ready signature does not change at that instant.
-        # Track the earliest such instant over the whole eligible scan, without
-        # retaining rows, so an unchanged set can still reveal an expired wait.
-        deferred_seen = False
-        deferred_invalid = False
-        deferred_key = None
-        deferred_at = None
         for entry in active:
             item, since = self._decode(*entry[:3])
             self._require_migrated_item(item["id"])
@@ -2415,22 +2402,6 @@ class WorkItems:
                 elif item.get("holder") != role_name and not (
                         item["status"] == "blocked" and item.get("holder") is None):
                     continue
-                if (item["status"] == "blocked"
-                        and isinstance(writer_roles, (set, frozenset))
-                        and writer_roles == {item.get("holder")} == {role_name}):
-                    wait_probe = item.get("wait")
-                    if isinstance(wait_probe, dict) and wait_probe.get("kind") == "deadline":
-                        deferred_seen = True
-                        try:
-                            at = wait_probe.get("at")
-                            instant = _timestamp_order(at) if isinstance(at, str) else None
-                            if instant is None:
-                                raise ValueError("missing deadline instant")
-                        except (Denied, ValueError, TypeError, OverflowError):
-                            deferred_invalid = True
-                        else:
-                            if deferred_key is None or instant < deferred_key:
-                                deferred_key, deferred_at = instant, at
             # Operational effective status only: the raw ledger record stays
             # blocked with its wait, but holder-only waits have no external
             # resolver, so read projections treat the item as ordinary
@@ -2446,8 +2417,6 @@ class WorkItems:
                     published_snapshot = self.snapshots.get()
                 if holder_only(self, item, published_snapshot, writer_roles=writer_roles,
                                record_question=record_question) is not None:
-                    if isinstance(wait_probe, dict) and wait_probe.get("kind") == "deadline":
-                        view["deferred_until"] = wait_probe.get("at")
                     item = {key: value for key, value in item.items()
                             if key not in ("wait", "blocked_since")}
                     item["status"] = "open"
@@ -2560,10 +2529,6 @@ class WorkItems:
             result["coverage_complete"] = complete
             result["signature"] = digest(canonical(
                 ["ready-set-v1", total, f"{ready_sum:064x}"]))
-            if deferred_seen:
-                # Private host observation: None means a malformed/missing
-                # instant, which observers must treat as already due.
-                result["_earliest_deferred_until"] = None if deferred_invalid else deferred_at
         if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
             raise LimitExceeded("Work-item page exceeds byte bound")
         if order_fingerprint:

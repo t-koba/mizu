@@ -121,24 +121,6 @@ from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             prompt_delta_for, prompt_for)
 
 
-def _deferred_until_due(value) -> bool:
-    """True unless ``value`` is a parsable future timezone-aware instant.
-
-    A holder-deferred deadline carries no membership change when it passes, so
-    observers compare its instant instead. Missing and malformed instants fail
-    closed as due rather than silently parking the role.
-    """
-    if not isinstance(value, str) or not value:
-        return True
-    try:
-        moment = dt.datetime.fromisoformat(value)
-        if moment.tzinfo is None:
-            return True
-        return moment <= dt.datetime.now(dt.timezone.utc)
-    except (ValueError, TypeError, OverflowError):
-        return True
-
-
 def _normalized_wake_generation(value) -> str:
     """Fail closed on malformed local control generations without crashing a run."""
     return value if isinstance(value, str) else ""
@@ -301,11 +283,10 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
     full signature reports ready-set change; schema-4–6 writer progress separately
     qualifies resolution wakes by exact item/revision tokens actually shown in
     the opening pages. Legacy progress retains its conservative changed-set
-    fallback because it has no delivery tokens. A holder-deferred deadline has
-    no membership signal when it passes, so its private full-scan instant is
-    compared as well; missing or malformed instants count as due. The progress
-    role and fingerprint scope prevent an observer from consuming another role's
-    ready-work signal.
+    fallback because it has no delivery tokens. A sole-holder deadline stays
+    ordinary open work in the holder's ready set, so its instant passing grants
+    no wake. The progress role and fingerprint scope prevent an observer from
+    consuming another role's ready-work signal.
     """
     if role is not None and "work_items_transition" not in role.capabilities:
         return False, False, False
@@ -340,10 +321,6 @@ def _ready_work_observation(project, record, role=None, *, work_items=None) -> t
             changed = present
         else:
             changed = signature != previous["ready_work_signature"]
-            if not changed and "_earliest_deferred_until" in page:
-                # A passed holder deadline keeps the same membership and ID
-                # signature. Its instant is the only change we can observe.
-                changed = _deferred_until_due(page["_earliest_deferred_until"])
         if delivered_tokens is not None:
             resolution_changed = page.get("_wait_resolution_undelivered")
             if type(resolution_changed) is not bool:

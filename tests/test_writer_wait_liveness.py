@@ -14,7 +14,6 @@ from mizu.fs import now, read_json
 from support import history_write_json as write_json
 from mizu.runtime import (Engine, _progress_self_admits, _ready_work_observation,
                            _writer_wait_liveness, _writer_wait_sources, prompt_for, should_run)
-from mizu.runtime import _deferred_until_due
 from mizu.work_item_waits import holder_only
 
 
@@ -315,29 +314,31 @@ class HolderOnlyTests(Fixture):
         self.assertEqual(holder_only(store, fresh, snapshot, writer_roles=frozenset({'worker'})),
                          'sole_writer_code_change')
 
-    def test_holder_only_deadline_is_deferred_work_with_its_deadline(self):
+    def test_holder_only_deadline_has_no_date_label_or_signal(self):
         at = '2099-01-01T00:00:00+00:00'
         item = self.block('deferred deadline', {'kind': 'deadline', 'at': at})
         store = self.project.work_items
         fresh = store.get(item['id'])
         self.assertEqual(holder_only(store, fresh, self.project.snapshots.get(),
                                      writer_roles={'worker'}), 'sole_holder_deadline')
-        # Deferred work is the holder's own schedule: visible as open work in
-        # its ready page with the deadline, never as blocked backpressure.
+        # A self-deferral is ordinary held-open work: present in the holder's
+        # ready page and prompt, but with no date label or private timing signal.
         ready = store.page_ready(role_name='worker')
         row = next(row for row in ready['items'] if row['id'] == item['id'])
         self.assertEqual(row['status'], 'open')
-        self.assertEqual(row['deferred_until'], at)
-        self.assertEqual(ready['_earliest_deferred_until'], at)
-        self.assertNotIn('_earliest_deferred_until', store.page_ready(role_name='reviewer'))
-        for absent in ('wait', 'wait_liveness', 'blocked_since', 'blocked_age_seconds'):
+        for absent in ('wait', 'wait_liveness', 'blocked_since', 'blocked_age_seconds',
+                       'deferred_until'):
             self.assertNotIn(absent, row)
+        self.assertNotIn('_earliest_deferred_until', ready)
+        self.assertNotIn('_earliest_deferred_until', store.page_ready(role_name='reviewer'))
         blocked_ids = [row['id'] for row in self.project.status()['blocked_work']['items']]
         self.assertNotIn(item['id'], blocked_ids)
-        # The deadline reaches the model's opening, not just the read page.
+        # The open work reaches the model's opening with no deadline attached.
         projected = json.loads(prompt_for(self.context()))['ready_work']['items']
         shown = next(row for row in projected if row['id'] == item['id'])
-        self.assertEqual(shown['deferred_until'], at)
+        self.assertEqual(shown['status'], 'open')
+        for absent in ('wait', 'wait_liveness', 'wait_satisfied', 'deferred_until'):
+            self.assertNotIn(absent, shown)
         self.assertEqual(store.get(item['id']), item)
 
     def test_sole_holder_deadline_is_not_external_wait_liveness(self):
@@ -747,7 +748,7 @@ class WriterParkingTests(Fixture):
         self.quiet_baseline()
         before = store.page_ready(role_name="worker")
         self.assertEqual([row["id"] for row in before["items"]], [item["id"]])
-        self.assertEqual(before["_earliest_deferred_until"], at)
+        self.assertNotIn("_earliest_deferred_until", before)
         runs = []
 
         def finish_wait(ctx, *_):
@@ -777,18 +778,40 @@ class WriterParkingTests(Fixture):
         after = store.page_ready(role_name="worker")
         self.assertEqual(after["signature"], before["signature"])
         self.assertEqual([row["id"] for row in after["items"]], [item["id"]])
-        self.assertEqual(after["items"][0]["deferred_until"], at)
-        self.assertEqual(after["_earliest_deferred_until"], at)
+        self.assertNotIn("deferred_until", after["items"][0])
+        self.assertNotIn("_earliest_deferred_until", after)
         self.assertEqual(store.get(item["id"])["status"], "blocked")
         self.assertEqual(holder_only(store, store.get(item["id"]), second,
                                      writer_roles={"worker"}), "sole_holder_deadline")
         self.assertEqual(len(runs), 2)
 
-    def test_malformed_deferred_instant_is_due(self):
-        for value in (None, "", "not-a-time", "2030-01-01T00:00:00"):
-            with self.subTest(value=value):
-                self.assertTrue(_deferred_until_due(value))
-        self.assertFalse(_deferred_until_due("2099-01-01T00:00:00+00:00"))
+    def test_passed_holder_deadline_has_no_ready_set_change_or_wake(self):
+        from mizu.runtime import _progress_record
+        from mizu.snapshot import PROGRESS_SIGNALS
+        past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(
+            timespec="seconds")
+        item = self.block_deadline("passed deadline", past)
+        store = self.project.work_items
+        page = store.page_ready(role_name="worker")
+        self.assertEqual([row["id"] for row in page["items"]], [item["id"]])
+        self.assertNotIn("deferred_until", page["items"][0])
+        self.assertNotIn("_earliest_deferred_until", page)
+        # A progress record bound to this same ready set must not report a
+        # change merely because the holder's deadline instant has passed.
+        progress = _progress_record(
+            self.project.snapshots.get(), "worker", self.config.limits.progress_signals,
+            {name: False for name in PROGRESS_SIGNALS}, "wait", ready_work=True,
+            ready_work_signature=page["signature"], wait_resolution_tokens=[])
+        changed, present, resolution_changed = _ready_work_observation(
+            self.project, {"progress": progress, "role": "worker"},
+            self.config.roles["worker"])
+        self.assertFalse(changed)
+        self.assertTrue(present)
+        self.assertFalse(resolution_changed)
+        after = store.page_ready(role_name="worker")
+        self.assertEqual(after["signature"], page["signature"])
+        self.assertNotIn("_earliest_deferred_until", after)
+        self.assertEqual(store.get(item["id"])["status"], "blocked")
 
     def test_wait_accepts_a_remaining_ready_item_without_disposition(self):
         from support import bind_delivery
