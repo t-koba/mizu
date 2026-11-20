@@ -740,5 +740,112 @@ class QueueDecisionAuthority(unittest.TestCase):
         self.assertEqual(self.assert_parity(identity), [])
 
 
+    def _decision_rows(self, identity):
+        return [row for row in self.project.kernel_queues.read(
+            "decisions", "operator", now=stage2_verify.NOW)["messages"]
+            if row["body"].get("legacy_insight") == identity
+            and row.get("deliver_at") is None
+            and row["body"].get("legacy_rev") == "1"]
+
+    def test_superseding_defer_uses_distinct_id_and_keeps_parity(self):
+        """A same-revision replacement defer cannot reuse the first decision id."""
+        self.activate()
+        identity = "a1" * 16
+        self.live_submit(identity, "Defer then replace")
+        self.project.insights.decide(
+            identity, "defer", "first", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        stable_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1)
+        self.assertEqual([row["id"] for row in self._decision_rows(identity)], [stable_id])
+
+        self.project.insights.decide(
+            identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+            "run-b", expected_rev=1)
+        rows = self._decision_rows(identity)
+        self.assertEqual(len(rows), 2)
+        decision = json.loads((self.project.insights.root / "decisions" /
+                               f"{identity}.json").read_bytes())
+        superseding_id = queue_decision_delivery.superseding_message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1,
+            digest(canonical(decision))[:32])
+        self.assertEqual(rows[1]["id"], superseding_id)
+        self.assertNotEqual(rows[1]["id"], rows[0]["id"])
+        # The read side selects the last row as effective; both legacy and
+        # queue pages show the replacement.
+        self.assertEqual(json.loads(rows[-1]["body"]["legacy_record"])["reason"],
+                         "replacement")
+        events = self.assert_parity(identity)
+        self.assertEqual([(event["action"], event["reason"], event["revisit"])
+                          for event in events],
+                         [("defer", "replacement", "2099-02-01T00:00:00+00:00")])
+
+    def test_defer_then_accept_uses_distinct_id_and_keeps_parity(self):
+        """A final disposition after a defer owns its own immutable id."""
+        self.activate()
+        identity = "b1" * 16
+        self.live_submit(identity, "Defer then accept")
+        self.project.insights.decide(
+            identity, "defer", "first", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        self.project.insights.decide(
+            identity, "accept", "evidence arrived", "", "run-b",
+            expected_rev=1, work_item_intent="none")
+        rows = self._decision_rows(identity)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["id"], rows[1]["id"])
+        self.assertEqual(json.loads(rows[-1]["body"]["legacy_record"])["action"], "accept")
+        events = self.assert_parity(identity)
+        self.assertEqual([(event["action"], event["reason"]) for event in events],
+                         [("accept", "evidence arrived")])
+
+    def test_exact_retry_of_superseding_defer_is_a_no_op(self):
+        """Replaying a replacement defer converges on its existing row."""
+        self.activate()
+        identity = "c1" * 16
+        self.live_submit(identity, "Replace then retry")
+        self.project.insights.decide(
+            identity, "defer", "first", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        self.project.insights.decide(
+            identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+            "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 2)
+        self.project.insights.decide(
+            identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+            "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 2)
+        self.assert_parity(identity)
+
+    def test_missed_superseding_append_repairs_under_distinct_id(self):
+        """A lost replacement-defer append is repaired without a second row."""
+        self.activate()
+        identity = "d1" * 16
+        self.live_submit(identity, "Defer then lost replacement")
+        self.project.insights.decide(
+            identity, "defer", "first", stage2_tests.REVISIT_AT, "run-a", expected_rev=1)
+        writer = self.project.insights.decision_queue_writer
+        real_decide = writer.decide
+        calls = {"count": 0}
+
+        def drop_next_append(*args):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return
+            return real_decide(*args)
+
+        with mock.patch.object(writer, "decide", side_effect=drop_next_append):
+            self.project.insights.decide(
+                identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+                "run-b", expected_rev=1)
+        self.assertEqual(len(self._decision_rows(identity)), 1)
+
+        self.project.insights.decide(
+            identity, "defer", "replacement", "2099-02-01T00:00:00+00:00",
+            "run-b", expected_rev=1)
+        rows = self._decision_rows(identity)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(json.loads(rows[-1]["body"]["legacy_record"])["reason"],
+                         "replacement")
+        self.assert_parity(identity)
+
+
 if __name__ == "__main__":
     unittest.main()

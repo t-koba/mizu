@@ -642,6 +642,21 @@ def message_id(kind: str, identity: str, rev: int | str) -> str:
     return hashlib.sha256(token).hexdigest()[:32]
 
 
+def superseding_message_id(kind: str, identity: str, rev: int, event_id: str) -> str:
+    """The id for a decision that supersedes one already at the stable id.
+
+    A revision can carry several committed transitions (defer, replacement
+    defer, final disposition). Only the first owns the conversion-stable id;
+    each later one is immutable in its own right and is keyed by the exact
+    history stem that produced it. A v2 domain keeps these ids disjoint from
+    every converted v1 id, and the stem makes an exact retry converge on the
+    same row rather than append a second one.
+    """
+    import hashlib
+    token = f"decision-supersede:v2:{kind}:{identity}:{rev}:{event_id}".encode("utf-8")
+    return hashlib.sha256(token).hexdigest()[:32]
+
+
 def _require_producer_queues(project) -> None:
     """A missing or malformed declaration refuses the write instead of falling back."""
     needed = {
@@ -784,33 +799,69 @@ class DecisionQueueWriter:
             raise AdapterError("Decision envelope exceeds the transport frame")
         identity = current["id"]
         rev = current["rev"]
-        store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
-                     id=message_id(kind, identity, rev))
+        decision_id = message_id(kind, identity, rev)
+        revisit_id = message_id(REVISIT_KIND, identity, rev)
+        if kind == DECISION_KIND:
+            # The first decision owns the conversion-stable id. A later
+            # committed decision on the same revision must not reuse it: an
+            # immutable id already holds the earlier transition. Detect that
+            # by the retained history stem, then give this transition its own
+            # id so both rows coexist and the read side selects the later one
+            # as effective. An exact retry keeps the same stem and id, so the
+            # kernel append stays a content no-op.
+            try:
+                first = store.message(decision_id, "role:writer")
+            except Denied:
+                first = None
+            if first is not None:
+                if first["queue"] != DECISIONS:
+                    raise AdapterError("Decision identity message names another queue")
+                if identifier(first["body"].get("legacy_event")) != event_id:
+                    decision_id = superseding_message_id(kind, identity, rev, event_id)
+                    revisit_id = superseding_message_id(REVISIT_KIND, identity, rev, event_id)
+        store.append(DECISIONS, body, "role:writer", refs=[proposal_id], id=decision_id)
         if action == "defer":
             instant = _revisit_instant(event.get("revisit"))
             if instant is not None:
                 store.append(DECISIONS, body, "role:writer", refs=[proposal_id],
-                             deliver_at=instant, id=message_id(REVISIT_KIND, identity, rev))
+                             deliver_at=instant, id=revisit_id)
 
-    def retained_event_identity(self, insight_id: str, rev: int) -> str | None:
-        """Return the history stem bound by an already-appended decision message.
+    def retained_event_identity(self, decision: dict, rev: int) -> str | None:
+        """Return the history stem bound by a decision message for this record.
 
-        The stable-id decision message carries ``legacy_event``: the exact
-        decision-history filename the first write (or one-time conversion)
-        bound. Reading it by id is O(1) and independent of how much decision
-        history is permanently retained. Returns None only when no decision
-        message has been appended yet, so the caller can fall back to the
-        bounded content scan for an interrupted first append. A present but
-        malformed envelope fails closed through ``identifier``.
+        Each decision message carries ``legacy_event`` (the exact history
+        filename) and ``legacy_record`` (the committed decision). The first
+        decision owns the conversion-stable id, so the common case is an O(1)
+        keyed read whose record matches, independent of retained history. A
+        superseding decision owns a stem-derived id, so when the stable row is
+        a different record a bounded complete read finds the message bound to
+        this exact record. Returns None only when no message for the record
+        has been appended yet (an interrupted append), letting the caller fall
+        back to the content-addressed history read. Malformed envelopes fail
+        closed through ``identifier``.
         """
         store = self.project.kernel_queues
+        identity = decision["id"]
+        wanted = canonical(decision).decode("utf-8")
         try:
-            message = store.message(message_id(DECISION_KIND, insight_id, rev), "role:writer")
+            first = store.message(message_id(DECISION_KIND, identity, rev), "role:writer")
         except Denied:
-            return None
-        if message["queue"] != DECISIONS:
-            raise Denied("Decision identity message names another queue")
-        return identifier(message["body"].get("legacy_event"))
+            first = None
+        if first is not None:
+            if first["queue"] != DECISIONS:
+                raise Denied("Decision identity message names another queue")
+            if first["body"].get("legacy_record") == wanted:
+                return identifier(first["body"].get("legacy_event"))
+        for message in read_complete(store, DECISIONS, "role:writer"):
+            if message.get("deliver_at") is not None:
+                continue
+            body = message["body"]
+            if (body.get("legacy_insight") != identity
+                    or body.get("legacy_rev") != str(rev)):
+                continue
+            if body.get("legacy_record") == wanted:
+                return identifier(body.get("legacy_event"))
+        return None
 
     def decide(self, current, event, event_id: str) -> None:
         """Append the declared decision (and delayed revisit) for one event."""

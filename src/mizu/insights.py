@@ -1495,7 +1495,7 @@ replacement insight without implying rejected substance.
         """
         writer = self.decision_queue_writer
         if writer is not None and writer.active():
-            retained = writer.retained_event_identity(decision["id"], rev)
+            retained = writer.retained_event_identity(decision, rev)
             if retained is not None:
                 identifier(retained)
                 return retained
