@@ -54,6 +54,7 @@ from .drivers import DriverCheckpoint, driver_for
 from .context_driver import ContextDriverMixin
 from .context_kernel_tools import ContextKernelToolsMixin
 from .context_insight_tools import ContextInsightToolsMixin
+from .context_evidence import ContextEvidenceMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -459,7 +460,8 @@ def _spend_counter(name):
 
 
 class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
-                ContextKernelToolsMixin, ContextInsightToolsMixin):
+                ContextKernelToolsMixin, ContextInsightToolsMixin,
+                ContextEvidenceMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -884,21 +886,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
     def _op_read(self, args: dict) -> dict:
         return workspace_reads.op_read(
             self, args, max_identities=MAX_READ_IDENTITIES)
-
-    def _read_retained_evidence(self, kind: str, args: dict) -> dict:
-        return evidence_records.read_retained(self, kind, args)
-
-    def _new_invocation_evidence(self, kind: str) -> tuple[str, str]:
-        return evidence_records.new_invocation(kind)
-
-    def _mutation_evidence(self, kind: str, op: str, parameters: dict):
-        return evidence_records.mutation(self, kind, op, parameters)
-
-    def _op_command_evidence_read(self, args: dict) -> dict:
-        return self._read_retained_evidence("commands", args)
-
-    def _op_experiment_evidence_read(self, args: dict) -> dict:
-        return self._read_retained_evidence("experiments", args)
 
     def _op_exec_experiment(self, op: str, args: dict) -> dict:
         return sandbox_operations.exec_experiment(self, op, args)
@@ -1678,8 +1665,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
 
     _DISPATCH = {
         "diff": _op_diff, "files": _op_files, "read": _op_read, "result_read": _op_result_read,
-        "command_evidence_read": _op_command_evidence_read,
-        "experiment_evidence_read": _op_experiment_evidence_read,
+        "command_evidence_read": ContextEvidenceMixin._op_command_evidence_read,
+        "experiment_evidence_read": ContextEvidenceMixin._op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
         "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "feed_updates": _op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
         "ready_work_read": _op_ready_work_read,
