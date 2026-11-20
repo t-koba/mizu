@@ -8,7 +8,10 @@ readable, and a reproduced regression is retained with its hold reason and
 reproduction evidence. No Pi updater or release policy lives in the harness.
 """
 import dataclasses
+import hashlib
 import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -19,6 +22,47 @@ from mizu.web import Web
 ROOT = Path(__file__).resolve().parents[1]
 RELEASING = ROOT / "docs" / "releasing.md"
 FEED = "https://github.com/earendil-works/pi/releases.atom"
+
+#: Deterministic transcript marker printed by the bounded stand-in gate child.
+GATE_MARKER = "MIZU-PI-SDK-GATE-TRANSCRIPT-3f91c7a2"
+GATE_OUTPUT_CAP = 4096
+
+
+def run_standin_sdk_gate(*, failing):
+    """Run a bounded stand-in Pi SDK gate and return a structured outcome.
+
+    The child prints a deterministic marker and exits non-zero in failing mode
+    (zero in passing mode). Fixed argv, no shell, no network, a short timeout
+    and an output cap keep this a small self-contained test double: the failure
+    is the child's real exit status and captured transcript, never a literal.
+    """
+    expectation = "fail" if failing else "pass"
+    command = (
+        "import sys; "
+        f"marker = {GATE_MARKER!r}; "
+        f"expectation = {expectation!r}; "
+        "print('pi-sdk-gate ' + expectation + ' ' + marker); "
+        "sys.stdout.flush(); "
+        "sys.exit(0 if expectation == 'pass' else 1)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        shell=False, timeout=5, check=False)
+    stdout = completed.stdout[:GATE_OUTPUT_CAP]
+    stderr = completed.stderr[:GATE_OUTPUT_CAP]
+    transcript = stdout + b"\n" + stderr
+    return {
+        "expectation": expectation,
+        "returncode": completed.returncode,
+        "failing": expectation == "fail" and completed.returncode != 0,
+        "passed": expectation == "pass" and completed.returncode == 0,
+        "marker": GATE_MARKER,
+        "stdout": stdout.decode("utf-8", "replace"),
+        "stderr": stderr.decode("utf-8", "replace"),
+        "transcript": transcript,
+        "receipt": hashlib.sha256(transcript).hexdigest(),
+    }
 
 
 class PiReleaseProcedureTests(unittest.TestCase):
@@ -91,6 +135,37 @@ class PiReleaseHandoffTests(Fixture):
         path = self.project.root / "decisions" / f"{insight_id}.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def route_release(self, item, gate):
+        """Walkthrough routing: hold only for a reproduced regression with a failing gate.
+
+        A stable patch with no reproduced blocking regression, or a gate that
+        passed, has no hold evidence and goes to lockstep adoption review. Any
+        hold reason is derived from the captured gate transcript and receipts,
+        so it cannot be satisfied by a fabricated literal.
+        """
+        reproduced = "blocking regression reproduced" in item["summary"]
+        if reproduced and gate["failing"]:
+            reproduction = (
+                f'reproduced blocking regression at {item["url"]} '
+                f'(source receipt {item["source_receipt"]}, '
+                f'gate transcript {gate["stdout"].strip()}, '
+                f'gate receipt sha256:{gate["receipt"]})')
+            return {
+                "action": "defer",
+                "reason": f"Hold: {reproduction}; stay pinned until the regression is resolved",
+                "revisit": "recheck after upstream regression fix",
+                "token": "run-hold-review",
+                "reproduction": reproduction,
+            }
+        return {
+            "action": "defer",
+            "reason": ("Route to lockstep adoption review: no reproduced blocking "
+                       "regression with a failing gate"),
+            "revisit": "lockstep adoption review of " + item["title"],
+            "token": "run-stable-review",
+            "reproduction": None,
+        }
+
     def test_stable_patch_without_known_defect_reaches_adoption_review(self):
         observed = self.observe_feed(
             entry("1.5.3", "Pi 1.5.3 stable", "stable patch; fixes no known Mizu defect"))
@@ -123,25 +198,80 @@ class PiReleaseHandoffTests(Fixture):
         item = observed[0]
         insight_id = "b" * 32
         submitted = self.submit_release(insight_id, item)
-        # Reproduction evidence is the feed's source receipt plus the observed
-        # gate failure, both carried into the hold decision rather than assumed.
-        reproduction = (f'reproduced blocking regression at {item["url"]} '
-                        f'(receipt {item["source_receipt"]}, Pi SDK gate failure)')
+
+        gate = run_standin_sdk_gate(failing=True)
+        self.assertTrue(gate["failing"])
+        self.assertNotEqual(gate["returncode"], 0)
+        self.assertIn(gate["marker"], gate["stdout"])
+        self.assertEqual(len(gate["receipt"]), 64)
+        self.assertEqual(gate["receipt"], hashlib.sha256(gate["transcript"]).hexdigest())
+
+        # The feed itself must report a reproduced blocking regression for this
+        # failing gate to justify a hold; a stable-patch suspicion does not.
+        self.assertIn("blocking regression reproduced", item["summary"])
+        self.assertIn("fails the Pi SDK gate", item["summary"])
+
+        routing = self.route_release(item, gate)
+        self.assertIsNotNone(routing["reproduction"])
+        self.assertIn(gate["marker"], routing["reproduction"])
+        self.assertIn(gate["receipt"], routing["reproduction"])
+        self.assertIn(item["source_receipt"], routing["reproduction"])
+        self.assertIn(item["url"], routing["reproduction"])
+
         self.project.insights.decide(
-            insight_id, "defer",
-            f"Hold: {reproduction}; stay pinned until the regression is resolved",
-            "recheck after upstream regression fix", "run-hold-review", expected_rev=1)
+            insight_id, routing["action"], routing["reason"], routing["revisit"],
+            routing["token"], expected_rev=1)
         decision = self.read_decision(insight_id)
         self.assertEqual(decision["action"], "defer")
+        self.assertIn("Hold:", decision["reason"])
         self.assertIn("blocking regression", decision["reason"])
         self.assertIn("reproduced", decision["reason"])
         self.assertIn(item["source_receipt"], decision["reason"])
         self.assertIn(item["url"], decision["reason"])
+        self.assertIn(gate["marker"], decision["reason"])
+        self.assertIn(gate["receipt"], decision["reason"])
         history = list((self.project.insights.root / "decision-history").glob("*.json"))
         self.assertEqual(len(history), 1)
         retained = history[0].read_text(encoding="utf-8")
         self.assertIn(item["source_receipt"], retained)
-        self.assertIn("Pi SDK gate failure", retained)
+        self.assertIn(gate["marker"], retained)
+        self.assertIn(gate["receipt"], retained)
+
+    def test_stable_patch_with_passing_gate_routes_to_adoption_review_without_hold(self):
+        observed = self.observe_feed(
+            entry("1.5.5", "Pi 1.5.5 stable",
+                  "stable patch: no regression reproduced, SDK gate not run"))
+        item = observed[0]
+        insight_id = "c" * 32
+        submitted = self.submit_release(insight_id, item)
+
+        gate = run_standin_sdk_gate(failing=False)
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["returncode"], 0)
+        self.assertIn(gate["marker"], gate["stdout"])
+        self.assertEqual(len(gate["receipt"]), 64)
+
+        routing = self.route_release(item, gate)
+        self.assertIsNone(routing["reproduction"])
+        self.assertNotIn("Hold:", routing["reason"])
+        self.project.insights.decide(
+            insight_id, routing["action"], routing["reason"], routing["revisit"],
+            routing["token"], expected_rev=1)
+        decision = self.read_decision(insight_id)
+        self.assertEqual(decision["action"], "defer")
+        self.assertIn("adoption review", decision["reason"])
+        self.assertNotIn("Hold:", decision["reason"])
+        self.assertNotIn(gate["marker"], decision["reason"])
+        self.assertNotIn(gate["receipt"], decision["reason"])
+        self.assertIn("lockstep adoption review", decision["revisit"])
+        history = list((self.project.insights.root / "decision-history").glob("*.json"))
+        self.assertEqual(len(history), 1)
+        retained = history[0].read_text(encoding="utf-8")
+        self.assertNotIn("Hold:", retained)
+        self.assertNotIn("gate transcript", retained)
+        self.assertNotIn(gate["marker"], retained)
+        self.assertNotIn(gate["receipt"], retained)
+        self.assertNotIn(item["source_receipt"], retained)
 
 
 if __name__ == "__main__":
