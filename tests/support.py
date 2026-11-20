@@ -63,18 +63,6 @@ def history_write_json(path, value, **kwargs):
             forget_ledger(ancestor)
 
 
-def stored_question_insight(project, *, source='worker'):
-    """Seed a retained insight from before the SharedRecords question route."""
-    from uuid import uuid4
-    from mizu.fs import now
-    stamp = now()
-    item = dict(id=uuid4().hex, source=source, title='Legacy question', body='Q: Which?',
-                base_snapshot=None, kind='question', addressee='operator', run=None, origin=None,
-                created_at=stamp, updated_at=stamp, rev=1, evidence=[])
-    history_write_json(project.root / 'inbox' / f"{item['id']}.json", item)
-    return item
-
-
 def index_items(root, items, *, replace=False):
     """Put synthetic current records straight into the derived index (scale tests)."""
     import sqlite3
@@ -83,8 +71,9 @@ def index_items(root, items, *, replace=False):
     from mizu.work_items import _timestamp_order
     rows = [(item["id"], item["rev"], item["status"], item["holder"],
              _timestamp_order(item["created_at"]), _timestamp_order(item["updated_at"]),
-             (item["origin"] or {}).get("insight_id"), (item["origin"] or {}).get("rev"),
-             (item.get("wait") or {}).get("kind"), None, item.get("blocked_since"), None,
+             item["origin"] if item["origin"] is None or isinstance(item["origin"], str)
+             else canonical(item["origin"]).decode(), None,
+             (item.get("wait") or {}).get("kind"), None, item.get("blocked_since"),
              canonical(item).decode()) for item in items]
     columns = (*COLUMNS, "change_seq")
     with contextlib.closing(sqlite3.connect(Path(root) / NAME)) as db, db:
@@ -279,7 +268,7 @@ def delivered_ack_tokens(prompt):
     """Fake roles handle supported token rows, never CI waits or job/status data."""
     data = json.loads(prompt)
     return [row["ack_token"]
-            for source in ("decision_events", "work_item_events", "wait_events", "obligations")
+            for source in ("work_item_events", "wait_events")
             for row in data.get(source, []) if "ack_token" in row]
 
 
@@ -289,6 +278,3 @@ def finish_with_event_acks(context, prompt, profile=None):
                               "state": "Next step is explicit.",
                               "ack_events": delivered_ack_tokens(prompt)})
 
-
-# Existing decision-focused tests share the same explicit delivered-row contract.
-finish_with_decision_acks = finish_with_event_acks

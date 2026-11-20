@@ -9,7 +9,6 @@ from support import Fixture
 from mizu import cli, fs, lock_diagnostics as diagnostics
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, SnapshotConflict
-from mizu.insights import Insights
 from mizu.runtime import Engine
 from mizu.smoke_refs import record_lock, shared_lock
 from mizu.smoke_retention import retention_apply_lock
@@ -70,7 +69,7 @@ class LockDiagnosticsTests(Fixture):
                         load(self.file)
 
     def test_holder_timings_and_disabled_no_collection(self):
-        path = self.root / "sensitive-record" / "insights.lock"
+        path = self.root / "sensitive-record" / "records.lock"
         now = [0]
         local, kernel = fs._acquire_local, fs._platform.lock_fd
 
@@ -116,19 +115,10 @@ class LockDiagnosticsTests(Fixture):
                 patch.object(fs._platform, "lock_fd", side_effect=kernel), \
                 patch.object(fs._platform, "unlock_fd", side_effect=cleanup):
             with self.assertRaises(Busy):
-                with fs.lock(self.root / "insights.lock"):
+                with fs.lock(self.root / "records.lock"):
                     self.fail("body entered")
         row = self.summary(err.getvalue())["observations"][0]
         self.assertEqual((row["kernel_ms"], row["hold_ms"]), (11, None))
-
-    def test_insight_page_and_read_operations_are_labeled(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), diagnostics.collect(True):
-            self.project.insights.list_page(limit=1)
-            self.project.insights.unresolved_counts([])
-            self.project.insights.pending_insight_events("worker", {}, limit=1)
-        rows = self.summary(err.getvalue())["observations"]
-        self.assertEqual([row["operation"] for row in rows], ["page", "read", "list"])
 
     def test_cli_acquisition_and_body_failures_keep_code_and_do_not_replay(self):
         self.enable()
@@ -146,7 +136,7 @@ class LockDiagnosticsTests(Fixture):
                 kernels = []
 
                 def local(key, **kwargs):
-                    target = "smoke-retention.lock" if mode == "shared-local" else "insights.lock"
+                    target = "smoke-retention.lock" if mode == "shared-local" else "records.lock"
                     if mode in ("local", "shared-local") and key.endswith(target):
                         raise BlockingIOError("sensitive-error")
                     return original_local(key, **kwargs)
@@ -172,7 +162,7 @@ class LockDiagnosticsTests(Fixture):
                             raise error
 
                 before = set(self.project.root.glob("runs/*"))
-                with patch.object(Insights, "ingest_editor", ingest):
+                with patch("mizu.editor.ingest", ingest):
                     code, out, err = self.invoke()
                 self.assertEqual(code, 75)
                 self.assertEqual(out, "")
@@ -206,7 +196,7 @@ class LockDiagnosticsTests(Fixture):
 
     def test_cli_success_dispatch_and_disabled_output_parity(self):
         def dispatch(engine, project, *args, **kwargs):
-            with fs.lock(project.root / "locks" / "insights.lock"):
+            with fs.lock(project.root / "locks" / "records.lock"):
                 pass
             return {"skip": {"skipped": "fixture"}}
 
@@ -218,7 +208,6 @@ class LockDiagnosticsTests(Fixture):
         self.assertEqual(disabled, (0, '{\n  "skipped": "fixture"\n}\n', ""))
         self.assertEqual(enabled[:2], disabled[:2])
         rows = self.summary(enabled[2])["observations"]
-        self.assertTrue(any(r["phase"] == "editor-ingestion" for r in rows))
         startup_writes = [r for r in rows if r["phase"] == "pre-admission-startup"
                           and r["operation"] == "write"]
         self.assertTrue(any(r["lock"] == "project-record" for r in startup_writes))
@@ -234,7 +223,7 @@ class LockDiagnosticsTests(Fixture):
 
         def after_admission(*args, **kwargs):
             # The guard runs immediately after ordinary execution admission.
-            with fs.lock(self.project.root / "locks" / "insights.lock"):
+            with fs.lock(self.project.root / "locks" / "records.lock"):
                 effects.append(1)
                 raise error
 
@@ -265,7 +254,7 @@ class LockDiagnosticsTests(Fixture):
             self.assertIs(caught.exception, error)
             # A nested disabled run neither collects nor inherits its caller.
             with diagnostics.collect(False), patch.object(diagnostics, "_Observation", side_effect=AssertionError):
-                with fs.lock(self.root / "insights.lock"):
+                with fs.lock(self.root / "records.lock"):
                     pass
         rows = self.summary(err.getvalue())["observations"]
         self.assertEqual([(r["lock"], r["phase"], r["operation"], r["outcome"]) for r in rows[-2:]],
@@ -277,11 +266,11 @@ class LockDiagnosticsTests(Fixture):
             with fs.lock(self.root / "sensitive-record.lock"):
                 pass
             for _ in range(diagnostics.MAX_LOCK_DIAGNOSTIC_ROWS + 3):
-                with fs.lock(self.root / "insights.lock"):
+                with fs.lock(self.root / "records.lock"):
                     pass
             # Fixed-width numeric fields remain bounded even for a long hold.
             with patch.object(diagnostics.time, "perf_counter_ns", return_value=0):
-                observation = diagnostics.begin("insights.lock")
+                observation = diagnostics.begin("records.lock")
             with patch.object(diagnostics.time, "perf_counter_ns", return_value=10**30):
                 observation.advance("local-acquire")
                 observation.started = 0

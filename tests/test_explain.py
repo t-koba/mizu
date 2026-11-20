@@ -7,7 +7,7 @@ from support import Fixture
 from mizu.budget import Budget
 from mizu.cli import execute, parser
 from mizu.errors import ConfigError
-from mizu.insights import Insights
+from mizu.kernel.queues import QueueStore
 from mizu.project import Project
 from mizu.runtime import Engine
 
@@ -36,9 +36,8 @@ class ExplainTests(Fixture):
         before = self._tree_state(self.config.data)
         with (patch.object(Project, "status", side_effect=AssertionError("status called")),
               patch.object(Budget, "gc", side_effect=AssertionError("gc called")),
-              patch.object(Insights, "list", side_effect=AssertionError("inbox scanned")),
-              patch.object(Insights, "due_waits", side_effect=AssertionError("waits scanned")),
-              patch.object(Insights, "pending_obligations", side_effect=AssertionError("waits scanned")),
+              patch.object(QueueStore, "read", side_effect=AssertionError("queue scanned")),
+              patch.object(QueueStore, "pending", side_effect=AssertionError("queue scanned")),
               patch.object(Engine, "preview", side_effect=AssertionError("selection preview called"))):
             result = execute(self._args("--role", "worker"))
         self.assertEqual(before, self._tree_state(self.config.data))
@@ -59,9 +58,9 @@ class ExplainTests(Fixture):
         self.assertNotIn("last_completed_outcome", facts["unknowns"])
         self.assertEqual(facts["last_outcome"], {"status": "unavailable", "record": None})
         self.assertEqual(facts["selection_wait"], {"status": "absent", "record": None})
-        self.assertEqual(facts["unknowns"]["pending_insight_state"], "unknown")
+        self.assertEqual(facts["unknowns"]["queue_state"], "unknown")
         self.assertEqual(facts["unknowns"]["structured_wait_state"], "unknown")
-        self.assertIn("decision_sources", facts["triggers"])
+        self.assertIn("work_item_sources", facts["triggers"])
         self.assertEqual(facts["selection_constraints"]["status"], "not_configured")
         self.assertEqual(facts["selection_constraints"]["configured_profile"]["profile"], "primary")
         self.assertEqual(result["project_facts"]["control"]["record"]["reason"],

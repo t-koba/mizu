@@ -9,7 +9,7 @@ from mizu.config import load
 from mizu.errors import ConfigError, Denied
 from mizu.fs import canonical, read_json, text_preview
 from support import history_write_json as write_json
-from mizu.insights import Insights
+from mizu.ledger import Ledger
 from mizu.project import Project
 from mizu.runtime import prompt_delta_for, prompt_for
 from mizu.work_items import MAX_OPEN_ROW_BYTES, WorkItems
@@ -22,7 +22,7 @@ CHILD_RELEASE_SECONDS = 600
 
 def claim(root, item_id, actor, ready, release, results):
     root = Path(root)
-    store = WorkItems(root, None, Insights(root))
+    store = WorkItems(root, None, Ledger(root))
     ready.put(actor)
     if not release.wait(CHILD_RELEASE_SECONDS):
         results.put((actor, "timeout"))
@@ -184,10 +184,9 @@ class WorkItemHoldTests(Fixture):
                 self.assertEqual(view["doing_age_seconds"], age)
                 self.assertIs(view["doing_stale"], stale)
 
-    def test_age_in_open_readonly_explain_submitter_and_full_delta_prompts(self):
-        proposal = self.project.insights.submit(source="worker", title="Age", body="Review", base_snapshot=None)
-        item_id = self.project.insights.decide(proposal["id"], "accept", "Take", "", "run",
-                                                expected_rev=1)["work_item"]["id"]
+    def test_age_in_open_readonly_explain_and_full_delta_prompts(self):
+        item_id = self.store.create(idempotency_key="age", title="Age",
+                                    actor="worker")["record"]["work_item"]["id"]
         start = "2030-01-01T00:00:00+00:00"
         with patch("mizu.work_items.now", return_value=start):
             self.change(item_id)
@@ -196,8 +195,8 @@ class WorkItemHoldTests(Fixture):
         with patch("mizu.work_items.now", return_value="2030-01-02T00:00:00+00:00"):
             self.assertEqual(self.store.page_ready(role_name="worker")["signature"], signature)
             views = [self.store.page_open()["items"][0], self.store.page_open_readonly()["items"][0],
-                     self.store.explain(item_id), self.store.submitter_status(proposal["id"])]
-            for prompt in (prompt_for, lambda context: prompt_delta_for(context, [])):
+                     self.store.explain(item_id)]
+            for prompt in (prompt_for, lambda context: prompt_delta_for(context)):
                 opening = json.loads(prompt(context))
                 ready = opening["ready_work"]["items"][0]
                 self.assertIn("age_seconds", ready)
@@ -206,7 +205,6 @@ class WorkItemHoldTests(Fixture):
                 self.assertEqual(view["doing_since"], start)
                 self.assertEqual(view["doing_age_seconds"], 86400)
                 self.assertTrue(view["doing_stale"])
-                self.assertFalse(view["stale"])  # Origin staleness is independent.
         self.change(item_id, "open")
         view = self.store.explain(item_id)
         self.assertIsNone(view["doing_since"])
@@ -218,9 +216,8 @@ class WorkItemHoldTests(Fixture):
                 "status": "doing", "rev": 2, "holder": "worker",
                 "created_at": "2030-01-01T00:00:00+00:00",
                 "updated_at": "2030-01-01T00:00:00+00:00",
-                "description": "\x01" * 560, "scope": "\x01" * 560, "reason": "r" * 1024}
-        view = {"current_origin_rev": None, "stale": False, "redecision": None,
-                "doing_since": item["updated_at"], "doing_age_seconds": 0, "doing_stale": False}
+                "description": "\x01" * 565, "scope": "\x01" * 565, "reason": "r" * 1024}
+        view = {"doing_since": item["updated_at"], "doing_age_seconds": 0, "doing_stale": False}
         _, row = self.store._open_row(item, view)
         self.assertLessEqual(len(canonical(row)), MAX_OPEN_ROW_BYTES)
         self.assertTrue(row["description_truncated"] or row["scope_truncated"]

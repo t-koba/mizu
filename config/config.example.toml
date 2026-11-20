@@ -5,13 +5,11 @@
 # deep-merge and any duplicate leaf key is an error naming both files.
 # Relative values inside fragments resolve against this directory.
 # include = []
-# To mirror legacy insight/decision writes into kernel objects, include the
-# example userland kinds: include = ["../examples/development/kinds.toml"].
 # Per-project policy belongs in projects/NAME/project.toml, not this file:
 # work_item_wait_resolution = "reopen" (default); "manual" disables automatic reopening.
 data_dir = "~/.local/state/mizu"
 timezone = "UTC"
-# Default answering role for consultation when the caller names none.
+# Default consulted role when the caller names none.
 # Unset (empty) fails closed: consultation then requires an explicit role.
 consult_role = "consult"
 # Default role for one-shot implementation delegation when the caller names none.
@@ -89,24 +87,43 @@ exclude = [".git", ".pi", ".env", ".env.*", ".venv", "node_modules", "__pycache_
 # clone_timeout_seconds = 300
 # local_timeout_seconds = 15
 
-# Kernel object kinds (see docs/kernel.md): fields, states, transitions, requirements
-# and events, all declared by the deployment. None by default; examples/development/
-# shows a complete userland.
-# [kinds.note]
-# states = ["open", "closed"]
-# initial = "open"
-# create = ["operator"]
-# fields.title = {type = "string", max = 200, required = true}
-
 # Kernel message queues (see docs/kernel.md): named declarations with write,
-# read and wake principals, retention and an optional body schema. None by
-# default; examples/development/queues.toml shows declarations to include.
-# [queues.tasks]
-# write = ["role:*", "operator"]
-# read = ["role:reader"]
-# wake = ["role:reader"]
-# [queues.tasks.schema]
-# title = {type = "string", max = 200, required = true}
+# read and wake principals, retention and an optional body schema. Roles
+# reach them with the "queues" capability; the operator and host tooling use
+# `mizu queue`. What a message means is role policy (policies/*.md).
+[queues.proposals]       # knowledge and ideas for the product
+write = ["role:*", "operator", "host"]
+read = ["role:worker", "role:maintainer", "operator"]
+wake = ["role:worker"]
+[queues.proposals.schema]
+title = {type = "string", max = 240, required = true}
+body = {type = "string", max = 65536, required = true}
+
+[queues.questions]       # what only the operator can settle
+write = ["role:*"]
+read = ["operator", "role:*"]
+[queues.questions.schema]
+question = {type = "string", max = 8192, required = true}
+default = {type = "string", max = 8192, required = true}
+context = {type = "string", max = 16384}
+
+[queues.answers]         # refs: the question
+write = ["operator"]
+read = ["role:*", "operator"]
+wake = ["role:worker"]
+[queues.answers.schema]
+body = {type = "string", max = 16384, required = true}
+
+[queues.notices]         # operator and host facts for the roles
+write = ["operator", "host"]
+read = ["role:*", "operator"]
+wake = ["role:worker"]
+[queues.notices.schema]
+body = {type = "string", max = 16384, required = true}
+
+# Host publisher outcomes for publication_ci waits default closed (record_kinds
+# absent). Schema and host adapter route:
+# docs/shared-records.md#declared-host-publisher-outcomes
 
 # Named dynamic-model selectors (see docs/model-selection.md). Empty by default;
 # a role's selector key replaces its profile with one of these tables.
@@ -140,56 +157,8 @@ git_timeout_seconds = 10      # Two independently timed commands: rev-parse, the
 git_output_bytes = 8388608    # Captured index stdout+stderr; rev-parse keeps a 4096-byte cap.
 # Decoded/split/normalized path structures use memory beyond git_output_bytes.
 
-# Decision-to-work policy: the mechanism defaults to create for every source.
-# These example source defaults avoid tasks for operator/VCS dispositions;
-# each accept/modify may override them with work_item_intent = "create".
-[insight_decisions]
-work_item_intent_default = "create"
-# Operator insights without an explicit addressee notify this configured role.
-# Empty keeps operator submissions in the host inbox (no model role wake).
-operator_addressee = "worker"
-[insight_decisions.work_item_intent_by_source]
-operator = "none"
-vcs = "none"
-
-# Operator-only records; no model writer. Pending addressed records admit runs.
-# Disable a kind to stop writes/delivery, without deleting its immutable audit.
-# Answers bind an exact insight ID/revision and derive its authenticated source.
-# Optional declared publisher outcomes default closed (record_kinds absent).
-# Schema and host adapter route: docs/shared-records.md#declared-host-publisher-outcomes
-[operator_records.answer]
-enabled = true
-wake = true
-route = "question_source"
-retention = "permanent"  # Only permanent immutable storage is supported; no TTL/deletion.
-[operator_records."operator.notice"]
-enabled = true
-wake = true
-route = "addressee"
-retention = "permanent"
-
-# Role writes and author-only reads default closed: no role-writable kind, record_write or record_read grant is enabled.
-# To opt in, add "record_write" (to write) and "record_read" (to read that role's own records)
-# to the intended role's capabilities AND declare (uncomment to enable):
-# Role-writable kind names cannot contain '/'; record IDs may use slash-separated segments.
-#   [record_kinds."role.note"]
-#   writer = "role.worker"       # Authenticated role principal, not tool input.
-#   route = "none"               # Data only; no delivery, source migration or wake.
-#   wake = false
-#   retention = "permanent"
-#   acknowledgement = "explicit"
-#   subject = "object"           # Subject and payload are bounded finite JSON objects.
-#   maximum = 8192               # Canonical envelope bytes, 1-131072.
-# See docs/shared-records.md#role-authenticated-data-writes-and-author-only-retrieval for the tool schemas.
-
 [limits]
 selection_max_interval_seconds = 31536000 # Selector timer ceiling (1..TOML signed-64-bit max); computed timestamps must still fit year 9999.
-# Provisional per-source cap on unresolved live producer inputs; 0 disables.
-# Existing over-limit inputs are preserved; only the next admission is held.
-producer_inputs_per_source = 20
-# Optional producer backpressure, NOT a work-item seed cap (0 disables).
-# Requires roles.<name>.held_at_capacity = true; counts open/doing/blocked work.
-open_work_items = 0
 daily_requests = 0                 # Fail closed. Set a deliberate positive limit.
 shared_daily_requests = 0          # Optional shared total across projects sharing data_dir (0 disables, max 100,000).
 budget_day_file_bytes = 4194304     # Day-file write/peek budget (4 MiB default); positive, up to min(TOML signed-64-bit max, sys.maxsize). Larger values allow proportionally larger resource use.
@@ -205,7 +174,7 @@ command_seconds = 300
 idle_seconds = 15
 readiness_recheck_seconds = 0 # Resident signals daemon: reuse a negative readiness result while the state tree is unchanged, for at most this long (0-86400; 0 evaluates every idle tick).
 cooldown_seconds = 5
-progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.
+progress_signals = ["tool", "code", "message", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.
 no_progress_continuations = 0 # Read-only no-progress self-admissions (0-100); writer ready work needs disposition or a next_step handoff.
 no_progress_recovery_after = 2 # Consecutive unchanged-input no-progress wait, blocked, continue or bounded writer snapshots before next persistent-session dispatch starts fresh (1-100).
 no_progress_backoff_seconds = 0 # Read-only on-change timer default; per-role override also applies to writers.
@@ -221,11 +190,8 @@ check_pending = 32             # Unfinished check jobs retained per project (1-1
 # Check evidence is released by source/input changes and terminal acknowledgement,
 # never by a retention count or TTL; typed references and immutable receipts survive.
 prior_role_report_preview_bytes = 4000 # UTF-8 bytes per continuation summary/state; 0 disables text (0-128000).
-history_temporaries = 64       # Decision-history crash-leftover recovery budget (1-4096); excess fails closed without cleanup.
-decision_projection_records = 512 # Combined page retention rows (1-512); explicit projection overflow refuses.
-decision_receipt_diagnostics = 10 # Malformed-receipt diagnostics per decision page (0-100); 0 hides the sample, not decisions.
+history_temporaries = 64       # Work-item history crash-leftover recovery budget (1-4096); excess fails closed without cleanup.
 queue_observations = 8          # Contended-admission observations in started.json (0-100); also trimmed to the 64 KiB read cap, tracking omitted.
-decision_reconciliation_bytes = 8388608 # Host-only activation plan/report bytes (1-67108864); runtime checks the report digest, not its body.
 admission_wait_seconds = 0    # Keep the FIFO ticket until dispatch or cancellation; positive values opt into a deadline.
 busy_retry_seconds = 300      # Separate timed provider-selection recovery window; 0 disables recovery waiting.
 drain_yield = true             # Persistent, non-ephemeral units wrap up at a safe request boundary on explicit drain.
@@ -255,8 +221,7 @@ snapshot_bytes = 268435456
 snapshot_files = 20000
 history_index = 128              # Published IDs in the active history window; merge ancestry uses the same bound.
 prompt_snapshots = 6             # Recent anchored summaries offered to each work unit.
-retention_days = 31              # Operator-selected retention window (days) for budget day-files and decided proposals. 0 disables time-based reaping; this clock never expires runs, snapshots or permanent audit records.
-automatic_insight_archive_interval_seconds = 3600 # Per-project cadence for automatic decided-insight archiving (0 disables automatic passes; `mizu insight ingest` remains immediate; 0–2678400).
+retention_days = 31              # Operator-selected retention window (days) for budget day-files. 0 disables time-based reaping; this clock never expires runs, snapshots or permanent audit records.
 run_retention_days = 31        # Expire only complete, unreferenced run components (0 keeps indefinitely; 0–3650).
 run_retention_scan_runs = 5000  # Physical runs per retention scan (1–100000); independent of usage reports; incomplete scans refuse all deletion.
 host_record_reference_scan_entries = 5000 # Host partition and legacy-root entries per snapshot scan; budget exhaustion refuses reclamation.
@@ -273,17 +238,13 @@ event_log_compress_days = 7    # Compress bulky per-run engine logs (*-events.js
 event_log_retention_days = 31   # Drop bulky per-run engine logs (raw and .gz) older than M days (0 disables); Lifecycle records follow run_retention_days, not this log clock.
 event_stream_bytes = 4194304  # Per-run engine event-stream retention in bytes (1 MiB-256 MiB); past-budget bytes are dropped with an explicit *-events-truncated.json marker while the run continues.
 probe_executable_bytes = 268435456 # Maximum local executable size hashed for recovery-probe identity (default 256 MiB; host I/O policy).
-insight_history_entries = 1000 # Per history page: exact revision reads/rows (1-1000); --limit defaults/caps here, --after-rev continues across gaps; no directory scan.
-insight_cursor_ttl_seconds = 86400 # Absolute insight page cursor lifetime (60-604800 seconds); continuation never extends it.
-pending_insights = 30            # Newest pending proposals offered per prompt. Raw inbox/decisions stay on disk; `mizu insight list` uses 1000.
+queue_opening_messages = 3       # Newest due messages stated per readable queue in a unit opening (0-64); the count is always stated.
 work_items_doing = 1             # Per-role active doing slots (1-100); blocked waits excluded.
 work_items_stale_seconds = 86400 # Doing-age review visibility only (1-31536000); never expires a hold.
-operator_record_catalog_scan_entries = 2048 # Work-item record_closed catalog directory entries; positive TOML integer.
-work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow and incomplete legacy coverage are explicit).
+work_items_prompt = 20           # Open work-item rows per full/delta prompt (1-100; overflow is explicit).
 session_delta_details = "elide"  # full|elide: full/delta previews use exact read references only with that grant; shared-check details and row/liveness metadata stay explicit.
-decision_events_limit = 10  # Decision events per dispatch per role (1-100; default 10). Bound stays 100; value is policy.
-work_item_events_limit = 10 # Terminal work-item events per dispatch per role (1-100; default 10). Independent of the decision batch above.
-wait_events_limit = 10      # Structured insight/CI/proposal waits and dependency obligations per source (1-100; default 10).
+work_item_events_limit = 10 # Terminal work-item events per dispatch per role (1-100; default 10).
+wait_events_limit = 10      # CI wait events per dispatch (1-100; default 10).
 session_max_tokens = 0          # Restart a resumed persistent session once cumulative tokens reach N (0 disables).
 session_max_cost_usd = 0         # Restart a resumed persistent session once estimated cost (USD) reaches N (0 disables).
 session_max_age_seconds = 0      # Restart a resumed persistent session once wall-clock conversation lifetime reaches N seconds (stable creation surviving same-id saves; 0 disables).
@@ -464,7 +425,8 @@ merge_grant = false          # Explicit operator grant for vcs_dispose merge; fa
 owned_prefixes = []          # Temporary integration namespaces (e.g. ["mizu/"]); only these retire.
 protected_refs = []          # Exact long-lived refs that always win (e.g. ["main"]); never retire.
 poll_enabled = false         # Explicit opt-in for daemon upstream/CI polling; false disables.
-poll_proposals_enabled = false # Additional opt-in for proposal observations; also requires poll_enabled.
+observation_queue = ""         # Declared queue (host may write) receiving external proposal observations; empty disables; also requires poll_enabled.
+approval_queue = ""            # Declared queue (operator may write) holding operator "GO <branch>" approval messages for vcs_publish and merges.
 poll_interval_seconds = 300  # Daemon poll cadence in seconds (15-86400).
 poll_max_branches = 4            # Actual CI branches polled per daemon tick (1-64).
 poll_max_ci_wait_targets = 16    # Unique receipt-resolved branch/SHA wait targets per tick (1-64).
@@ -509,18 +471,14 @@ workspace = "write"
 # Optional per-role sequential shell for direct exec only; requires the existing "exec" grant. Default false.
 # persistent_exec = true
 # Grant "check_job" to run acceptance checks asynchronously, so a long check does not block the unit (docs/check-jobs.md).
-capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "insights", "decide", "consult", "work_items_read", "work_items_create", "work_items_transition", "work_order", "finish"]
+capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "fetch", "search", "queues", "consult", "work_items_read", "work_items_create", "work_items_transition", "work_order", "finish"]
 daemon = true
 # Per-role per-run spend override (optional, same range as [limits]; unset keeps the project value).
 # requests_per_run = 24
 # tools_per_run = 64
 # wrap_up_requests = 3
 # wrap_up_tools = 5
-# Per-role event batch overrides (optional, 1-100 each; unset keeps the matching project default).
-# decision_events_limit = 10
-# Shared decision delivery requires an explicit page-byte budget per subscriber.
-# Unset by default; setting a budget does NOT activate shared delivery.
-# decision_page_bytes = 65536  # 1-1048576; include references/metadata, reserve other prompt space.
+# Per-role terminal work-item batch override (optional, 1-100; unset keeps the project default).
 # work_item_events_limit = 10
 # Per-role no-progress timer-wake override (optional, 0-86400; unset keeps the project value).
 # no_progress_backoff_seconds = 0 # Override this role's no-progress timer; unset writer roles use the project writer default.
@@ -542,7 +500,7 @@ daemon = true
 # Per-role progress-signal override (optional, same unique supported names
 # as [limits].progress_signals; unset inherits the project list, explicit []
 # disables qualification for this role).
-# progress_signals = ["tool", "code", "decision", "insight", "input"]
+# progress_signals = ["tool", "code", "message", "input"]
 # Per-role event-only recovery poll override (optional, 60-2678400 seconds,
 # default 60; the Task Scheduler minimum/bounds). Applies to unscheduled watched
 # roles on all platforms: Linux/macOS recheck pending event inputs alongside
@@ -550,38 +508,25 @@ daemon = true
 # event_poll_seconds = 60
 
 [roles.searcher]
-held_at_capacity = false # Explicit opt-in to limits.open_work_items; inert at threshold 0.
 profile = "alternate"
 policy = ["policies/shared.md", "policies/searcher.md"]
 workspace = "read"
-# Add "withdraw_decided" here only to allow retracting proposals with a current accept/modify disposition.
-capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
+capabilities = ["files", "read", "search", "fetch", "experiment", "queues", "work_items_read", "finish"]
 interval_seconds = 1800
 
 [roles.reviewer]
 profile = "alternate"
 policy = ["policies/shared.md", "policies/reviewer.md"]
 workspace = "read"
-capabilities = ["files", "read", "diff", "exec", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
+capabilities = ["files", "read", "diff", "exec", "experiment", "queues", "work_items_read", "finish"]
 # on_change combines with interval_seconds. Roles compare the code digest;
 # a review_verdict capability holder's approval transfers to a same-code successor,
 # so only a changed code digest arms a new review.
 on_change = true
 interval_seconds = 900
-# A rejected finding returns for reconsideration even when the code is unchanged.
-# decision_events = ["reject"]
-# Terminal work from this role's findings can also return for follow-up (default []).
+# Terminal work items can return for follow-up (default []).
 # work_item_events = ["done", "dropped"]
-# Routes are independent when work_item_sources is explicit; each any requires
-# its own nonempty subscription. Both default to own.
-# decision_sources = "any"  # decisions from any source; requires decision_events.
-# work_item_sources = "own" # terminal events by origin submitter, never actor.
-# Dispatch batches are independent per source: decision_events_limit bounds only
-# decisions and work_item_events_limit only terminal events (role override or
-# project default). wait_events_limit is project-wide and applies separately to
-# each structured-wait/obligation source; there is no shared total.
-# Migration: omitted work_item_sources inherits legacy decision_sources for terminal
-# delivery; terminal-only legacy decision_sources="any" resolves to decision own, work-item any.
+# work_item_sources = "own" # own: items this role created; any: every matching item.
 # A red ci_branch wakes only roles with ci_wake (default true for write roles,
 # false otherwise), so event-only roles skip CI they never subscribed to.
 # ci_wake = false
@@ -596,7 +541,7 @@ interval_seconds = 900
 profile = "primary"
 policy = ["policies/shared.md", "policies/reporter.md"]
 workspace = "read"
-capabilities = ["files", "read", "diff", "insights", "report", "work_items_read", "finish"]
+capabilities = ["files", "read", "diff", "queues", "report", "work_items_read", "finish"]
 calendar = ["07:00", "19:00"]
 
 [roles.consult]
@@ -610,23 +555,22 @@ capabilities = ["files", "read", "work_items_read", "finish"]
 profile = "primary"
 policy = ["policies/shared.md", "policies/maintainer.md"]
 workspace = "write"
-capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "insights", "decide", "consult", "work_items_read", "finish"]
+capabilities = ["files", "read", "diff", "exec", "experiment", "verify", "queues", "consult", "work_items_read", "finish"]
 interval_seconds = 21600
 
 [roles.maintainer-searcher]
 profile = "alternate"
 policy = ["policies/shared.md", "policies/maintainer-searcher.md"]
 workspace = "read"
-capabilities = ["files", "read", "search", "fetch", "experiment", "submit_insight", "revise_insight", "withdraw_insight", "work_items_read", "finish"]
+capabilities = ["files", "read", "search", "fetch", "experiment", "queues", "work_items_read", "finish"]
 interval_seconds = 21600
 
 # Dedicated publisher for external publication only. Uncomment to enable on a
 # project with `[vcs] command` configured; run explicitly via
-# `mizu run <project> --role publisher` after the operator records
-# `GO <branch>` approval for the current code digest (see docs/configuration.md).
-# This role never holds `decide`, so it cannot approve its own push (config
-# load refuses that combination); it may hold `submit_insight` for ordinary
-# reports, which can never mint an operator-channel GO approval. `workspace = "write"` below is
+# `mizu run <project> --role publisher` after the operator writes a
+# `GO <branch>` approval message for the current code digest to
+# `[vcs] approval_queue` (see docs/configuration.md). Only a message the kernel
+# bound to the operator approves; role messages never do. `workspace = "write"` below is
 # required plumbing: config load refuses `verify`/`sync`/`vcs_publish` without
 # it. It is not an edit grant: the capability list holds no source-editing
 # tool (no `exec`, no edit engine tools), so merging stays ordinary workspace
@@ -635,16 +579,13 @@ interval_seconds = 21600
 # profile = "primary"
 # policy = ["policies/shared.md", "policies/publisher.md"]
 # workspace = "write"
-# capabilities = ["files", "read", "diff", "verify", "sync", "vcs_read", "vcs_publish", "insights", "finish"]
+# capabilities = ["files", "read", "diff", "verify", "sync", "vcs_read", "vcs_publish", "queues", "finish"]
 
 # Dedicated integrator for external PR/ref operations only. Uncomment to enable
 # on a project with `[vcs]` command and grants configured; run explicitly via
-# `mizu run <project> --role integrator` after the operator records
-# `GO <branch>` approval for the current code digest (see docs/configuration.md).
-# This role never holds `decide`, so it cannot approve its own disposition
-# (config load refuses that combination); it may hold `submit_insight` for
-# ordinary integration reports, which can never mint an operator-channel
-# GO approval. `workspace = "read"` is
+# `mizu run <project> --role integrator` after the operator writes a
+# `GO <branch>` approval message for the current code digest to
+# `[vcs] approval_queue` (see docs/configuration.md). `workspace = "read"` is
 # enough: integration authority is the capability plus the configured grants,
 # not source-write access. It holds no source-editing tool (no `exec`, no edit
 # engine tools) and no `verify`, so it cannot edit or complete source work.
@@ -652,7 +593,7 @@ interval_seconds = 21600
 # profile = "alternate"
 # policy = "policies/integrator.md"
 # workspace = "read"
-# capabilities = ["files", "read", "vcs_read", "vcs_dispose", "vcs_retire", "insights", "finish"]
+# capabilities = ["files", "read", "vcs_read", "vcs_dispose", "vcs_retire", "queues", "finish"]
 
 # Optional role that asks the provider for CI at an exact published commit. It
 # also needs `[vcs] request_grant = true`; without that grant the capability
@@ -688,6 +629,5 @@ interval_seconds = 21600
 # values = ["easy", "hard"]
 # Bounded current-work inputs for inference (defaults shown; 0 disables).
 # [selectors.adaptive.classifier.inputs]
-# max_proposals = 8
-# max_decisions = 8
+# max_messages = 8
 # max_text_bytes = 2048

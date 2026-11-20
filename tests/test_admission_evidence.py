@@ -8,8 +8,6 @@ from support import Fixture, ScriptDriver
 from mizu.admission import _Queue, admission, role_exclusion
 from mizu.errors import Busy, Denied
 from mizu.dispatch_evidence import AdmissionSource
-from mizu.decision_reconciliation import _boundary
-from mizu.insights import Insights
 from mizu.evidence_records import read_retained
 from mizu.fs import canonical, lock, read_json, write_json
 from mizu.runtime import (Engine, MAX_STARTED_EVIDENCE_BYTES,
@@ -68,77 +66,6 @@ class AdmissionEvidenceTests(Fixture):
                     self.assertEqual(current.observation['bypassed_busy_ticket_ids'], [head.identity])
         self.assertEqual(choice, {'candidates': [], 'total': 2, 'omitted': 2, 'complete': False})
 
-    def test_choice_capture_does_not_exclude_alternative_reconciliation_or_change_fifo(self):
-        self.config = dataclasses.replace(self.config,
-            limits=dataclasses.replace(self.config.limits, parallel_runs=1))
-        head, current, later = (self.queue(name, observe=True)
-                                for name in ('worker', 'reporter', 'maintainer'))
-        # Enqueue all three while their own exclusions are unavailable, so
-        # even an older ready ticket cannot prevent the fixture from queuing.
-        with contextlib.ExitStack() as held:
-            for queue in (head, current, later):
-                held.enter_context(lock(next(iter(queue.paths.values())), blocking=False))
-                with self.assertRaises(Busy):
-                    queue.attempt(enqueue=True)
-        source = current.evidence_source
-        captured, reconciled, busy = [], [], []
-        insights = Insights(self.project.root)
-
-        def capture(ticket, *, held):
-            captured.append((ticket['id'], held))
-            if held:
-                # Deterministically enter the real consumer at the former
-                # held=True alternative-probe point. Evidence exceptions are
-                # swallowed, so retain any Busy for an explicit assertion.
-                try:
-                    with _boundary(insights, {'maintainer': {}}):
-                        reconciled.append(ticket['id'])
-                except Busy as exc:
-                    busy.append(str(exc))
-            return source(ticket, held=held)
-
-        class Capture:
-            metadata = source.metadata
-            __call__ = staticmethod(capture)
-        current.evidence_source = Capture()
-        with lock(role_exclusion(self.project.root, 'worker'), blocking=False), \
-                patch.object(current, '_slots', wraps=current._slots) as slots:
-            selected = current.attempt(enqueue=False)
-            with selected:
-                self.assertEqual(busy, [])
-                self.assertEqual(slots.call_count, 1)
-                view = current.observation['choice_set']
-                self.assertFalse(view['complete'])
-                self.assertEqual(view['omitted'], 0)
-                self.assertEqual(view['total'], 3)
-                self.assertEqual([r['admission_id'] for r in view['candidates']],
-                                 [head.identity, current.identity, later.identity])
-                self.assertEqual([r['readiness'] for r in view['candidates']],
-                                 ['busy', 'ready', 'unknown'])
-                self.assertEqual(current.observation['bypassed_busy_ticket_ids'], [head.identity])
-                self.assertEqual(reconciled, [current.identity])
-                self.assertEqual(captured, [(current.identity, False), (current.identity, True)])
-                self.assertIsNone(view['candidates'][0]['profile'])
-                self.assertIsNone(view['candidates'][2]['session']['key'])
-                # Only the actual selected exclusions/slot were acquired.
-                with self.assertRaises(Busy), lock(role_exclusion(self.project.root, 'reporter'), blocking=False):
-                    pass
-                with self.assertRaises(Busy), lock(self.config.data / 'slots/0.lock', blocking=False):
-                    pass
-                with lock(role_exclusion(self.project.root, 'maintainer'), blocking=False):
-                    pass
-                with lock(self.project.root / 'locks/workspace.lock', blocking=False):
-                    pass
-                with self.assertRaises(Busy):
-                    later.attempt(enqueue=False)
-        # Once the original head is ready FIFO still refuses later admission,
-        # irrespective of the incomplete evidence about the later candidate.
-        with self.assertRaisesRegex(Busy, 'Older execution admission is ready'):
-            later.attempt(enqueue=False)
-        with lock(role_exclusion(self.project.root, 'reporter'), blocking=False):
-            pass
-        with lock(self.config.data / 'slots/0.lock', blocking=False):
-            pass
 
     def test_persistent_generation_is_read_at_admission_and_matches_dispatch_identity(self):
         queue = self.queue('reporter', observe=True)

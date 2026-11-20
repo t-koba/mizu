@@ -7,10 +7,9 @@ import re
 import unittest
 
 from support import Fixture
-from mizu.config import (DEFAULT_INSIGHT_HISTORY_ENTRIES, DEFAULT_PROBE_EXECUTABLE_BYTES,
-                         MAX_DECISION_PROJECTION_RECORDS, MAX_DECISION_RECEIPT_DIAGNOSTICS,
-                         MAX_HISTORY_TEMPORARIES, MAX_INSIGHT_HISTORY_ENTRIES,
-                         MAX_QUEUE_OBSERVATIONS, MAX_DECISION_RECONCILIATION_BYTES,
+from mizu.config import (DEFAULT_PROBE_EXECUTABLE_BYTES,
+                         MAX_HISTORY_TEMPORARIES,
+                         MAX_QUEUE_OBSERVATIONS,
                          MAX_PROJECT_GOAL_BYTES, MAX_CHECK_INPUT_BOUND, TOML_INTEGER_MAX,
                          MAX_STORAGE_RUN_ENTRIES,
                          Limits, ROOT_KEYS, _LIMIT_RANGES, load)
@@ -35,24 +34,6 @@ class CheckInputBoundConfigTests(Fixture):
                 with self.assertRaises(ConfigError):
                     load(self.file)
 
-
-class OperatorRecordCatalogLimitTests(Fixture):
-    def test_positive_toml_integer_default_and_override(self):
-        key = 'operator_record_catalog_scan_entries'
-        base = re.sub(rf'(?m)^{key} = .*\n', '', self.file.read_text())
-        self.file.write_text(base)
-        self.assertEqual(getattr(load(self.file).limits, key), 2048)
-        self.assertEqual(_LIMIT_RANGES[key], (1, TOML_INTEGER_MAX))
-        for value in ('1', '2048', str(TOML_INTEGER_MAX), '0', '-1',
-                      str(TOML_INTEGER_MAX + 1), 'true', '1.5', '"1"', '[]', '{}'):
-            with self.subTest(value=value):
-                self.file.write_text(base.replace(
-                    '\n[limits]\n', f'\n[limits]\n{key} = {value}\n'))
-                if value in ('1', '2048', str(TOML_INTEGER_MAX)):
-                    self.assertEqual(getattr(load(self.file).limits, key), int(value))
-                else:
-                    with self.assertRaisesRegex(ConfigError, f'limits.{key}'):
-                        load(self.file)
 
 
 class PriorRoleReportPreviewConfigTests(Fixture):
@@ -132,27 +113,6 @@ attributes = {{label = {{type = "string"}}}}
                                               spec['on_error'][1]['seconds'], spec['reselection_interval_seconds']),
                                              tuple(timers[f] for f in fields))
 
-
-class InsightHistoryLimitConfigTests(Fixture):
-    def test_default_override_range_and_project_wiring(self):
-        self.assertEqual(MAX_INSIGHT_HISTORY_ENTRIES, 1000)
-        self.assertEqual(DEFAULT_INSIGHT_HISTORY_ENTRIES, 1000)
-        self.assertEqual(Limits().insight_history_entries, 1000)
-        self.assertEqual(_LIMIT_RANGES["insight_history_entries"], (1, 1000))
-        base = re.sub(r'(?m)^insight_history_entries = .*\n', '', self.file.read_text())
-        self.file.write_text(base)
-        self.assertEqual(load(self.file).limits.insight_history_entries, 1000)
-        for value in ("1", "500", "1000", "0", "1001", "-1", "true", "1.5", "\"1\"", "[]", "{}"):
-            with self.subTest(value=value):
-                self.file.write_text(base.replace(
-                    "\n[limits]\n", f"\n[limits]\ninsight_history_entries = {value}\n"))
-                if value in ("1", "500", "1000"):
-                    config = load(self.file)
-                    self.assertEqual(config.limits.insight_history_entries, int(value))
-                    self.assertEqual(Project(config, "sample").insights.history_entries, int(value))
-                else:
-                    with self.assertRaisesRegex(ConfigError, "limits.insight_history_entries"):
-                        load(self.file)
 
 
 class WaitEventsLimitConfigTests(Fixture):
@@ -458,78 +418,7 @@ class SmokeRetentionScanConfigTests(Fixture):
                 self.file.write_text(base)
 
 
-class DecisionProjectionConfigTests(Fixture):
-    def test_default_and_absolute_range(self):
-        self.assertEqual(MAX_DECISION_PROJECTION_RECORDS, 512)
-        self.assertEqual(Limits().decision_projection_records, 512)
-        original = re.sub(r'(?m)^decision_projection_records = .*\n', '', self.file.read_text())
-        self.file.write_text(original)
-        self.assertEqual(load(self.file).limits.decision_projection_records, 512)
-        for value in ('1', '512', '513', '1000000', '0', '-1',
-                      'true', 'false', '1.5', '"1"', '[]', '{}'):
-            with self.subTest(value=value):
-                self.file.write_text(original.replace(
-                    '\n[limits]\n',
-                    f'\n[limits]\ndecision_projection_records = {value}\n'))
-                if value in ('1', '512'):
-                    self.assertEqual(load(self.file).limits.decision_projection_records,
-                                     int(value))
-                else:
-                    with self.assertRaisesRegex(ConfigError,
-                                                'limits.decision_projection_records'):
-                        load(self.file)
 
-
-class ReconciliationPlanConfigTests(Fixture):
-    def test_default_and_absolute_range(self):
-        self.assertEqual(MAX_DECISION_RECONCILIATION_BYTES, 64 * 1024 * 1024)
-        self.assertEqual(Limits().decision_reconciliation_bytes, 8 * 1024 * 1024)
-        base = self.file.read_text()
-        for name, default, ceiling in (
-                ('decision_reconciliation_bytes', 8 * 1024 * 1024,
-                 MAX_DECISION_RECONCILIATION_BYTES),):
-            with self.subTest(name=name):
-                original = re.sub(rf'(?m)^{name} = .*\n', '', base)
-                self.file.write_text(original)
-                self.assertEqual(getattr(load(self.file).limits, name), default)
-                for value in ('1', str(default), str(ceiling), str(ceiling + 1),
-                              '0', '-1', 'true', 'false', '1.5', '"1"', '[]', '{}'):
-                    with self.subTest(value=value):
-                        self.file.write_text(original.replace(
-                            '\n[limits]\n', f'\n[limits]\n{name} = {value}\n'))
-                        if value in ('1', str(default), str(ceiling)):
-                            self.assertEqual(getattr(load(self.file).limits, name), int(value))
-                        else:
-                            with self.assertRaisesRegex(ConfigError, f'limits.{name}'):
-                                load(self.file)
-                self.file.write_text(base)
-
-
-class DiagnosticSampleConfigTests(Fixture):
-    def test_defaults_and_ranges(self):
-        self.assertEqual(MAX_DECISION_RECEIPT_DIAGNOSTICS, 100)
-        self.assertEqual(MAX_QUEUE_OBSERVATIONS, 100)
-        self.assertEqual(Limits().decision_receipt_diagnostics, 10)
-        self.assertEqual(Limits().queue_observations, 8)
-        base = self.file.read_text()
-        for name, default, ceiling in (
-                ('decision_receipt_diagnostics', 10, 100),
-                ('queue_observations', 8, 100)):
-            with self.subTest(name=name):
-                original = re.sub(rf'(?m)^{name} = .*\n', '', base)
-                self.file.write_text(original)
-                self.assertEqual(getattr(load(self.file).limits, name), default)
-                for value in ('0', str(default), str(ceiling), str(ceiling + 1),
-                              '-1', 'true', 'false', '1.5', '"1"', '[]', '{}'):
-                    with self.subTest(value=value):
-                        self.file.write_text(original.replace(
-                            '\n[limits]\n', f'\n[limits]\n{name} = {value}\n'))
-                        if value in ('0', str(default), str(ceiling)):
-                            self.assertEqual(getattr(load(self.file).limits, name), int(value))
-                        else:
-                            with self.assertRaisesRegex(ConfigError, f'limits.{name}'):
-                                load(self.file)
-                self.file.write_text(base)
 
 
 class CompletionEvidenceConfigTests(Fixture):

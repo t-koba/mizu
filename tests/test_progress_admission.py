@@ -2,7 +2,6 @@
 import dataclasses
 import datetime as dt
 import time
-from unittest.mock import patch
 
 from support import Fixture, ScriptDriver, delivered_ack_tokens
 from mizu.config import DEFAULT_PROGRESS_SIGNALS, load, role_no_progress_backoff_seconds, role_progress_signals
@@ -10,7 +9,7 @@ from mizu.errors import ConfigError, Denied
 from mizu.explain import explain
 from mizu.fs import canonical, digest, now, read_json, write_json
 from mizu.runtime import (Engine, _is_observational_operation, _operator_woke,
-                          _progress_obligations_digest, _progress_record, _writer_next_task, should_run)
+                          _progress_record, _writer_next_task, should_run)
 from mizu.snapshot import PROGRESS_SIGNALS, no_progress_recovery_due, progress_disposition, validate_next_step, validate_progress
 
 
@@ -38,7 +37,7 @@ class ProgressConfigTests(Fixture):
             candidate = raw
             if setting == "progress_signals":
                 candidate = candidate.replace(
-                    'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
+                    'progress_signals = ["tool", "code", "message", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
                     f"progress_signals = {invalid}")
             if setting == "no_progress_continuations":
                 candidate = candidate.replace("no_progress_continuations = 0", f"no_progress_continuations = {invalid}")
@@ -67,12 +66,12 @@ class ProgressConfigTests(Fixture):
                           limits.no_progress_recovery_after), (100, 86400, 86400, 100))
 
         empty = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
+            'progress_signals = ["tool", "code", "message", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
             "progress_signals = []")
         self.file.write_text(empty)
         self.assertEqual(load(self.file).limits.progress_signals, ())
         state_opt_in = raw.replace(
-            'progress_signals = ["tool", "code", "decision", "insight", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
+            'progress_signals = ["tool", "code", "message", "input"] # Signals qualify immediate progress; writer handoff also needs a new next_step. Empty disables qualification.',
             'progress_signals = ["state"]')
         self.file.write_text(state_opt_in)
         self.assertEqual(load(self.file).limits.progress_signals, ("state",))
@@ -81,12 +80,11 @@ class ProgressConfigTests(Fixture):
 class ProgressAdmissionTests(Fixture):
     def _baseline(self):
         current = self.project.snapshots.get()
-        generation = self.project.insights.generation()
         base = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Now: Baseline inputs\nNext: Continue the progress experiment", run=None,
             outcome="wait", summary="Baseline inputs for a progress test",
-            wake_at=time.time() + 3600, inbox_seen=generation,
+            wake_at=time.time() + 3600,
             wake_generation=self.project.control().get("wake_generation", ""),
             parent=current["id"])
         self.project.snapshots.publish(base)
@@ -99,8 +97,7 @@ class ProgressAdmissionTests(Fixture):
         return validate_progress({
             "schema": 1, "signals": signals, "selected": selected, "role": role,
             "has_progress": has_progress, "no_progress_count": count,
-            "obligations_digest": _progress_obligations_digest(
-                self.project.insights.pending_obligations(role)),
+            "obligations_digest": digest(canonical([])),
             "recorded_at": stamp or now(),
         })
 
@@ -112,7 +109,6 @@ class ProgressAdmissionTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Now: Baseline inputs\nNext: Continue the progress experiment", run=None, outcome=outcome,
             summary="Progress disposition test", wake_at=wake_at,
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control().get("wake_generation", ""),
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(snapshot)
@@ -135,6 +131,21 @@ class ProgressAdmissionTests(Fixture):
                 ctx.handle("finish", args)
         Engine(config, driver=ScriptDriver(run)).run(self.project, "worker")
         return self.project.snapshots.get()
+
+    def test_existing_state_reads_and_receipt_replays_are_observational(self):
+        for operation in ("files", "read", "diff", "research_read", "vcs_read",
+                          "command_evidence_read", "experiment_evidence_read",
+                          "queue_read", "message_read", "message_refs"):
+            self.assertTrue(_is_observational_operation(operation, {}), operation)
+        for operation in ("queue_write", "queue_ack"):
+            self.assertFalse(_is_observational_operation(operation, {}), operation)
+        for action in ("list", "logs", "result"):
+            self.assertTrue(_is_observational_operation("check_job", {"action": action}))
+        cases = (("fetch", "receipt_id", {"url": "https://example.test/"}),
+                 ("search", "result_id", {"query": "new work"}))
+        for operation, argument, request in cases:
+            self.assertTrue(_is_observational_operation(operation, {argument: "recorded-id"}), operation)
+            self.assertFalse(_is_observational_operation(operation, request), operation)
 
     def test_next_declaration_is_bounded_unambiguous_and_requires_work(self):
         self.assertEqual(validate_next_step('Add the test.'), 'Add the test.')
@@ -241,25 +252,6 @@ class ProgressAdmissionTests(Fixture):
         self.assertIsNone(_writer_next_task(self.project, snapshot, "worker"))
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
 
-    def test_existing_state_reads_and_receipt_replays_are_observational(self):
-        for operation in ("files", "read", "diff", "insights", "research_read", "vcs_read",
-                          "command_evidence_read", "experiment_evidence_read",
-                          "objects_read", "objects_list", "events_read"):
-            self.assertTrue(_is_observational_operation(operation, {}), operation)
-        for operation in ("objects_create", "objects_transition", "events_ack"):
-            self.assertFalse(_is_observational_operation(operation, {}), operation)
-        for action in ("list", "logs", "result"):
-            self.assertTrue(_is_observational_operation("check_job", {"action": action}))
-        for status in ("queued", "running"):
-            self.assertTrue(_is_observational_operation("check_job", {"action": "result"}, {"status": status}))
-        self.assertFalse(_is_observational_operation("check_job", {"action": "result"}, {"status": "completed"}))
-        cases = (("fetch", "receipt_id", {"url": "https://example.test/"}),
-                 ("probe", "receipt_id", {"url": "https://example.test/", "method": "GET"}),
-                 ("search", "result_id", {"query": "new work"}))
-        for operation, argument, request in cases:
-            self.assertTrue(_is_observational_operation(operation, {argument: "recorded-id"}), operation)
-            self.assertFalse(_is_observational_operation(operation, request), operation)
-
     def test_finish_only_unchanged_run_is_recorded_as_no_progress_and_parked(self):
         snapshot = self._recorded_run()
         self.assertEqual(snapshot["outcome"], "continue")
@@ -268,74 +260,6 @@ class ProgressAdmissionTests(Fixture):
         self.assertFalse(snapshot["progress"]["has_progress"])
         self.assertEqual(snapshot["progress"]["no_progress_count"], 1)
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-
-    def test_default_progress_ignores_observations_and_free_text_state(self):
-        def repeated_read(ctx, base):
-            for _ in range(3):
-                ctx.handle("files", {})
-        observation = self._recorded_run(repeated_read)
-        self.assertFalse(observation["progress"]["signals"]["tool"])
-        self.assertFalse(observation["progress"]["has_progress"])
-        self.assertEqual(observation["progress"]["no_progress_count"], 1)
-        self.assertFalse(should_run(self.project, observation, role_name="worker"))
-
-        def failed_tool(ctx, base):
-            with self.assertRaises(Denied):
-                ctx.handle("files", {"unexpected": True})
-            ctx.handle("finish", {"outcome": "continue", "summary": "Tool refused",
-                                   "next_step": 'Continue the progress experiment', "state": base["state"]})
-        failed = self._recorded_run(failed_tool)
-        self.assertFalse(failed["progress"]["signals"]["tool"])
-
-        def change_code(ctx, base):
-            (ctx.workspace / "app.py").write_text("VALUE = 17\n")
-            ctx.handle("finish", {"outcome": "continue", "summary": "Code changed",
-                                   "next_step": 'Continue the progress experiment', "state": base["state"]})
-        code = self._recorded_run(change_code)
-        self.assertTrue(code["progress"]["signals"]["code"])
-
-        def finish_with_state(ctx, base, value):
-            ctx.handle("finish", {"outcome": "continue", "summary": "State was reworded",
-                                   "next_step": 'Continue the progress experiment', "state": value})
-        state = self._recorded_run(
-            lambda ctx, base: finish_with_state(ctx, base, "Now: a distinct recorded state.\nNext: Continue the progress experiment"))
-        self.assertTrue(state["progress"]["signals"]["state"])
-        self.assertNotIn("state", state["progress"]["selected"])
-        self.assertFalse(state["progress"]["has_progress"])
-        self.assertEqual(state["progress"]["no_progress_count"], 1)
-        self.assertFalse(should_run(self.project, state, role_name="worker"))
-
-        opted_in_limits = dataclasses.replace(
-            self.config.limits, progress_signals=DEFAULT_PROGRESS_SIGNALS + ("state",))
-        opted_in_config = dataclasses.replace(self.config, limits=opted_in_limits)
-        opted_in = self._recorded_run(
-            lambda ctx, base: finish_with_state(ctx, base, "Now: another paraphrase.\nNext: Continue the progress experiment"),
-            custom_config=opted_in_config)
-        self.assertIn("state", opted_in["progress"]["selected"])
-        self.assertTrue(opted_in["progress"]["has_progress"])
-
-        enabled = dataclasses.replace(self.config.roles["worker"], capabilities=tuple(
-            dict.fromkeys((*self.config.roles["worker"].capabilities, "submit_insight"))))
-        roles = dict(self.config.roles)
-        roles["worker"] = enabled
-        config = dataclasses.replace(self.config, roles=roles)
-        def actions(ctx, base):
-            record = ctx.handle("submit_insight", {"title": "A tested action", "body": "Observed detail."})
-            ctx.handle("decide", {"id": record["id"], "action": "accept", "reason": "Evidence supports it.", "rev": 1})
-            ctx.handle("finish", {"outcome": "continue", "summary": "Decision recorded",
-                                   "next_step": 'Implement the accepted finding', "state": "Now: accepted work.\nNext: Implement the accepted finding"})
-        action = self._recorded_run(actions, custom_config=config)
-        self.assertTrue(action["progress"]["signals"]["tool"])
-        self.assertTrue(action["progress"]["signals"]["decision"])
-        self.assertTrue(action["progress"]["signals"]["insight"])
-        self.assertEqual(action["progress"]["no_progress_count"], 0)
-
-    def test_new_inbox_generation_offered_to_run_counts_as_input(self):
-        base = self._baseline()
-        self.project.insights.submit(source="editor", title="New input", body="Fresh evidence.",
-                                     base_snapshot=base["id"])
-        result = self._recorded_run(base=base)
-        self.assertTrue(result["progress"]["signals"]["input"])
 
     def test_operator_wake_offered_to_run_counts_as_input(self):
         base = self._baseline()
@@ -373,192 +297,16 @@ class ProgressAdmissionTests(Fixture):
         self.assertTrue(snapshot["progress"]["signals"]["tool"])
         self.assertEqual(snapshot["progress"]["no_progress_count"], 0)
 
-    def test_persistent_obligations_and_non_due_ci_do_not_reset_streak(self):
-        target = self.project.insights.submit(
-            source="worker", title="Result needed", body="Evidence.", addressee="operator",
-            base_snapshot=self.project.snapshots.get()["id"])
-        item = self.project.insights.submit(
-            source="reviewer", title="Dependent finding", body="Evidence.", addressee="operator",
-            base_snapshot=self.project.snapshots.get()["id"])
-        self.project.insights.decide(
-            item["id"], "defer", "Needs result", "After decision", "test", expected_rev=1,
-            wait={"kind": "dependency", "recipient": "worker", "requires": {
-                "insight": target["id"], "rev": 1, "action": "accept"}})
-        parked = self._parked_snapshot(count=4)
-        present_ci = [{"sha": "red", "check": "offline", "run": "test"}]
-        def ci_due(project, config, role, *due_args):
-            return [] if due_args else present_ci
-        with patch("mizu.role_admission._ci_due_for", side_effect=ci_due):
-            for expected in (5, 6):
-                self.assertTrue(self.project.insights.pending_obligations("worker"))
-                snapshot = self._recorded_run(base=parked)
-                self.assertFalse(snapshot["progress"]["signals"]["input"])
-                self.assertEqual(snapshot["progress"]["no_progress_count"], expected)
-                self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-                parked = snapshot
-
-    def test_new_obligation_is_input_once_even_without_inbox_generation_change(self):
-        target = self.project.insights.submit(
-            source="worker", title="Result needed", body="Evidence.", addressee="operator",
-            base_snapshot=self.project.snapshots.get()["id"])
-        item = self.project.insights.submit(
-            source="reviewer", title="Dependent finding", body="Evidence.", addressee="operator",
-            base_snapshot=self.project.snapshots.get()["id"])
-        parked = self._parked_snapshot(count=4)
-        generation = self.project.insights.generation()
-        self.project.insights.decide(
-            item["id"], "defer", "Needs result", "After decision", "test", expected_rev=1,
-            wait={"kind": "dependency", "recipient": "worker", "requires": {
-                "insight": target["id"], "rev": 1, "action": "accept"}})
-        self.assertEqual(self.project.insights.generation(), generation)
-        self.assertTrue(self.project.insights.pending_obligations("worker"))
-
-        first = self._recorded_run(base=parked)
-        self.assertTrue(first["progress"]["signals"]["input"])
-        self.assertEqual(first["progress"]["no_progress_count"], 0)
-        second = self._recorded_run(base=first)
-        self.assertFalse(second["progress"]["signals"]["input"])
-        self.assertEqual(second["progress"]["no_progress_count"], 1)
-        self.assertFalse(should_run(self.project, second, role_name="worker"))
-
-    def test_due_ci_and_consumed_wait_and_decision_events_reset_streak_once(self):
-        # These are one-shot inputs, unlike pending obligation/CI visibility.
-        for kind in ("ci", "wait", "decision"):
-            with self.subTest(kind=kind):
-                config = self.config
-                if kind in ("wait", "decision"):
-                    item = self.project.insights.submit(
-                        source="worker", title="One-shot input", body="Evidence.",
-                        base_snapshot=self.project.snapshots.get()["id"])
-                    if kind == "wait":
-                        past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=5)).isoformat()
-                        self.project.insights.decide(
-                            item["id"], "defer", "Until deadline", "After deadline", "test",
-                            expected_rev=1, wait={"kind": "deadline", "at": past})
-                    else:
-                        self.project.insights.decide(
-                            item["id"], "reject", "Reconsider", "", "test", expected_rev=1)
-                        roles = dict(self.config.roles)
-                        roles["worker"] = dataclasses.replace(roles["worker"], decision_events=("reject",))
-                        config = dataclasses.replace(self.config, roles=roles)
-                parked = self._parked_snapshot(count=4)
-                due = [{"sha": "red", "check": "offline", "run": "test"}] if kind == "ci" else []
-                with patch("mizu.engine_dispatch._ci_due_for_with_facts", return_value=(due, [])):
-                    result = self._recorded_run(base=parked, custom_config=config,
-                                                ack_decisions=(kind in ("wait", "decision")))
-                self.assertTrue(result["progress"]["signals"]["input"])
-                self.assertEqual(result["progress"]["no_progress_count"], 0)
-                self.assertEqual(self.project.insights.due_waits("worker", result), [])
-                self.assertEqual(self.project.insights.decision_events("worker", ("reject",)), [])
-                with patch("mizu.engine_dispatch._ci_due_for_with_facts", return_value=([], [])):
-                    repeated = self._recorded_run(base=result, custom_config=config)
-                self.assertFalse(repeated["progress"]["signals"]["input"])
-                self.assertEqual(repeated["progress"]["no_progress_count"], 1)
-
     def _publish_progress(self, progress, outcome):
         current = self.project.snapshots.get()
         snapshot = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
             state="Now: unchanged input.\nNext: Inspect the result", run=None, outcome=outcome,
             summary="Counted no-progress finish", wake_at=4102444800,
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control().get("wake_generation", ""),
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(snapshot)
         return self.project.snapshots.get()
-
-    def test_unchanged_input_wait_and_blocked_finishes_count_and_park(self):
-        selected = tuple(DEFAULT_PROGRESS_SIGNALS)
-        signals = {name: False for name in PROGRESS_SIGNALS}
-        digest = _progress_obligations_digest(())
-        signature = self.project.work_items.page_ready(role_name="worker")["signature"]
-        args = dict(obligations_digest=digest, ready_work=False,
-                    ready_work_signature=signature)
-        first = _progress_record({}, "worker", selected, signals, "wait", **args)
-        second = _progress_record({"progress": first}, "worker", selected, signals, "wait", **args)
-        blocked = _progress_record({"progress": second}, "worker", selected, signals, "blocked", **args)
-        self.assertEqual([item["no_progress_count"] for item in (first, second, blocked)], [1, 2, 3])
-        self.assertFalse(no_progress_recovery_due(first, "wait", self.config, "worker"))
-        self.assertTrue(no_progress_recovery_due(second, "wait", self.config, "worker"))
-        self.assertTrue(no_progress_recovery_due(blocked, "blocked", self.config, "worker"))
-        # Recovery and disposition follow the recorded input, not an outcome name.
-        self.assertFalse(no_progress_recovery_due(blocked, "done", self.config, "worker"))
-        self.assertEqual(progress_disposition(blocked, "blocked", self.config, "worker"),
-                         "parked_no_progress")
-        observer = self._record(role="searcher", count=2)
-        self.assertEqual(progress_disposition(observer, "wait", self.config, "searcher"),
-                         "not_applicable")
-        snapshot = self._publish_progress(blocked, "blocked")
-        self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-        status = self.project.status()["progress"]
-        self.assertEqual(status["disposition"], "parked_no_progress")
-        self.assertEqual(status["recovery"]["status"], "due")
-        self.assertEqual(status["recovery"]["no_progress_count"], 3)
-
-    def test_progress_and_input_changes_restart_wait_streak(self):
-        selected = tuple(PROGRESS_SIGNALS)
-        signals = {name: False for name in PROGRESS_SIGNALS}
-        digest = _progress_obligations_digest(())
-        args = dict(obligations_digest=digest, ready_work=False, ready_work_signature="1" * 64)
-        previous = _progress_record({}, "worker", selected, signals, "wait", **args)
-        self.assertEqual(previous["no_progress_count"], 1)
-        for name in PROGRESS_SIGNALS:
-            with self.subTest(signal=name):
-                progressed = _progress_record(
-                    {"progress": previous}, "worker", selected, {**signals, name: True}, "wait", **args)
-                self.assertTrue(progressed["has_progress"])
-                self.assertEqual(progressed["no_progress_count"], 0)
-        for changed in ({"ready_work_signature": "2" * 64},
-                        {"obligations_digest": "3" * 64},
-                        {"ready_work": True}):
-            with self.subTest(changed=changed):
-                restarted = _progress_record({"progress": previous}, "worker", selected, signals,
-                                             "wait", **{**args, **changed})
-                self.assertFalse(restarted["has_progress"])
-                self.assertEqual(restarted["no_progress_count"], 1)
-        unchanged = _progress_record({"progress": previous}, "worker", selected, signals, "wait", **args)
-        self.assertEqual(unchanged["no_progress_count"], 2)
-
-    def test_explicit_wakes_dispatch_on_change_writer_with_unchanged_code(self):
-        roles = dict(self.config.roles)
-        roles["worker"] = dataclasses.replace(roles["worker"], on_change=True)
-        config = dataclasses.replace(self.config, roles=roles)
-        self.project.config = config
-        for kind in ("operator", "inbox", "goal", "elapsed_wait"):
-            with self.subTest(kind=kind):
-                parked = self._parked_snapshot(
-                    count=4, outcome="wait" if kind == "elapsed_wait" else "continue",
-                    wake_at=time.time() - 10 if kind == "elapsed_wait" else None)
-                write_json(self.project.root / "observed" / "worker.json",
-                           {"code_digest": parked["code_digest"]})
-                if kind == "operator":
-                    self.project.set_control(wake_generation="new-operator-wake")
-                elif kind == "inbox":
-                    self.project.insights.submit(
-                        source="editor", title="Fresh inbox", body="Evidence.",
-                        base_snapshot=parked["id"])
-                elif kind == "goal":
-                    (self.project.root / "PROJECT.md").write_text("A changed objective.\n")
-                self.assertTrue(should_run(self.project, parked, role_name="worker"))
-                calls = []
-                def finish(ctx, prompt, profile):
-                    calls.append(True)
-                    ctx.handle("finish", {"outcome": "continue", "summary": "Wake consumed",
-                                          "next_step": 'Continue the progress experiment', "state": ctx.snapshot["state"]})
-                engine = Engine(config, driver=ScriptDriver(finish))
-                # Explicit file-trigger dispatch still requires a due event.
-                self.assertEqual(engine.run(self.project, "worker", event_trigger=True)["skipped"], "no-event")
-                result = engine.run(self.project, "worker")
-                self.assertEqual(result["status"], "completed")
-                self.assertEqual(calls, [True])
-                snapshot = self.project.snapshots.get()
-                self.assertEqual(snapshot["code_digest"], parked["code_digest"])
-                if kind != "goal":
-                    self.assertTrue(snapshot["progress"]["signals"]["input"])
-                    self.assertEqual(snapshot["progress"]["no_progress_count"], 0)
-                    # Delivered input is consumed; without a new next_step it cannot loop.
-                self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-                self.assertEqual(engine.run(self.project, "worker")["skipped"], "unchanged")
 
     def test_streak_increments_and_resets_on_selected_progress_role_or_policy_change(self):
         selected = ("code",)
@@ -637,22 +385,6 @@ class ProgressAdmissionTests(Fixture):
             with self.subTest(count=count):
                 self._parked_snapshot(count=count)
                 self.assertEqual(engine.run(self.project, "reviewer")["skipped"], "unchanged")
-
-    def test_external_wakes_and_wait_expiry_survive_parking(self):
-        parked = self._parked_snapshot(count=1)
-        self.project.set_control(wake_generation="a-new-operator-generation")
-        self.assertTrue(should_run(self.project, parked, role_name="worker"))
-        self.project.set_control(wake_generation=parked["wake_generation"])
-
-        with patch.object(self.project.insights, "generation", return_value="new-inbox-generation"):
-            self.assertTrue(should_run(self.project, parked, role_name="worker"))
-        with patch("mizu.role_admission._role_events_due", return_value=True):
-            self.assertTrue(should_run(self.project, parked, role_name="worker"))
-        with patch("mizu.role_admission._ci_due_for", return_value=[{"sha": "red"}]):
-            self.assertTrue(should_run(self.project, parked, role_name="worker"))
-
-        wait = self._parked_snapshot(count=1, outcome="wait", wake_at=100)
-        self.assertTrue(should_run(self.project, wait, current_time=101, role_name="worker"))
 
     def test_no_progress_recovery_warning_is_visible_without_self_admitting(self):
         parked = self._parked_snapshot(count=2)
@@ -783,12 +515,11 @@ class ProgressAdmissionTests(Fixture):
 class PerRoleProgressSignalsTests(Fixture):
     def _baseline(self):
         current = self.project.snapshots.get()
-        generation = self.project.insights.generation()
         base = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Now: Baseline inputs\nNext: Continue the progress experiment", run=None,
             outcome="wait", summary="Baseline inputs for a progress test",
-            wake_at=time.time() + 3600, inbox_seen=generation,
+            wake_at=time.time() + 3600,
             wake_generation=self.project.control().get("wake_generation", ""),
             parent=current["id"])
         self.project.snapshots.publish(base)
@@ -801,8 +532,7 @@ class PerRoleProgressSignalsTests(Fixture):
         return validate_progress({
             "schema": 1, "signals": signals, "selected": selected, "role": role,
             "has_progress": has_progress, "no_progress_count": count,
-            "obligations_digest": _progress_obligations_digest(
-                self.project.insights.pending_obligations(role)),
+            "obligations_digest": digest(canonical([])),
             "recorded_at": stamp or now(),
         })
 
@@ -889,22 +619,6 @@ class PerRoleProgressSignalsTests(Fixture):
         self.assertEqual(load(self.file).roles["worker"].progress_signals, ("state",))
         self.file.write_text(original)
 
-    def test_record_selection_uses_effective_list_and_resets_streak(self):
-        config = self._with_role_signals("worker", ("state",))
-        snapshot = self._recorded_run(custom_config=config)
-        self.assertEqual(snapshot["progress"]["selected"], ["state"])
-        # Signal-policy change resets the consecutive no-progress streak.
-        previous = self._record(role="worker", selected=list(DEFAULT_PROGRESS_SIGNALS), count=3)
-        reselected = _progress_record({"progress": previous}, "worker", ("state",),
-                                      {n: False for n in PROGRESS_SIGNALS}, "continue",
-                                      obligations_digest=previous["obligations_digest"])
-        self.assertEqual(reselected["selected"], ["state"])
-        self.assertEqual(reselected["no_progress_count"], 1)
-        continued = _progress_record({"progress": reselected}, "worker", ("state",),
-                                     {n: False for n in PROGRESS_SIGNALS}, "continue",
-                                     obligations_digest=reselected["obligations_digest"])
-        self.assertEqual(continued["no_progress_count"], 2)
-
     def test_disposition_and_recovery_follow_effective_list(self):
         config = self._with_role_signals("worker", ("state",))
         # Same record content parks under the override but progresses by default.
@@ -947,52 +661,6 @@ class ReadOnlyProgressTests(Fixture):
             ctx.handle("finish", args)
         return Engine(self.config, driver=ScriptDriver(finish)).run(
             self.project, "reviewer", **kwargs)
-
-    def test_explicit_operator_wake_is_role_cursored_once_even_for_probes(self):
-        self.run_observer(outcome="wait")
-        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
-        before = self.project.snapshots.get()
-        self.project.set_control(wake_generation="observer-wake")
-        self.assertTrue(should_run(self.project, before, role_name="reviewer"))
-        self.assertEqual(self.run_observer(outcome="wait", event_trigger=True)["status"], "completed")
-        self.assertEqual(self.cursor()["wake_generation_digest"], digest(b"observer-wake"))
-        self.assertTrue(self.cursor()["progress"]["signals"]["input"])
-        self.assertEqual(self.project.snapshots.get()["id"], before["id"])
-        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
-        self.assertEqual(self.run_observer()["skipped"], "unchanged")
-        self.assertFalse(should_run(self.project, before, role_name="reviewer"))
-        # Global inbox/goal/wait changes are not observer wake signals.
-        self.project.insights.submit(source="editor", title="Unrouted input", body="News",
-                                     base_snapshot=before["id"])
-        (self.project.root / "PROJECT.md").write_text("New writer objective")
-        self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
-        self.assertEqual(self.run_observer()["skipped"], "unchanged")
-
-    def test_meaningful_progress_self_admits_then_no_progress_parks(self):
-        self.run_observer(outcome="wait")
-        self.project.set_control(wake_generation="new-input")
-        def submit(ctx):
-            ctx.handle("submit_insight", {"title": "A new observation", "body": "Measured evidence",
-                                        "addressee": "operator"})
-        before = self.project.snapshots.get()["id"]
-        self.run_observer(submit)
-        progress = validate_progress(self.cursor()["progress"])
-        self.assertTrue(progress["signals"]["tool"])
-        self.assertTrue(progress["signals"]["insight"])
-        self.assertFalse(progress["signals"]["code"])
-        self.assertEqual(progress["role"], "reviewer")
-        self.assertEqual(progress["no_progress_count"], 0)
-        self.assertTrue(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
-        self.assertEqual(self.run_observer()["status"], "completed")
-        progress = self.cursor()["progress"]
-        self.assertFalse(progress["has_progress"])
-        self.assertFalse(progress["signals"]["input"])
-        self.assertEqual(progress["no_progress_count"], 1)
-        self.assertEqual(self.run_observer()["skipped"], "unchanged")
-        self.assertFalse(should_run(self.project, self.project.snapshots.get(), role_name="reviewer"))
-        self.assertEqual(self.project.snapshots.get()["id"], before)
-        self.project.set_control(wake_generation="wake-parked-observer")
-        self.assertEqual(self.run_observer()["status"], "completed")
 
     def test_bounded_continuations_use_role_policy_and_saturating_counter(self):
         self.config.roles["reviewer"] = dataclasses.replace(
@@ -1059,18 +727,3 @@ class ReadOnlyProgressTests(Fixture):
         self.assertEqual(self.cursor()["wake_generation_digest"], digest(b"later-wake"))
         self.assertEqual(self.run_observer(event_trigger=True)["skipped"], "no-event")
 
-    def test_role_routed_event_wakes_parked_progress_without_repeating_input(self):
-        self.config.roles["reviewer"] = dataclasses.replace(
-            self.config.roles["reviewer"], decision_events=("reject",))
-        self.run_observer()  # initial input progress
-        self.run_observer()  # empty continuation parks
-        self.assertEqual(self.run_observer()["skipped"], "unchanged")
-        proposal = self.project.insights.submit(
-            source="reviewer", title="Finding", body="Evidence",
-            base_snapshot=self.project.snapshots.get()["id"])
-        self.project.insights.decide(proposal["id"], "reject", "Not material", "", "test", expected_rev=1)
-        self.assertEqual(self.run_observer(event_trigger=True, ack_decisions=True)["status"], "completed")
-        self.assertTrue(self.cursor()["progress"]["signals"]["input"])
-        self.assertEqual(self.run_observer()["status"], "completed")
-        self.assertFalse(self.cursor()["progress"]["signals"]["input"])
-        self.assertEqual(self.run_observer()["skipped"], "unchanged")

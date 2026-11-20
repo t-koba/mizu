@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from support import Fixture, bind_delivery, ScriptDriver, finish_with_event_acks, forget_ledger
-from mizu import fs, insight_archive, work_item_events as events
+from mizu import fs, work_item_events as events
 from mizu.cli import execute, parser
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied, InfraExceeded, LimitExceeded, MissingFinish
@@ -30,11 +30,9 @@ class WorkItemEventTests(Fixture):
 
     def seed(self, source="reviewer"):
         self.serial += 1
-        proposal = self.project.insights.submit(
-            source=source, title=f"Terminal work {self.serial}", body="Evidence", base_snapshot=None)
-        decision = self.project.insights.decide(
-            proposal["id"], "accept", "reviewed", "", "run", expected_rev=1)
-        return proposal, decision["work_item"]
+        seed = self.store.create(idempotency_key=f"terminal-{self.serial}",
+                                 title=f"Terminal work {self.serial}", actor=source)["record"]["work_item"]
+        return seed, seed
 
     def terminal(self, source="reviewer", *, timestamp=None, done=False):
         proposal, seed = self.seed(source)
@@ -143,21 +141,6 @@ class WorkItemEventTests(Fixture):
         self.finish(ctx, ack_events=[row["ack_token"]])
         self.assertEqual(self.page()["pending"], 2)
 
-    def test_terminal_stale_payload_refused_before_intent(self):
-        proposal, _ = self.terminal()
-        ctx = self.context("reviewer")
-        ctx.work_item_events = self.delivered()
-        token = ctx.work_item_events[0]["ack_token"]
-        # Current routing/payload changed: retained identity alone is not enough.
-        (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
-        forget_ledger(self.project.root)
-        self.assertNotEqual(self.delivered(sources="any")[0]["ack_token"], token)
-        with self.assertRaises(Denied):
-            self.finish(ctx, ack_events=[token])
-        self.assertIsNone(ctx.finished)
-        self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
-        self.assertEqual(self.page(sources="any")["pending"], 1)
-
     def test_corrected_terminal_revision_invalidates_old_delivered_token(self):
         from mizu import acceptance
         _, seed = self.seed()
@@ -201,44 +184,6 @@ class WorkItemEventTests(Fixture):
         self.assertNotIn("ack_token", page["events"][0])  # raw store view unchanged
         self.assertEqual(len(events.delivery("reviewer", page)["events"][0]["ack_token"]), 64)
 
-    def test_finish_shared_contract_excludes_ci_status_and_check_jobs(self):
-        from test_waits import _defer, _past
-        from test_dependencies import _submit, _wait
-        self.terminal()
-        self.terminal()
-        _defer(self.project, "reviewer", {"kind": "deadline", "at": _past()})
-        result = _submit(self.project, "worker", "Result")
-        _defer(self.project, "worker", _wait(recipient="reviewer", target=result["id"]))
-        roles = dict(self.subscribed_config().roles)
-        roles["reviewer"] = dataclasses.replace(roles["reviewer"], decision_events=("accept",))
-        config = dataclasses.replace(self.config, roles=roles)
-        remaining_decisions = []
-        def mixed(ctx, prompt, profile=None):
-            data = json.loads(prompt)
-            decision = next(r for r in data["decision_events"] if r["action"] == "accept")
-            selected = [decision["ack_token"], data["work_item_events"][1]["ack_token"],
-                        data["wait_events"][0]["ack_token"], data["obligations"][0]["ack_token"]]
-            remaining_decisions.extend(r["ack_token"] for r in data["decision_events"]
-                                       if r["ack_token"] not in selected)
-            # CI waits share wait_events, but never the structured wait tokens.
-            ctx.wait_events.append({"kind": "ci", "registration_id": "0" * 32, "ack_token": "a" * 64})
-            ctx.ci_failures = [{"ack_token": "b" * 64}]
-            ctx.check_jobs = [{"ack_token": "c" * 64}]
-            for token in ("a" * 64, "b" * 64, "c" * 64):
-                with self.assertRaises(Denied):
-                    self.finish(ctx, ack_events=[*selected, token])
-                self.assertIsNone(ctx.finished)
-                self.assertFalse((ctx.run_dir / "finish-intent.json").exists())
-            ctx.wait_events.pop()
-            ctx.ci_failures = []
-            self.finish(ctx, ack_events=selected)
-        Engine(config, driver=ScriptDriver(mixed)).run(self.project, "reviewer")
-        self.assertEqual(self.page()["pending"], 1)
-        self.assertEqual([r["ack_token"] for r in self.project.insights.decision_events("reviewer", ("accept",))],
-                         remaining_decisions)
-        self.assertEqual(self.project.insights.due_waits("reviewer", self.project.snapshots.get()), [])
-        self.assertEqual(self.project.insights.pending_obligations("reviewer"), [])
-
     def test_terminal_selection_is_independent_of_outcome_and_check_wait(self):
         roles = dict(self.subscribed_config().roles)
         roles["reviewer"] = dataclasses.replace(roles["reviewer"], capabilities=(
@@ -274,142 +219,6 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(self.page("worker")["pending"], 1)
         Engine(config, driver=ScriptDriver(finish_with_event_acks)).run(self.project, "worker")
         self.assertEqual(self.page("worker")["pending"], 0)
-
-    def test_disabled_default_and_config_validation(self):
-        self.assertTrue(all(not r.work_item_events for r in self.config.roles.values()))
-        original = self.file.read_text()
-        for values, scope, valid in (("[]", "own", True), ('["done"]', "any", True),
-                                      ('["done", "dropped"]', "own", True),
-                                      ('["done", "done"]', "own", False),
-                                      ('["doing"]', "own", False), ('["DONE"]', "own", False),
-                                      ('"done"', "own", False), ("[]", "any", False)):
-            with self.subTest(values=values, scope=scope):
-                self.file.write_text(original.replace(
-                    "[roles.reviewer]", f'[roles.reviewer]\nwork_item_events = {values}\ndecision_sources = "{scope}"'))
-                if valid:
-                    self.assertEqual(load(self.file).roles["reviewer"].work_item_sources, scope)
-                    self.assertEqual(load(self.file).roles["reviewer"].decision_sources, "own")
-                else:
-                    with self.assertRaises(ConfigError):
-                        load(self.file)
-
-    def test_independent_route_defaults_migration_and_validation(self):
-        original = self.file.read_text()
-        # decision subscription, terminal subscription, raw route lines, effective pair
-        cases = [
-            ('[]', '[]', '', ("own", "own")),
-            ('["reject"]', '["done"]', 'decision_sources = "any"', ("any", "any")),
-            ('[]', '["done"]', 'decision_sources = "any"', ("own", "any")),
-            ('["reject"]', '[]', 'decision_sources = "any"', ("any", "own")),
-            ('[]', '["done"]', 'work_item_sources = "any"', ("own", "any")),
-            ('["reject"]', '["done"]', 'decision_sources = "any"\nwork_item_sources = "own"', ("any", "own")),
-            ('["reject"]', '["done"]', 'decision_sources = "own"\nwork_item_sources = "any"', ("own", "any")),
-            ('["reject"]', '["done"]', 'decision_sources = "any"\nwork_item_sources = "any"', ("any", "any")),
-            ('["reject"]', '[]', 'decision_sources = "any"\nwork_item_sources = "own"', ("any", "own")),
-            ('[]', '["done"]', 'decision_sources = "any"\nwork_item_sources = "any"', None),
-            ('["reject"]', '[]', 'work_item_sources = "any"', None),
-            ('[]', '[]', 'work_item_sources = "any"', None),
-            ('[]', '["done"]', 'work_item_sources = "everyone"', None),
-            ('[]', '["done"]', 'work_item_sources = true', None),
-            ('[]', '["done"]', 'work_item_sources = []', None),
-            ('["reject"]', '["done"]', 'decision_sources = "everyone"\nwork_item_sources = "own"', None),
-        ]
-        for decisions, terminal, routes, expected in cases:
-            with self.subTest(decisions=decisions, terminal=terminal, routes=routes):
-                self.file.write_text(original.replace(
-                    "[roles.reviewer]", f"[roles.reviewer]\ndecision_events = {decisions}\n"
-                    f"work_item_events = {terminal}\n{routes}"))
-                if expected is None:
-                    with self.assertRaises(ConfigError):
-                        load(self.file)
-                else:
-                    role = load(self.file).roles["reviewer"]
-                    self.assertEqual((role.decision_sources, role.work_item_sources), expected)
-
-    def test_independent_routes_through_pending_admission_and_cli(self):
-        text = self.file.read_text()
-        for name, decisions, terminal in (("reviewer", "any", "own"), ("searcher", "own", "any")):
-            text = text.replace(f"[roles.{name}]", f'[roles.{name}]\ndecision_events = ["accept"]\n'
-                                f'work_item_events = ["dropped"]\ndecision_sources = "{decisions}"\n'
-                                f'work_item_sources = "{terminal}"')
-        self.file.write_text(text)
-        config = load(self.file)
-        self.project.config = config
-        self.terminal(source="worker")
-        driver = ScriptDriver(finish_with_event_acks)
-        engine = Engine(config, driver=driver)
-        for name in ("reviewer", "searcher"):
-            role = config.roles[name]
-            with self.subTest(role=name):
-                decisions = self.project.insights.decision_events(name, role.decision_events,
-                                                                  sources=role.decision_sources)
-                terminal = events.pending(self.store, name, role.work_item_events, sources=role.work_item_sources)
-                self.assertEqual(len(decisions), int(name == "reviewer"))
-                self.assertEqual(terminal["pending"], int(name == "searcher"))
-                self.assertTrue(_role_events_due(self.project, self.project.snapshots.get(), name))
-                cursor_before = self.project.insights.decision_cursor(name)
-                with patch.object(self.project.insights, "acknowledge_decisions",
-                                  wraps=self.project.insights.acknowledge_decisions) as decision_ack:
-                    result = engine.run(self.project, name, event_trigger=True)
-                self.assertEqual(result["status"], "completed")
-                prompt = json.loads(driver.calls[-1][1])
-                self.assertEqual(prompt["decision_events"], decisions)
-                self.assertEqual(prompt.get("work_item_events", []), events.delivery(name, terminal)["events"])
-                if name == "reviewer":
-                    self.assertEqual(decision_ack.call_args.kwargs["sources"], "any")
-                else:
-                    decision_ack.assert_not_called()
-                    self.assertEqual(self.project.insights.decision_cursor(name), cursor_before)
-                self.assertFalse(_role_events_due(self.project, self.project.snapshots.get(), name))
-                self.assertEqual(engine.run(self.project, name, event_trigger=True)["skipped"], "no-event")
-        output = execute(parser().parse_args(["--config", str(self.file), "work-items", self.project.name]))
-        self.assertEqual(output["closed"]["items"][0]["event_acknowledgements"], {"searcher": True})
-        summaries = {row["role"]: row for row in output["event_delivery"]["roles"]}
-        self.assertEqual((summaries["reviewer"]["sources"], summaries["reviewer"]["acknowledged"]), ("own", 0))
-        self.assertEqual((summaries["searcher"]["sources"], summaries["searcher"]["acknowledged"]), ("any", 1))
-        # Any-source terminal delivery did not consume the foreign decision.
-        self.assertEqual(len(self.project.insights.decision_events("searcher", ("accept",), sources="any")), 1)
-
-    def test_origin_not_actor_and_unknown_only_any(self):
-        proposal, item = self.terminal()
-        row = self.page()["events"][0]
-        self.assertEqual(row["event"], f"work_item:{item['id']}:2")
-        self.assertEqual((row["source"], row["type"], row["actor"], row["origin_source"]),
-                         ("work_item", "dropped", "worker", "reviewer"))
-        self.assertEqual(row["origin"], {"insight_id": proposal["id"], "rev": 1})
-        self.assertTrue(row["reason_truncated"])
-        self.assertLessEqual(len(row["reason_preview"].encode()), 1024)
-        self.assertEqual(self.page("worker")["events"], [])
-        self.assertEqual(len(self.page("searcher", sources="any")["events"]), 1)
-        # Removing the supported origin body is a legacy routing hole, not an
-        # invitation to fall back to transition actor (or the identity sidecar).
-        (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
-        forget_ledger(self.project.root)
-        self.assertEqual(self.page()["events"], [])
-        self.assertEqual(self.page("worker")["events"], [])
-        unknown = self.page("searcher", sources="any")
-        self.assertEqual(unknown["unknown_routing"], 1)
-        self.assertIsNone(unknown["events"][0]["origin_source"])
-        self.assertEqual(unknown["events"][0]["routing"], "unknown")
-
-    def test_revised_then_archived_origin_preserves_seed_refs_and_routing(self):
-        proposal, item = self.terminal()
-        revised = self.project.insights.revise(proposal["id"], source="reviewer", title="Revised",
-                                                body="New evidence", base_snapshot=None, expected_rev=1)
-        self.assertEqual(revised["rev"], 2)
-        original = self.page()["events"][0]
-        self.assertEqual(original["title"], item["title"])
-        self.assertEqual(original["origin"]["rev"], 1)
-        # Use the supported archive writer, then remove the inbox record as GC does.
-        body = self.project.insights.read(proposal["id"])
-        identity = read_json(self.project.root / "insight-ids" / f"{proposal['id']}.json")
-        self.assertEqual(identity["id"], proposal["id"])
-        insight_archive.store(self.project.root, body, {}, identity)
-        (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
-        forget_ledger(self.project.root)
-        self.assertEqual(self.page()["events"], [original])
-        events.acknowledge(self.store, "reviewer", [original])
-        self.assertEqual(self.page()["acknowledged"], 1)
 
     def test_done_has_snapshot_and_bounded_verification_reference(self):
         _, item = self.terminal(done=True)
@@ -470,23 +279,6 @@ class WorkItemEventTests(Fixture):
         # clock value. Exact receipts must still expose it.
         _, rollback = self.terminal(timestamp="2010-01-01T00:00:00+00:00")
         self.assertEqual(self.page(limit=1)["events"][0]["id"], rollback["id"])
-
-    def test_later_decision_cursor_never_hides_older_work_event_and_vice_versa(self):
-        self.terminal(timestamp="2020-01-01T00:00:00+00:00")
-        proposal = self.project.insights.submit(source="reviewer", title="Decision only",
-                                                body="Evidence", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "No work", "", "run", expected_rev=1)
-        decisions = self.project.insights.decision_events("reviewer", ("reject",))
-        self.project.insights.acknowledge_decisions("reviewer", decisions)
-        cursor = self.project.insights.decision_cursor("reviewer")
-        self.assertEqual(len(self.page()["events"]), 1)
-        events.acknowledge(self.store, "reviewer", self.page()["events"])
-        self.assertEqual(self.project.insights.decision_cursor("reviewer"), cursor)
-        proposal = self.project.insights.submit(source="reviewer", title="Decision only",
-                                                body="Evidence", base_snapshot=None)
-        self.project.insights.decide(proposal["id"], "reject", "Another", "", "run", expected_rev=1)
-        self.assertEqual(len(self.project.insights.decision_events("reviewer", ("reject",))), 1)
-        self.assertEqual(self.page()["events"], [])
 
     def test_partial_ack_failure_is_exact_and_replay_safe_and_per_role(self):
         for _ in range(3):
@@ -579,46 +371,6 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(self.page()["acknowledged"], 1)
         self.assertEqual(self.page()["pending"], 0)
 
-    def test_acknowledgement_collision_requires_a_fully_valid_receipt(self):
-        _, item = self.terminal()
-        selected = self.page()["events"]
-        receipt = events._receipt_path(self.store, "reviewer", item)
-        valid = {"role": "reviewer", "source": "work_item", "event": selected[0]["event"],
-                 "acknowledged_at": "2026-01-01T00:00:00+00:00"}
-        target = self.root / "receipt-target.json"
-        write_json(target, valid)
-        real_write = events.write_json
-        invalid = ["{", "[]", json.dumps({"event": valid["event"]})]
-        invalid += [json.dumps({**valid, key: value}) for key, value in (
-            ("role", "searcher"), ("source", "decision"), ("event", "work_item:other:2"),
-            ("acknowledged_at", "invalid"), ("extra", True))]
-        for content in [*invalid, "symlink", "hardlink", "absent"]:
-            with self.subTest(content=content):
-                def collide(path, value, **kwargs):
-                    if content == "absent":
-                        raise Denied("Write denied without a receipt")
-                    if content == "symlink":
-                        try:
-                            path.symlink_to(target)
-                        except (OSError, NotImplementedError):
-                            self.skipTest("Symlinks unavailable")
-                    elif content == "hardlink":
-                        os.link(target, path)
-                    else:
-                        path.write_text(content)
-                    return real_write(path, value, **kwargs)
-
-                try:
-                    with patch.object(events, "write_json", side_effect=collide):
-                        with self.assertRaises(Denied):
-                            events.acknowledge(self.store, "reviewer", selected)
-                    if receipt.exists() and not receipt.is_symlink():
-                        self.assertEqual(receipt.read_bytes(), target.read_bytes()
-                                         if content == "hardlink" else content.encode())
-                    self.assertEqual(read_json(target), valid)
-                finally:
-                    receipt.unlink(missing_ok=True)
-
     def test_malformed_or_incomplete_chain_and_unsafe_receipt_fail_closed(self):
         _, item = self.terminal()
         path = self.project.root / "work-items" / item["id"] / "2.json"
@@ -653,42 +405,6 @@ class WorkItemEventTests(Fixture):
         self.assertEqual(page["acknowledged"], 12)
         self.assertEqual(page["acknowledged_event_ids"], expected)
         self.assertTrue(page["acknowledged_ids_truncated"])
-
-    def test_event_admission_prompts_run_evidence_and_successful_only_ack(self):
-        self.project.set_control(wake_generation="")  # no pending operator wake
-        config = self.subscribed_config()
-        driver = ScriptDriver(finish_with_event_acks)
-        engine = Engine(config, driver=driver)
-        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
-        engine.run(self.project, "reviewer")  # marks unchanged code
-        self.terminal()
-        batch = events.delivery("reviewer", self.page())["events"]
-        # Ack is reached only after completed result is on disk.
-        real_ack = events.acknowledge
-        def assert_durable(store, role, rows):
-            ctx = driver.calls[-1][0]
-            self.assertEqual(read_json(ctx.run_dir / "result.json")["status"], "completed")
-            return real_ack(store, role, rows)
-        with patch.object(events, "acknowledge", side_effect=assert_durable):
-            result = engine.run(self.project, "reviewer", event_trigger=True)
-        delivered_prompt = json.loads(driver.calls[-1][1])
-        self.assertEqual(delivered_prompt["work_item_events"], batch)
-        self.assertEqual(list(delivered_prompt).index("decision_receipt_diagnostics"),
-                         list(delivered_prompt).index("decision_events") + 1)
-        self.assertEqual(list(delivered_prompt).index("work_item_events"),
-                         list(delivered_prompt).index("decision_events") + 2)
-        run = self.project.root / "runs" / result["run"]
-        self.assertEqual(read_json(run / "started.json")["admission"], "work_item")
-        self.assertEqual(read_json(run / "started.json")["work_item_events"], 1)
-        self.assertEqual(read_json(run / "prompt_projection.json")["work_item_events"], 1)
-        self.assertEqual(read_json(run / "work-item-events.json")["events"], batch)
-        self.assertEqual(json.loads(driver.calls[-1][1])["work_item_events"], batch)
-        # Full and durable-session delta prompts carry a separate field.
-        ctx = driver.calls[-1][0]
-        self.assertEqual(json.loads(prompt_for(ctx))["work_item_events"], batch)
-        self.assertEqual(json.loads(prompt_delta_for(ctx, []))["work_item_events"], batch)
-        self.assertEqual(self.page()["events"], [])
-        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
 
     def test_ack_failure_replays_and_new_events_during_run_not_acknowledged(self):
         self.terminal()
@@ -789,71 +505,6 @@ class WorkItemEventTests(Fixture):
                                                            status="dropped", actor="worker", reason="Retired"))
         return proposals, decisions, items
 
-    def test_grouped_cli_readers_keep_exact_role_parity(self):
-        proposals, _, _ = self.grouped_terminal_fixture()
-        # Unknown routing is included only by any-source subscribers.
-        (self.project.root / "inbox" / f"{proposals[0]['id']}.json").unlink()
-        forget_ledger(self.project.root)
-        template = self.config.roles["reviewer"]
-        roles = {name: dataclasses.replace(template, work_item_events=actions, work_item_sources=route)
-                 for name, actions, route in
-                 [("reviewer", ("dropped",), "own"), ("searcher", ("done", "dropped"), "own"),
-                  ("worker", ("done",), "any")]
-                 + [(f"role-{n}", ("dropped",), "any") for n in range(5)]}
-        for name, role in roles.items():
-            page = events.pending(self.store, name, role.work_item_events, sources=role.work_item_sources)
-            events.acknowledge(self.store, name, page["events"][:1])
-        expected = []
-        for name in sorted(roles):
-            role = roles[name]
-            page = events.pending(self.store, name, role.work_item_events, sources=role.work_item_sources)
-            summary = {k: v for k, v in page.items() if k not in ("events", "overflow_count", "truncated")}
-            summary.update(pending_event_ids=[row["event"] for row in page["events"]],
-                           pending_ids_truncated=page["truncated"], pending_overflow_count=page["overflow_count"])
-            expected.append(summary)
-        base = self.store.page_closed_readonly(limit=8)
-        for row in base["items"]:
-            item = self.store._get(row["id"])
-            payload = events._payload(self.store, item)
-            row["event_acknowledgements"] = {
-                name: events._received(self.store, name, item) for name in sorted(roles)
-                if payload["type"] in roles[name].work_item_events
-                and (roles[name].work_item_sources == "any" or payload["origin_source"] == name)}
-        with patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
-                patch.object(events, "write_json", side_effect=AssertionError("read write")):
-            self.assertEqual(events.closed_page(self.store, roles, limit=8), base)
-            for limit in (1, 4, 8):
-                result = events.progress(self.store, roles, limit=limit)
-                self.assertEqual(result["roles"], expected[:limit])
-                self.assertEqual(result["truncated"], limit < 8)
-            limited = events.closed_page(self.store, roles, limit=1)
-            self.assertEqual(limited["items"], base["items"][:1])
-            self.assertEqual((limited["total"], limited["overflow_count"]), (8, 7))
-
-    def test_shared_cli_scan_still_rejects_source_chain_and_receipt_corruption(self):
-        _, decisions, items = self.grouped_terminal_fixture(groups=1, unrelated=0)
-        roles = {name: dataclasses.replace(self.config.roles["reviewer"], work_item_events=("dropped",),
-                                            work_item_sources="any") for name in ("reviewer", "searcher")}
-        source = self.project.root / "decision-history" / f"{decisions[0]['decision_key']}.json"
-        chain = self.project.root / "work-items" / items[0]["id"] / "2.json"
-        events.acknowledge(self.store, "searcher", self.page("searcher", sources="any")["events"])
-        receipt = self.project.root / "work-item-receipts/searcher" / f"{items[0]['id']}.2.json"
-        for path, mutate in (
-                (source, lambda value: value["work_items"][0].update(title="Forged")),
-                (chain, lambda value: value.update(transition={"from": "doing", "to": "dropped"})),
-                (receipt, lambda value: value.update(role="reviewer"))):
-            original = path.read_bytes()
-            value = read_json(path)
-            mutate(value)
-            write_json(path, value)
-            try:
-                for reader in (lambda: events.closed_page(self.store, roles, limit=2),
-                               lambda: events.progress(self.store, roles)):
-                    with self.subTest(path=path.name), self.assertRaises(Denied):
-                        reader()
-            finally:
-                path.write_bytes(original)
-
     def test_cli_progress_is_bounded_and_read_only(self):
         # Persist an opt-in so the CLI's read-only Project uses it.
         self.file.write_text(self.file.read_text().replace(
@@ -890,54 +541,6 @@ class WorkItemEventTests(Fixture):
         self.assertTrue(bounded["truncated"])
         self.assertFalse(bounded["coverage_complete"])
 
-
-    def test_closed_cli_exact_receipts_outside_summary_sample(self):
-        text = self.file.read_text()
-        for name, route in (("worker", "own"), ("reviewer", "own"), ("searcher", "any")):
-            text = text.replace(f"[roles.{name}]", f'[roles.{name}]\nwork_item_events = ["dropped"]\n'
-                                f'work_item_sources = "{route}"')
-        self.file.write_text(text)
-        for n in range(12):
-            self.terminal(timestamp=f"2030-01-{n+1:02d}T00:00:00+00:00")
-        rows = self.page(limit=100)["events"]
-        events.acknowledge(self.store, "reviewer", rows)
-        # The all-source role has a receipt for only the oldest event.
-        events.acknowledge(self.store, "searcher", rows[:1])
-        before = {p.relative_to(self.project.root): (p.stat().st_mtime_ns, p.read_bytes())
-                  for p in self.project.root.rglob("*") if p.is_file()}
-        args = parser().parse_args(["--config", str(self.file), "work-items", self.project.name, "--closed", "100"])
-        with patch("mizu.work_items.lock", side_effect=AssertionError("read lock")), \
-                patch("mizu.work_items.WorkItems._recover_temporary_writes", side_effect=AssertionError("recovery")), \
-                patch.object(events, "write_json", side_effect=AssertionError("read write")):
-            output = execute(args)
-        after = {p.relative_to(self.project.root): (p.stat().st_mtime_ns, p.read_bytes())
-                 for p in self.project.root.rglob("*") if p.is_file()}
-        self.assertEqual(before, after)
-        summary = next(row for row in output["event_delivery"]["roles"] if row["role"] == "reviewer")
-        self.assertEqual(summary["acknowledged"], 12)
-        self.assertEqual(len(summary["acknowledged_event_ids"]), 10)
-        self.assertTrue(summary["acknowledged_ids_truncated"])
-        self.assertNotIn(rows[0]["event"], summary["acknowledged_event_ids"])
-        closed = output["closed"]["items"]
-        self.assertEqual(closed[-1]["id"], rows[0]["id"])
-        for row in closed:
-            self.assertEqual(row["event_acknowledgements"],
-                             {"reviewer": True, "searcher": row["id"] == rows[0]["id"]})
-            self.assertEqual(list(row["event_acknowledgements"]), ["reviewer", "searcher"])
-        # Transition actor worker is not routed by own; done-only is not routed.
-        text = text.replace('[roles.searcher]\nwork_item_events = ["dropped"]',
-                            '[roles.searcher]\nwork_item_events = ["done"]')
-        self.file.write_text(text)
-        output = execute(args)
-        self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {"reviewer": True})
-        # Once the submitter is unknown, only any can match (not actor worker).
-        (self.project.root / "inbox" / f"{rows[0]['origin']['insight_id']}.json").unlink()
-        forget_ledger(self.project.root)
-        output = execute(args)
-        self.assertEqual(output["closed"]["items"][-1]["event_acknowledgements"], {})
-        self.file.write_text(text.replace('[roles.searcher]\nwork_item_events = ["done"]',
-                                          '[roles.searcher]\nwork_item_events = ["dropped"]'))
-        self.assertEqual(execute(args)["closed"]["items"][-1]["event_acknowledgements"], {"searcher": True})
 
     def test_closed_acknowledgements_bounds_and_invalid_receipts_fail_closed(self):
         _, item = self.terminal()
@@ -991,43 +594,6 @@ class WorkItemEventTests(Fixture):
                     self.project, "reviewer", event_trigger=True)
         ack.assert_not_called()
         self.assertEqual(self.page()["pending"], 1)
-
-    def test_any_source_unknown_routes_admits_once_without_decision_subscription(self):
-        self.project.set_control(wake_generation="")  # no pending operator wake
-        proposal, _ = self.terminal(source="searcher")
-        (self.project.root / "inbox" / f"{proposal['id']}.json").unlink()
-        forget_ledger(self.project.root)
-        own = Engine(self.subscribed_config(), driver=ScriptDriver(finish_with_event_acks))
-        self.assertEqual(own.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
-        engine = Engine(self.subscribed_config(work_item_sources="any"), driver=ScriptDriver(finish_with_event_acks))
-        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["status"], "completed")
-        self.assertEqual(self.page(sources="any")["acknowledged"], 1)
-        self.assertEqual(engine.run(self.project, "reviewer", event_trigger=True)["skipped"], "no-event")
-
-    def test_legacy_coverage_uses_reconciled_seed_and_never_recovers_reads(self):
-        event_id = "a" * 32
-        legacy = {"id": "legacy-origin", "action": "accept", "rev": 1,
-                  "reason": "Legacy assessment", "revisit": "", "run": "legacy-run",
-                  "created_at": "2024-01-01T00:00:00+00:00"}
-        write_json(self.project.root / "decision-history" / f"{event_id}.json", legacy)
-        page = self.page(sources="any")
-        self.assertEqual((page["unseeded_decisions"], page["coverage_complete"]), (1, False))
-        self.assertEqual(page["events"], [])
-        self.store.reconcile(event_id, expected_action="accept", outcome="open",
-                             reason="Still actionable", title="Retained work", actor="worker")
-        terminal = self.store.transition(f"wi_{event_id}", expected_rev=1, status="dropped",
-                                         actor="worker", reason="Superseded")
-        # WorkItems validates its atomic-write leftovers in readonly mode;
-        # the event adapter must not invent a weaker glob/recovery path.
-        temporary = self.project.root / "work-items" / terminal["id"] / ".new-abcdefgh"
-        temporary.write_text("uncommitted")
-        before = temporary.read_bytes()
-        with patch.object(self.store, "_recover_temporary_writes", side_effect=AssertionError("recovery")):
-            page = self.page(sources="any")
-        self.assertTrue(page["coverage_complete"])
-        self.assertEqual(page["events"][0]["id"], terminal["id"])
-        self.assertEqual(page["events"][0]["routing"], "unknown")
-        self.assertEqual(temporary.read_bytes(), before)
 
     def test_bounded_dispatch_drain_excludes_receipts_before_limit(self):
         for _ in range(3):

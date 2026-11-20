@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 from support import Fixture, bind_delivery
 from mizu.errors import Busy, Denied, LimitExceeded
-from mizu.insights import Insights
 from mizu.project import Project
 from mizu.storage import backup, restore
 from mizu import storage, smoke_retention as retention, snapshot as snapshot_module
@@ -213,11 +212,8 @@ class RestoreTests(Fixture):
         retention.publish(data, smoke_id, {'status': 'pass',
                           'time': '2000-01-01T00:00:00+00:00'}, None)
         self.project.set_control(paused=True)
-        insights = Insights(self.project.root)
-        record = insights.submit(source='worker', title='Pinned restore',
-                                 body='Synthetic smoke reference', base_snapshot=None)
-        insights.attach_evidence(record['id'], source='worker', text='Keep this pair',
-                                 expected_rev=1, smoke_refs=[smoke_id])
+        self.project.work_items.create(idempotency_key='pinned', title='Pinned restore',
+                                       actor='worker', smoke_refs=[smoke_id])
         archive = self.root / f'{smoke_id}.tar.gz'
         backup(self.project, archive)
         shutil.rmtree(self.project.root)
@@ -454,144 +450,25 @@ class RestoreTests(Fixture):
         self.assertEqual(len(list(staging.iterdir())), 1)
 
     def test_roundtrip_preserves_work_item_completion_evidence(self):
-        proposal = self.project.insights.submit(
-            source="worker", title="Restore durable work", body="Keep transition evidence", base_snapshot=None)
-        decision = self.project.insights.decide(
-            proposal["id"], "accept", "reviewed", "", "run-restore", expected_rev=1)
+        item = self.project.work_items.create(
+            idempotency_key="restore", title="Restore durable work", actor="worker")["record"]["work_item"]
         captured = self.project.snapshots.capture_files(self.project.workspace)
         verification = {"passed": True, "code_digest": captured["code_digest"], "run": "run-restore"}
         snapshot = self.project.snapshots.create(
             captured, goal=self.project.goal, state="Verified work item", run="run-restore",
             outcome="done", summary="Completion evidence", verification=verification)
         self.project.snapshots.publish(snapshot)
-        bind_delivery(self.project, decision["work_item"]["id"], snapshot["id"])
+        bind_delivery(self.project, item["id"], snapshot["id"])
         completed = self.project.work_items.transition(
-            decision["work_item"]["id"], expected_rev=3, status="done", actor="worker",
+            item["id"], expected_rev=3, status="done", actor="worker",
             snapshot_id=snapshot["id"])
         self.project.set_control(paused=True)
         archive = self.root / "work-items.tar.gz"
         backup(self.project, archive)
         restore(self.config, "restored", archive)
         restored = Project(self.config, "restored")
-        self.assertEqual(restored.work_items.get(decision["work_item"]["id"]), completed)
+        self.assertEqual(restored.work_items.get(item["id"]), completed)
         self.assertTrue((restored.root / "snapshots" / f"{snapshot['id']}.json").is_file())
-
-    def test_restore_fails_closed_while_a_quarantined_pair_awaits_recovery(self):
-        from mizu.smoke_retention import publish
-        data = self.config.data
-        (data / "validation").mkdir()
-        smoke_id = "c" * 32
-        pair = Path(publish(data, smoke_id, {"status": "pass", "time": "2020-01-01T00:00:00+00:00"}, None)["pair"])
-        proposal = self.project.insights.submit(
-            source="worker", title="Pinned evidence", body="Restore this reference", base_snapshot=None)
-        self.project.insights.attach_evidence(
-            proposal["id"], source="worker", text="Pin", expected_rev=1, smoke_refs=[smoke_id])
-        self.project.set_control(paused=True)
-        archive = self.root / "smoke-recovery.tar.gz"
-        backup(self.project, archive)
-        self.project.insights.revise(
-            proposal["id"], source="worker", title="Unpinned", body="No current reference",
-            base_snapshot=None, expected_rev=1)
-
-        rename = retention.os.rename
-        def interrupt(source, destination):
-            if str(destination).endswith(".committed"):
-                raise KeyboardInterrupt("synthetic process death before deletion commit")
-            return rename(source, destination)
-        with patch.object(retention.os, "rename", side_effect=interrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                retention.run(data, apply=True)
-        self.assertTrue((data / "validation/quarantine" / f"{smoke_id}.pending").is_dir())
-        self.assertFalse(pair.exists())
-        with self.assertRaises(Denied):
-            restore(self.config, "restored-before-recovery", archive)
-        self.assertFalse((data / "projects/restored-before-recovery").exists())
-        self.assertEqual(list((data / "staging/projects").iterdir()), [])
-
-        recovered = retention.run(data, apply=True)
-        self.assertTrue(recovered["complete"])
-        self.assertEqual(recovered["recovered"], [smoke_id])
-        self.assertEqual(recovered["retired"], [])
-        self.assertTrue(pair.is_dir())
-        restore(self.config, "restored-after-recovery", archive)
-        restored = Project(self.config, "restored-after-recovery")
-        self.assertEqual(restored.insights.read(proposal["id"])["evidence"][0]["smoke_refs"], [smoke_id])
-        self.assertIn(smoke_id, retention.run(data)["pinned"])
-
-    def test_restore_root_publication_precedes_retention_scan_atomically(self):
-        from mizu.smoke_retention import publish
-        data = self.config.data
-        (data / "validation").mkdir()
-        smoke_id = "d" * 32
-        pair = Path(publish(data, smoke_id, {"status": "pass", "time": "2020-01-01T00:00:00+00:00"}, None)["pair"])
-        proposal = self.project.insights.submit(
-            source="worker", title="Pinned evidence", body="Restore this reference", base_snapshot=None)
-        self.project.insights.attach_evidence(
-            proposal["id"], source="worker", text="Pin", expected_rev=1, smoke_refs=[smoke_id])
-        self.project.set_control(paused=True)
-        archive = self.root / "smoke-publication.tar.gz"
-        backup(self.project, archive)
-        self.project.insights.revise(
-            proposal["id"], source="worker", title="Unpinned", body="No current reference",
-            base_snapshot=None, expected_rev=1)
-
-        entered, release = threading.Event(), threading.Event()
-        attempted = threading.Event()
-        original_validate, original_shared = retention.validate_restored_refs, retention.shared_lock
-        def pause_validation(root_data, root, **kwargs):
-            self.assertTrue(held(root_data / "locks/smoke-retention.lock"))
-            entered.set()
-            self.assertTrue(release.wait(10), "Restore validation was not released")
-            return original_validate(root_data, root, **kwargs)
-        @contextmanager
-        def observe_retention_lock(root_data, *, blocking=False):
-            attempted.set()
-            with original_shared(root_data, blocking=blocking):
-                yield
-
-        with patch.object(retention, "validate_restored_refs", side_effect=pause_validation), \
-             patch.object(retention, "shared_lock", observe_retention_lock), \
-             ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(restore, self.config, "restored-first", archive)
-            try:
-                self.assertTrue(entered.wait(5), "Restore did not reach locked reference validation")
-                self.assertFalse((data / "projects/restored-first").exists())
-                # Keep restore concurrent, but run the competing admission on
-                # this thread so worker startup latency cannot mask lock behavior.
-                with self.assertRaises(Busy):
-                    retention.run(data, apply=True)
-                self.assertTrue(attempted.is_set(), "Retention did not attempt the shared lock")
-                self.assertTrue(pair.is_dir())
-            finally:
-                release.set()
-            self.assertFalse(future.result(timeout=5)["armed"])
-
-        restored = Project(self.config, "restored-first")
-        self.assertEqual(restored.insights.read(proposal["id"])["evidence"][0]["smoke_refs"], [smoke_id])
-        result = retention.run(data, apply=True)
-        self.assertTrue(result["complete"])
-        self.assertIn(smoke_id, result["pinned"])
-        self.assertNotIn(smoke_id, result["retired"])
-        self.assertTrue(pair.is_dir())
-
-    def test_shared_smoke_refs_restore_only_with_complete_shared_pairs(self):
-        from mizu.smoke_retention import publish
-        import shutil
-        (self.config.data / "validation").mkdir()
-        smoke_id = "a" * 32
-        result = publish(self.config.data, smoke_id, {"status": "pass", "time": "2020-01-01T00:00:00+00:00"}, None)
-        proposal = self.project.insights.submit(source="worker", title="Shared evidence", body="Keep it", base_snapshot=None)
-        self.project.insights.attach_evidence(proposal["id"], source="worker", text="Pin", expected_rev=1, smoke_refs=[smoke_id])
-        self.project.set_control(paused=True)
-        archive = self.root / "smoke-refs.tar.gz"
-        backup(self.project, archive)
-        restore(self.config, "restored", archive)
-        restored = Project(self.config, "restored")
-        self.assertEqual(restored.insights.read(proposal["id"])["evidence"][0]["smoke_refs"], [smoke_id])
-        shutil.rmtree(result["pair"])
-        with self.assertRaises(Denied):
-            restore(self.config, "missing-pair", archive)
-        self.assertFalse((self.config.data / "projects/missing-pair").exists())
 
     def malicious(self, name, kind=None):
         archive = self.root / 'malicious.tar.gz'

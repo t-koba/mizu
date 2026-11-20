@@ -16,7 +16,8 @@ from mizu import smoke_retention as retention
 from mizu.config import load
 from mizu.errors import ConfigError, Denied, LimitExceeded
 from mizu.fs import held, write_json
-from mizu.insights import Insights
+from mizu.ledger import Ledger
+from mizu.work_items import WorkItems
 from mizu.smoke_refs import project_record_lock, shared_lock
 
 CLOCK = 2_000_000_000
@@ -61,10 +62,8 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
     def test_due_expires_only_old_unpinned_pairs_and_preserves_artifacts(self):
         free, pinned, recent = self.pair(), self.pair("b"), self.pair("c", age=31)
         root = self.data / "projects/owner"
-        insights = Insights(root)
-        item = insights.submit(source="worker", title="Live", body="Evidence", base_snapshot=None)
-        insights.attach_evidence(item["id"], source="worker", text="Synthetic",
-                                 expected_rev=1, smoke_refs=["b" * 32])
+        WorkItems(root, None, Ledger(root)).create(
+            idempotency_key="live", title="Live", actor="worker", smoke_refs=["b" * 32])
         for name in ("snapshots/keep.json", "objects/keep"):
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +218,7 @@ class AutomaticSmokeRetentionTests(unittest.TestCase):
 
     def test_incomplete_refs_and_scan_bounds_refuse_before_deletion(self):
         old = self.pair()
-        bad = self.data / "projects/owner/inbox/bad.json"
+        bad = self.data / "projects/owner/work-items/bad.json"
         bad.parent.mkdir(parents=True)
         bad.write_bytes(b"{")
         result = self.maintain()

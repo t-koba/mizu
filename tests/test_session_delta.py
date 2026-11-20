@@ -10,9 +10,9 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu.errors import ConfigError, Denied
 from mizu.engine_config import effective, session_generation, session_record, save_session
-from mizu.fs import now, read_json
+from mizu.fs import canonical, digest, now, read_json
 from mizu.project import Project
-from mizu.runtime import Engine, _progress_obligations_digest
+from mizu.runtime import Engine
 from mizu.snapshot import PROGRESS_SIGNALS, validate_progress
 
 
@@ -382,7 +382,7 @@ class SessionDeltaTests(Fixture):
             "schema": 1, "signals": signals,
             "selected": list(config.limits.progress_signals), "role": "worker",
             "has_progress": False, "no_progress_count": 1,
-            "obligations_digest": _progress_obligations_digest(()), "recorded_at": now(),
+            "obligations_digest": digest(canonical([])), "recorded_at": now(),
         })
         ctx.snapshot = {**ctx.snapshot, "outcome": "continue", "progress": progress}
         _, mode, _, rotation, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
@@ -412,7 +412,7 @@ class SessionDeltaTests(Fixture):
             "schema": 1, "signals": signals,
             "selected": list(ctx.config.limits.progress_signals), "role": "worker",
             "has_progress": False, "no_progress_count": 2,
-            "obligations_digest": _progress_obligations_digest(()), "recorded_at": now(),
+            "obligations_digest": digest(canonical([])), "recorded_at": now(),
         })
         ctx.snapshot = {**ctx.snapshot, "outcome": "continue", "progress": progress}
         _, mode, _, rotation, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
@@ -560,185 +560,6 @@ class SnapshotRevivalTests(Fixture):
         self.assertEqual(revived["id"], ids[0])
         self.assertEqual(revived["summary"], "snap 0")
 
-
-def _submit(fixture, source, title):
-    return fixture.project.insights.submit(
-        source=source, title=title, body="body",
-        base_snapshot=fixture.project.snapshots.get()["id"])
-
-
-class SessionBacklogTests(Fixture):
-    def test_full_prompt_states_open_backlog(self):
-        ids = {_submit(self, "worker", f"Finding {i}")["id"] for i in range(2)}
-        capture = Capture()
-        result = Engine(self.config, driver=capture).run(self.project, "worker")
-        decoded = json.loads(capture.prompts[0])
-        self.assertNotIn("goal", decoded)
-        self.assertEqual(decoded["goal_digest"], self.project.snapshots.get()["goal_digest"])
-        stated = decoded["open_insights"]
-        self.assertEqual(set(stated["ids"]), ids)
-        self.assertEqual(stated["total"], 2)
-        self.assertFalse(stated["truncated"])
-        self.assertEqual(projection(self, result["run"])["open_insights"], 2)
-
-    def test_delta_with_no_new_offers_still_states_backlog(self):
-        from mizu.engine_config import write_prompt_state
-        from mizu.runtime import session_prompt
-        ids = {_submit(self, "worker", f"Finding {i}")["id"] for i in range(2)}
-        ctx = self.context("worker")
-        path = save_worker_session(self, {"tokens": 0})
-        # Mimic the post-run state: same snapshot, same inbox generation, so
-        # the delta offers nothing new -- the reported empty-backlog case.
-        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
-                           inbox_generation=self.project.insights.generation())
-        prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
-        decoded = json.loads(prompt)
-        self.assertEqual(mode, "delta")
-        self.assertEqual(decoded["pending_insights"], [])
-        stated = decoded["open_insights"]
-        self.assertEqual(set(stated["ids"]), ids)
-        self.assertEqual(stated["total"], 2)
-        self.assertFalse(stated["truncated"])
-
-    def test_delta_reoffers_insights_excluded_from_previous_opening(self):
-        from mizu.engine_config import write_prompt_state
-        from mizu.runtime import session_prompt
-        item = _submit(self, "worker", "Finding")
-        ctx = self.context("worker")
-        path = save_worker_session(self, {"tokens": 0})
-        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
-                           inbox_generation=self.project.insights.generation(),
-                           sections=["work_order"])
-        prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
-        self.assertEqual(mode, "delta")
-        self.assertIn(item["id"], {row["id"] for row in json.loads(prompt)["pending_insights"]})
-
-    def test_delta_reoffers_insights_with_malformed_sections(self):
-        from mizu.engine_config import write_prompt_state
-        from mizu.fs import write_json
-        from mizu.runtime import session_prompt
-        item = _submit(self, "worker", "Finding")
-        path = save_worker_session(self, {"tokens": 0})
-        for sections in (None, "insights", {"insights": True}, ["insights", 1]):
-            with self.subTest(sections=sections):
-                ctx = self.context("worker")
-                write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
-                                   inbox_generation=self.project.insights.generation())
-                record = read_json(path.parent / "prompt_state.json")
-                record["sections"] = sections
-                write_json(path.parent / "prompt_state.json", record)
-                prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
-                self.assertEqual(mode, "delta")
-                self.assertIn(item["id"], {row["id"] for row in json.loads(prompt)["pending_insights"]})
-
-    def test_finish_records_which_sections_were_delivered(self):
-        from mizu import prompt_sections
-
-        def finish(ctx, *_):
-            ctx.handle("finish", {"outcome": "wait", "summary": "x", "state": "Now: x.\nNext: y."})
-
-        path = save_worker_session(self, {"tokens": 0})
-        Engine(self.config, driver=ScriptDriver(finish)).run(self.project, "worker")
-        self.assertIn("insights", read_json(path.parent / "prompt_state.json")["sections"])
-
-        # A role that excludes the section must record it as not delivered,
-        # so a later re-inclusion re-offers the rows it never saw.
-        delivered = prompt_sections.included
-        with patch.object(prompt_sections, "included",
-                          side_effect=lambda role: delivered(role) - {"insights"}):
-            Engine(self.config, driver=ScriptDriver(finish)).run(self.project, "worker")
-        self.assertNotIn("insights", read_json(path.parent / "prompt_state.json")["sections"])
-
-    def test_changed_delta_offers_the_same_once_captured_inventory(self):
-        from mizu.runtime import session_prompt, prompt_for
-        item = _submit(self, "worker", "Finding")
-        ctx = self.context("worker")
-        save_worker_session(self, {"tokens": 0})
-        with patch.object(self.project.insights, "projection", wraps=self.project.insights.projection) as captured:
-            prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
-            full = json.loads(prompt_for(ctx))
-            self.assertEqual(captured.call_count, 1)
-        delta = json.loads(prompt)
-        self.assertEqual(mode, "delta")
-        self.assertEqual([row["id"] for row in delta["pending_insights"]], [item["id"]])
-        self.assertEqual(delta["pending_insights"], full["pending_insights"])
-        self.assertEqual(delta["work_order"]["opening_generation"], full["work_order"]["opening_generation"])
-
-    def test_insight_arriving_after_delta_capture_stays_pending_for_next_unit(self):
-        from mizu.engine_config import write_prompt_state
-        from mizu.runtime import session_prompt
-        work = self.project.work_items.create(
-            idempotency_key="delta-capture-race", title="Work", actor="worker")["record"]["work_item"]
-        ctx = self.context("worker")
-        path = save_worker_session(self, {"tokens": 0})
-        store = self.project.insights
-        original_generation = store.generation
-        baseline = original_generation()
-        write_prompt_state(path.parent, snapshot=ctx.snapshot["id"],
-                           inbox_generation=baseline)
-        inserted = []
-
-        def inject_after_generation_read():
-            value = original_generation()
-            if not inserted:
-                inserted.append(_submit(self, "worker", "Arrived after capture"))
-            return value
-
-        with patch.object(store, "generation", side_effect=inject_after_generation_read):
-            prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
-        delta = json.loads(prompt)
-        insight_id = inserted[0]["id"]
-        opening_generation = delta["work_order"]["opening_generation"]
-        self.assertEqual(mode, "delta")
-        self.assertEqual(delta["pending_insights"], [])
-        self.assertNotIn(insight_id, delta["open_insights"]["ids"])
-        ctx.handle("work_order", {
-            "items": [work["id"]], "rationale": "reviewed frozen opening",
-            "expected_rev": delta["work_order"]["rev"],
-            "expected_generation": opening_generation,
-        })
-        self.assertEqual(self.project.work_order_status()["status"], "review_due")
-
-        next_ctx = self.context("worker")
-        next_prompt, next_mode, _, _, _ = session_prompt(
-            next_ctx, next_ctx.role, next_ctx.run_dir)
-        next_delta = json.loads(next_prompt)
-        self.assertEqual(next_mode, "delta")
-        self.assertIn(insight_id, {row["id"] for row in next_delta["pending_insights"]})
-        self.assertEqual(next_delta["work_order"]["status"], "review_due")
-
-    def test_resume_generation_read_failure_reoffers_captured_inventory(self):
-        from mizu.runtime import session_prompt
-        item = _submit(self, "worker", "Offer when cursor unavailable")
-        ctx = self.context("worker")
-        save_worker_session(self, {"tokens": 0})
-        with patch.object(self.project.insights, "generation",
-                          side_effect=OSError("inbox cursor unavailable")):
-            prompt, mode, _, _, _ = session_prompt(ctx, ctx.role, ctx.run_dir)
-        decoded = json.loads(prompt)
-        self.assertEqual(mode, "delta")
-        self.assertIn(item["id"], {row["id"] for row in decoded["pending_insights"]})
-
-    def test_open_backlog_truncation_is_explicit(self):
-        import dataclasses
-        from mizu.runtime import prompt_delta_for
-        self.config = dataclasses.replace(
-            self.config, limits=dataclasses.replace(self.config.limits, pending_insights=2))
-        for i in range(3):
-            _submit(self, "worker", f"Finding {i}")
-        stated = json.loads(prompt_delta_for(self.context("worker"), []))["open_insights"]
-        self.assertEqual(len(stated["ids"]), 2)
-        self.assertEqual(stated["total"], 3)
-        self.assertTrue(stated["truncated"])
-
-    def test_open_backlog_gated_by_capability(self):
-        from mizu.runtime import prompt_delta_for, prompt_for
-        _submit(self, "worker", "Finding")
-        stated = json.loads(prompt_delta_for(self.context("consult"), []))["open_insights"]
-        self.assertEqual(stated, {"ids": [], "total": 0, "truncated": False})
-        full = json.loads(prompt_for(self.context("consult")))
-        self.assertEqual(full["pending_insights"], [])
-        self.assertEqual(full["open_insights"], {"ids": [], "total": 0, "truncated": False})
 
 
 if __name__ == "__main__":
