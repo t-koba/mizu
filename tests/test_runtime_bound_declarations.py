@@ -12,22 +12,17 @@ The editor search byte, match and excerpt defaults are configured policy in
 maximum excerpt, strict settings-file read cap and MAX_FRAME-derived canonical
 response cap remain fixed safety/framing bounds, checked against their uses.
 The `vcs.py` provider response-shape bounds are fixed mechanism and safety
-ceilings for untrusted content; it owns the shared proposal cursor, generated
-proposal-ID suffix, and Insight-title format bounds. Upstream-ref path slicing
-derives its prefix length from `REF_PREFIX`.
+ceilings for untrusted content; it owns the shared proposal cursor, a bounded
+operator-approval message scan and the generated observation-title length.
+Upstream-ref path slicing derives its prefix length from `REF_PREFIX`.
 The proposal poll's surfaced diagnostic preview is a fixed safety cap; its
 pagination behavior otherwise follows the VCS schema without a provider guess.
 The `project.py` git-tree import time bounds are configured policy; its
-remaining output caps are fixed safety ceilings. The `insights.py` module
-constants are fixed record and evidence safety bounds; its explicit-history
-result count is configured policy with a fixed ceiling, and discovery remains
-unbounded by that count. Constructor policy defaults include policy supplied by
-`Project`, including history output and the malformed-receipt diagnostic sample;
-literal bound-parameter defaults are
+remaining output caps are fixed safety ceilings. Constructor policy defaults
+include policy supplied by `Project`; literal bound-parameter defaults are
 classified separately below. The `runtime.py` literals are fixed run-local
-memory, one-row probe and public page bounds; `decision_idle.py` owns the bounded
-idle-decision cache constant. Runtime's configurable admission and dispatch choices
-are `Limits` and `[dispatch_evidence]` fields, including the run-local
+memory, one-row probe and public page bounds. Runtime's configurable admission
+and dispatch choices are `Limits` and `[dispatch_evidence]` fields, including the run-local
 queue-observation sample.
 `evidence_records.py` declares the started.json authorization-read ceiling that
 also trims that sample; runtime re-exports it only as an alias.
@@ -51,8 +46,7 @@ a mechanism contract;
 `ci_wake.py`'s re-wake default is configured policy owned by
 `[vcs] ci_rewake_seconds`, and its record version is format, outside the
 name-scoped detector.
-The `kernel_shadow.py` failure list is a bounded process-local diagnostic; it is
-not authoritative state. The `lock_diagnostics.py`
+The `lock_diagnostics.py`
 constants are fixed journal-line row and numeric-field format bounds; the
 opt-in collection is policy, but it introduces no host-cost numeric bound.
 The `cli.py` module-level inventory is empty; its numeric page defaults are
@@ -210,7 +204,7 @@ Arbitrary loop conditions, slices, aliases and numeric literals in other
 contexts remain outside these inventories. Direct-comparison inventories record operands by file, scope, argument and
 occurrence. Most slices use magnitude 3 in `check_jobs.py`, `codex.py`,
 `acceptance.py`, `ci_acceptance.py`, `ci_requests.py`, `ci_waits.py`,
-`ci_wake.py`, `insights.py`, `proposal_waits.py`, `selection.py`, `usage.py`,
+`ci_wake.py`, `selection.py`, `usage.py`,
 `config.py`, `runtime.py`, `project.py`, `services.py`, `persistent_exec.py`,
 `cli.py`, `vcs.py`, `pi_durable.py`, `platform.py`,
 `work_item_seed.py`, `work_item_retirement.py`, `work_item_waits.py`,
@@ -223,10 +217,7 @@ explicit: `admission.py` uses magnitude 2 for its two-lock ceiling;
 slices use magnitude 1 for positive revisions, schema versions, nonempty
 fields and positive page sizes; `work_items.py` uses magnitude 1 for positive
 constructor inputs, persisted shapes and filesystem-safety comparisons;
-`model_catalog.py` includes its observation-store schema version at magnitude 1;
-`operator_records.py` inventories positive insight-subject revisions, question-list bounds and exact answer-route IDs at magnitude 1;
-`operator_record_index.py` records single-link scratch and exact body-marker/schema shapes at
-magnitude 1.
+`model_catalog.py` includes its observation-store schema version at magnitude 1.
 This is not a global numeric comparison linter.
 """
 import ast
@@ -257,7 +248,7 @@ EXTRA_CANDIDATES = {
 POLICY_DEFAULTS = {
     'selection.py': {
         'DEFAULT_CLASSIFIER_INPUTS': (
-            {'max_proposals': 8, 'max_decisions': 8, 'max_text_bytes': 2048},
+            {'max_messages': 8, 'max_text_bytes': 2048},
             'configured policy',
             'selection / per-classifier inputs defaults; operator overrides through the '
             'classifier inputs table, documented in docs/model-selection.md'),
@@ -265,16 +256,6 @@ POLICY_DEFAULTS = {
 }
 # name: (exact ast.unparse(value), classification, owner / rationale)
 DECLARATIONS = {
-    'authority_marker.py': {
-        'MARKER_BYTES': (
-            '4096', 'safety',
-            'authority markers / bounded canonical marker read for decision and record authority'),
-    },
-    'queue_record_delivery.py': {
-        'PENDING_ROWS': (
-            '20', 'safety',
-            'record delivery / fixed pending-page row cap for the queue-backed record adapter'),
-    },
     'protocol.py': {
         'KERNEL_FIELD_MAP_MAX': (
             '64', 'safety',
@@ -566,30 +547,10 @@ DECLARATIONS = {
         'MAX_RECORDED_BATCH_COMMANDS': (
             '32', 'safety', 'project / bounded commands per named batch'),
     },
-    'insight_archive.py': {
-        'MAX_SQLITE_INTEGER': (
-            '9223372036854775807', 'format',
-            'insight archive / signed 64-bit SQLite INTEGER ceiling for revisions '
-            'and cursor high-water'),
-    },
     'feed_updates.py': {
         '_STATE_BYTES': (
             '2 * 1000 * 67 + 1024', 'safety',
             'feed updates / bounded cursor stores at most 1000 completed and 1000 partially delivered SHA-256 identities plus its envelope'),
-    },
-    'insights.py': {
-        'MAX_DECISION_EVENT_BYTES': (
-            '1024 * 1024', 'safety', 'insights / fixed decision-event record read and write ceiling'),
-        'AUTOMATIC_INSIGHT_ARCHIVE_INTERVAL_MAX': (
-            '2678400', 'safety', 'insights / maximum automatic archive interval (31 days)'),
-        '_AUTOMATIC_INSIGHT_ARCHIVE_STATE_BYTES': (
-            '4096', 'safety', 'insights / bounded automatic archive cadence state read'),
-        'DECISION_RECEIPT_BYTES': (
-            '1024', 'safety', 'insights / fixed-shape per-token decision receipt read bound'),
-        'MAX_EVIDENCE_ENTRIES': (
-            '16', 'safety', 'insights / fixed append-only evidence entries per insight'),
-        'MAX_EVIDENCE_CHARS': (
-            '8192', 'safety', 'insights / fixed evidence text bound per entry'),
     },
     'kernel/queues.py': {
         'MAX_BODY_BYTES': (
@@ -617,11 +578,6 @@ DECLARATIONS = {
             '(1 << 63) - 1', 'format',
             'kernel queues / TOML signed-64-bit integer representation ceiling for declared fields'),
     },
-    'kernel_shadow.py': {
-        'MAX_SHADOW_FAILURES': (
-            '32', 'safety',
-            'kernel shadow / bounded process-local projection failure diagnostics'),
-    },
     'lock_diagnostics.py': {
         'MAX_LOCK_DIAGNOSTIC_ROWS': (
             '32', 'mechanism', 'lock diagnostics / fixed journal-line row bound'),
@@ -647,29 +603,9 @@ DECLARATIONS = {
         'OBSERVED_CURSOR_MAX_BYTES': (
             '4096', 'safety', 'wake evidence / bounded role cursor state read'),
     },
-    'decision_idle.py': {
-        '_DECISION_IDLE_CACHE_LIMIT': (
-            '256', 'safety', 'decision delivery / bounded in-process empty-decision cache entries'),
-    },
-    'queue_decision_delivery.py': {
-        'MAX_PAGES': (
-            '64', 'safety',
-            'queue decision adapter / shared stage-2 read page-count bound before an oversized queue is refused'),
-    },
     'work_item_resolution.py': {
         'MAX_RESOLUTION_BYTES': (
             '521', 'format', 'work items / exact maximum canonical wait-resolution member growth'),
-    },
-    'record_migration.py': {
-        'SCAN_ENTRIES': (
-            '1000', 'safety',
-            'record migration / fixed maximum flat shared-record entries inspected by one operator command'),
-    },
-    'work_item_migration.py': {
-        'DEFAULT_SCAN_LIMIT': (
-            '10000', 'configured policy',
-            'work-item migration / default per-directory scan budget when --scan-limit is omitted; '
-            'an explicit CLI value wins'),
     },
     'work_items.py': {
         'MAX_EVENT_BYTES': (
@@ -843,12 +779,12 @@ DECLARATIONS = {
         'MAX_PROPOSALS': ('256', 'mechanism', 'VCS proposals / bounded external proposal rows'),
         'MAX_CHANGED_SUBJECTS': (
             '256', 'mechanism', 'VCS changes / bounded external change-stream subjects'),
-        'MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS': (
-            '32', 'format',
-            'VCS proposals / fixed lower-case SHA-256 hex suffix in generated Insight identity'),
-        'MAX_PROPOSAL_INSIGHT_TITLE_CHARS': (
+        'MAX_APPROVAL_SCAN': (
+            '512', 'safety',
+            'VCS approvals / bounded newest operator messages examined for one publication GO approval'),
+        'MAX_PROPOSAL_TITLE_CHARS': (
             '200', 'format',
-            'VCS proposals / generated Insight title must fit its public title format'),
+            'VCS proposals / generated observation title stays within the public title format'),
         'MAX_REVIEWS': ('64', 'mechanism', 'VCS proposals / bounded independent reviews per row'),
         'MAX_PROPOSAL_CHECK_DETAIL_BYTES': (
             '16 * 1024', 'safety', 'VCS proposals / fixed UTF-8 budget for retained check detail'),
@@ -978,11 +914,6 @@ DECLARATIONS = {
             '16', 'format',
             'host records / fixed schema field count'),
     },
-    'insight_tools.py': {
-        'INSIGHT_RETRIEVAL_LIMIT': (
-            '1000', 'mechanism',
-            'insight retrieval / fixed public page bound'),
-    },
     'lineage.py': {
         'TARGET_VERSION_MIN': (
             '1', 'format', 'lineage / accepted target-version range starts at version one'),
@@ -1023,11 +954,6 @@ DECLARATIONS = {
         'OBSERVATION_COUNT': (
             '128', 'safety',
             'model catalog / bounded observation rows'),
-    },
-    'operator_records.py': {
-        'MAX_OPERATOR_RECORD_BODY_CHARS': (
-            '32768', 'safety',
-            'operator records / fixed cap for user-authored immutable body content'),
     },
     'pi_durable.py': {
         'RESULT_BYTES': (
@@ -1117,6 +1043,9 @@ DECLARATIONS = {
         'MAX_WAIT_RESOLUTION_TOKENS': (
             '200', 'mechanism',
             'snapshot progress / one token per row across the two public 100-row work-item pages'),
+        'MAX_PROGRESS_SIGNALS': (
+            '16', 'safety',
+            'snapshot progress / bounded signal names accepted in a stored progress record'),
         '_PATH_VALIDATION_CACHE_LIMIT': (
             '256', 'safety',
             'snapshot / bounded in-process path-validation cache'),
@@ -1151,18 +1080,15 @@ DECLARATIONS = {
             '512', 'safety',
             'proposal polling / bounded surfaced adapter and recording diagnostics'),
     },
-    'wait_events.py': {
-        'MAX_ROW_BYTES': (
-            '1024 * 1024', 'safety',
-            'wait events / bounded row read'),
-        'RECEIPT_BYTES': (
+    'work_item_waits.py': {
+        'MAX_INERT_WAIT_BYTES': (
             '4096', 'safety',
-            'wait events / bounded receipt read'),
+            'work-item waits / bounded canonical size of a stored wait the product no longer evaluates'),
     },
     'work_item_seed.py': {
-        'MAX_DECISION_TASKS': (
-            '16', 'format',
-            'work-item seed / fixed task count'),
+        'MAX_ORIGIN_CHARS': (
+            '512', 'format',
+            'work-item seed / opaque origin reference character bound in the protocol schema'),
     },
     'doctor.py': {
         '_CHECK_RUNNER_SETTINGS_MAXIMUM': (
@@ -1295,6 +1221,8 @@ CONFIGURED = {
         'search_max_bytes': ('8 * 1024 * 1024', 'configured policy', 'editor / per-request scan byte budget'),
         'search_max_matches': ('50', 'configured policy', 'editor / per-request match count'),
         'search_match_chars': ('1000', 'configured policy', 'editor / matching-line excerpt length'),
+        'queue': ("''", 'configured policy',
+                  'editor / declared host-writable outbox queue; empty leaves the outbox unread'),
     },
     'Usage': {
         'runs_scanned': ('5000', 'configured policy', 'usage / history scan work budget'),
@@ -1428,17 +1356,10 @@ SMOKE_RETENTION_SCAN = {
 }
 
 
-# The receipt-diagnostic and queue-observation samples are operator-selected
-# output/evidence policy. Their ceilings keep one page or run record bounded;
-# neither is a history-sized scan or a delivery bound.
+# The queue-observation sample is operator-selected output/evidence policy. Its
+# ceiling keeps one started.json run record bounded; it is not a history-sized
+# scan or a delivery bound.
 DIAGNOSTIC_SAMPLES = {
-    'decision_receipt_diagnostics': (
-        'DEFAULT_DECISION_RECEIPT_DIAGNOSTICS', 'configured policy',
-        'Limits / malformed-receipt diagnostics per decision page'),
-    'DEFAULT_DECISION_RECEIPT_DIAGNOSTICS': (
-        '10', 'configured policy', 'config / unchanged receipt-diagnostic sample default'),
-    'MAX_DECISION_RECEIPT_DIAGNOSTICS': (
-        '100', 'safety', 'config / fixed companion output-page diagnostic ceiling'),
     'queue_observations': (
         'DEFAULT_QUEUE_OBSERVATIONS', 'configured policy',
         'Limits / contended-admission observations per started.json'),
@@ -1450,33 +1371,7 @@ DIAGNOSTIC_SAMPLES = {
 }
 
 
-# The current-decision projection is history policy; its separate absolute
-# in-process row ceiling is name-scoped, not a full config.py inventory.
-DECISION_PROJECTION = {
-    'decision_projection_records': ('DEFAULT_DECISION_PROJECTION_RECORDS', 'configured policy',
-                                    'Limits / combined decision and pending-attention page retention rows'),
-    'DEFAULT_DECISION_PROJECTION_RECORDS': ('512', 'configured policy',
-                                            'config / single page-retention default, independent of the measured ceiling'),
-    'MAX_DECISION_PROJECTION_RECORDS': ('512', 'safety',
-                                        'config / measured in-process projection-row ceiling'),
-}
 
-
-# The host-only activation plan/report is history-sized local evidence. Its
-# default is configured policy; the ceiling bounds activation-time parsing and
-# the retained report's exact-byte check, not a transport frame.
-DECISION_RECONCILIATION = {
-    'decision_reconciliation_bytes': (
-        'DEFAULT_DECISION_RECONCILIATION_BYTES', 'configured policy',
-        'Limits / serialized activation plan and post-map report bytes'),
-    'DEFAULT_DECISION_RECONCILIATION_BYTES': (
-        '8 * 1024 * 1024', 'configured policy',
-        'config / activation plan/report default for several thousand routed rows'),
-    'MAX_DECISION_RECONCILIATION_BYTES': (
-        '64 * 1024 * 1024', 'safety',
-        'config / bounded activation-time plan/report parse and retained report digest read; '
-        'runtime parses only the 4096-byte marker'),
-}
 
 
 # Remaining config.py module-level candidates not owned by the special
@@ -1489,11 +1384,6 @@ DECISION_RECONCILIATION = {
 CONFIG_MODULE_BOUNDS = {
     'MAX_EDITOR_SEARCH_MATCH_CHARS': (
         'READ_PAGE_CHARS', 'safety', 'editor / fixed maximum excerpt uses the shared read-page envelope'),
-    'MAX_INSIGHT_HISTORY_ENTRIES': (
-        '1000', 'safety', 'insights / fixed ceiling for explicit history output rows'),
-    'DEFAULT_INSIGHT_HISTORY_ENTRIES': (
-        '1000', 'configured policy',
-        'insights / default for [limits].insight_history_entries'),
     'DEFAULT_ARTIFACT_FULL_READ_CHARS': (
         '524288', 'configured policy', 'VCS artifacts / default whole-file character budget'),
     'MAX_STORAGE_RUN_ENTRIES': (
@@ -1626,17 +1516,6 @@ CALLS = {
             '4096', 'safety', 'workspace cache / bounded automatic due-state read'),
     },
     'ci_requests.py': {},
-    'insights.py': {},
-    'decision_delivery.py': {
-        ('read', 'store(context).read_page', 'limit', 0): (
-            "args.get('limit', 8192)", 'safety',
-            'decision delivery / omitted limit defaults to the shared-record page ceiling'),
-    },
-    'insight_tools.py': {
-        ('insights', 'page', 'maximum', 0): (
-            'PREVIEW_BYTES * 2', 'safety',
-            'insight tools / bounded result page for two preview-sized bodies'),
-    },
     'process.py': {
         ('_stop_io', 'thread.join', 'timeout', 0): (
             'max(0.0, deadline - time.monotonic())', 'safety',
@@ -1672,8 +1551,6 @@ CALLS = {
             '1', 'mechanism', 'work readiness / one-row readiness existence check'),
     },
     'engine_dispatch.py': {
-        ('EngineDispatchMixin._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
-            '1', 'mechanism', 'engine dispatch / one-row pending-decision dispatch check'),
     },
     'runtime.py': {
         ('Engine._run', 'read_json', 'max_bytes', 0): (
@@ -1686,10 +1563,6 @@ CALLS = {
             '1', 'mechanism', 'role admission / one-row combined receipt-wait scheduling check'),
         ('_role_events_due', 'work_item_events.pending', 'limit', 0): (
             '1', 'mechanism', 'role admission / one-row work-item event check'),
-        ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (
-            '1', 'mechanism', 'role admission / one-row decision-delivery check'),
-        ('_role_events_due', 'project.insights.due_waits', 'limit', 0): (
-            '1', 'mechanism', 'role admission / one-row due-wait existence check'),
         ('_role_events_due', '_receipt_wait_due', 'limit', 0): (
             '1', 'mechanism', 'role admission / one-row combined receipt-wait check'),
     },
@@ -1726,11 +1599,6 @@ CALLS = {
             '1', 'mechanism', 'reviews / exact code-digest receipt lookup reads one row'),
     },
     'cli.py': {
-        ('_cmd_insight', 'project.insights.list', 'limit', 0): (
-            '1000', 'mechanism', 'CLI / fixed legacy insight-list page bound'),
-        ('_cmd_insight', 'project.insights.list_page', 'limit', 0): (
-            'args.limit if args.limit is not None else 30', 'policy',
-            'CLI / insight page default; callers may select --limit'),
         ('_cmd_work_items', 'closed_page', 'limit', 0): (
             'args.closed if args.closed is not None else 10', 'policy',
             'CLI / closed work-item page default; callers may select --closed'),
@@ -1759,13 +1627,6 @@ CALLS = {
         ('stop_engine_containers', 'run', 'maximum', 0): (
             '8192', 'safety', 'engine config / bounded cleanup output read'),
     },
-    'operator_records.py': {
-        ('store', 'KindPolicy', 'maximum', 0): (
-            '140000', 'safety', 'operator records / bounded shared-record payload envelope'),
-        ('read', 'store(context.project).read_page', 'limit', 0): (
-            "args.get('limit', 8192)", 'safety',
-            'operator records / omitted limit defaults to the shared-record page ceiling'),
-    },
     'persistent_exec.py': {
         ('ExecSession._remove', 'run', 'maximum', 0): (
             '8192', 'safety', 'persistent exec / bounded cleanup output read'),
@@ -1786,10 +1647,6 @@ CALLS = {
         ('terminate_process', 'process.wait', 'timeout', 3): (
             '0.2 if grace == 0 else 5', 'safety',
             'platform / bounded post-kill reap wait after portable termination'),
-    },
-    'proposal_waits.py': {
-        ('shared_store', 'KindPolicy', 'maximum', 0): (
-            '8192', 'safety', 'proposal waits / bounded shared-record payload envelope'),
     },
     'safe_point.py': {
         ('read', 'read_json', 'max_bytes', 0): (
@@ -1844,10 +1701,6 @@ PARAMETER_DEFAULTS = {
         '0', 'mechanism', 'check jobs / initial evidence page position'),
     ('check_jobs.py', 'logs', 'limit'): (
         '8192', 'policy', 'check jobs / caller-selected evidence page length'),
-    ('kernel/events.py', 'EventLog.pending', 'limit'): (
-        '64', 'mechanism', 'kernel events / default subscribed-event page, capped by PAGE_MAX'),
-    ('kernel/objects.py', 'Objects.list', 'limit'): (
-        '64', 'mechanism', 'kernel objects / default object page, capped by PAGE_MAX'),
     ('ci_requests.py', 'CiRequests.daily', 'limit'): (
         '100', 'policy', 'CI requests / caller-selected daily request projection size'),
     ('ci_requests.py', 'CiRequests.page', 'limit'): (
@@ -1868,39 +1721,8 @@ PARAMETER_DEFAULTS = {
         '1000', 'policy', 'fs / caller-selected list projection size'),
     ('fs.py', 'text_preview', 'maximum'): (
         '8192', 'safety', 'fs / fallback bounded text preview, callers may narrow or override'),
-    ('insights.py', 'Insights.__init__', 'retention_days'): (
-        '31', 'configured policy', 'insights / Project supplies [limits] retention_days'),
-    ('insights.py', 'Insights.__init__', 'cursor_ttl_seconds'): (
-        '86400', 'configured policy', 'insights / Project supplies [limits] insight_cursor_ttl_seconds'),
-    ('insights.py', 'Insights.__init__', 'history_entries'): (
-        '1000', 'configured policy',
-        'insights / Project supplies [limits].insight_history_entries'),
-    ('insights.py', 'Insights.projection', 'limit'): (
-        '30', 'policy', 'insights / caller-selected live projection size'),
-    ('insights.py', 'Insights.list', 'limit'): (
-        '30', 'policy', 'insights / caller-selected live list size'),
-    ('insights.py', 'Insights.list_page', 'limit'): (
-        '30', 'policy', 'insights / caller-selected live/archive cursor page size'),
-    ('insights.py', 'Insights.due_waits', 'limit'): (
-        '10', 'configured policy', 'insights / project [limits].wait_events_limit per-source due-wait delivery batch'),
-    ('insights.py', 'Insights.pending_obligations', 'limit'): (
-        '10', 'configured policy', 'insights / project [limits].wait_events_limit per-source obligation delivery batch'),
-    ('insights.py', 'Insights.decision_events', 'limit'): (
-        '10', 'policy', 'insights / caller-selected decision-event batch'),
-    ('insights.py', 'Insights.pending_insight_events', 'limit'): (
-        '10', 'policy', 'insights / caller-selected pending insight-event batch'),
-    ('insights.py', 'Insights.shared_decision_page', 'limit'): (
-        '10', 'policy', 'insights / caller-selected shared decision page size'),
-    ('insights.py', 'Insights.decision_events_with_diagnostics', 'limit'): (
-        '10', 'policy', 'insights / caller-selected decision-event diagnostic projection size'),
     ('pi_durable_store.py', 'project_context', 'max_bytes'): (
         '65536', 'policy', 'Pi durable store / caller-selected summary truncation marker threshold, not a read cap'),
-    ('proposal_waits.py', 'delivery', 'limit'): (
-        '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
-    ('proposal_waits.py', 'pending', 'limit'): (
-        '10', 'configured policy', 'proposal waits / project [limits].wait_events_limit per-source delivery batch'),
-    ('proposal_waits.py', 'readiness_init', 'limit'): (
-        '10', 'policy', 'proposal waits / caller-selected readiness candidate batch'),
     ('protocol.py', 'text', 'maximum'): (
         '32768', 'safety', 'protocol / default schema string validation ceiling'),
     ('protocol.py', 'array', 'maximum'): (
@@ -1937,8 +1759,6 @@ PARAMETER_DEFAULTS = {
         '1', 'configured policy', 'work items / Project supplies [limits] work_items_doing'),
     ('work_items.py', 'WorkItems.__init__', 'stale_seconds'): (
         '86400', 'configured policy', 'work items / Project supplies [limits] work_items_stale_seconds'),
-    ('work_items.py', 'WorkItems.page_legacy', 'limit'): (
-        '25', 'policy', 'work items / caller-selected legacy listing size'),
     ('work_items.py', 'WorkItems.explain', 'limit'): (
         '25', 'policy', 'work items / caller-selected explanation history size'),
     ('work_items.py', 'WorkItems.page_open', 'limit'): (
@@ -1997,15 +1817,9 @@ TIMED_WAIT_ARGUMENTS = {
 # (relative file, qualified scope, positional argument, occurrence):
 #     (exact ast.unparse(argument), classification, owner / rationale)
 RANGE_ARGUMENTS = {
-    ('insight_index.py', 'audit', 0, 0): (
-        '1', 'mechanism', 'insight audit / prior revisions start at the first'),
     ('ci_requests.py', 'CiRequests.prior_spend_possible', 0, 0): (
         '1', 'format',
         'CI request attempts / attempt identities start at one; inspect only prior attempts'),
-    ('decision_delivery.py', 'pending', 1, 0): (
-        '-1', 'mechanism', 'decision delivery / reverse-range sentinel'),
-    ('decision_delivery.py', 'pending', 2, 0): (
-        '-1', 'mechanism', 'decision delivery / reverse-range step'),
     ('fs.py', '_safe_write_openat', 0, 0): (
         '8', 'safety',
         'fs / bounded UUID temporary-name collision attempts; fail closed if all eight collide'),
@@ -2023,6 +1837,9 @@ RANGE_ARGUMENTS = {
     ('vcs.py', '_prune_stale', 0, 0): (
         '1', 'mechanism',
         'VCS ref pruning / start at the first path component so the ref store root itself is never pruned'),
+    ('vcs.py', 'require_go_approval', 2, 0): (
+        '-1', 'mechanism',
+        'VCS approvals / reverse-range step over the bounded newest-message window'),
     ('web.py', 'Web.fetch', 0, 0): (
         '4', 'safety',
         'web fetch / fixed redirect-hop ceiling; every hop revalidates the destination'),
@@ -2050,8 +1867,6 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('check_jobs.py', 'submit.request_slot', 0, 0): (
         'LEGACY_CHECK_REQUEST_SEQUENCE_COUNT', 'safety',
         'check jobs / reconstruct the bounded legacy sequence space before indexed allocation'),
-    ('insight_index.py', 'audit', 1, 0): (
-        'row[3]', 'mechanism', 'insight audit / prior revisions below the live revision'),
     ('admission.py', 'check_slot_exclusions', 0, 0): (
         'max(0, slots)', 'configured policy',
         'admission / one exclusion per configured parallel_checks slot'),
@@ -2079,15 +1894,6 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('ci_polling.py', 'poll_ci', 0, 0): (
         'max_branches', 'configured policy',
         'CI polling / rotating branch batch bounded by vcs.poll_max_branches'),
-    ('decision_delivery.py', 'pending', 0, 0): (
-        'len(delivered) - 1', 'mechanism',
-        'decision delivery / reverse scan of the bounded page trims optional attention rows'),
-    ('insights.py', 'Insights.history', 0, 0): (
-        'after_rev + 1', 'mechanism',
-        'insight history / begin at the first revision after the exclusive cursor'),
-    ('insights.py', 'Insights.history', 1, 0): (
-        'end + 1', 'configured policy',
-        'insight history / scan through the page end bounded by the configured read budget'),
     ('scheduler_evidence.py', 'summarize', 0, 0): (
         'len(sequence)', 'mechanism',
         'scheduler evidence / interval-overlap scan examines each already-bounded sequence entry'),
@@ -2109,9 +1915,12 @@ SYMBOLIC_RANGE_ARGUMENTS = {
     ('vcs.py', '_prune_stale', 1, 0): (
         'len(parts)', 'mechanism',
         'VCS ref pruning / walk each validated ref-name component when collecting needed directories'),
-    ('work_item_seed.py', 'task_seeds', 0, 0): (
-        'len(tasks)', 'mechanism',
-        'work-item task manifest / visit every validated member within the 16-task contract'),
+    ('vcs.py', 'require_go_approval', 0, 0): (
+        'head', 'mechanism',
+        'VCS approvals / start at the newest queued message sequence'),
+    ('vcs.py', 'require_go_approval', 1, 0): (
+        'max(0, head - MAX_APPROVAL_SCAN)', 'safety',
+        'VCS approvals / stop at the fixed newest-message bound without underflow'),
     ('work_items.py', 'WorkItems._iter_chain', 1, 0): (
         'len(revisions) + 2', 'format',
         'work items / validate contiguous revision numbers after immutable seed revision 1'),
@@ -2217,18 +2026,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('claude.py', '_verify_staged_skill', 1, 0): (
         '1', 'safety',
         'Claude staged file skill / require exactly one reviewed SKILL.md entry; extras are untrusted'),
-    ('authority_marker.py', 'read', 1, 0): (
-        '1', 'format',
-        'authority markers / exact schema version one selects the persisted marker contract'),
-    ('queue_record_delivery.py', '_record_envelope', 1, 0): (
-        '32768', 'safety',
-        'record delivery / fixed legacy envelope byte ceiling before canonical reconstruction'),
-    ('decision_delivery.py', 'page_bytes', 0, 0): (
-        '1', 'configured policy',
-        'shared decision page / configured per-role byte budget must be a positive integer'),
-    ('decision_reconciliation.py', '_validate_plan', 1, 0): (
-        '1', 'format',
-        'decision reconciliation plan / exact schema version one selects the persisted plan contract'),
     ('delegation_gates.py', '_policy', 1, 0): (
         '1', 'format',
         'delegation-gate policy / exact integer version one selects the trusted TOML contract'),
@@ -2271,33 +2068,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('fs.py', '_safe_write_portable', 1, 0): (
         '1', 'safety',
         'portable filesystem write / existing destination must be a singly linked regular file'),
-    ('operator_record_index.py', '_files', 1, 0): (
-        '1', 'safety',
-        'operator record index / ignore only single-link unpublished atomic-write scratch'),
-    ('operator_record_index.py', 'catalog', 1, 0): (
-        '1', 'configured policy',
-        'operator record catalog / supplied scan_limit must be a positive configured entry budget'),
-    ('operator_record_index.py', '_parts', 1, 0): (
-        '1', 'format',
-        'operator record index framing / exactly one empty-body marker anchors body elision'),
-    ('operator_record_index.py', '_projection', 1, 0): (
-        '1', 'format',
-        'shared record projection / schema version one selects the persisted envelope layout'),
-    ('operator_record_index.py', '_check', 1, 0): (
-        '1', 'format',
-        'operator record index reference / schema version one selects the compact projection layout'),
-    ('operator_records.py', '_subject', 1, 0): (
-        '1', 'format',
-        'operator record subject / referenced insight revision is a positive exact history revision'),
-    ('operator_records.py', 'questions', 1, 0): (
-        '1', 'format',
-        'operator question listing / per-invocation row limit must be a positive integer'),
-    ('operator_records.py', 'questions', 1, 1): (
-        '1', 'format',
-        'operator question listing / per-invocation directory scan limit must be a positive integer'),
-    ('operator_records.py', 'record_answer_evidence', 1, 0): (
-        '3', 'format',
-        'operator answer proof / exact SharedRecord IDs have three path components'),
     ('work_order.py', '_validate_items', 0, 0): (
         '1', 'format',
         'work order / a plan requires at least one actionable item ID'),
@@ -2513,9 +2283,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('unit_finish.py', 'ContextFinishMixin._op_finish', 1, 1): (
         '64', 'format',
         'finish / acknowledgement-token length follows the public maxLength contract'),
-    ('producer_admission.py', '_producer_limit', 2, 0): (
-        '1073741824', 'configured policy',
-        'producer holds / open_work_items and producer_inputs_per_source use the configured range'),
     ('snapshot.py', 'validate_next_step', 0, 0): (
         '1', 'format',
         'typed writer handoff / next_step is a nonempty finish field'),
@@ -2629,40 +2396,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('ci_waits.py', '_absence_generation', 1, 0): (
         '32', 'format',
         'CI absence revocation / advisory generation token is an exact 32-hex UUID string'),
-    ('insights.py', '_validate_decision_projection', 1, 0): (
-        '64', 'safety', 'decision projection / bound timestamp text before ISO-8601 parsing'),
-    ('insights.py', '_validate_pending_projection', 1, 0): (
-        '64', 'safety', 'pending insight projection / bound timestamp text before ISO-8601 parsing'),
-    ('insights.py', '_check_origin', 2, 0): (
-        '256', 'safety', 'insight origin / bound opaque caller label before persistence'),
-    ('insights.py', 'Insights.submit', 2, 0): (
-        '200', 'format', 'insight submit / title follows the public 1-200 character contract'),
-    ('insights.py', 'Insights.revise', 2, 0): (
-        '200', 'format', 'insight revision / title follows the public 1-200 character contract'),
-    ('insights.py', 'Insights.list_page', 2, 0): (
-        '1000', 'format',
-        'insight page API / 1-1000 cursor-page contract shared by runtime and CLI'),
-    ('insights.py', 'Insights._page_cursor', 2, 0): (
-        '4096', 'safety', 'insight cursor / bound encoded cursor text before decoding'),
-    ('insights.py', 'Insights._page_cursor', 2, 1): (
-        '253402300799', 'format', 'insight cursor / Unix timestamp ceiling for datetime year 9999'),
-    ('insights.py', 'Insights.read', 1, 0): (
-        '32', 'format', 'insight lookup / only shorter hexadecimal IDs enter prefix resolution'),
-    ('insights.py', 'Insights.due_waits', 1, 0): (
-        '100', 'mechanism', 'insight waits / fixed maximum per-source delivery page'),
-    ('insights.py', 'Insights.pending_obligations', 1, 0): (
-        '100', 'mechanism', 'insight obligations / fixed maximum per-source delivery page'),
-    ('insights.py', 'Insights.pending_insight_events', 2, 0): (
-        '100', 'mechanism', 'pending insight events / fixed maximum delivery page'),
-    ('insights.py', 'Insights.shared_decision_page', 2, 0): (
-        '100', 'mechanism', 'shared decision events / fixed maximum delivery page'),
-    ('insights.py', 'Insights._scan_decision_delivery', 2, 0): (
-        '100', 'mechanism', 'decision delivery scan / fixed maximum candidate page'),
-    ('insights.py', 'Insights.acknowledge_decisions', 1, 0): (
-        '512', 'format',
-        'decision acknowledgement / match the public finish ack_events maximum batch size'),
-    ('insights.py', 'Insights._archivable', 2, 0): (
-        '200', 'format', 'insight archive / title follows the public 1-200 character contract'),
     ('engine_config.py', 'child_authority_digest', 1, 0): (
         '64', 'format',
         'child authority / goal and adapter identity fields are lowercase SHA-256 hex digests'),
@@ -2684,12 +2417,6 @@ COMPARISON_BOUND_ARGUMENTS = {
     ('engine_config.py', 'connected_servers', 1, 0): (
         '64', 'safety',
         'MCP server materialization / retain the explicit-server safety cap at runtime'),
-    ('proposal_waits.py', 'normalize', 1, 0): (
-        '3', 'format', 'proposal endpoint / repo, ref and SHA must have exactly three components'),
-    ('proposal_waits.py', 'delivery', 2, 0): (
-        '100', 'mechanism', 'proposal wait / fixed maximum per-source delivery page'),
-    ('proposal_waits.py', 'readiness_init', 2, 0): (
-        '100', 'mechanism', 'proposal wait readiness / fixed maximum candidate page'),
     ('probes.py', 'sponsor_binding', 1, 0): (
         '65536', 'safety',
         'recovery probes / bound project settings file before parsing and hashing sponsor identity'),
@@ -4032,8 +3759,7 @@ def no_defaults(limit, /, count, *, size):
         found = inventory(tree, symbolic_bounds=SYMBOLIC_BOUNDS.get('config.py'))
         declared = set(CONFIG_MODULE_BOUNDS)
         for special in (PRIOR_ROLE_REPORT_PREVIEW, HISTORY_TEMPORARIES,
-                        DECISION_PROJECTION, DIAGNOSTIC_SAMPLES, DECISION_RECONCILIATION,
-                        SMOKE_RETENTION_SCAN):
+                        DIAGNOSTIC_SAMPLES, SMOKE_RETENTION_SCAN):
             declared.update(name for name in special if name in found)
         self.assertEqual(set(found), declared)
         categories = {'mechanism', 'format', 'safety', 'configured policy'}
@@ -4351,22 +4077,6 @@ def no_defaults(limit, /, count, *, size):
                          if isinstance(node, ast.Assign) for target in node.targets
                          if isinstance(target, ast.Name)})
 
-    def test_migration_scan_budget_declarations(self):
-        for name, module, (expression, category, rationale) in (
-                ('SCAN_ENTRIES', 'record_migration.py', DECLARATIONS['record_migration.py']['SCAN_ENTRIES']),
-                ('DEFAULT_SCAN_LIMIT', 'work_item_migration.py',
-                 DECLARATIONS['work_item_migration.py']['DEFAULT_SCAN_LIMIT'])):
-            with self.subTest(bound=name):
-                tree = ast.parse((ROOT / module).read_text(encoding='utf-8'))
-                node = next(node for node in tree.body
-                            if isinstance(node, ast.Assign)
-                            and any(isinstance(target, ast.Name) and target.id == name
-                                    for target in node.targets))
-                self.assertEqual(ast.unparse(node.value), expression)
-                self.assertTrue(rationale.strip())
-        self.assertEqual(DECLARATIONS['record_migration.py']['SCAN_ENTRIES'][1], 'safety')
-        self.assertEqual(DECLARATIONS['work_item_migration.py']['DEFAULT_SCAN_LIMIT'][1], 'configured policy')
-
     def test_smoke_retention_scan_budget_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
         limits = next(node for node in tree.body
@@ -4387,94 +4097,22 @@ def no_defaults(limit, /, count, *, size):
              'smoke_retention_entries', 'smoke_retention_metadata_bytes',
              'smoke_retention_report_bytes'} & set(fields))
 
-    def test_decision_projection_policy_and_safety_declarations(self):
-        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
-        limits = next(node for node in tree.body
-                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
-        field = next(node for node in limits.body
-                     if isinstance(node, ast.AnnAssign)
-                     and node.target.id == 'decision_projection_records')
-        self.assertEqual(ast.unparse(field.value), DECISION_PROJECTION['decision_projection_records'][0])
-        self.assertEqual(inventory(tree)['MAX_DECISION_PROJECTION_RECORDS'],
-                         DECISION_PROJECTION['MAX_DECISION_PROJECTION_RECORDS'][0])
-        default = next(node for node in tree.body if isinstance(node, ast.Assign)
-                       and any(isinstance(target, ast.Name)
-                               and target.id == 'DEFAULT_DECISION_PROJECTION_RECORDS'
-                               for target in node.targets))
-        self.assertEqual(ast.unparse(default.value),
-                         DECISION_PROJECTION['DEFAULT_DECISION_PROJECTION_RECORDS'][0])
-        insights = ast.parse((ROOT / 'insights.py').read_text(encoding='utf-8'))
-        constructor = next(node for node in insights.body
-                           if isinstance(node, ast.ClassDef) and node.name == 'Insights')
-        initializer = next(node for node in constructor.body
-                           if isinstance(node, ast.FunctionDef) and node.name == '__init__')
-        index = [arg.arg for arg in initializer.args.kwonlyargs].index(
-            'decision_projection_records')
-        self.assertEqual(ast.unparse(initializer.args.kw_defaults[index]),
-                         DECISION_PROJECTION['decision_projection_records'][0])
-        self.assertEqual([DECISION_PROJECTION[key][1]
-                          for key in ('decision_projection_records',
-                                      'DEFAULT_DECISION_PROJECTION_RECORDS',
-                                      'MAX_DECISION_PROJECTION_RECORDS')],
-                         ['configured policy', 'configured policy', 'safety'])
-        self.assertTrue(all(entry[2].strip() for entry in DECISION_PROJECTION.values()))
-
-    def test_decision_reconciliation_policy_and_safety_declarations(self):
-        tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
-        limits = next(node for node in tree.body
-                      if isinstance(node, ast.ClassDef) and node.name == 'Limits')
-        field = next(node for node in limits.body
-                     if isinstance(node, ast.AnnAssign)
-                     and node.target.id == 'decision_reconciliation_bytes')
-        self.assertEqual(ast.unparse(field.value),
-                         DECISION_RECONCILIATION['decision_reconciliation_bytes'][0])
-        self.assertEqual(inventory(tree)['MAX_DECISION_RECONCILIATION_BYTES'],
-                         DECISION_RECONCILIATION['MAX_DECISION_RECONCILIATION_BYTES'][0])
-        default = next(node for node in tree.body if isinstance(node, ast.Assign)
-                       and any(isinstance(target, ast.Name)
-                               and target.id == 'DEFAULT_DECISION_RECONCILIATION_BYTES'
-                               for target in node.targets))
-        self.assertEqual(ast.unparse(default.value),
-                         DECISION_RECONCILIATION['DEFAULT_DECISION_RECONCILIATION_BYTES'][0])
-        insights = ast.parse((ROOT / 'insights.py').read_text(encoding='utf-8'))
-        constructor = next(node for node in insights.body
-                           if isinstance(node, ast.ClassDef) and node.name == 'Insights')
-        initializer = next(node for node in constructor.body
-                           if isinstance(node, ast.FunctionDef) and node.name == '__init__')
-        index = [arg.arg for arg in initializer.args.kwonlyargs].index(
-            'decision_reconciliation_bytes')
-        self.assertEqual(ast.unparse(initializer.args.kw_defaults[index]),
-                         DECISION_RECONCILIATION['decision_reconciliation_bytes'][0])
-        self.assertEqual([DECISION_RECONCILIATION[key][1]
-                          for key in ('decision_reconciliation_bytes',
-                                      'DEFAULT_DECISION_RECONCILIATION_BYTES',
-                                      'MAX_DECISION_RECONCILIATION_BYTES')],
-                         ['configured policy', 'configured policy', 'safety'])
-        self.assertTrue(all(entry[2].strip() for entry in DECISION_RECONCILIATION.values()))
-
     def test_diagnostic_sample_policy_and_safety_declarations(self):
         tree = ast.parse((ROOT / 'config.py').read_text(encoding='utf-8'))
         limits = next(node for node in tree.body
                       if isinstance(node, ast.ClassDef) and node.name == 'Limits')
         fields = {field.target.id: ast.unparse(field.value) for field in limits.body
                   if isinstance(field, ast.AnnAssign)}
-        self.assertEqual(fields['decision_receipt_diagnostics'],
-                         DIAGNOSTIC_SAMPLES['decision_receipt_diagnostics'][0])
         self.assertEqual(fields['queue_observations'],
                          DIAGNOSTIC_SAMPLES['queue_observations'][0])
-        for key in ('DEFAULT_DECISION_RECEIPT_DIAGNOSTICS',
-                    'MAX_DECISION_RECEIPT_DIAGNOSTICS',
-                    'DEFAULT_QUEUE_OBSERVATIONS', 'MAX_QUEUE_OBSERVATIONS'):
+        for key in ('DEFAULT_QUEUE_OBSERVATIONS', 'MAX_QUEUE_OBSERVATIONS'):
             assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
                               and any(isinstance(target, ast.Name) and target.id == key
                                       for target in node.targets))
             self.assertEqual(ast.unparse(assignment.value), DIAGNOSTIC_SAMPLES[key][0])
         self.assertEqual([DIAGNOSTIC_SAMPLES[key][1] for key in (
-            'decision_receipt_diagnostics', 'DEFAULT_DECISION_RECEIPT_DIAGNOSTICS',
-            'MAX_DECISION_RECEIPT_DIAGNOSTICS', 'queue_observations',
-            'DEFAULT_QUEUE_OBSERVATIONS', 'MAX_QUEUE_OBSERVATIONS')],
-                         ['configured policy', 'configured policy', 'safety',
-                          'configured policy', 'configured policy', 'safety'])
+            'queue_observations', 'DEFAULT_QUEUE_OBSERVATIONS', 'MAX_QUEUE_OBSERVATIONS')],
+                         ['configured policy', 'configured policy', 'safety'])
         self.assertTrue(all(entry[2].strip() for entry in DIAGNOSTIC_SAMPLES.values()))
 
     def test_configured_raw_settings_declarations(self):
