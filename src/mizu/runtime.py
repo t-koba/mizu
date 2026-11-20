@@ -60,6 +60,7 @@ from .context_check_tools import ContextCheckToolsMixin
 from .context_read_tools import ContextReadToolsMixin
 from .context_role_tools import ContextRoleToolsMixin
 from .context_join_tools import ContextJoinToolsMixin
+from .context_work_tools import ContextWorkToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -94,7 +95,6 @@ from .publication import Publication, source_commit
 from .web import Web
 from . import reviews
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
-from . import work_item_operations
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
@@ -462,7 +462,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextKernelToolsMixin, ContextInsightToolsMixin,
                 ContextEvidenceMixin, ContextWebToolsMixin,
                 ContextCheckToolsMixin, ContextReadToolsMixin,
-                ContextRoleToolsMixin, ContextJoinToolsMixin):
+                ContextRoleToolsMixin, ContextJoinToolsMixin,
+                ContextWorkToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -898,18 +899,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         if not operation_allowed("report_read", self.role.capabilities):
             raise Denied("Report read requires the report grant")
         return {"previous_report": _previous_report(self.project)}
-
-    def _op_work_items_read(self, args: dict) -> dict:
-        return work_item_operations.read(self, args)
-
-    def _op_work_items_create(self, args: dict) -> dict:
-        return work_item_operations.create(self, args)
-
-    def _op_work_items_transition(self, args: dict) -> dict:
-        return work_item_operations.transition(self, args)
-
-    def _op_work_items_reopen(self, args: dict) -> dict:
-        return work_item_operations.reopen(self, args)
 
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
@@ -1525,10 +1514,10 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "ready_work_read": _op_ready_work_read,
         "work_order_read": _op_work_order_read,
         "report_read": _op_report_read,
-        "work_items_read": _op_work_items_read,
-        "work_items_create": _op_work_items_create,
-        "work_items_transition": _op_work_items_transition,
-        "work_items_reopen": _op_work_items_reopen,
+        "work_items_read": ContextWorkToolsMixin._op_work_items_read,
+        "work_items_create": ContextWorkToolsMixin._op_work_items_create,
+        "work_items_transition": ContextWorkToolsMixin._op_work_items_transition,
+        "work_items_reopen": ContextWorkToolsMixin._op_work_items_reopen,
         "work_order": ContextRoleToolsMixin._op_work_order,
         "objects_create": ContextKernelToolsMixin._op_objects_create,
         "objects_transition": ContextKernelToolsMixin._op_objects_transition,
