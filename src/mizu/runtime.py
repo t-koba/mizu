@@ -123,16 +123,10 @@ from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             _prompt_tool_surface, _ready_work_age,
                             _ready_work_projection,  # preserved unit_prompts re-export seam
                             prompt_delta_for, prompt_for)
-
-
-def _normalized_wake_generation(value) -> str:
-    """Fail closed on malformed local control generations without crashing a run."""
-    return value if isinstance(value, str) else ""
-
-
-def _wake_generation_digest(value) -> str:
-    """Bound observer cursor state to a valid generation or the empty sentinel."""
-    return digest(_normalized_wake_generation(value).encode())
+# Wake evidence keeps its established runtime re-export seam.
+from .wake_evidence import (OBSERVED_CURSOR_MAX_BYTES,
+                            _normalized_wake_generation, _operator_woke,
+                            _role_cursor, _wake_generation_digest)
 
 
 @contextlib.contextmanager
@@ -162,9 +156,6 @@ INFRA_WAIT = (Busy, InfraExceeded)
 MAX_ENGINE_TOOL_INVOCATIONS = 4096
 MAX_ENGINE_TOOL_ID = 256
 MAX_READ_IDENTITIES = workspace_reads.MAX_READ_IDENTITIES
-#: Bound for role cursors: snapshot/code, wake generation, and (for read-only
-#: completion) state digest, outcome and validated compact progress evidence.
-OBSERVED_CURSOR_MAX_BYTES = 4096
 #: Bounded serialized size of the work items a CI request covers.
 MAX_COVERED_BYTES = 2048
 
@@ -3019,31 +3010,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin):
                     ctx.close_exec()
             finally:
                 guard.close()
-
-
-def _role_cursor(project, role_name) -> dict:
-    """Read bounded local observation evidence; unsafe/malformed cursors close."""
-    try:
-        cursor = read_json(project.root / "observed" / f"{role_name}.json", {},
-                           max_bytes=OBSERVED_CURSOR_MAX_BYTES)
-        return cursor if isinstance(cursor, dict) else {}
-    except (OSError, ValueError, Busy, Denied, LimitExceeded):
-        return {}
-
-
-def _operator_woke(control, cursor, *, observer=False) -> bool:
-    raw_generation = control.get("wake_generation", "")
-    if not isinstance(raw_generation, str):
-        return False
-    generation = raw_generation
-    if observer:
-        # A digest keeps the observer cursor bounded without narrowing the
-        # publisher's existing control-generation contract. Malformed local
-        # control state is the empty sentinel, never a wake or a crash.
-        return (_wake_generation_digest(generation) !=
-                cursor.get("wake_generation_digest", _wake_generation_digest("")))
-    seen = _normalized_wake_generation(cursor.get("wake_generation", ""))
-    return generation != seen
 
 
 def _progress_self_admits(record, config, role_name, current_time=None) -> bool:

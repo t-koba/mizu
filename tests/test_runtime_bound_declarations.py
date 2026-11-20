@@ -640,10 +640,12 @@ DECLARATIONS = {
             '4096', 'safety', 'runtime / fixed run-local engine-tool admission identity memory bound'),
         'MAX_ENGINE_TOOL_ID': (
             '256', 'mechanism', 'runtime / engine-tool invocation id format bound'),
-        'OBSERVED_CURSOR_MAX_BYTES': (
-            '4096', 'safety', 'runtime / bounded role cursor state read'),
         'MAX_COVERED_BYTES': (
             '2048', 'safety', 'runtime / bounded serialized CI-request covered-item set'),
+    },
+    'wake_evidence.py': {
+        'OBSERVED_CURSOR_MAX_BYTES': (
+            '4096', 'safety', 'wake evidence / bounded role cursor state read'),
     },
     'decision_idle.py': {
         '_DECISION_IDLE_CACHE_LIMIT': (
