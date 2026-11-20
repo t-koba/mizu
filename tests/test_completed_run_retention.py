@@ -6,7 +6,7 @@ import os
 import uuid
 from unittest import mock
 
-from support import Fixture, forget_ledger
+from support import Fixture
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied
 from mizu.fs import lock
@@ -196,11 +196,6 @@ class CompletedRunRetentionTests(Fixture):
         prune(self.project, apply=True)
         self.assertTrue(all(not (self.project.root / "runs" / r).exists() for r in (a, b, c)))
 
-    def block(self, wait):
-        item = self.project.work_items.create(idempotency_key=uuid.uuid4().hex, title="Wait for evidence", actor="worker")
-        return self.project.work_items.transition(item["record"]["work_item"]["id"], expected_rev=1, status="blocked",
-                                                 actor="worker", wait=wait)
-
     def test_symlink_and_hardlink_reference_fail_closed(self):
         old = self.run_record()
         target = self.root / "reference.json"
@@ -254,7 +249,7 @@ class CompletedRunRetentionTests(Fixture):
 
     def test_lock_order_busy_refuses_without_pause_and_other_maintenance_stays_paused(self):
         self.run_record()
-        for name in ("workspace.lock", "run-worker.lock", "run-retired-role.lock", "editor-ingest.lock", "insights.lock"):
+        for name in ("workspace.lock", "run-worker.lock", "run-retired-role.lock", "editor-ingest.lock", "run-reviewer.lock"):
             with self.subTest(name=name):
                 with lock(self.project.root / "locks" / name):
                     with self.assertRaises(Busy):
@@ -305,18 +300,17 @@ class CompletedRunRetentionTests(Fixture):
         prune(self.project, apply=True)
         self.assertEqual(runs.quarantines(self.project), [])
 
-    def test_corrupt_work_item_chain_and_symlink_reference_directory_refuse(self):
+    def test_corrupt_active_reference_and_symlink_reference_directory_refuse(self):
         self.run_record()
-        blocked = self.block({"kind": "deadline", "at": "2040-01-01T00:00:00+00:00"})
-        path = self.project.root / "work-items" / blocked["id"] / "2.json"
-        saved = path.read_bytes()
-        path.write_bytes(b"{")
-        forget_ledger(self.project.root)
+        # An unreadable active run pointer hides a live run from retention.
+        active = self.project.root / "active"
+        active.mkdir(exist_ok=True)
+        pointer = active / "worker.json"
+        pointer.write_bytes(b"{")
         self.assertFalse(prune(self.project)["run_retention"]["complete"])
         with self.assertRaises(Denied):
             prune(self.project, apply=True)
-        path.write_bytes(saved)
-        active = self.project.root / "active"
+        pointer.unlink()
         if active.exists():
             active.rmdir()
         external = self.root / "external-active"

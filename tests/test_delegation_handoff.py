@@ -20,6 +20,10 @@ class EndParent(Exception):
     """Stop the fake driver without attempting an unsupported reserved finish."""
 
 
+WORK_ORDER_ARGUMENTS = {'items': ['wi_' + 'a' * 32], 'rationale': 'Reserved gate check',
+                        'expected_rev': 0, 'expected_generation': 'a' * 64}
+
+
 class DelegationHandoffTests(Fixture):
     def setUp(self):
         super().setUp()
@@ -74,11 +78,13 @@ class DelegationHandoffTests(Fixture):
                 with self.assertRaises(Denied):
                     self.reserve(ctx, key, request)
                 self.assertEqual(ctx._reservation_view, view)
-            with patch.dict(Context._DISPATCH, files=Mock(), insights=Mock(return_value={'ok': True})) as handlers:
+            # work_order is an allowed parent control-plane operation; files is
+            # not. Mocking both handlers proves the gate, not the handler, decides.
+            with patch.dict(Context._DISPATCH, files=Mock(), work_order=Mock(return_value={'ok': True})) as handlers:
                 for dispatch in (ctx.handle, ctx.dispatch):
                     with self.assertRaises(Denied):
                         dispatch('files', {})
-                    self.assertEqual(dispatch('insights', {}), {'ok': True})
+                    self.assertEqual(dispatch('work_order', WORK_ORDER_ARGUMENTS), {'ok': True})
                 handlers['files'].assert_not_called()
             # Returned values cannot mutate the trusted Context binding.
             view['request']['source_snapshot'] = 'f' * 64
@@ -392,7 +398,7 @@ class DelegationHandoffTests(Fixture):
             self.assertEqual(ctx._reservation_view, {})
             for dispatch in (ctx.handle, ctx.dispatch):
                 with self.assertRaises(Denied):
-                    dispatch('insights', {})
+                    dispatch('work_order', WORK_ORDER_ARGUMENTS)
             self.assertIsNotNone(jobs.DelegationJobs.existing_reservation(self.project.root))
             self.assertEqual(self.reserve(ctx), ctx._reservation_view)
         self.run_parent(work)

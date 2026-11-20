@@ -316,15 +316,14 @@ class WaitResolutionTests(Fixture):
         # Supersession is not a terminal CI result and is absent from ready pages.
         if kind == 'publication_ci':
             self.assertNotIn(item['id'], {row['id'] for row in self.store.page_ready()['items']})
-        scan = self.store._iter_item_events_with_revisions
+        scan = self.store._active_rows
 
         def pending_first(**kwargs):
             rows = list(scan(**kwargs))
-            rows.sort(key=lambda row: self.store._seed_for_event(
-                row[0], row[1], readonly=True)[1]['id'] not in pending_ids)
+            rows.sort(key=lambda row: json.loads(row[0])['id'] not in pending_ids)
             return iter(rows)
 
-        with patch.object(self.store, '_iter_item_events_with_revisions', side_effect=pending_first), \
+        with patch.object(self.store, '_active_rows', side_effect=pending_first), \
                 patch.object(self.store, 'transition', wraps=self.store.transition) as transition:
             page, _ = resolution.reconcile(self.project, 'worker', limit=2)
         self.assertEqual(transition.call_count, 1)

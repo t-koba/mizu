@@ -365,7 +365,8 @@ class SnapshotRetentionTests(Fixture):
 
     def test_oversized_records_invalid_times_and_item_history_refuse_gc(self):
         old = self.snapshot()
-        bad = self.project.root / 'inbox/bad.json'
+        # An oversized run-reference record hides which runs retain snapshots.
+        bad = self.project.root / 'runs/invalid/started.json'
         write_json(bad, {'padding': 'x' * storage._AUDIT_JSON_BYTES})
         self.assertEqual(self.collect()['status'], 'refused')
         bad.unlink()
@@ -380,8 +381,8 @@ class SnapshotRetentionTests(Fixture):
     def test_nonblocking_exclusions_and_busy_does_not_consume_cadence(self):
         old = self.snapshot()
         paths = [self.project.root / ('locks/' + name + '.lock') for name in
-                 ('workspace', 'publication', 'editor-ingest', 'insights', 'acceptance', 'run-worker')]
-        paths.append(self.project.root / "spool/editor/.submit.lock")
+                 ('workspace', 'publication', 'editor-ingest', 'run-searcher', 'records',
+                  'acceptance', 'run-worker')]
         paths.append(check_slot_exclusion(self.project.root, self.config.limits.parallel_checks - 1))
         for path in paths:
             with self.subTest(lock=path.name), lock(path):
@@ -487,7 +488,9 @@ class SnapshotRetentionTests(Fixture):
         self.assertEqual(self.collect()['status'], 'refused')
         self.assertTrue(self.path(old).exists())
         generation.write_bytes(data)
-        for name in ('snapshots', 'objects', 'histories', 'spool'):
+        # Runs are a live reference root for snapshot collection.
+        (self.project.root / 'runs').mkdir(exist_ok=True)
+        for name in ('snapshots', 'objects', 'histories', 'runs'):
             with self.subTest(root=name):
                 source = self.project.root / name
                 moved = self.root / ('moved-' + name)
@@ -501,7 +504,7 @@ class SnapshotRetentionTests(Fixture):
                 self.assertTrue(self.path(old).exists())
         self.assertEqual(self.collect()['status'], 'collected')
 
-    def test_disappearing_enumerated_history_and_insight_refuse_gc(self):
+    def test_disappearing_enumerated_history_and_run_reference_refuse_gc(self):
         old = self.snapshot()
         history = [old['id']]
         path = self.project.root / 'histories' / (digest(canonical(history)) + '.json')
@@ -516,13 +519,13 @@ class SnapshotRetentionTests(Fixture):
             self.assertEqual(self.collect()['status'], 'refused')
         self.assertTrue(self.path(old).exists())
         path.unlink()
-        insight = self.project.root / 'inbox/citation.json'
-        write_json(insight, {'base_snapshot': old['id']})
+        run_reference = self.project.root / 'runs/citation/started.json'
+        write_json(run_reference, {'snapshot': old['id']})
         original = storage._audit_ref_dict
-        def missing_insight(root, candidate):
-            if candidate == insight:
-                return None, False
+        def unreadable_reference(root, candidate):
+            if candidate == run_reference:
+                return None, True
             return original(root, candidate)
-        with mock.patch.object(storage, '_audit_ref_dict', side_effect=missing_insight):
+        with mock.patch.object(storage, '_audit_ref_dict', side_effect=unreadable_reference):
             self.assertEqual(self.collect()['status'], 'refused')
         self.assertTrue(self.path(old).exists())

@@ -29,17 +29,6 @@ maximum = 1024
 type = "newer_snapshot"
 '''
 KIND = 'publisher.outcome'
-ROLE_DECLARATION = '''
-[record_kinds."probe.note"]
-writer = "role.worker"
-route = "none"
-wake = false
-retention = "permanent"
-acknowledgement = "explicit"
-subject = "object"
-maximum = 1024
-'''
-
 
 class HostRecordTests(CiWaitFixture):
     def setUp(self):
@@ -227,48 +216,44 @@ class HostRecordTests(CiWaitFixture):
         self.assertEqual(len(ci_waits.pending(self.store, 'worker')), 1)
 
     def test_foreign_kind_record_in_host_partition_is_an_incomplete_reference(self):
-        # A canonically stored record of another declared family can sit in the
-        # host partition. Its subject names no snapshot, so the scan must report
-        # an incomplete reference source instead of aborting maintenance.
-        self.file.write_text(self.file.read_text() + ROLE_DECLARATION)
-        loaded = load(self.file)
-        config = dataclasses.replace(self.config, record_kinds=loaded.record_kinds)
-        shared = host_records.store(self.project.root, self.project.snapshots, config.record_kinds)
-        shared.put(dict(schema=1, id='host/probe/x', kind='probe.note', writer='role.worker',
-                        created_at=now(), subject={}, payload={}), writer='role.worker')
+        # A canonically stored CI-wait record (another declared source family)
+        # can sit in the host partition. Its subject names no snapshot, so the
+        # host scan must report an incomplete reference source instead of
+        # aborting maintenance; record_kinds itself stays publisher-only.
+        subject = {'work_item': 'wi_' + 'a' * 32, 'rev': 1, 'holder': 'worker'}
+        payload = {**subject, 'kind': 'ci', 'trust': 'external-untrusted'}
+        ci_waits.shared_store(self.store).put(
+            dict(schema=1, id='host/probe/x', kind='ci.wait', writer='host.ci',
+                 created_at=now(), subject=subject, payload=payload), writer='host.ci')
         self.project.set_control(paused=True)
-        with patch.object(self.project, 'config', config):
-            report = audit(self.project)
-            self.assertGreater(report['reference_records_skipped'], 0)
-            self.assertIn('shared-records/host', report['reference_records_skipped_sample'])
-            self.assertEqual(report['references']['host_record_snapshots'], 0)
-            preview = reclaim(self.project)
-            self.assertGreater(preview['reference_records_skipped'], 0)
-            self.assertIn('shared-records/host', preview['reference_records_skipped_sample'])
-            with self.assertRaisesRegex(Denied, r'Skipped reference records \(shared-records/host'):
-                reclaim(self.project, apply=True)
+        report = audit(self.project)
+        self.assertGreater(report['reference_records_skipped'], 0)
+        self.assertIn('shared-records/host', report['reference_records_skipped_sample'])
+        self.assertEqual(report['references']['host_record_snapshots'], 0)
+        preview = reclaim(self.project)
+        self.assertGreater(preview['reference_records_skipped'], 0)
+        self.assertIn('shared-records/host', preview['reference_records_skipped_sample'])
+        with self.assertRaisesRegex(Denied, r'Skipped reference records \(shared-records/host'):
+            reclaim(self.project, apply=True)
 
     def test_invalid_payload_snapshot_reference_is_an_incomplete_scan(self):
-        # Role payloads are data-only, so a nested snapshot reference can be
-        # malformed; it must count as a skipped source, not crash the audit.
-        self.file.write_text(self.file.read_text() + ROLE_DECLARATION)
-        loaded = load(self.file)
-        config = dataclasses.replace(self.config, record_kinds=loaded.record_kinds)
-        shared = host_records.store(self.project.root, self.project.snapshots, config.record_kinds)
-        shared.put(dict(schema=1, id='host/probe/y', kind='probe.note', writer='role.worker',
-                        created_at=now(), subject={'snapshot_id': 'a' * 64},
-                        payload={'probe': {'snapshot_id': ['not-a-digest']}}),
-                   writer='role.worker')
+        # A stored outcome can carry a malformed nested snapshot reference;
+        # it must count as a skipped source, not crash the audit or authorize
+        # deletion of the snapshots that record might retain.
+        result = self.write({'outcome': 'superseded', 'replacement': self.newer(publish=False)})
+        path = self.project.root / self.shared().record_name(result['record']['id'])
+        record = json.loads(path.read_text())
+        record['payload']['replacement']['snapshot_id'] = ['not-a-digest']
+        path.write_bytes(canonical(record))
         self.project.set_control(paused=True)
-        with patch.object(self.project, 'config', config):
-            report = audit(self.project)
-            self.assertGreater(report['reference_records_skipped'], 0)
-            self.assertIn('shared-records/host', report['reference_records_skipped_sample'])
-            preview = reclaim(self.project)
-            self.assertGreater(preview['reference_records_skipped'], 0)
-            self.assertIn('shared-records/host', preview['reference_records_skipped_sample'])
-            with self.assertRaisesRegex(Denied, r'Skipped reference records \(shared-records/host'):
-                reclaim(self.project, apply=True)
+        report = audit(self.project)
+        self.assertGreater(report['reference_records_skipped'], 0)
+        self.assertIn('shared-records/host', report['reference_records_skipped_sample'])
+        preview = reclaim(self.project)
+        self.assertGreater(preview['reference_records_skipped'], 0)
+        self.assertIn('shared-records/host', preview['reference_records_skipped_sample'])
+        with self.assertRaisesRegex(Denied, r'Skipped reference records \(shared-records/host'):
+            reclaim(self.project, apply=True)
 
     def test_disabled_wake_and_stale_ack_remain_pending(self):
         item = self.block()
