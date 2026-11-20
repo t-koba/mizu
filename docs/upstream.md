@@ -12,16 +12,21 @@ adapters/pi の2依存と adapters/pi-durable の4依存（Chord を含む）を
 非 Pi パッケージの解決版は次のみ変更した: pi lock は undici 8.10.2 → 8.12.3、
 minimatch 11.0.3 を追加（`@isaacs/nonrecursive-glob-match` 1.0.3 を伴う）、ws は 8.22.0 のまま;
 pi-durable lock は ws 8.22.0 → 8.21.0、undici 8.10.2 → 8.12.3、minimatch 11.0.3 を追加（同上）。
+2026-11-20 に最新 stable の Pi 1.5.2（2026-11-10 公開）へ追随し、同じ依存を 1.5.2 に固定した。
+両 lock は trusted materialize で再生成し、承認済み offline npm cache から `npm ci` で実装物を
+install して SDK・durable・replay の各 gate を通過させた。両 lock で非 Pi パッケージの解決版の
+変更は `grok-mermaid` 0.2.3 → `lovely-mermaid` 0.3.3 のみ（1.5.1 の Mermaid 描画拡張に伴う）。
+1.5.1 と 1.5.2 の差分をレビューし、Mizu が使う公開入口に契約破壊がないことを確認した（詳細は下記 Pi 節）。
 実行物のバージョンは証跡であり、
 Mizu が旧実行物を判定・変換・拒否するための条件ではない。内部の設定・bridge・保存記録には
 世代番号を持たせない。
 
 ## Pi
 
-[1.5.0 の変更履歴](https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/CHANGELOG.md)、
-[公開 SDK](https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/docs/sdk.md)、
-[拡張 API](https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/docs/extensions.md)、
-[RPC](https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/docs/rpc.md)
+[1.5.2 の変更履歴](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/CHANGELOG.md)、
+[公開 SDK](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/sdk.md)、
+[拡張 API](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/extensions.md)、
+[RPC](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/rpc.md)
 を参照した。v1.0.1 から v1.0.4 の差分を評価し、Mizu が使う公開入口
 （`ModelRuntime`、`createAgentSession`、`runRpcMode`、設定・拡張・型）に
 契約破壊がないことを確認してから固定した。v1.0.4 から v1.1.0 の差分も同様に評価した：
@@ -58,6 +63,15 @@ Pi Durable 1.5.0 はこの SQLite schema v2 を変更しないが、`pi.live` �
 クラッシュ時は最大約 1 秒のストリーム内容を失うが、launcher は one-shot で、provider usage は
 stream 完了時に bridge へ報告されるため、既存のクラッシュ境界を超える会計上の欠落は追加しない。
 `0` は保存回数を増やすだけなので採用しない。
+1.5.1 は shell からの `pi auth login/logout`、idle prompt cache warming、Anthropic message threads、
+Markdown transformer の対象選択などを追加し、2 つの破壊的変更を含む: custom `GrepOperations.readFile`
+は context 行に対して呼ばれなくなり、ツールが全無効の session で OpenAI 互換モデルが空の `tools`
+配列を送らなくなる。Mizu の launcher はこれらに依存しない。1.5.2 は消えた folder の session を
+現在の folder へ fork できるようにし、Anthropic OAuth の Claude Code バージョン表記を修正するのみで、
+Mizu の契約に影響しない。
+pi-durable は 1.5.1 で `Tx.submission(id)`、会話単位の compaction 設定、JSONL の read-only open などを
+追加し、SQLite commit を効率化した。1.5.2 に durable 側の変更はない。いずれも SQLite schema v2 と
+`pi.live` / `pi.tool` v3 を変更しないため、移行手順の更新は不要である。
 
 pi-durable の launcher は Pi 自身の `ModelRuntime` で固定モデルを解決する。
 解決元は pi と同じ二つ: 同梱カタログと engine directory の `models.json`。
