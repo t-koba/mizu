@@ -879,8 +879,10 @@ rebuilds the index when every history validates. Writers wait for the audit.
   creates the lock file, and never removes atomic-write leftovers. Validated
   `.new-*` orphans/aliases are ignored (never promoted); unsafe or unexpected
   names, malformed records, incomplete chains and bound violations fail closed.
-  Runtime prompt projection and `work_items_read` keep their locked, recovering
-  `page_open` behavior. The separate host `--legacy` inventory uses `page_legacy`.
+  Runtime prompt projection and the open-page and by-ID modes of `work_items_read`
+  keep their locked, recovering `page_open` behavior; the `closed=true` page uses
+  the unlocked, non-recovering `page_closed` reader. The separate host `--legacy`
+  inventory uses `page_legacy`.
 
 #### Incremental current projections
 

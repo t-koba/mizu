@@ -652,10 +652,12 @@ substantive event, requires scanning old random-ID history to detect a hidden
 substantive decision. Old events are never rewritten.
 
 `Project.work_items` provides internal `get(item_id)` and the locked readers
-`page_open(cursor=None, limit=25)`, `projection(item_id)`, and
+`page_open(cursor=None, limit=25)`, the read-only
+`page_closed(cursor=None, limit=25, status=None, origin=None,
+closed_after=None, closed_before=None)`, `projection(item_id)`, and
 `explain(item_id, *, after_rev=0, limit=25)`, plus
 `transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
-snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the two
+snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the three
 page modes through the existing `work_items_read` grant and exposes transition
 only through its separately granted operation described below. Other modules
 use only the public seams `current`, `current_items`, `unseeded_decisions`,
@@ -1040,6 +1042,21 @@ only the current record and bounded page under the existing maximum of 256
 revisions. This read uses recognized temporary recovery under
 `insights.lock`, preserves fail-closed seed/chain validation, and remains
 observational: it does not account progress or affect scheduling/wakeup.
+
+The same `work_items_read` grant selects a third mode with `closed=true`:
+`WorkItems.page_closed(cursor=None, limit=25, status=None, origin=None,
+closed_after=None, closed_before=None)` pages seeded terminal items (`done` and
+`dropped`) ordered by status, then newest `updated_at` first, then ascending ID.
+The exclusive `cursor` carries the last row's status, update-order key and ID
+so a caller reaches the whole set. `status` (done or dropped), `origin` (the
+insight id), and the timezone-aware `closed_after` / `closed_before` timestamps
+narrow matches but never cap `total`, which counts all rows after filters.
+Rows and pages are byte-bounded; malformed cursors, filters or committed rows
+fail closed. Unlike the open-page and by-ID readers this mode reads with an
+unlocked, non-recovering store view: it neither acquires `insights.lock` nor
+performs atomic-write recovery cleanup. It cannot combine with by-ID `id` or
+`after_rev`, and closed filters require `closed=true`. The response is a fresh
+live view, not a frozen snapshot, and remains observational.
 
 The separately granted `work_items_transition` operation exposes only
 `Project.work_items.transition`: required `id`, positive `expected_rev`, and
