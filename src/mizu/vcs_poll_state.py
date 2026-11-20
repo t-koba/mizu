@@ -27,8 +27,7 @@ def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=Tru
 
     Schema: ``state`` is daemon in-memory poll state (fetch, CI, proposal
     timestamp/cursor); ``shared`` is the flat ``vcs-poll.json`` mapping.
-    Returns the ``ci`` sub-state. The host-only complete proposal inventory is
-    refreshed wholesale (including absence); a valid shared CI failure map is
+    Returns the ``ci`` sub-state. A valid shared CI failure map is
     also authoritative and replaces stale in-memory failures, including when
     empty. An absent, unreadable, or invalid failure map leaves the local map
     intact. Success evidence has its separate merge policy. Bounds: timestamps
@@ -37,8 +36,6 @@ def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=Tru
     normalization until after upstream refresh/live-ref discovery. Failure: never raises.
     """
     ci_state = state.setdefault("ci", {})
-    state["proposal_complete_facts"] = (shared.get("proposal_complete_facts")
-                                        if isinstance(shared, dict) else None)
     if not isinstance(shared, dict):
         return ci_state
     for key, target in (("last_fetch", state), ("last_poll", ci_state),
@@ -56,6 +53,8 @@ def refresh_poll_state(state: dict, shared: dict, config=None, *, refresh_ci=Tru
     for key in ("ci_changes_cursor", "ci_changes_pending", "ci_changes_epoch"):
         if key in shared:
             state[key] = shared[key]
+    if isinstance(shared.get("proposal_refs"), dict):
+        state["proposal_refs"] = shared["proposal_refs"]
     if "proposal_cursor" in shared:
         stored_cursor = shared.get("proposal_cursor")
         if stored_cursor is None:

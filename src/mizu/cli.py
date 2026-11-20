@@ -14,7 +14,7 @@ from . import __version__
 from . import platform as _platform
 from .config import load
 from .errors import ConfigError, Denied, MizuError
-from .fs import PREVIEW_BYTES, atomic_write, mkdir, lock
+from .fs import atomic_write, mkdir, lock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -64,9 +64,8 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--role", default=None, help="Configured role (default: single configured role, else required)")
         if name == "run":
             p.add_argument("--attributes", type=Path, help="Operator JSON attributes for this execution")
-            p.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
             p.add_argument("--event", action="store_true",
-                           help="Event-triggered dispatch: exit without model use unless a subscribed decision or due wait is pending")
+                           help="Event-triggered dispatch: exit without model use unless a queue message, event or wait is due")
     p = sub.add_parser("check-jobs", help="Execute a bounded batch of frozen-input sandbox checks; no model")
     p.add_argument("project")
     p.add_argument("--recover", action="store_true", help="Recover quarantined compute slots only after container cleanup")
@@ -105,49 +104,36 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", required=True)
     p.add_argument("--subject", required=True, help="Exact snapshot subject as JSON")
     p.add_argument("--payload", required=True, help="Declared bounded payload as JSON")
-    p = sub.add_parser("record-questions", help="Bounded operator listing of declared role questions")
-    p.add_argument("project")
-    p.add_argument("--limit", type=int, required=True,
-                   help="Maximum questions returned for this invocation")
-    p.add_argument("--scan-limit", type=int, required=True,
-                   help="Maximum role record filenames scanned for this invocation")
-    p = sub.add_parser("record", help="Operator-only immutable answers and notices; no Insight decisions")
-    p.add_argument("project")
-    p.add_argument("action", choices=("publish", "withdraw", "supersede"))
-    p.add_argument("--id", required=True, help="Stable event ID for exact replay")
-    p.add_argument("--kind", required=True, choices=("answer", "operator.notice"))
-    p.add_argument("--body", default="", help="Exact bounded content (not interpreted)")
-    p.add_argument("--role", help="Notice addressee; answers derive the authenticated asking role")
-    p.add_argument("--subject-id", help="Exact full insight/question ID")
-    p.add_argument("--subject-rev", type=int)
-    p.add_argument("--subject-kind", help="Declared role question kind (instead of insight revision)")
-    p.add_argument("--subject-digest", help="Exact role question envelope digest")
-    p.add_argument("--target-id", help="Exact notice record ID to withdraw/supersede")
-    p.add_argument("--target-digest", help="Exact notice envelope digest")
-    p = sub.add_parser("insight", help="Submit, list, read, decide or ingest proposals")
-    p.add_argument("action", choices=("submit", "list", "page", "read", "decide", "ingest", "revise", "history", "withdraw"), help="Proposal operation")
+    p = sub.add_parser("queue", help="Write, read or acknowledge declared queue messages as operator or host",
+                       usage="mizu queue PROJECT write QUEUE --body JSON|- [--id ID] [--ref ID ...] [--deliver-at ISO] [--host]\n"
+                             "       mizu queue PROJECT read QUEUE [--cursor SEQ] [--limit N] [--host]\n"
+                             "       mizu queue PROJECT ack QUEUE SEQ [--host]\n"
+                             "       mizu queue PROJECT message ID [--host]\n"
+                             "       mizu queue PROJECT refs ID --direction in|out [--cursor ID] [--limit N] [--host]")
     p.add_argument("project", help="Managed project name")
-    p.add_argument("--scope", choices=("live", "archive"), default=None, help="Insight page scope (default: live)")
-    p.add_argument("--limit", type=int, default=None,
-                   help="Insight page size (1-1000; default: 30), or positive history read budget "
-                        "(capped/defaulted by insight_history_entries)")
-    p.add_argument("--cursor", default=None, help="Opaque insight page continuation")
-    p.add_argument("--after-rev", type=int, default=None, help="Exclusive history revision cursor (nonnegative; default: 0)")
-    p.add_argument("--id", help="Proposal ID for read/submit/decide/withdraw")
-    p.add_argument("--title", help="Proposal title for submit")
-    p.add_argument("--body", type=Path, help="Read Markdown body from this file; '-' reads stdin")
-    p.add_argument("--work-items", type=Path, help="JSON file of 1-16 {title, description} tasks for accept/modify")
-    p.add_argument("--work-item-intent", choices=("create", "none"), help="Work disposition for accept/modify; omitted uses source policy")
-    p.add_argument("--accepted-scope", default=None, help="Accepted scope for accept/modify decisions (1-4000 nonblank characters)")
-    p.add_argument("--decision", help="Decision action for decide (accept/modify/defer/reject)")
-    p.add_argument("--reason", default="", help="Decision reason for decide, withdrawal reason for withdraw")
-    p.add_argument("--revisit", default="", help="Revisit condition for defer")
-    p.add_argument("--wait", default=None, help="Structured defer wait: deadline:<ISO-at> | code_change | insight_decided:<id> | dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
-    p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise/decide/withdraw")
-    p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
-    p.add_argument("--addressee", default=None,
-                   help="Explicit insight addressee for submit/revise: operator or a configured project role; "
-                        "omitted routes an operator submission to the configured default recipient")
+    qsub = p.add_subparsers(dest="queue_command", required=True)
+    q = qsub.add_parser("write", help="Append one message")
+    q.add_argument("queue")
+    q.add_argument("--body", required=True, help="JSON object body; '-' reads it from stdin")
+    q.add_argument("--id", default=None, help="Message id (32 hex) for idempotent retries")
+    q.add_argument("--ref", action="append", default=None, help="Id of an earlier message this one refers to")
+    q.add_argument("--deliver-at", default=None, help="Aware ISO time before which the message is not delivered")
+    q = qsub.add_parser("read", help="Read due messages after the principal's cursor, or after --cursor")
+    q.add_argument("queue")
+    q.add_argument("--cursor", type=int, default=None, help="Read after this sequence instead of the acknowledged cursor")
+    q.add_argument("--limit", type=int, default=None, help="Messages per page (1-512; default 64)")
+    q = qsub.add_parser("ack", help="Advance the principal's cursor")
+    q.add_argument("queue")
+    q.add_argument("seq", type=int)
+    q = qsub.add_parser("message", help="Read one message by id")
+    q.add_argument("id")
+    q = qsub.add_parser("refs", help="List messages referring to an id (in) or that it refers to (out)")
+    q.add_argument("id")
+    q.add_argument("--direction", required=True, choices=("in", "out"))
+    q.add_argument("--cursor", default=None, help="Continue after this message id")
+    q.add_argument("--limit", type=int, default=None, help="Messages per page (1-512; default 64)")
+    for q in qsub.choices.values():
+        q.add_argument("--host", action="store_true", help="Act as the host principal instead of operator")
     p = sub.add_parser("publication", help="Record or list durable publication receipts")
     publication = p.add_subparsers(dest="publication_command", required=True)
     record = publication.add_parser("record", help="Record an operator-run publication receipt; create-only and idempotent")
@@ -167,16 +153,15 @@ def parser() -> argparse.ArgumentParser:
     listing.add_argument("--code-digest", default=None, help="Filter by exact code digest (64 hex)")
     listing.add_argument("--branch", default=None, help="Filter by exact branch name")
     listing.add_argument("--published-sha", default=None, help="Filter by exact published SHA (40 or 64 hex)")
-    p = sub.add_parser("work-items", help="Inspect work items or reconcile one legacy decision",
+    p = sub.add_parser("work-items", help="Inspect work items or open one blocked item as the operator",
                        usage="mizu work-items PROJECT [inventory options]\n"
-                             "       mizu work-items reconcile-legacy PROJECT EVENT_ID --outcome {open,drop}"
-                             " --reason TEXT [--expected-action {accept,modify}] [--expected-rev N] [--title TEXT]")
+                             "       mizu work-items open PROJECT ID --expected-rev N --reason TEXT")
     p.add_argument("project", help="Managed project name")
-    p.add_argument("reconcile_project", nargs="?", metavar="PROJECT", help="Managed project for reconcile-legacy")
-    p.add_argument("event_id", nargs="?", metavar="EVENT_ID", help="Exact decision-history ID for reconcile-legacy")
+    p.add_argument("open_project", nargs="?", metavar="PROJECT", help="Managed project for open")
+    p.add_argument("item_id", nargs="?", metavar="ID", help="Exact work-item ID for open")
     p.add_argument("--limit", type=int, help="Items per inventory page (1-100; default: 25)")
     mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--cursor", default=None, help="Opaque open or legacy page continuation from a previous call")
+    mode.add_argument("--cursor", default=None, help="Opaque open page continuation from a previous call")
     mode.add_argument("--changes", action="store_true", help="Start a bounded current-projection change scan")
     mode.add_argument("--change-cursor", default=None, help="Resume or poll from an opaque change cursor")
     p.add_argument("--closed", type=int, default=None, help="Closed items to include, newest first (0-100; default: 10)")
@@ -184,13 +169,9 @@ def parser() -> argparse.ArgumentParser:
                    help="Under the record lock, replay every work-item history with full validation and compare it with the current-state index")
     p.add_argument("--repair", action="store_true",
                    help="With --audit, rebuild the current-state index from the history when they diverge")
-    p.add_argument("--legacy", action="store_true", help="List legacy decision dispositions instead of current work items")
-    legacy = p.add_argument_group("reconcile-legacy options")
-    legacy.add_argument("--outcome", choices=("open", "drop"), help="Required disposition")
-    legacy.add_argument("--reason", help="Required nonblank reason (1-4000 characters); preserved verbatim")
-    legacy.add_argument("--expected-action", choices=("accept", "modify"), help="Require this exact decision action")
-    legacy.add_argument("--expected-rev", type=int, metavar="N", help="Require this exact positive decision revision")
-    legacy.add_argument("--title", help="Required for open (1-200 characters); not allowed for drop")
+    opening = p.add_argument_group("open options")
+    opening.add_argument("--reason", help="Required nonblank reason (1-4000 characters); preserved verbatim")
+    opening.add_argument("--expected-rev", type=int, metavar="N", help="Required current revision of the item")
     p = sub.add_parser("editor", help="Export a capsule or serve the Editor MCP")
     esub = p.add_subparsers(dest="editor_command", required=True)
     p = esub.add_parser("export", help="Export an immutable Editor capsule")
@@ -223,22 +204,6 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("storage", help="Report snapshot/object retention accounting; dry-run preview unless --apply")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Remove unreferenced manifests and orphan objects under quiescence")
-    p = sub.add_parser("kernel-shadow", help="Verify one insight's derived kernel projection; no authority transfer")
-    p.add_argument("project", help="Managed project name")
-    p.add_argument("insight", help="Exact insight ID or unique prefix")
-    p.add_argument("--reproject", action="store_true",
-                   help="Replay the projection once before verifying (writes kernel objects only)")
-    p = sub.add_parser("kernel-shadow-audit", help="Bounded read-only audit of all declared stage-2 kernel shadows")
-    p.add_argument("project", help="Managed project name")
-    p = sub.add_parser("migrate-records", help="Preview flat shared record migration; dry-run unless --apply")
-    p.add_argument("project", help="Managed project name")
-    p.add_argument("--apply", action="store_true", help="Move verified records under quiescence")
-    from .work_item_migration import DEFAULT_SCAN_LIMIT
-    p = sub.add_parser("migrate-work-items", help="Preview legacy work-item conversion; dry-run unless --apply")
-    p.add_argument("project", help="Paused managed project name")
-    p.add_argument("--apply", action="store_true", help="Rename verified work-item resolutions under quiescence")
-    p.add_argument("--scan-limit", type=int, default=DEFAULT_SCAN_LIMIT,
-                   help=f"Entry limit per scanned directory (default: {DEFAULT_SCAN_LIMIT})")
     p = sub.add_parser("prune", help="Preview (or apply) retention of completed runs, inputs, artifacts, logs and web cache")
     p.add_argument("project", help="Managed project name")
     p.add_argument("--apply", action="store_true", help="Actually remove candidates")
@@ -342,8 +307,7 @@ def _cmd_run(config, project, args):
         # independently of provider recovery; the daemon keeps its
         # own defer-and-repoll loop and never waits here.
         return Engine(config, stop=stop).run(project, role, attributes=_attribute_input(getattr(args, "attributes", None)),
-                                             retry_busy=True, event_trigger=getattr(args, "event", False),
-                                             scheduled_invocation=getattr(args, "scheduled", False))
+                                             retry_busy=True, event_trigger=getattr(args, "event", False))
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -361,126 +325,6 @@ def _cmd_cleanup(config, project, args):
     from .sandbox import cleanup
     return cleanup(config, project.root, args.role)
 
-
-def _parse_wait(spec):
-    """Parse a CLI ``--wait kind[:arg]`` spec into a wait dict (None when absent)."""
-    if spec is None:
-        return None
-    kind, _, arg = spec.partition(":")
-    if kind == "deadline" and arg:
-        return {"kind": "deadline", "at": arg}
-    if kind == "code_change" and not arg:
-        return {"kind": "code_change"}
-    if kind == "insight_decided" and arg:
-        return {"kind": "insight_decided", "insight": arg}
-    if kind == "dependency" and arg:
-        parts = arg.split(":")
-        # The dependency CLI form carries recipient, insight, revision and action.
-        if len(parts) == 4:
-            recipient, target, rev, action = parts
-            try:
-                required_rev = int(rev)
-            except (ValueError, TypeError):
-                required_rev = 0
-            if (recipient and target and required_rev >= 1
-                    and action in ("accept", "modify", "reject")):
-                return {"kind": "dependency", "recipient": recipient,
-                        "requires": {"insight": target, "rev": required_rev, "action": action}}
-    raise ConfigError("Insight wait must be deadline:<ISO-at>, code_change, insight_decided:<id>, "
-                      "or dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
-
-
-def _cmd_insight(config, project, args):
-    if args.work_items is not None and args.action != "decide":
-        raise ConfigError("--work-items applies only to insight decide")
-    if args.work_item_intent is not None and args.action != "decide":
-        raise ConfigError("--work-item-intent applies only to accept/modify decisions")
-    if args.action != "page" and any(getattr(args, key, None) is not None for key in ("scope", "cursor")):
-        raise ConfigError("--scope and --cursor apply only to insight page")
-    if args.action not in ("page", "history") and args.limit is not None:
-        raise ConfigError("--limit applies only to insight page/history")
-    if args.action != "history" and args.after_rev is not None:
-        raise ConfigError("--after-rev applies only to insight history")
-    if args.action != "decide" and args.accepted_scope is not None:
-        raise ConfigError("--accepted-scope applies only to insight decide")
-    if args.addressee is not None and args.action not in ("submit", "revise"):
-        raise ConfigError("--addressee applies only to insight submit/revise")
-    explicit_addressee = {}
-    if args.addressee is not None:
-        if args.addressee != "operator" and args.addressee not in project.roles:
-            raise ConfigError("--addressee must be operator or a configured project role")
-        explicit_addressee["addressee"] = args.addressee
-    if args.action == "page":
-        return project.insights.list_page(scope=args.scope or "live", limit=args.limit if args.limit is not None else 30,
-                                          cursor=args.cursor)
-    if args.action == "list":
-        return project.insights.list(pending=False, limit=1000)
-    if args.action == "read":
-        if not args.id:
-            raise ConfigError("--id is required")
-        return project.insights.read(args.id)
-    if args.action == "history":
-        if not args.id:
-            raise ConfigError("--id is required")
-        return project.insights.history(args.id, after_rev=args.after_rev if args.after_rev is not None else 0,
-                                        limit=args.limit)
-    if args.action == "revise":
-        if not args.id:
-            raise ConfigError("--id is required")
-        if not args.title or args.body is None:
-            raise ConfigError("Insight revision requires --title and --body")
-        if str(args.body) == "-":
-            import sys as _sys
-            from .fs import PREVIEW_BYTES as _PREVIEW
-            body = _sys.stdin.read(_PREVIEW + 1)
-        else:
-            if args.body.stat().st_size > PREVIEW_BYTES:
-                raise Denied("Insight body file exceeds byte limit")
-            body = args.body.read_text(encoding="utf-8")
-        # Keep the observed snapshot alive until its durable reference is written.
-        # Refuse as Busy on contention; retry the command after maintenance.
-        with lock(project.root / "locks/publication.lock", blocking=False):
-            return project.insights.revise(args.id, source="operator", title=args.title, body=body,
-                                           base_snapshot=project.snapshots.get()["id"],
-                                           expected_rev=args.expected_rev, **explicit_addressee)
-    if args.action == "decide":
-        if not args.id or not args.decision:
-            raise ConfigError("Insight decide requires --id and --decision")
-        tasks = None
-        if args.work_items is not None:
-            if args.work_items.stat().st_size > PREVIEW_BYTES:
-                raise Denied("Task list file exceeds byte limit")
-            try:
-                tasks = json.loads(args.work_items.read_text(encoding="utf-8"))
-            except (ValueError, UnicodeError):
-                raise ConfigError("--work-items requires a UTF-8 JSON task list") from None
-            if tasks is None:
-                raise ConfigError("--work-items requires a nonempty JSON task list")
-        return project.insights.decide(args.id, args.decision, args.reason or "", args.revisit or "", "operator",
-                                                 wait=_parse_wait(args.wait),
-                                                 expected_rev=args.expected_rev, work_item_intent=args.work_item_intent,
-                                                 scope=args.accepted_scope, work_items=tasks)
-    if args.action == "withdraw":
-        if not args.id or not args.reason.strip():
-            raise ConfigError("Insight withdraw requires --id and --reason")
-        return project.insights.withdraw(args.id, source="operator", reason=args.reason,
-                                         expected_rev=args.expected_rev)
-    if args.action == "ingest":
-        return project.insights.ingest_editor()
-    if not args.title or args.body is None:
-        raise ConfigError("Insight submission requires --title and --body")
-    if str(args.body) == "-":
-        body = sys.stdin.read(PREVIEW_BYTES + 1)
-    else:
-        if args.body.stat().st_size > PREVIEW_BYTES:
-            raise Denied("Insight body file exceeds byte limit")
-        body = args.body.read_text(encoding="utf-8")
-    # Keep the observed snapshot alive until its durable reference is written.
-    # Refuse as Busy on contention; retry the command after maintenance.
-    with lock(project.root / "locks/publication.lock", blocking=False):
-        return project.insights.submit(source="operator", title=args.title, body=body,
-                                       base_snapshot=project.snapshots.get()["id"], insight_id=args.id,
-                                       origin=args.origin, **explicit_addressee)
 
 
 def _cmd_editor_export(config, project, args):
@@ -515,11 +359,6 @@ def _cmd_prune(config, project, args):
     return prune(project, apply=args.apply, keep_artifacts=args.keep_artifacts)
 
 
-def _cmd_kernel_shadow_audit(config, project, args):
-    # Lazy: only this read-only operator command needs the audit helper.
-    from . import kernel_shadow_audit
-    return kernel_shadow_audit.audit(project)
-
 
 def _cmd_storage(config, project, args):
     from .storage import audit, reclaim
@@ -527,68 +366,6 @@ def _cmd_storage(config, project, args):
         return reclaim(project, apply=True)
     return audit(project)
 
-
-def _cmd_kernel_shadow(config, project, args):
-    # Lazy: only this operator command needs the record helpers.
-    from . import operator_records
-    from .kernel_shadow import published_answer
-
-    insight = project.insights.read(args.insight)
-    shadow = project.insights.kernel_shadow
-    decision = project.insights.decision(insight["id"])
-    if args.reproject:
-        if shadow is None:
-            raise ConfigError("Kernel shadow is not enabled for this project")
-        shadow.clear_failures(insight["id"])
-        try:
-            shadow.submitted(insight)
-            shadow.revised(insight)
-            if decision is not None:
-                shadow.decided(insight, decision)
-        except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
-            shadow.note_failure("reproject", insight["id"], exc)
-        try:
-            shadow.questioned(insight)
-        except (Denied, OSError, ValueError, TypeError, KeyError) as exc:
-            shadow.note_failure("reproject", insight["id"], exc)
-        answers, answers_complete = operator_records.reproject_answers(project, insight["id"])
-    else:
-        answers, answers_complete = operator_records.insight_answers(project, insight["id"])
-    subject = {"type": "insight", "id": insight["id"],
-               "rev": insight.get("rev", 1)}
-    answered = published_answer(answers, subject, answers_complete)
-    answer_verification = ([shadow.verify_answer(record, insight)
-                            for record, _ in answers] if shadow is not None else [])
-    if not answers_complete:
-        answer_verification.append({
-            "kind": "answer", "object": "", "ok": False,
-            "mismatches": ["answer scan incomplete; verified only the available prefix"]})
-    question_verification = None
-    if shadow is not None and insight.get("addressee") == "operator":
-        question_verification = shadow.verify_question(insight, insight=insight,
-                                                       answered=answered)
-        if answered is None:
-            question_verification["mismatches"].append(
-                "answer scan incomplete; question answer state is unknown")
-            question_verification["ok"] = False
-    return {"project": project.name, "insight": insight["id"],
-            "enabled": shadow is not None,
-            "answers_complete": answers_complete,
-            "verification": shadow.verify(insight, decision) if shadow is not None else None,
-            "question_verification": question_verification,
-            "answer_verification": answer_verification,
-            "failures": [row for row in (shadow.failures if shadow is not None else [])
-                         if row["insight"] == insight["id"]]}
-
-
-def _cmd_migrate_records(config, project, args):
-    from .record_migration import apply, plan
-    return apply(project) if args.apply else plan(project)
-
-
-def _cmd_migrate_work_items(config, project, args):
-    from .work_item_migration import apply, plan
-    return (apply if args.apply else plan)(project, scan_limit=args.scan_limit)
 
 
 def _cmd_publication_record(config, project, args):
@@ -653,23 +430,21 @@ def _cmd_publication_list(config, project, args):
 
 
 def _cmd_work_items(config, project, args):
-    """Inventory or incremental current records. Only legacy pages can recover.
+    """Inventory or incremental current records, read-only.
 
     Change mode returns only the persistent-index change page; it never
-    computes inventory totals, event delivery, origin staleness or live waits.
+    computes inventory totals, event delivery or live waits.
 
     Schema: ``open`` and ``closed`` bounded pages, plus ``event_delivery``
     per-role subscription/pending/acknowledged summaries (at most 100 roles).
-    The open page keeps the exact ``page_open`` ordering, cursor, overflow,
-    ``unseeded_decisions`` and ``coverage_complete`` fields. The closed page
+    The open page keeps the exact ``page_open`` ordering, cursor and overflow
+    fields. The closed page
     holds the newest seeded terminal items first with exact per-role
     ``event_acknowledgements`` (not limited to summary ID samples). The project must already be
     opened read-only by the caller.
     """
     store = project.work_items
     page_size = {"limit": args.limit} if args.limit is not None else {}
-    if args.legacy:
-        return store.page_legacy(cursor=args.cursor, **page_size)
     if args.changes or args.change_cursor is not None:
         return store.page_changes_readonly(cursor=args.change_cursor, **page_size)
     from .work_item_events import closed_page, progress
@@ -680,6 +455,41 @@ def _cmd_work_items(config, project, args):
                          limit=args.closed if args.closed is not None else 10)
     return {"open": open_page, "closed": closed,
             "event_delivery": event_delivery}
+
+
+def _cmd_queue(project, args):
+    """Operator or host access to declared queues; returns the kernel's JSON result.
+
+    The principal is ``operator``, or ``host`` with ``--host``; the queue
+    declaration decides what it may write and read. ``read --cursor SEQ``
+    reads after SEQ without touching the principal's cursor and reports
+    ``head`` (the last sequence), so a caller can page from the end.
+    """
+    from .fs import loads_finite
+    store = project.kernel_queues
+    actor = "host" if args.host else "operator"
+    command = args.queue_command
+    if command == "write":
+        raw = sys.stdin.read(4 * 1024 * 1024 + 1) if args.body == "-" else args.body
+        try:
+            body = loads_finite(raw.encode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise ConfigError("--body must be a JSON object") from exc
+        return store.append(args.queue, body, actor, refs=args.ref,
+                            deliver_at=args.deliver_at, id=args.id)
+    if command == "read":
+        options = {"cursor": args.cursor}
+        if args.limit is not None:
+            options["limit"] = args.limit
+        return store.read(args.queue, actor, **options)
+    if command == "ack":
+        return {"seq": store.ack(args.queue, actor, args.seq)}
+    if command == "message":
+        return store.message(args.id, actor)
+    options = {"cursor": args.cursor}
+    if args.limit is not None:
+        options["limit"] = args.limit
+    return store.refs(args.id, "to" if args.direction == "in" else "from", actor, **options)
 
 
 def _cmd_check_jobs(config, project, args):
@@ -702,12 +512,9 @@ _PROJECT_COMMANDS = {
     "pause": _cmd_pause, "resume": _cmd_resume, "wake": _cmd_wake, "drain": _cmd_drain,
     "check-jobs": _cmd_check_jobs,
     "run": _cmd_run, "daemon": _cmd_daemon, "cleanup": _cmd_cleanup,
-    "insight": _cmd_insight, "service": _cmd_service, "report": _cmd_report,
+    "service": _cmd_service, "report": _cmd_report,
     "usage": _cmd_usage, "backup": _cmd_backup,
-    "prune": _cmd_prune, "storage": _cmd_storage, "kernel-shadow": _cmd_kernel_shadow,
-    "kernel-shadow-audit": _cmd_kernel_shadow_audit,
-    "migrate-records": _cmd_migrate_records,
-    "migrate-work-items": _cmd_migrate_work_items,
+    "prune": _cmd_prune, "storage": _cmd_storage,
 }
 
 
@@ -843,22 +650,21 @@ def _execute(config, args):
         # `editor export` needs a project; `editor mcp` handled above.
         project = Project(config, args.project)
         return _cmd_editor_export(config, project, args)
+    if args.command == "queue":
+        return _cmd_queue(Project(config, args.project), args)
     if args.command == "work-items":
         changes = args.changes or args.change_cursor is not None
-        reconcile_args = (args.reconcile_project, args.event_id, args.outcome, args.reason,
-                          args.expected_action, args.expected_rev, args.title)
-        if any(value is not None for value in reconcile_args):
-            if (args.project != "reconcile-legacy" or not args.reconcile_project
-                    or args.event_id is None or args.outcome is None or args.reason is None):
-                raise ConfigError("Use mizu work-items reconcile-legacy PROJECT EVENT_ID --outcome open|drop --reason TEXT")
-            if (changes or args.audit or args.repair or args.legacy or args.cursor is not None
+        if args.project == "open" or any(value is not None for value in (
+                args.open_project, args.item_id, args.reason, args.expected_rev)):
+            if (args.project != "open" or not args.open_project or args.item_id is None
+                    or args.reason is None or args.expected_rev is None):
+                raise ConfigError("Use mizu work-items open PROJECT ID --expected-rev N --reason TEXT")
+            if (changes or args.audit or args.repair or args.cursor is not None
                     or args.closed is not None or args.limit is not None):
-                raise ConfigError("reconcile-legacy cannot be combined with inventory options")
-            return Project(config, args.reconcile_project).work_items.reconcile(
-                args.event_id, outcome=args.outcome, reason=args.reason, expected_action=args.expected_action,
-                expected_rev=args.expected_rev, title=args.title, actor="operator")
-        if args.legacy and (changes or args.audit or args.repair or args.closed is not None):
-            raise ConfigError("--legacy only accepts --cursor and --limit as inventory options")
+                raise ConfigError("open cannot be combined with inventory options")
+            return Project(config, args.open_project).work_items.transition(
+                args.item_id, expected_rev=args.expected_rev, status="open",
+                actor="operator", reason=args.reason)
         if changes and (args.audit or args.repair or args.closed is not None):
             raise ConfigError("Change reads cannot be combined with --audit, --repair or --closed")
         if args.repair and not args.audit:
@@ -881,40 +687,7 @@ def _execute(config, args):
             raise ConfigError("Publisher record input exceeds frame bound")
         return write_publisher(Project(config, args.project), kind=args.kind,
                                subject=loads_finite(args.subject), payload=loads_finite(args.payload))
-    if args.command in ("record-questions", "record"):
-        from . import operator_records, queue_record_delivery
-        project = Project(config, args.project)
-        queued = queue_record_delivery.authority_kind(project.insights.root) == "queues"
-    if args.command == "record-questions":
-        from .operator_records import questions
-        return (queue_record_delivery.questions if queued else questions)(
-            project, limit=args.limit, scan_limit=args.scan_limit)
-    if args.command == "record":
-        from .operator_records import write
-        record_subject = args.subject_kind is not None or args.subject_digest is not None
-        if record_subject:
-            if (args.subject_kind is None or args.subject_digest is None
-                    or args.subject_id is None or args.subject_rev is not None):
-                raise ConfigError("Record question requires kind, ID and digest, not revision")
-        elif (args.subject_id is None) != (args.subject_rev is None):
-            raise ConfigError("Record subject requires both exact ID and revision")
-        if (args.target_id is None) != (args.target_digest is None):
-            raise ConfigError("Record target requires both ID and digest")
-        subject = ({"type": "insight", "id": args.subject_id, "rev": args.subject_rev}
-                   if args.subject_id is not None else None)
-        if record_subject:
-            subject = {"type": "record", "kind": args.subject_kind,
-                       "id": args.subject_id, "digest": args.subject_digest}
-        target = ({"id": args.target_id, "digest": args.target_digest}
-                  if args.target_id is not None else None)
-        return (queue_record_delivery.write if queued else write)(
-            project, event_id=args.id, kind=args.kind, body=args.body,
-                     addressee=args.role, subject=subject, action=args.action, target=target)
-    read_only = args.command in ("migrate-records", "migrate-work-items",
-                                 "kernel-shadow-audit")
-    if args.command == "kernel-shadow" and not getattr(args, "reproject", False):
-        read_only = True
-    project = Project(config, args.project, read_only=read_only)
+    project = Project(config, args.project)
     if args.command == "ci-acceptance":
         from .ci_acceptance import retain
         return retain(project, snapshot_id=args.snapshot, publication_id=args.publication_id,

@@ -1,4 +1,4 @@
-"""Work-item object waits: exact subjects, history proofs and dependency edges."""
+"""Work-item waits on other work items: exact subjects, history proofs and dependency edges."""
 from contextvars import ContextVar
 from contextlib import contextmanager
 
@@ -10,44 +10,21 @@ _reading = ContextVar('object_wait_targets', default=frozenset())
 
 
 def normalize(wait):
-    from .operator_records import _subject
     from .work_items import ITEM_ID
     if type(wait) is not dict or set(wait) != {'kind', 'subject'} or wait['kind'] != 'object_resolved':
-        raise Denied('An object_resolved wait requires only a supported subject')
+        raise Denied('An object_resolved wait requires only a work-item subject')
     subject = wait['subject']
-    if type(subject) is not dict:
-        raise Denied('Expected an object wait subject')
-    kind = subject.get('type')
-    if kind == 'record':
-        _subject(subject)
-    elif kind in ('insight', 'work_item') and set(subject) == {'type', 'id'}:
-        identifier(subject['id'])
-        if kind == 'work_item' and not ITEM_ID.fullmatch(subject['id']):
-            raise Denied('Expected an exact work-item ID')
-    else:
-        raise Denied('Unsupported object wait subject')
+    if (type(subject) is not dict or set(subject) != {'type', 'id'}
+            or subject.get('type') != 'work_item'
+            or not isinstance(subject.get('id'), str) or not ITEM_ID.fullmatch(subject['id'])):
+        raise Denied('An object_resolved wait needs an exact work-item subject')
     return {'kind': 'object_resolved', 'subject': dict(subject)}
 
 
-def consolidate(wait):
-    """Canonicalize new normalized insight/record registrations only."""
-    if wait is None or wait['kind'] not in ('insight_decided', 'record_closed'):
-        return wait
-    result = normalize({'kind': 'object_resolved', 'subject': subject_of(wait)})
-    if 'smoke_refs' in wait:
-        result['smoke_refs'] = wait['smoke_refs']
-    return result
-
-
 def subject_of(wait):
-    """Historical wait bytes are never rewritten on read/replay."""
-    if wait['kind'] == 'object_resolved':
-        return wait['subject']
-    if wait['kind'] == 'insight_decided':
-        return {'type': 'insight', 'id': wait['target']}
-    if wait['kind'] == 'record_closed':
-        return wait['subject']
-    return None
+    """The work-item subject of an evaluated object wait, else None."""
+    from .work_item_waits import evaluated
+    return wait['subject'] if wait.get('kind') == 'object_resolved' and evaluated(wait) else None
 
 
 @contextmanager
@@ -109,82 +86,42 @@ def observe(store, wait, item):
     if subject is None:
         return None
     from .work_item_waits import liveness
-    kind = subject['type']
-    if kind != 'record' and liveness(store, wait, None, item=item)['state'] != 'due':
+    if liveness(store, wait, None, item=item)['state'] != 'due':
         return None
-    if kind == 'work_item':
-        record = target(store, subject['id'])
-        if record['status'] not in ('done', 'dropped'):
-            return None
-        proof = _proof(record, subject['id'], record['rev'], record['status'])
-    elif kind == 'insight':
-        record = store._optional_record(f"decisions/{subject['id']}.json")
-        if record is None:
-            return None  # Advisory liveness may race removal/unavailability.
-        action, rev = store._validate_current_decision_shape(record, subject['id'])
-        if action not in ('accept', 'modify', 'reject'):
-            return None
-        event = record.get('decision_key')
-        if event is None:
-            # Only immutable pre-key decisions need legacy discovery.
-            matches = [path.stem for path in (store.root / 'decision-history').glob('*.json')
-                       if store._read(f'decision-history/{path.name}') == record]
-            if len(matches) != 1:
-                raise Denied('Ambiguous legacy decision history')
-            event = matches[0]
-        proof = _proof(record, event, rev, action)
-    else:
-        if store.record_answer_evidence is None:
-            return None
-        proof = store.record_answer_evidence(subject, item['holder'], None)
-        if proof is None:
-            return None
+    record = target(store, subject['id'])
+    if record['status'] not in ('done', 'dropped'):
+        return None
+    proof = _proof(record, subject['id'], record['rev'], record['status'])
     validate(store, wait, item['holder'], proof)
     return {'kind': 'due', 'evidence': proof}
 
 
 def validate(store, wait, holder, proof):
-    """Replay the selected immutable revision, not the current decision/status."""
+    """Replay the selected immutable revision, not the current status."""
     from .fs import DIGEST
     subject = subject_of(wait)
     if (subject is None or type(proof) is not dict
             or set(proof) != {'event', 'digest', 'rev', 'state'}
             or not isinstance(proof['digest'], str) or not DIGEST.fullmatch(proof['digest'])):
         raise Denied('Invalid object resolution proof')
-    kind = subject['type']
-    if kind == 'record':
-        if store.record_answer_evidence is None:
-            raise Denied('Answer proof reader unavailable')
-        store.record_answer_evidence(subject, holder, proof)
-        return
     rev, state = proof['rev'], proof['state']
     if type(rev) is not int or rev < 1:
         raise Denied('Invalid object resolution revision')
     identifier(proof['event'])
-    if kind == 'insight':
-        if state not in ('accept', 'modify', 'reject'):
-            raise Denied('Object insight proof must be substantive')
-        record = store._read(f"decision-history/{proof['event']}.json")
-        action, revision = store._validate_current_decision_shape(record, subject['id'])
-        if (action, revision) != (state, rev):
-            raise Denied('Insight resolution revision/state mismatch')
-        if record.get('decision_key', proof['event']) != proof['event']:
-            raise Denied('Insight resolution event mismatch')
-    else:
-        if proof['event'] != subject['id'] or state not in ('done', 'dropped'):
-            raise Denied('Work-item resolution identity/state mismatch')
-        # Stop at the selected immutable revision: later dropped-to-done
-        # corrections neither revoke nor replace the old terminal proof.
-        from .work_items import MAX_REVISIONS
-        record = None
-        with reading(subject['id']):
-            for candidate in store.history(subject['id']):
-                if candidate['rev'] == rev:
-                    record = candidate
-                    break
-        if rev == MAX_REVISIONS and state == 'dropped' and record and record['status'] != 'dropped':
-            record = target(store, subject['id'])  # immutable retirement sidecar
-        if record is None or (record['rev'], record['status']) != (rev, state):
-            raise Denied('Work-item resolution revision/state mismatch')
+    if proof['event'] != subject['id'] or state not in ('done', 'dropped'):
+        raise Denied('Work-item resolution identity/state mismatch')
+    # Stop at the selected immutable revision: later dropped-to-done
+    # corrections neither revoke nor replace the old terminal proof.
+    from .work_items import MAX_REVISIONS
+    record = None
+    with reading(subject['id']):
+        for candidate in store.history(subject['id']):
+            if candidate['rev'] == rev:
+                record = candidate
+                break
+    if rev == MAX_REVISIONS and state == 'dropped' and record and record['status'] != 'dropped':
+        record = target(store, subject['id'])  # immutable retirement sidecar
+    if record is None or (record['rev'], record['status']) != (rev, state):
+        raise Denied('Work-item resolution revision/state mismatch')
     if digest(canonical(record)) != proof['digest']:
         raise Denied('Object resolution digest mismatch')

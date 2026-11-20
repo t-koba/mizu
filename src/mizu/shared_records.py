@@ -22,9 +22,9 @@ create-only, bounded, and never repaired.
 Canonical files are sharded by the record ID's first component under
 ``shared-records/<namespace>/``; long namespace components use a bounded digest
 directory. This generic store has no index or timestamp cursor; source-specific
-derived projections, when needed, are owned outside this module. The installer
-converts flat records before activation; ``mizu migrate-records`` also previews
-or applies that conversion explicitly.
+derived projections, when needed, are owned outside this module. Users are
+CI-wait deliveries and host publisher records (publication results); both are
+work-item and publication mechanisms that later kernel stages replace.
 Managed project directories must remain host-owned during writes, as required by
 fs.atomic_write; safe_read additionally pins read paths on supported platforms.
 A batch validates before writing, but an I/O failure may commit a prefix: replay
@@ -287,7 +287,7 @@ class SharedRecords:
         files, malformed JSON and mismatched canonical identities fail closed.
         Each enumerated envelope is validated once from its scanned bytes; no
         second read is issued. ``namespace`` restricts the scan to a single
-        ``shared-records/<namespace>/`` partition (for example ``"operator"``).
+        ``shared-records/<namespace>/`` partition (for example ``"host"``).
         An optional ``scan_limit`` is only valid for a single namespace. It
         preserves filesystem enumeration order rather than sorting complete
         directories. Reserved ``fs.atomic_write`` staging names are skipped but

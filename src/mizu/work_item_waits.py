@@ -5,18 +5,31 @@ import datetime as dt
 
 from .errors import Busy, ConfigError, Denied, LimitExceeded
 from .smoke_refs import validate_refs
-from .fs import DIGEST, canonical, digest, identifier, now
+from .fs import DIGEST, canonical, digest, now
 
-#: Locally observable defer/task conditions, reevaluated from recorded state.
-WAIT_KINDS = ("deadline", "code_change", "insight_decided", "dependency")
+#: Locally observable conditions, reevaluated from recorded state. Receipt
+#: routes (``ci``, ``publication_ci``) and work-item subjects
+#: (``object_resolved``) have their own normalizers.
+WAIT_KINDS = ("deadline", "code_change")
+#: Every kind the product evaluates. A stored wait of any other kind stays as
+#: written: it is inert, never resolves on its own and replays unchecked.
+EVALUATED_KINDS = frozenset({*WAIT_KINDS, "ci", "publication_ci", "object_resolved"})
 
 
-def _normalize_wait(wait, action: str, baseline=None) -> dict | None:
-    """Normalize raw defer/work-item waits; capture code baseline only on creation."""
+def evaluated(wait) -> bool:
+    """Whether the product evaluates this stored wait's kind (and subject)."""
+    if not isinstance(wait, dict) or wait.get("kind") not in EVALUATED_KINDS:
+        return False
+    if wait["kind"] == "object_resolved":
+        subject = wait.get("subject")
+        return isinstance(subject, dict) and subject.get("type") == "work_item"
+    return True
+
+
+def _normalize_wait(wait, baseline=None) -> dict | None:
+    """Normalize a raw work-item wait; capture the code baseline only on creation."""
     if wait is None:
         return None
-    if action != "defer":
-        raise Denied("Structured waits may only be registered with a deferral")
     if not isinstance(wait, dict):
         raise Denied(f"Unsupported wait; supported kinds: {', '.join(WAIT_KINDS)}")
     kind = wait.get("kind")
@@ -30,39 +43,11 @@ def _normalize_wait(wait, action: str, baseline=None) -> dict | None:
             moment = None
         if moment is None or moment.tzinfo is None:
             raise Denied("A deadline wait needs a timezone-aware ISO timestamp in 'at'")
+        if set(wait) - {"kind", "at"}:
+            raise Denied("A deadline wait takes only at")
         return {"kind": kind, "at": moment.isoformat(timespec="seconds")}
-    if kind == "insight_decided":
-        target = wait.get("insight")
-        if not isinstance(target, str) or not target:
-            raise Denied("An insight_decided wait needs an 'insight' id")
-        identifier(target)
-        return {"kind": kind, "target": target}
-    if kind == "dependency":
-        recipient = wait.get("recipient")
-        if not isinstance(recipient, str) or not recipient:
-            raise Denied("A dependency wait needs a 'recipient' role")
-        identifier(recipient)
-        requires = wait.get("requires")
-        if not isinstance(requires, dict):
-            raise Denied("A dependency wait needs 'requires' with insight, rev, and action")
-        target = requires.get("insight")
-        if not isinstance(target, str) or not target:
-            raise Denied("A dependency wait needs a 'requires.insight' id")
-        identifier(target)
-        required_rev = requires.get("rev")
-        if type(required_rev) is not int or required_rev < 1:
-            raise Denied("A dependency wait binds the required result revision in 'requires.rev'")
-        required_action = requires.get("action")
-        if required_action not in ("accept", "modify", "reject"):
-            raise Denied("A dependency wait needs a substantive 'requires.action'")
-        if set(wait) - {"kind", "recipient", "requires"}:
-            raise Denied("A dependency wait takes only recipient and requires")
-        if set(requires) - {"insight", "rev", "action"}:
-            raise Denied("A dependency wait requires only insight, rev, and action")
-        return {"kind": kind, "recipient": recipient,
-                "requires": {"insight": target, "rev": required_rev, "action": required_action}}
-    # code_change falls through: no fields beyond kind, baseline is the
-    # current published digest.
+    # code_change has no fields beyond kind; its baseline is the current
+    # published digest.
     if set(wait) - {"kind"}:
         raise Denied("A code_change wait takes no fields")
     try:
@@ -72,21 +57,8 @@ def _normalize_wait(wait, action: str, baseline=None) -> dict | None:
     return {"kind": kind, "digest": baseline}
 
 
-
-def normalize_record_wait(wait):
-    """Exact immutable subject; this wait is deliberately work-item-only."""
-    from .operator_records import _subject
-    if (type(wait) is not dict or wait.get('kind') != 'record_closed'
-            or set(wait) - {'smoke_refs'} != {'kind', 'subject'}):
-        raise Denied('A record_closed wait requires only an exact record subject')
-    subject = wait['subject']
-    _subject(subject)
-    if subject['type'] != 'record':
-        raise Denied('A record_closed wait needs a record subject')
-    result = {'kind': 'record_closed', 'subject': dict(subject)}
-    if 'smoke_refs' in wait:
-        result['smoke_refs'] = validate_refs(wait['smoke_refs'])
-    return result
+#: Bound of a stored wait the product no longer evaluates.
+MAX_INERT_WAIT_BYTES = 4096
 
 
 def _stored_wait(value) -> dict:
@@ -94,27 +66,33 @@ def _stored_wait(value) -> dict:
     if not isinstance(value, dict):
         raise Denied("Blocked work items require a structured wait")
     kind = value.get("kind")
+    if not isinstance(kind, str):
+        raise Denied("Invalid stored work-item wait")
     if kind == "object_resolved":
         from .object_waits import normalize
         return normalize(value)
-    if kind == "record_closed":
-        return normalize_record_wait(value)
     if kind == "code_change":
         baseline = value.get("digest")
         if set(value) != {"kind", "digest"} or not isinstance(baseline, str) or not DIGEST.fullmatch(baseline):
             raise Denied("Invalid stored code-change wait")
         return value
-    raw = {"kind": kind, "insight": value.get("target")} if kind == "insight_decided" else value
-    normalized = normalize_wait(raw, "defer")
+    if not evaluated(value):
+        try:
+            if len(canonical(value)) > MAX_INERT_WAIT_BYTES:
+                raise Denied("Stored work-item wait exceeds its bound")
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise Denied("Invalid stored work-item wait") from exc
+        return value
+    normalized = normalize_wait(value)
     if value != normalized:
         raise Denied("Invalid normalized work-item wait")
     return normalized
 
 
-def normalize_wait(wait, action, baseline=None):
+def normalize_wait(wait, baseline=None):
     refs = wait.get("smoke_refs") if isinstance(wait, dict) else None
     raw = {k: v for k, v in wait.items() if k != "smoke_refs"} if isinstance(wait, dict) else wait
-    result = _normalize_wait(raw, action, baseline)
+    result = _normalize_wait(raw, baseline)
     if refs is not None:
         result = {**result, "smoke_refs": validate_refs(refs)}
     elif isinstance(wait, dict) and "smoke_refs" in wait:
@@ -125,6 +103,8 @@ def normalize_wait(wait, action, baseline=None):
 def stored_wait(value):
     refs = value.get("smoke_refs") if isinstance(value, dict) else None
     raw = {k: v for k, v in value.items() if k != "smoke_refs"} if isinstance(value, dict) else value
+    if not evaluated(raw):
+        return _stored_wait(value)
     result = _stored_wait(raw)
     if refs is not None:
         result = {**result, "smoke_refs": validate_refs(refs)}
@@ -149,21 +129,19 @@ def blocked_age(item):
     return {"blocked_since": since, "blocked_age_seconds": age}
 
 
-def liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_question=None):
-    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
-                         record_question=record_question)
+def liveness(store, wait, snapshot, *, item=None, writer_roles=None):
+    observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles)
     return observed if item is None else {**observed, **blocked_age(item)}
 
 
-def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_question=None) -> dict:
+def _liveness(store, wait, snapshot, *, item=None, writer_roles=None) -> dict:
     """Read-only work replanning evidence, never completion authority.
 
-    Insight-decided waits follow the current revision; dependency waits bind an
-    exact revision/action and use pure satisfaction evidence for due checks.
-    Missing/withdrawn targets and superseded/conflicting dependencies are impossible;
-    unavailable bodies or unsafe/inconsistent observations are unknown. CI and
-    proposal merge waits use only their receipt-bound routes when a current
-    item is supplied (readiness); generic diagnostics leave them receipt_bound.
+    Work-item subjects follow the target's current status. CI waits use only
+    their receipt-bound routes when a current item is supplied (readiness);
+    generic diagnostics leave them receipt_bound. A stored wait of a kind the
+    product no longer evaluates is ``unknown``. Unsafe or inconsistent
+    observations are unknown.
     """
     holder = item.get("holder") if item is not None else None
     self_resolvable = None
@@ -177,60 +155,35 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
     try:
         if wait is None:
             return result("absent", "no_wait")
+        if not evaluated(wait):
+            return result("unknown", "unsupported_wait")
         wait = store._stored_wait(wait)
         kind = wait["kind"]
-        if kind in ("ci", "publication_ci", "proposal_merged"):
+        if kind in ("ci", "publication_ci"):
             if item is None:
                 return result("receipt_bound", f"{kind}_receipt_route")
             if item["status"] != "blocked" or not item["holder"] or item["wait"] != wait:
                 raise Denied("Terminal readiness requires the current held waiter")
-            if kind == "proposal_merged":
-                from . import proposal_waits
-                observed = proposal_waits.evidence(store, item)
-            else:
-                from . import ci_waits
-                observed = ci_waits.terminal_evidence(store, item)
+            from . import ci_waits
+            observed = ci_waits.terminal_evidence(store, item)
             if observed is None:
-                if kind != "proposal_merged" and ci_waits.holder_only(store, item):
+                if ci_waits.holder_only(store, item):
                     self_resolvable = "sole_requester_ci"
                 return result("pending", "terminal_evidence_absent")
             envelope, computed = observed
             event = envelope["payload"]
-            outcome = (event["state"] if kind == "proposal_merged" else
-                       event["conclusion"] if event["kind"] == "ci" else
-                       event["outcome"]["outcome"])
+            outcome = event["conclusion"] if event["kind"] == "ci" else event["outcome"]["outcome"]
             return {**result("terminal", "receipt_route_terminal"), "outcome": outcome,
                     "evidence": {"record_digest": computed or digest(canonical(envelope))}}
         if kind == "object_resolved":
-            subject = wait["subject"]
-            if subject["type"] == "work_item":
-                from .object_waits import work_item_state
-                state, reason = work_item_state(store, subject)
-                return result(state, reason)
-            # Reuse the established read-only insight and authenticated answer
-            # routes, while retaining the registered kind in the projection.
-            legacy = ({"kind": "insight_decided", "target": subject["id"]}
-                      if subject["type"] == "insight" else
-                      {"kind": "record_closed", "subject": subject})
-            return {**_liveness(store, legacy, snapshot, item=item, writer_roles=writer_roles,
-                               record_question=record_question),
-                    "wait_kind": kind}
-        if kind == "record_closed":
-            if record_question is None:
-                factory = store.record_question_lookup
-                if factory is None:
-                    return result("unknown", "record_question_unavailable")
-                record_question = factory()
-            closed = record_question(wait["subject"])
-            if closed is None:
-                return result("unknown", "record_question_unavailable")
-            return result("due" if closed else "pending",
-                          "record_closed" if closed else "record_answer_pending")
+            from .object_waits import work_item_state
+            state, reason = work_item_state(store, wait["subject"])
+            return result(state, reason)
         if kind == "deadline":
             due = dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(wait["at"])
             if holder is not None and writer_roles == {holder}:
                 self_resolvable = "sole_holder_deadline"
-        elif kind == "code_change":
+        else:
             if snapshot is None:
                 snapshot = store.snapshots.get()
             current = snapshot.get("code_digest") if isinstance(snapshot, dict) else None
@@ -239,59 +192,6 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
             due = current != wait["digest"]
             if holder is not None and writer_roles == {holder}:
                 self_resolvable = "sole_writer_code_change"
-        else:
-            from . import insight_archive
-            from .fs import PREVIEW_BYTES
-            from .insights import insight_metadata
-            target = wait["target"] if kind == "insight_decided" else wait["requires"]["insight"]
-            item = store._optional_record(f"inbox/{target}.json")
-            if item is None:
-                item = insight_archive.read_immutable(store.root, target, include_unavailable=True)
-            decision = store._optional_record(f"decisions/{target}.json")
-            if decision is not None:
-                action, decision_rev = store._validate_current_decision_shape(decision, target)
-            if item is None:
-                # Old GC could retain identity but lose the body. That is not
-                # evidence of a missing target. Nor is an orphan decision.
-                identity = store._optional_record(f"insight-ids/{target}.json")
-                if identity is not None or decision is not None:
-                    return result("unknown", "target_unavailable")
-                return result("impossible", "target_missing")
-            identifier(item.get("source"))
-            rev = item.get("rev", 1)
-            if (len(canonical(item)) > PREVIEW_BYTES or item.get("body_unavailable") is True
-                    or item.get("id") != target or type(rev) is not int or rev < 1
-                    or not isinstance(item.get("title"), str) or not 1 <= len(item["title"]) <= 200
-                    or not isinstance(item.get("body"), str) or not item["body"].strip()
-                    or "base_snapshot" not in item
-                    or (item["base_snapshot"] is not None and
-                        (not isinstance(item["base_snapshot"], str) or not DIGEST.fullmatch(item["base_snapshot"])))
-                    or not isinstance(item.get("evidence", []), list)
-                    or dt.datetime.fromisoformat(item.get("created_at", "")).tzinfo is None):
-                return result("unknown", "target_unavailable")
-            insight_metadata(item)
-            if decision is not None and decision_rev > rev:
-                return result("unknown", "inconsistent_revision")
-            if kind == "dependency":
-                if decision is not None and decision_rev == rev and action == "withdraw":
-                    return result("impossible", "target_withdrawn")
-                if rev > wait["requires"]["rev"]:
-                    return result("impossible", "target_superseded")
-                if rev < wait["requires"]["rev"]:
-                    return result("pending", "future_revision")
-            if decision is None:
-                return result("pending", "undecided")
-            if decision_rev < rev:
-                return result("pending", "superseded_decision")
-            if kind == "insight_decided":
-                if action == "withdraw":
-                    return result("impossible", "target_withdrawn")
-                due = action in ("accept", "modify", "reject")
-            else:
-                if action in ("accept", "modify", "reject") and action != wait["requires"]["action"]:
-                    return result("impossible", "decision_conflict")
-                from .insights import satisfaction_evidence
-                due = satisfaction_evidence(wait, item, decision) is not None
         return result("due" if due else "pending", "condition_met" if due else "condition_pending")
     except (Busy, ConfigError, Denied, OSError, ValueError, TypeError, AttributeError, KeyError, LimitExceeded, RecursionError):
         return result("unknown", "unreadable")
@@ -301,7 +201,7 @@ def _liveness(store, wait, snapshot, *, item=None, writer_roles=None, record_que
 #: needs no classifier; ``unknown`` and other non-pending states fail closed.
 _HOLDER_ONLY_STATES = ("pending", "receipt_bound")
 
-def holder_only(store, item, snapshot, *, writer_roles, record_question=None) -> str | None:
+def holder_only(store, item, snapshot, *, writer_roles) -> str | None:
     """Positive witness for a pending wait only its holder can release."""
     try:
         if not isinstance(item, dict) or item.get("status") != "blocked" or not item.get("holder"):
@@ -310,8 +210,7 @@ def holder_only(store, item, snapshot, *, writer_roles, record_question=None) ->
         if wait.get("kind") not in ("ci", "publication_ci"):
             if not isinstance(writer_roles, (set, frozenset)) or writer_roles != {item["holder"]}:
                 return None
-        observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles,
-                             record_question=record_question)
+        observed = _liveness(store, wait, snapshot, item=item, writer_roles=writer_roles)
         if observed["state"] in _HOLDER_ONLY_STATES:
             return observed.get("self_resolvable")
     except (Denied, KeyError, TypeError, AttributeError, ValueError, OSError):

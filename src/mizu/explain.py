@@ -179,7 +179,7 @@ def _last_outcome(project, health, role_name: str) -> dict:
     scalar ``kind``/``status``/``finished_at``. Identity: the record must
     carry this run id and this role; a record for another run (or a record
     without identity) is skipped, never attributed. Bounds: two reads at
-    most ``RECORD_BYTES`` each, no inbox or wait scans. Trust: local run
+    most ``RECORD_BYTES`` each, no queue or wait scans. Trust: local run
     records. Failure: anything missing, mismatched, or malformed reports
     ``unavailable``; never raises.
     """
@@ -209,8 +209,7 @@ def _selection_wait(project, role_name: str) -> dict:
     and the auditing run. Bounds: one bounded record read, two scalar
     fields, no scans. Trust: local selection state. Failure: a missing file
     reports ``absent``; a malformed one reports ``unavailable``; never
-    raises. This is the probe wait only; insight-structured waits need an
-    inbox scan, which this projection deliberately avoids.
+    raises. This is the probe wait only.
     """
     status, record = _read_record(project.root, f"selection/{role_name}-wait.json")
     if status == "absent":
@@ -267,9 +266,7 @@ def explain(config, project, role_name: str) -> dict:
     triggers = {"configured_profile": role.profile, "selector": role.selector,
                 "daemon": role.daemon, "interval_seconds": role.interval_seconds,
                 "calendar": list(role.calendar), "on_change": role.on_change,
-                "decision_events": list(role.decision_events),
                 "work_item_events": list(role.work_item_events),
-                "decision_sources": role.decision_sources,
                 "work_item_sources": role.work_item_sources, "ci_wake": role.ci_wake}
     return {
         "schema_version": 1,
@@ -287,10 +284,10 @@ def explain(config, project, role_name: str) -> dict:
             "active": {**active, "process_liveness": "unknown", "yieldability": "unknown"},
             "selection_constraints": _selection(config, role),
             "triggers": triggers,
-            # Pending-insight and insight-wait state stay unknown: they need
-            # inbox/wait scans, which this projection deliberately avoids (see
-            # the no-unbounded-APIs test). The probe wait and the last run
-            # outcome are single bounded reads and reported.
+            # Queue and wait state stay unknown: they need scans, which this
+            # projection deliberately avoids (see the no-unbounded-APIs test).
+            # The probe wait and the last run outcome are single bounded reads
+            # and reported.
             "last_outcome": _last_outcome(project, health, role_name),
             "selection_wait": _selection_wait(project, role_name),
             "unknowns": {
@@ -299,7 +296,7 @@ def explain(config, project, role_name: str) -> dict:
                 "admission_queue_position": "unknown",
                 "active_process_liveness": "unknown",
                 "active_process_yieldability": "unknown",
-                "pending_insight_state": "unknown",
+                "queue_state": "unknown",
                 "structured_wait_state": "unknown",
             },
         },

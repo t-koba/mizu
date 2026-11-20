@@ -79,13 +79,13 @@ def classify(engine, project, role, snapshot, facts, *, preview=False):
     excerpt = {'goal': task.get('goal') if isinstance(task.get('goal'), str) else '',
                'state': task.get('state') if isinstance(task.get('state'), str) else ''}
     excerpt = {key: _clip(value, cap) for key, value in excerpt.items()}
-    inputs = {'task': excerpt, 'proposals': work['proposals'], 'evidence': work['evidence'],
+    inputs = {'task': excerpt, 'messages': work['messages'], 'evidence': work['evidence'],
               'attributes': facts['attributes'], 'role': role.name,
               'project': project.name, 'output_attributes': definition['attributes']}
     # Cache identity covers material inputs and policy, never raw state text:
-    # bookkeeping state churn must not invalidate, while new proposals,
+    # bookkeeping state churn must not invalidate, while new messages,
     # fresh evidence, goal edits, label changes, or policy/settings changes do.
-    key = digest(canonical({'goal': task.get('goal'), 'proposals': work['proposals'],
+    key = digest(canonical({'goal': task.get('goal'), 'messages': work['messages'],
                             'evidence': work['evidence'], 'attributes': facts['attributes'],
                             'definition': definition, 'policy': policy,
                             'settings': settings, 'command': config.command(settings['engine']),

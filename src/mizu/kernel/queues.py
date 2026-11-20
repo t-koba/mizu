@@ -529,6 +529,49 @@ class QueueStore:
                 return seq
             return current
 
+    def pending(self, queue: str, actor: str, *, newest: int = PAGE_DEFAULT, now=None) -> dict:
+        """Count the due unacknowledged messages a read would deliver to ``actor``.
+
+        The count covers the contiguous due run after the actor's cursor (a
+        delayed message ends it, as it ends a read), scanning at most
+        ``PAGE_MAX`` messages; ``more`` reports a longer run. ``messages``
+        holds the newest ``newest`` (0..PAGE_MAX) of the counted run. Reads
+        nothing else and acknowledges nothing; no lock is taken.
+        """
+        declaration = self._grant(queue, actor, write=False)
+        if type(newest) is not int or not 0 <= newest <= PAGE_MAX:
+            raise Denied(f"newest must be from 0 to {PAGE_MAX}")
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
+        head = self._head(declaration.name)
+        seq = self._cursor(declaration.name, actor)
+        count, rows = 0, []
+        while seq < head and count < PAGE_MAX:
+            seq += 1
+            message = self._message(declaration.name, seq)
+            if message is None:
+                continue
+            if not self._due(message, stamp):
+                break
+            count += 1
+            if newest:
+                rows.append(message)
+                del rows[:-newest]
+        more = count == PAGE_MAX and seq < head
+        return {"queue": declaration.name, "count": count, "more": more, "messages": rows}
+
+    def due(self, queue: str, actor: str, *, now=None) -> bool:
+        """Whether a read by ``actor`` would deliver at least one message now."""
+        declaration = self._grant(queue, actor, write=False)
+        stamp = _instant(now, "now") if now is not None else _instant(clock(), "now")
+        head = self._head(declaration.name)
+        seq = self._cursor(declaration.name, actor)
+        while seq < head:
+            seq += 1
+            message = self._message(declaration.name, seq)
+            if message is not None:
+                return self._due(message, stamp)
+        return False
+
     def message(self, id: str, actor: str) -> dict:
         message_id = _id(id, "message id")
         actor = self._actor(actor)

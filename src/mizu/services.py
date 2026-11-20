@@ -7,13 +7,12 @@ Scheduler XML on Windows. Each emitter is pure text over the same inputs;
 `system=` exists so tests cover all three spellings on any host. Nothing is
 started or enabled here on any platform.
 
-Decision/terminal work-item events, due structured waits, and unobserved
-published-code changes for unscheduled ``on_change`` roles wake subscribed roles before
-their next interval: systemd path units on Linux and WatchPaths on macOS invoke
-`mizu run --event`, which admits only on a subscribed decision/terminal event, a due
-wait, or an unobserved code change for that role and otherwise exits before any
-model use; timed roles with `scheduled_inputs` invoke `mizu run --scheduled`
-on their ordinary timers. Other timers remain plain `mizu run`. Task Scheduler
+Due queue messages (``wake/<role>``), terminal work-item events, due waits, and
+unobserved published-code changes for unscheduled ``on_change`` roles wake
+roles before their next interval: systemd path units on Linux and WatchPaths
+on macOS invoke `mizu run --event`, which admits only on something due for
+that role and otherwise exits before any model use. Timers remain plain
+`mizu run`. Task Scheduler
 XML has no file trigger in this minimal schema, so
 scheduled roles still dispatch events when their timer fires, while event-only
 roles get a bounded poll task invoking `mizu run --event` at the role's
@@ -96,8 +95,6 @@ def _scheduled_roles(config: Config, project: Project, executable: Path):
         base = _role_base(project, name)
         args = [str(executable.resolve()), "--config", str(config.file),
                 "daemon" if role.daemon else "run", project.name, "--role", name]
-        if not role.daemon and role.scheduled_inputs:
-            args.append("--scheduled")
         yield name, role, base, args
 
 
@@ -123,83 +120,47 @@ def check_runner_units(project_name: str) -> tuple[str, ...]:
 
 
 def event_watches(config: Config, project: Project) -> dict[str, list[str]]:
-    """Event-trigger watch directories per subscribed role.
+    """Event-trigger watch directories per watched role.
 
-    Mechanism: roles with decision_events/work_item_events wake on their source and waits
-    writes, but dispatch runs only on a substantive event or due wait;
-    in own-source mode deferrals ride along and never admit a run on their own,
-    while a role with decision_sources="any" admits once per new matching
-    deferral from any source. Terminal admission separately uses work_item_sources
-    and exact receipts; file watches are only coarse source-specific wake hints. Scheduled write roles
-    additionally wake when their own structured waits come due. Unscheduled
-    ``on_change`` roles additionally watch the published pointer
-    (``current.json``); a published code change then wakes ``mizu run --event``,
-    which admits on the unobserved change with admission ``change``. Daemon roles
-    need no file trigger (their loop re-checks admission every idle tick via
-    should_run); whether a role runs on events, on a clock, or both is
-    configuration, so an event-only role (event subscriptions or unscheduled
-    ``on_change`` without any schedule) still gets a trigger, while a role with
-    neither a schedule nor event subscriptions nor unscheduled ``on_change``
-    watches only the inbox for explicitly addressed insight attention. Every
-    non-daemon project role watches ``inbox``; Engine's existing event gate
-    admits only the exact current target's unacknowledged event, not unrelated
-    inbox changes. Daemons use the same pending selector at their existing ticks.
-    Enabled operator records additionally watch the sharded operator partition
-    ``shared-records/operator`` for these roles and scheduled observers;
-    addressed SharedRecords pending state admits runs. The parent
-    ``shared-records`` directory is not watched: systemd PathChanged and
-    launchd WatchPaths triggers are not recursive, so only the partition that
-    gains new operator files needs a trigger.
-    Periodic discovery stays independent policy: timers and
+    Mechanism: a role that a declared queue wakes watches ``wake/``, where
+    the kernel touches ``wake/<role>`` on a due append. Roles with
+    work_item_events or check_job, and scheduled write roles, watch their
+    sources (``check-jobs``, ``work-items``, ``waits``); file watches are only
+    coarse wake hints and ``mizu run --event`` admits only on something due
+    for that role. Unscheduled ``on_change`` roles additionally watch the
+    published pointer (``current.json``). Daemon roles need no file trigger
+    (their loop re-checks admission via should_run). Roles with none of these
+    get no watch. Periodic discovery stays independent policy: timers and
     calendar entries keep their own schedules unchanged.
     """
-    from . import operator_records, queue_record_delivery
-    from .operator_records import configuration as record_configuration
-    operator_enabled = any(row['enabled'] and row['wake'] for row in record_configuration(config.operator_records).values())
-    root = getattr(getattr(project, "insights", None), "root", getattr(project, "root", None))
-    queued = (isinstance(root, Path)
-              and queue_record_delivery.authority_kind(root) == "queues")
+    from .queue_facts import waking
     watches: dict[str, list[str]] = {}
     for name in project.roles:
         role = config.roles[name]
-        if role.daemon or name == "operator" or not role.event_wakes:
+        if role.daemon or not role.event_wakes:
             continue  # An empty event_wakes list can never admit a standalone dispatch.
         scheduled = bool(role.interval_seconds or role.calendar)
         unscheduled_on_change = bool(role.on_change and not scheduled)
-        has_subscription = bool(
-            role.decision_events or role.work_item_events or "check_job" in role.capabilities)
-        scheduled_write = bool(
-            role.workspace == "write" and (role.interval_seconds or role.calendar))
-        if not (has_subscription or scheduled_write or unscheduled_on_change or (scheduled and operator_enabled)):
-            watches[name] = [str(project.root / "inbox")]
-            continue
-        if has_subscription or scheduled_write:
-            watches[name] = [str(project.root / "decision-history"), str(project.root / "waits")]
+        paths = []
+        if waking(config, name):
+            paths.append(str(project.root / "wake"))
+        if role.work_item_events or "check_job" in role.capabilities or (
+                role.workspace == "write" and scheduled):
+            paths.append(str(project.root / "waits"))
             if "check_job" in role.capabilities:
-                watches[name].append(str(project.root / "check-jobs"))
+                paths.append(str(project.root / "check-jobs"))
             if role.work_item_events:
                 # Terminal appends and successful receipt batches touch this parent
                 # as a non-authoritative hint; nested item/receipt writes are not
                 # assumed to be recursive platform watch events.
-                watches[name].append(str(project.root / "work-items"))
-        else:
-            watches[name] = []
-        watches[name].append(str(project.root / "inbox"))
-        if operator_enabled:
-            if queued:
-                watches[name].extend(str(project.root / "queues" / queue / "messages")
-                                     for queue in (queue_record_delivery.ANSWERS,
-                                                   queue_record_delivery.NOTICES)
-                                     if queue in config.queues)
-            else:
-                watches[name].append(str(project.root / "shared-records" / "operator"))
+                paths.append(str(project.root / "work-items"))
         if unscheduled_on_change:
             # Coarse published-code pointer: the persisted level state whose
             # change wakes ``mizu run --event``; admission still compares the
             # role's observed cursor against the published code digest.
-            pointer = str(project.root / "current.json")
-            if pointer not in watches[name]:
-                watches[name].append(pointer)
+            paths.append(str(project.root / "current.json"))
+        if paths:
+            watches[name] = paths
     return watches
 
 

@@ -7,15 +7,16 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import shutil
 import tempfile
 import uuid
 from pathlib import Path
 
 from .config import Editor, editor_settings
-from .errors import ConfigError, Denied
+from .errors import ConfigError, Denied, LimitExceeded
 from .fs import (MAX_FRAME, PREVIEW_BYTES, loads_finite, atomic_write, canonical,
-                 digest, mkdir, relative_parts, safe_read, write_json, page, lock)
+                 digest, mkdir, now, relative_parts, safe_read, write_json, page, lock)
 from .project import Project
 from .protocol import MCP_VERSIONS, PAGE_FIELDS, obj, text, validate
 assert MCP_VERSIONS is not None  # re-exported: single-sourced in protocol.py, framed in mcp_loop.py
@@ -38,9 +39,10 @@ TOOLS = {
     "search_files": (
         "Search literal text in the exported snapshot.",
         obj({"query": text(1000)}, ("query",))),
-    # Outbox ingest accepts only title, body, and the capsule-supplied base_snapshot.
-    "submit_insight": ("Propose an idea to the Worker; no editing or control authority.",
-                       obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
+    # Outbox ingest accepts only title and body.
+    "write_message": ("Send a message with a title and body to the project's configured editor "
+                      "queue, where its readers see it; no editing or control authority.",
+                      obj({"title": text(200), "body": text(60000)}, ("title", "body"))),
 }
 
 
@@ -240,17 +242,56 @@ class Capsule:
                             return result
             return result
         if not arguments["title"].strip() or not arguments["body"].strip():
-            raise Denied("Insight title and body must be nonempty")
-        insight_id = uuid.uuid4().hex
-        record = {**arguments, "base_snapshot": self.snapshot["id"]}
+            raise Denied("Message title and body must be nonempty")
+        message_id = uuid.uuid4().hex
+        record = dict(arguments)
         if len(canonical(record)) > PREVIEW_BYTES:
-            raise Denied("Insight exceeds outbox ingest byte bound")
-        # The outbox is the only shared mount with the project. Serialize the
-        # durable citation with snapshot GC without granting project access.
-        # Busy refuses before writing; the caller can retry after maintenance.
-        with lock(self.outbox / ".submit.lock", blocking=False):
-            write_json(self.outbox / f"{insight_id}.json", record, exclusive=True)
-        return {"id": insight_id, "status": "submitted_to_outbox", "base_snapshot": self.snapshot["id"]}
+            raise Denied("Message exceeds outbox ingest byte bound")
+        # The outbox is the only shared mount with the project.
+        write_json(self.outbox / f"{message_id}.json", record, exclusive=True)
+        return {"id": message_id, "status": "written_to_outbox"}
+
+
+#: Outbox files ingested per call; the rest wait for the next call.
+INGEST_BATCH = 100
+
+
+def ingest(project) -> dict:
+    """Append Editor outbox messages to ``[editor] queue`` as the host principal.
+
+    Each outbox file ``<32 hex>.json`` holds ``{"title", "body"}``; its name
+    is the message id, so a retried ingest appends nothing twice. A file the
+    queue refuses moves to ``rejected/`` with the reason. Without a
+    configured queue nothing is read. Bounds: ``INGEST_BATCH`` files per call.
+    """
+    queue = project.config.editor.queue
+    if not queue:
+        return {"accepted": 0, "rejected": 0}
+    accepted = rejected = 0
+    spool = project.root / "spool" / "editor"
+    with lock(project.root / "locks" / "editor-ingest.lock"):
+        try:
+            paths = sorted(spool.glob("*.json"))[:INGEST_BATCH]
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                if not re.fullmatch(r"[0-9a-f]{32}", path.stem):
+                    raise Denied("Invalid outbox message name")
+                record = loads_finite(safe_read(spool, path.name, PREVIEW_BYTES))
+                if not isinstance(record, dict) or set(record) != {"title", "body"}:
+                    raise Denied("Invalid outbox fields")
+                project.kernel_queues.append(queue, record, "host", id=path.stem)
+                path.unlink()
+                accepted += 1
+            except (ValueError, TypeError, Denied, LimitExceeded, OSError) as exc:
+                quarantine_id = uuid.uuid4().hex
+                mkdir(project.root / "rejected")
+                os.rename(path, project.root / "rejected" / (quarantine_id + ".item"))
+                write_json(project.root / "rejected" / f"{quarantine_id}.json",
+                           {"name": path.name, "error": str(exc), "created_at": now()})
+                rejected += 1
+    return {"accepted": accepted, "rejected": rejected}
 
 
 def serve(bundle: Path, outbox: Path, *, input_stream=None, output_stream=None) -> None:

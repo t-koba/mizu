@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from mizu import NODE_MINIMUM, __version__
-from mizu import install_migration, platform as _platform
+from mizu import platform as _platform
 from mizu.cli import configure
 from mizu.distribution import source_files as inventory
 from mizu.distribution import source_manifest as distribution_manifest
@@ -153,6 +153,15 @@ def command(argv, *, cwd=None, timeout=600):
     subprocess.run(list(map(str, argv)), cwd=cwd, check=True, timeout=timeout, stdin=subprocess.DEVNULL, stdout=sys.stderr)
 
 
+def managed_projects(config) -> list[Path]:
+    """Managed project directories under the configured data directory."""
+    directory = config.data / "projects"
+    if not directory.is_dir() or directory.is_symlink():
+        return []
+    return sorted(path for path in directory.iterdir()
+                  if not path.name.startswith(".") and path.is_dir() and not path.is_symlink())
+
+
 @contextlib.contextmanager
 def stopped(config_file: Path):
     with contextlib.ExitStack() as stack:
@@ -161,7 +170,7 @@ def stopped(config_file: Path):
             config = load(config_file)
             for path in sorted((config.data / "locks").glob("daemon-*.lock")):
                 stack.enter_context(lock(path, blocking=False))
-            projects = install_migration.managed_projects(config)
+            projects = managed_projects(config)
             for project in projects:
                 control = read_json(project / "control.json", {})
                 if control.get("armed") and not control.get("paused"):
@@ -278,7 +287,7 @@ def promote(args, release: Path):
     if launcher.exists() or launcher.is_symlink():
         if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
             raise Denied("Refusing to replace an unrelated mizu command")
-    with stopped(args.config) as project_state:
+    with stopped(args.config):
         current = args.prefix / "current"
         recover_link(current)
         old = current.resolve() if current.is_symlink() else None
@@ -289,35 +298,19 @@ def promote(args, release: Path):
         if old_mode and old_mode != new_mode and not getattr(args, "allow_mode_change", False):
             raise Denied(f"Release mode changes from {old_mode} to {new_mode}; "
                          "re-run with --allow-mode-change after review")
-        # An older staged release must not trigger this release's conversions.
-        migrations = (install_migration.convert(*project_state, release)
-                      if "src/mizu/install_migration.py" in manifest else [])
-        try:
-            link_atomically(current, release)
-            mkdir(args.bin_dir)
-            launcher = args.bin_dir / "mizu"
-            if launcher.exists() or launcher.is_symlink():
-                if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
-                    raise Denied("Refusing to replace an unrelated mizu command")
-            link_atomically(launcher, current / "bin/mizu")
-            if old and old != release and old.parent == release.parent and not old.is_symlink():
-                shutil.rmtree(old)
-        except (MizuError, OSError) as exc:
-            if not migrations:
-                raise
-            raise Denied(f"Promotion failed after project data conversion: {exc}. "
-                         f"Inspect the current/launcher links and conversion receipts in "
-                         f"{Path(migrations[0]['archive']).parent} before resuming.") from exc
-    change_note = ("Listed migrations were applied after verified backups; "
-                   "see migrations for archives and receipts. Budgets are unchanged."
-                   if migrations else "Only code was switched; data, side effects and budgets are unchanged.")
+        link_atomically(current, release)
+        mkdir(args.bin_dir)
+        launcher = args.bin_dir / "mizu"
+        if launcher.exists() or launcher.is_symlink():
+            if not launcher.is_symlink() or prefix not in launcher.resolve().parents:
+                raise Denied("Refusing to replace an unrelated mizu command")
+        link_atomically(launcher, current / "bin/mizu")
+        if old and old != release and old.parent == release.parent and not old.is_symlink():
+            shutil.rmtree(old)
     result = {
-        "status": "promoted", "release": str(release), "migrations": migrations,
-        "uncovered_families": {
-            "decision-receipts": (
-                "Promotion does not assess or convert this family; reconciliation is a separate route-bound host operation."),
-        },
-        "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. " + change_note,
+        "status": "promoted", "release": str(release),
+        "note": "Services remain stopped. Run doctor/smoke, then explicitly start and arm. "
+                "Only code was switched; data, side effects and budgets are unchanged.",
     }
     if old_mode and old_mode != new_mode:
         result["mode_change"] = {"from": old_mode, "to": new_mode}

@@ -4,8 +4,7 @@ The observed cursor keeps the reviewed input snapshot as evidence alongside
 its immutable review-receipt snapshot. Only a validated typed receipt marks
 that code reviewed for scheduling and publication; an observed attempt without
 a verdict remains pending. A same-code successor needs no new verdict, while a
-changed digest does. Neither prose, insights nor role-authored shared records
-are approval evidence.
+changed digest does. Neither prose nor queue messages are approval evidence.
 """
 from __future__ import annotations
 
@@ -78,7 +77,7 @@ def record(context, finished):
         run=context.run_dir.name, outcome=finished["outcome"], summary=finished["summary"],
         wake_at=(time.time() + finished["wait_seconds"]
                  if finished["outcome"] == "wait" else None),
-        inbox_seen=context.inbox_seen, wake_generation=context.wake_generation,
+        wake_generation=context.wake_generation,
         next_step=finished.get("next_step"), parent=source["id"], review=review)
     write_json(context.run_dir / "review.json",
                {"snapshot": receipt["id"], "review": review}, exclusive=True)
@@ -141,10 +140,9 @@ def _current_reviews(context, holders):
         yield receipt, review, saved
 
 
-def publication_state(context, *, pending_insights, open_insights) -> dict:
+def publication_state(context) -> dict:
     """Describe recorded publication and review evidence without granting publication."""
-    state = {"cause": "awaiting_review", "verdict": None, "reviewer": None,
-             "finding_insights": []}
+    state = {"cause": "awaiting_review", "verdict": None, "reviewer": None}
     code_digest = context.snapshot["code_digest"]
     if code_digest is not None:  # None would list receipts without a digest filter.
         try:
@@ -164,7 +162,6 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
 
     approvals = set()
     rejecting_holder = None
-    reviewed_snapshot = None
     for _, review, _ in _current_reviews(context, holders):
         if review["verdict"] == "approve":
             approvals.add(review["role"])
@@ -172,27 +169,10 @@ def publication_state(context, *, pending_insights, open_insights) -> dict:
                 return {**state, "cause": "approved_queued"}
         elif rejecting_holder is None:
             rejecting_holder = review["role"]
-            # Findings are filed against the snapshot the reviewer actually
-            # reviewed, which a same-code successor need not be. Correlate on
-            # that reviewed snapshot, not the successor's id, so a rejection
-            # that carries forward also carries its linked findings.
-            reviewed_snapshot = review["reviewed_snapshot"]
     if rejecting_holder is None:
         return state
-
-    # The backlog has only IDs; the opening's pending rows carry provenance.
-    open_ids = set(open_insights["ids"])
-    findings = {}
-    for row in pending_insights:
-        if (row.get("source") == rejecting_holder
-                and row.get("base_snapshot") == reviewed_snapshot):
-            finding_id = row.get("id")
-            if isinstance(finding_id, str) and finding_id in open_ids:
-                findings[finding_id] = None
-                if len(findings) == 16:
-                    break
     return {"cause": "changes_requested", "verdict": "changes_requested",
-            "reviewer": rejecting_holder, "finding_insights": list(findings)}
+            "reviewer": rejecting_holder}
 
 
 def require_approvals(context, code_digest) -> tuple[dict, ...]:

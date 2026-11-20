@@ -26,10 +26,10 @@ from .admission import check_slot_exclusions, role_exclusions
 from .config import DEFAULT_WEB_CACHE_SECONDS, MAX_PROJECT_GOAL_BYTES, MEBIBYTE_BYTES
 from .completion_evidence import VERIFIED_SNAPSHOT, recorded_policy
 from .errors import Busy, Denied, LimitExceeded
-from .fs import (ATOMIC_WRITE_TEMP_PREFIX, DIGEST, PREVIEW_BYTES, atomic_write,
+from .fs import (ATOMIC_WRITE_TEMP_PREFIX, DIGEST, atomic_write,
                  canonical, digest, identifier, lock, mkdir, now, read_json,
                  safe_read, sync_dir, write_json, relative_parts)
-from . import acceptance, insight_archive, lock_diagnostics
+from . import acceptance, lock_diagnostics
 from .project import (Project, _check_project_paths, _directory_identity,
                       _discard_project_stage, _project_parents, check_project_settings, read_goal)
 from .snapshot import open_store
@@ -40,13 +40,10 @@ RESTORE_CHUNK_BYTES = 1048576
 DEFAULT_RESTORE_MEMBER_COUNT = 100000
 
 #: Project members covered by backup/restore (plus backup.json on restore).
-#: operator-record-index is derived and deliberately rebuilt, not backed up.
 MEMBERS = (
     "project.toml", "PROJECT.md", "control.json", "current.json", "safe-point.json", "snapshots", "objects",
-    "inbox", "insight-ids", "insight-revisions", "insight-archive.sqlite3", "histories", ".ingest", "decisions",
-    "decision-authority.json", "decision-activation-plan.json", "decision-activation-report.json",
-    "decision-history", "decision-cursors", "decision-receipts", "work-items", "work-item-receipts",
-    "obligation-receipts", "shared-records", "shared-record-receipts", "delivery-settlements", "waits", "runs", "sessions",
+    "histories", "queues", "work-items", "work-item-receipts",
+    "shared-records", "shared-record-receipts", "delivery-settlements", "runs", "sessions",
     "evidence", "artifacts", "health", "role-state", "observed", "maintenance", "spool", "selection",
 )
 
@@ -109,15 +106,9 @@ def quiescent(project: Project, *, require_pause: bool = True, snapshot_gc: bool
             stack.enter_context(lock(path, blocking=False))
         stack.enter_context(lock(project.root / "locks" / "editor-ingest.lock", blocking=False))
         if snapshot_gc:
-            # Capsule writers share only the outbox mount, not project locks.
-            for directory in (project.root / "spool", project.root / "spool/editor"):
-                _, skipped = _audit_list_dir(directory)
-                if skipped:
-                    raise Denied("Unsafe editor outbox during snapshot retention")
-            stack.enter_context(lock(project.root / "spool/editor/.submit.lock", blocking=False))
-            # Delivery binding takes publication before insights.
+            # Delivery binding takes publication before the record lock.
             stack.enter_context(lock(project.root / "locks" / "publication.lock", blocking=False))
-        stack.enter_context(lock(project.root / "locks" / "insights.lock", blocking=False))
+        stack.enter_context(lock(project.root / "locks" / "records.lock", blocking=False))
         yield
 
 
@@ -131,7 +122,6 @@ def backup(project: Project, destination: Path, *, verify: bool = False) -> dict
     # Deliberately exclude project .git/hooks, active sockets/locks, caches and the
     # mutable worktree. A separate sealed snapshot captures uncommitted work.
     with quiescent(project):
-        insight_archive.recover(project.root)
         invalid = acceptance.recover_producers(project, include_runs=True)
         if invalid:
             raise Denied('Backup refused: unresolved invalid acceptance producers: ' +
@@ -516,7 +506,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
     sessions are not candidates. No shared smoke artifacts are handled here.
 
     Every invocation recomputes under workspace, sorted role, editor-ingest,
-    insights exclusions, nonblocking and without pause. Apply refuses any
+    record exclusions, nonblocking and without pause. Apply refuses any
     incomplete reference scan before deletion; dry-run changes no evidence.
     Apply records full bounded intent and completion audits; response lists
     are previews (100 names, 256 serialized bytes each, counts/digests). I/O errors
@@ -664,7 +654,7 @@ def prune(project: Project, *, apply: bool = False, keep_artifacts: int = DEFAUL
             removed[key] = names
     return {"applied": apply, "run_retention": run_preview, "path_previews": path_previews, **removed,
             "retained": "Run evidence outside expired, unreferenced complete components; snapshots, "
-                        "content objects, sessions, decisions, proposals, insight revisions, and work-item histories. "
+                        "content objects, sessions, queue messages and work-item histories. "
                         "Artifact documents beyond the kept count, "
                         "bulky engine logs beyond operator retention, and "
                         "web-cache entries expired past cache_seconds are disposable projections; "
@@ -1100,26 +1090,6 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
             continue
         reference_dict(child / "evidence.json", "snapshot", artifact_ids,
                        required=True, must_exist=True)
-    insight_ids: set[str] = set()
-    # Superseded revisions and queued editor submissions are durable citations too.
-    # Validate the spool parent too; lstat of a nested path follows parents.
-    reference_children(root / "spool")
-    insight_directories = [root / "inbox", root / "insight-revisions", root / ".ingest"]
-    if root / "spool" not in skipped_references:
-        insight_directories.append(root / "spool/editor")
-    for directory in insight_directories:
-        for child in reference_children(directory):
-            if child.suffix == ".json":
-                reference_dict(child, "base_snapshot", insight_ids,
-                               must_exist=history_cutoff is not None)
-    # Archive bodies remain durable references after leaving the live inbox.
-    # An unreadable archive refuses maintenance rather than hiding references.
-    for reference in insight_archive.snapshot_references(root):
-        digest_id = _audit_digest(reference)
-        if digest_id is not None:
-            insight_ids.add(digest_id)
-        elif reference is not None:
-            skipped_references.add(root / "insight-archive.sqlite3")
     work_item_ids: set[str] = set()
     work_item_skipped_paths: set[Path] = set()
     work_items_dir = root / "work-items"
@@ -1208,7 +1178,7 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
     except (Denied, LimitExceeded, OSError, ValueError):
         skipped_references.add(root / "shared-records" / "host")
     referenced_ids = (set(history_ids) | set(run_ids) | set(artifact_ids)
-                      | set(insight_ids) | set(work_item_ids) | host_record_ids)
+                      | set(work_item_ids) | host_record_ids)
     reference_roots = referenced_ids.copy()
     ancestors, incomplete = _snapshot_ancestry(
         manifests, reference_roots, project.snapshots.history_index)
@@ -1267,7 +1237,6 @@ def _audit_collect(project: Project, *, history_cutoff: float | None = None) -> 
         "run_ids": run_ids,
         "artifact_ids": artifact_ids,
         "acceptance_receipts": acceptance_receipts,
-        "insight_ids": insight_ids,
         "work_item_ids": work_item_ids,
         "host_record_ids": host_record_ids,
         "work_item_events_skipped": len(work_item_skipped_paths),
@@ -1310,7 +1279,7 @@ def audit(project: Project) -> dict:
     objects: {count, bytes, referenced_count, referenced_bytes,
     orphan_count, orphan_bytes, orphan_sample, orphan_truncated, skipped},
     references: {history_snapshots, run_snapshots, artifact_snapshots,
-    insight_snapshots, work_item_snapshots, host_record_snapshots}, work_item_events_skipped,
+    work_item_snapshots, host_record_snapshots}, work_item_events_skipped,
     work_item_events_skipped_sample, work_item_events_skipped_truncated,
     reference_records_skipped, reference_records_skipped_sample,
     reference_records_skipped_truncated, preview_only: True}``. Counts and byte totals
@@ -1328,16 +1297,15 @@ def audit(project: Project) -> dict:
     entries, digests, or active endpoints are incomplete. Usable valid IDs
     are still reported, but an incomplete scan
     is never proof that references are absent. Manifest ``files`` entries
-    with invalid digests are skipped. An unreadable insight archive raises
-    rather than hiding references. Trust: local recorded state only (data,
-    not proof); insight prose is never read, only ``base_snapshot`` IDs.
+    with invalid digests are skipped. Trust: local recorded state only (data,
+    not proof).
     Retry/cancellation: read-only, lock-free, idempotent; safe to retry
     while writers run, with no quiescence requirement because nothing is
     removed.
     Evidence: exact counts/bytes plus bounded samples; full evidence stays
     on disk under ``snapshots/``, ``histories/`` and ``objects/``.
-    Failure: raises only when the project or its store is unreadable (or the
-    insight archive is unreadable); per-file faults are counted as skipped.
+    Failure: raises only when the project or its store is unreadable;
+    per-file faults are counted as skipped.
     Nothing is deleted, moved, or rewritten by this preview.
     """
     collected = _audit_collect(project)
@@ -1394,7 +1362,6 @@ def audit(project: Project) -> dict:
             "history_snapshots": len(collected["history_ids"]),
             "run_snapshots": len(collected["run_ids"]),
             "artifact_snapshots": len(collected["artifact_ids"]),
-            "insight_snapshots": len(collected["insight_ids"]),
             "work_item_snapshots": len(collected["work_item_ids"]),
             "host_record_snapshots": len(collected["host_record_ids"]),
         },
@@ -1405,7 +1372,7 @@ def audit(project: Project) -> dict:
         "reference_records_skipped_sample": skipped_reference_paths[:_AUDIT_SAMPLE],
         "reference_records_skipped_truncated": len(skipped_reference_paths) > _AUDIT_SAMPLE,
         "preview_only": True,
-        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories are retained; this preview removes nothing. "
+        "retained": "All manifests, history generations, objects, runs, artifacts, sessions, queue messages, shared records, and work-item histories are retained; this preview removes nothing. "
                     "Web-cache entries expired past cache_seconds are disposable (see sessions/web_cache); "
                     "sessions are durable audit evidence and are accounted, never reclaimed.",
     }
@@ -1420,7 +1387,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     reference_records_skipped_sample, reference_records_skipped_truncated,
     audit?}``.
     The candidate sets are exactly what ``audit()`` reports in full: manifests
-    outside every durable reference (live/history/run/artifact/insight/work-item/host-record)
+    outside every durable reference (live/history/run/artifact/work-item/host-record)
     and its bounded merge ancestry (up to history_index parent edges), and
     objects referenced by no manifest on disk. Full ID lists are returned
     (sorted); use ``audit()`` for the bounded display samples.
@@ -1432,7 +1399,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     counted; present-but-unreadable, malformed, over-bound, wrong-shape, or
     failed directory scans set ``reference_records_skipped`` and refuse
     apply. History generations are never candidates, nor are runs, artifacts,
-    sessions, decisions, proposals, insight revisions, or work-item histories.
+    sessions, queue messages, or work-item histories.
     Trust: operator-invoked maintenance; the explicit ``--apply`` invocation
     behind quiescence (paused + locks) is the grant. Candidates are
     recomputed inside the quiescent section, so a stale preview can never
@@ -1444,8 +1411,7 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
     Evidence: returns removed/retained paths plus the maintenance audit path.
     Failure: Denied for skipped snapshot manifests, skipped reference
     records, unsafe work-item history or storage roots, symlinks at removal time, or a
-    non-quiescent project when applying; an unreadable insight archive
-    raises rather than hiding references.
+    non-quiescent project when applying.
     """
     if not apply:
         collected = _audit_collect(project)
@@ -1461,8 +1427,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
             "manifest_skipped": collected["manifest_skipped"],
             "manifest_skipped_sample": skipped_manifest_paths[:_AUDIT_SAMPLE],
             "manifest_skipped_truncated": len(skipped_manifest_paths) > _AUDIT_SAMPLE,
-            "retained": "All live/history/run/artifact/insight/work-item/host-record-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories. "
+            "retained": "All live/history/run/artifact/work-item/host-record-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, queue messages, shared records, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "work_item_events_skipped": collected["work_item_events_skipped"],
             "work_item_events_skipped_sample": skipped_work_item_paths[:_AUDIT_SAMPLE],
@@ -1527,8 +1493,8 @@ def reclaim(project: Project, *, apply: bool = False) -> dict:
         sync_dir(record.parent)
         removed["audit"] = record.relative_to(project.root).as_posix()
     return {"applied": True, **removed,
-            "retained": "All live/history/run/artifact/insight/work-item/host-record-referenced manifests, history generations, "
-                        "runs, artifacts, sessions, decisions, proposals, insight revisions, shared records, and work-item histories. "
+            "retained": "All live/history/run/artifact/work-item/host-record-referenced manifests, history generations, "
+                        "runs, artifacts, sessions, queue messages, shared records, and work-item histories. "
                         "Repeat audit/reclaim converges on newly orphaned objects.",
             "manifest_skipped": 0,
             "work_item_events_skipped": 0,
@@ -1768,7 +1734,7 @@ def _restore_stage(config, name: str, archive_path: Path, *, max_bytes: int,
         write_json(stage / "control.json", {"armed": False, "paused": True,
                    "draining": False,
                    "wake_generation": uuid.uuid4().hex, "reason": "Restored checkpoint; operator review required"})
-        atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
+        atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor outbox\n")
         store.publish(checkpoint)
         from .smoke_refs import shared_lock
         from .smoke_retention import Budgets, validate_restored_refs

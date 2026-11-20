@@ -1,4 +1,4 @@
-"""Terminal work-item delivery, independent of decision timestamp cursors.
+"""Terminal work-item delivery to the roles that subscribe to it.
 
 The work-item store remains authoritative. Receipts are exact, source-scoped,
 per-role identities, not watermarks. Reads never recover, lock or write. A
@@ -24,28 +24,15 @@ def _identity(item):
     return f"{SOURCE}:{item['id']}:{item['rev']}"
 
 
-def _origin_source(sources, origin):
-    """Resolve submitter, never the transition actor (including legacy holes)."""
-    if origin is None or "work_item_id" in origin:
-        return None
-    known = sources.get(origin["insight_id"])
-    if known is None:
-        return None
-    if not known[0]:
-        raise Denied("Invalid work-item event origin")
-    return known[1]
-
-
-def _payload(store, item, sources=None):
+def _payload(store, item, creators=None):
     _, row = store.closed_row(item)
     row.update(event=_identity(item), source=SOURCE, type=item["status"],
                terminal_at=item["updated_at"], transition=item["transition"],
-               origin_source=_origin_source(store.origin_sources() if sources is None else sources,
-                                            item["origin"]),
+               creator=(store.creators() if creators is None else creators).get(item["id"]),
                verification=({"sha256": digest(canonical(item["verification"])),
                               "passed": True, "code_digest": item["verification"]["code_digest"]}
                              if item["status"] == "done" and recorded_policy(item) == VERIFIED_SNAPSHOT else None))
-    row["routing"] = "known" if row["origin_source"] is not None else "unknown"
+    row["routing"] = "known" if row["creator"] is not None else "unknown"
     if len(canonical(row)) > MAX_CLOSED_ROW_BYTES:
         raise LimitExceeded("Work-item event exceeds row byte bound")
     return row
@@ -93,10 +80,9 @@ def pending(store, role, actions, *, sources="own", limit=10):
     """Bounded oldest-first pending page plus exact progress counts.
 
     Validates immutable seeds and the *entire* current chain via WorkItems'
-    existing reader (including legacy seeds). Excludes exact receipts before
-    the heap limit; UTC microseconds/id/rev order survives ties and rollback.
-    At most 100 rows, 8192 bytes/row, 1 MiB/response. Unseeded legacy decisions
-    are counted as incomplete coverage, never guessed into terminal events.
+    existing reader. ``own`` selects items the role created. Excludes exact
+    receipts before the heap limit; UTC microseconds/id/rev order survives
+    ties and rollback. At most 100 rows, 8192 bytes/row, 1 MiB/response.
     Unsafe/malformed stores fail closed. No reads have recovery side effects.
     """
     return _pending_pages(store, [(role, actions, sources)], limit)[0]
@@ -116,9 +102,9 @@ class _PendingPage:
         self.acknowledged = self.eligible = self.unknown = 0
 
     def add(self, store, item, row, listing=...):
-        if row["origin_source"] is None:
+        if row["creator"] is None:
             self.unknown += 1
-        if self.sources == "own" and row["origin_source"] != self.role:
+        if self.sources == "own" and row["creator"] != self.role:
             return
         key = (_timestamp_order(item["updated_at"]), item["id"], item["rev"])
         if _received(store, self.role, item, listing):
@@ -137,7 +123,7 @@ class _PendingPage:
         elif key < self.selected[0][1]:
             heapq.heapreplace(self.selected, candidate)
 
-    def result(self, unseeded):
+    def result(self):
         rows = [entry[2] for entry in sorted(self.selected, key=lambda value: value[1])]
         acknowledged_ids = [event_id for _, event_id in sorted(self.acknowledged_heap)]
         result = {"role": self.role, "subscribed": list(self.actions), "sources": self.sources,
@@ -145,9 +131,7 @@ class _PendingPage:
                   "acknowledged_event_ids": acknowledged_ids,
                   "acknowledged_ids_truncated": self.acknowledged > len(acknowledged_ids),
                   "overflow_count": self.eligible - len(rows), "truncated": self.eligible > len(rows),
-                  "unknown_routing": self.unknown, "routing_complete": self.unknown == 0,
-                  "unseeded_decisions": unseeded if self.actions else 0,
-                  "coverage_complete": unseeded == 0 or not self.actions}
+                  "unknown_routing": self.unknown, "routing_complete": self.unknown == 0}
         if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
             raise LimitExceeded("Work-item events exceed page byte bound")
         return result
@@ -157,18 +141,16 @@ def _pending_pages(store, subscriptions, limit):
     pages = [_PendingPage(*subscription, limit) for subscription in subscriptions]
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Denied("Work-item event limit must be in [1, 100]")
-    unseeded = 0
     if any(page.actions for page in pages):
-        unseeded = store.unseeded_decisions()
-        sources = store.origin_sources()
+        creators = store.creators()
         listings = {page.role: _receipts(store, page.role) for page in pages}
         for item in store.current_items(statuses=("done", "dropped")):
             matching = [page for page in pages if item["status"] in page.actions]
             if matching:
-                row = _payload(store, item, sources)
+                row = _payload(store, item, creators)
                 for page in matching:
                     page.add(store, item, row, listings[page.role])
-    return [page.result(unseeded) for page in pages]
+    return [page.result() for page in pages]
 
 
 def _token(role, payload):
@@ -221,7 +203,7 @@ def acknowledge(store, role, events):
 
     Validate each frozen payload against its immutable terminal chain before
     writing. One atomic file per identity avoids read/modify/write lost updates.
-    Never touches decision-cursors. I/O failure leaves remaining events pending;
+    I/O failure leaves remaining events pending;
     leftover atomic-write temporaries are not receipts and need no recovery.
     """
     identifier(role)
@@ -263,8 +245,7 @@ def progress(store, roles, *, limit=100):
     """Read-only summaries, at most 100 roles/1 MiB, no receipt enumeration."""
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Denied("Work-item progress role limit must be in [1, 100]")
-    # This view is specifically for terminal work-item subscriptions; decision-
-    # only roles do not have a work-item acknowledgement position to report.
+    # Only roles subscribed to terminal work items have a position to report.
     names = sorted(name for name, role in roles.items() if role.work_item_events)
     rows = []
     subscriptions = [(name, roles[name].work_item_events, roles[name].work_item_sources)
@@ -277,7 +258,7 @@ def progress(store, roles, *, limit=100):
         summary["pending_overflow_count"] = page["overflow_count"]
         rows.append(summary)
     result = {"roles": rows, "total": len(names), "truncated": len(names) > len(rows),
-              "coverage_complete": len(names) == len(rows) and all(r["coverage_complete"] for r in rows)}
+              "coverage_complete": len(names) == len(rows)}
     if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
         raise LimitExceeded("Work-item event progress exceeds byte bound")
     return result
@@ -291,9 +272,9 @@ def closed_page(store, roles, *, limit=10):
     closed at the existing row/page byte bounds. No locks or recovery.
     """
     page, items = store.closed_items(limit=limit)
-    sources = store.origin_sources()
+    creators = store.creators()
     for row, item in zip(page["items"], items):
-        payload = _payload(store, item, sources)
+        payload = _payload(store, item, creators)
         acknowledgements = {}
         row["event_acknowledgements"] = acknowledgements
         for name in sorted(roles):
@@ -302,7 +283,7 @@ def closed_page(store, roles, *, limit=10):
                 continue
             if role.work_item_sources not in ("own", "any"):
                 raise Denied("Invalid work-item event source route")
-            if role.work_item_sources == "own" and payload["origin_source"] != name:
+            if role.work_item_sources == "own" and payload["creator"] != name:
                 continue
             acknowledgements[name] = _received(store, name, item)
             if len(canonical(row)) > MAX_CLOSED_ROW_BYTES:

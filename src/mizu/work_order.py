@@ -6,15 +6,9 @@ reviewed. WorkItems stays authoritative for status, scope and evidence; no
 field here duplicates them. The generation binds semantic inputs captured
 for the unit opening: goal digest, exact bounded open-work page, bounded
 ready-work display (without volatile ages) plus the full actionable inventory
-signature and a full open-inventory accepted-scope/redecision fingerprint,
-the full bounded pending-insight inventory plus open-insight backlog (when
-granted), the bounded CI-failure projection (when granted), and the
-dispatch-frozen configured actionable inputs (decision events and their
-visible page summary, corrupt-receipt diagnostics, work-item terminal events,
-structured insight waits including due waits, and obligations). Full prompts
-display the pending inventory; resumed-session deltas may omit already-offered
-bodies while reusing the same frozen inventory for generation and backlog.
-It is captured once per unit so arrivals after opening are not retroactively
+signature and a full open-inventory scope fingerprint, the bounded CI-failure
+projection (when granted), and the dispatch-frozen actionable inputs (queue
+facts, work-item terminal events and CI waits). It is captured once per unit so arrivals after opening are not retroactively
 treated as reviewed.
 A change in the configured actionable-input set -- including an event
 disappearing after acknowledgement -- is a semantic input-set change and
@@ -196,21 +190,18 @@ def _stable_open_for_hash(open_work_items) -> dict:
 
 
 def generation_from_captured(*, goal_digest, open_work_items, ready_work,
-                             ready_signature, order_inventory, pending_insights, open_backlog,
-                             ci_current_summary, decision_events, decision_page,
-                             diagnostics, work_item_events, wait_events,
-                             obligations) -> str:
-    """Hash the captured prompt projections and full scope/redecision fingerprint.
+                             ready_signature, order_inventory, queues,
+                             ci_current_summary, work_item_events, wait_events) -> str:
+    """Hash the captured prompt projections and full scope fingerprint.
 
     The prompt projections are captured for this unit (goal pin, bounded
-    open page, ready display and inventory signature, pending list and
-    backlog, current configured-subject CI aggregates (independent of grants,
-    prompt sections and wake delivery), and dispatch-frozen event arrays including
-    structured waits). The separate constant-size scope/redecision
-    fingerprint covers the full open inventory, not just the visible page. Volatile ready ages are stripped so wall time alone never
-    moves the generation. Any malformed input raises Denied for the
-    caller to map to ``unavailable``. Age/review fields are prompt visibility,
-    not work identity, and never move the generation as time passes.
+    open page, ready display and inventory signature, queue facts, current
+    configured-subject CI aggregates (independent of grants, prompt sections
+    and wake delivery), and dispatch-frozen event arrays including CI waits).
+    The separate constant-size scope fingerprint covers the full open
+    inventory, not just the visible page. Volatile ready ages are stripped so
+    wall time alone never moves the generation. Any malformed input raises
+    Denied for the caller to map to ``unavailable``.
     """
     _validate_generation(goal_digest)
     if (not isinstance(open_work_items, dict)
@@ -222,38 +213,20 @@ def generation_from_captured(*, goal_digest, open_work_items, ready_work,
     _validate_generation(order_inventory)
     stable_open = _stable_open_for_hash(open_work_items)
     stable_ready = _stable_ready_for_hash(ready_work)
-    if not isinstance(pending_insights, list):
-        raise Denied("Invalid pending insights")
-    if (not isinstance(open_backlog, dict)
-            or not isinstance(open_backlog.get("ids"), list)
-            or not isinstance(open_backlog.get("total"), int)
-            or not isinstance(open_backlog.get("truncated"), bool)):
-        raise Denied("Invalid open-insight backlog")
     from .ci_observation import MAX_CI_WAKE_ROWS, _valid_ci_summary_fact
     if ci_current_summary is not None and (
             not isinstance(ci_current_summary, list)
             or len(ci_current_summary) > MAX_CI_WAKE_ROWS
             or any(not _valid_ci_summary_fact(fact) for fact in ci_current_summary)):
         raise Denied("Invalid CI summary")
-    if decision_page is not None and (not isinstance(decision_page, dict) or "events" in decision_page):
-        raise Denied("Invalid decision page summary")
-    for name, value in (("decision_events", decision_events),
-                        ("diagnostics", diagnostics),
+    for name, value in (("queues", queues),
                         ("work_item_events", work_item_events),
-                        ("wait_events", wait_events),
-                        ("obligations", obligations)):
+                        ("wait_events", wait_events)):
         if not isinstance(value, list):
             raise Denied(f"Invalid {name}")
-    return digest(canonical(["work-order-generation-v6", goal_digest,
+    return digest(canonical(["work-order-generation-v7", goal_digest,
                              stable_open, stable_ready, ready_signature, order_inventory,
-                             pending_insights, open_backlog,
-                             ci_current_summary,
-                             decision_events, decision_page, diagnostics,
-                             work_item_events, wait_events, obligations]))
-
-
-def _decision_page_summary(page):
-    return {key: value for key, value in page.items() if key != "events"} if page is not None else None
+                             queues, ci_current_summary, work_item_events, wait_events]))
 
 
 def _capture_opening(context) -> dict:
@@ -261,8 +234,7 @@ def _capture_opening(context) -> dict:
 
     Reads each projection a single time and reuses the same objects for
     both the full prompt and the frozen generation, so an arrival between
-    the two cannot enter the generation. A delta displays its offered subset,
-    but hashes this same full semantic pending inventory. Later calls on the same context
+    the two cannot enter the generation. Later calls on the same context
     return the first capture; a prior failure is not retried mid-unit.
     Current CI aggregates always cover configured wake subjects, regardless of
     capabilities, section inclusion, or wake suppression/delivery.
@@ -340,39 +312,19 @@ def _capture_opening(context) -> dict:
                 set(raw_ready["_wait_resolution_delivered_current"]) | set(shown_tokens)
             )[:MAX_WAIT_RESOLUTION_TOKENS]
             context.wait_resolution_high_water = raw_ready["_wait_resolution_high_water"]
-        limit_pending = config.limits.pending_insights
-        if "insights" in caps or "decide" in caps:
-            proj = project.insights.projection(limit=limit_pending)
-            if (not isinstance(proj, dict)
-                    or not isinstance(proj.get("items"), list)
-                    or not isinstance(proj.get("total"), int)):
-                raise Denied("Invalid pending-insight projection")
-            pending_insights = list(proj["items"])
-            open_backlog = {"ids": [item["id"] for item in pending_insights],
-                            "total": proj["total"],
-                            "truncated": bool(proj.get("truncated"))}
-        else:
-            pending_insights = []
-            open_backlog = {"ids": [], "total": 0, "truncated": False}
         from .ci_observation import wake_ci_facts
         ci_current_summary = wake_ci_facts(project, context.config)
-        decision_events = list(getattr(context, "decision_events", []) or [])
-        decision_page = _decision_page_summary(getattr(context, "decision_page", None))
-        diagnostics = list(getattr(context, "decision_receipt_diagnostics", []) or [])
+        queues = list(getattr(context, "queues", []) or [])
         work_item_events = list(getattr(context, "work_item_events", []) or [])
         wait_events = list(getattr(context, "wait_events", []) or [])
-        obligations = list(getattr(context, "obligations", []) or [])
         inputs = {"_captured": True, "goal_digest": goal_digest,
                   "open_work_items": open_work_items,
                   "ready_work": ready_work, "ready_signature": ready_signature,
                   "_order_inventory": order_inventory,
-                  "pending_insights": pending_insights,
-                  "open_backlog": open_backlog,
+                  "queues": queues,
                   "ci_current_summary": ci_current_summary,
-                  "decision_events": decision_events, "decision_page": decision_page,
-                  "diagnostics": diagnostics,
                   "work_item_events": work_item_events,
-                  "wait_events": wait_events, "obligations": obligations}
+                  "wait_events": wait_events}
         if "work_order" not in caps:
             context._work_order_inputs = inputs
             return inputs
@@ -380,11 +332,8 @@ def _capture_opening(context) -> dict:
             generation = generation_from_captured(
                 goal_digest=goal_digest, open_work_items=open_work_items,
                 ready_work=ready_work, ready_signature=ready_signature, order_inventory=order_inventory,
-                pending_insights=pending_insights, open_backlog=open_backlog,
-                ci_current_summary=ci_current_summary,
-                decision_events=decision_events, decision_page=decision_page, diagnostics=diagnostics,
-                work_item_events=work_item_events, wait_events=wait_events,
-                obligations=obligations)
+                queues=queues, ci_current_summary=ci_current_summary,
+                work_item_events=work_item_events, wait_events=wait_events)
         except Exception:
             # Hash failure is review-unavailable, not a prompt failure:
             # keep the display inputs so the prompt still builds.
@@ -460,50 +409,25 @@ def _fresh_generation_for_role(project, role) -> str:
     ready_signature = raw_ready["signature"]
     from .unit_prompts import _ready_work_projection
     ready_work = _ready_work_projection(raw_ready)
-    caps = set(getattr(role, "capabilities", ()))
-    limit_pending = project.config.limits.pending_insights
-    if "insights" in caps or "decide" in caps:
-        proj = project.insights.projection(limit=limit_pending)
-        pending_insights = list(proj["items"])
-        open_backlog = {"ids": [item["id"] for item in proj["items"]],
-                        "total": proj["total"],
-                        "truncated": bool(proj.get("truncated"))}
-    else:
-        pending_insights = []
-        open_backlog = {"ids": [], "total": 0, "truncated": False}
     from .ci_observation import wake_ci_facts
     ci_current_summary = wake_ci_facts(project, project.config)
-    from . import decision_delivery as _delivery
     from . import work_item_events as _tev
     from . import ci_waits as _ciw
-    from . import proposal_waits as _pww
-    decision_state = _delivery.pending(project, role)
-    decision_events = list(decision_state.get("events", []) or [])
-    decision_page = _decision_page_summary(decision_state.get("page"))
-    diagnostics = list(decision_state.get("diagnostics", []) or [])
+    from .config import role_work_item_events_limit
+    from .queue_facts import opening as _queue_opening
     terminal_page = _tev.pending(
         project.work_items, role.name, getattr(role, "work_item_events", ()),
         sources=getattr(role, "work_item_sources", "own") or "own",
-        limit=__import__("mizu.config", fromlist=["role_work_item_events_limit"]).role_work_item_events_limit(project.config, role))
+        limit=role_work_item_events_limit(project.config, role))
     terminal_page = _tev.delivery(role.name, terminal_page)
     work_item_events = list(terminal_page.get("events", []) or [])
-    try:
-        snapshot = project.snapshots.get()
-    except Exception as exc:
-        raise Denied("Work-order snapshot is unavailable") from exc
     wait_limit = project.config.limits.wait_events_limit
-    wait_events = list(project.insights.due_waits(role.name, snapshot, limit=wait_limit)
-                       + _ciw.pending(project.work_items, role.name, limit=wait_limit)
-                       + _pww.pending(project.work_items, role.name, limit=wait_limit))
-    obligations = list(project.insights.pending_obligations(role.name, limit=wait_limit))
+    wait_events = list(_ciw.pending(project.work_items, role.name, limit=wait_limit))
     return generation_from_captured(
         goal_digest=goal_digest, open_work_items=open_work_items,
         ready_work=ready_work, ready_signature=ready_signature, order_inventory=order_inventory,
-        pending_insights=pending_insights, open_backlog=open_backlog,
-        ci_current_summary=ci_current_summary,
-        decision_events=decision_events, decision_page=decision_page, diagnostics=diagnostics,
-        work_item_events=work_item_events, wait_events=wait_events,
-        obligations=obligations)
+        queues=_queue_opening(project, role.name), ci_current_summary=ci_current_summary,
+        work_item_events=work_item_events, wait_events=wait_events)
 
 
 def projection_for(context) -> dict | None:
@@ -609,10 +533,11 @@ def _is_actionable_locked(project, role_name: str, item_id: str, published_snaps
         if holder is not None and holder != role_name:
             return False
         wait = item.get("wait")
-        if not wait or not isinstance(wait, dict) or wait.get("kind") in ("ci", "publication_ci", "proposal_merged"):
+        if not wait or not isinstance(wait, dict) or wait.get("kind") in ("ci", "publication_ci"):
             return False
+        from .work_item_waits import liveness
         try:
-            if not project.insights._wait_due(wait, published_snapshot):
+            if liveness(store, wait, published_snapshot)["state"] != "due":
                 return False
         except Exception as exc:
             raise Denied("Work-order wait is unavailable") from exc
@@ -641,7 +566,7 @@ def write_plan(project, *, actor: str, run: str, items, rationale: str,
         raise Denied("Stale work-order review; re-read before recording")
     _validate_generation(opening_generation)
     from .fs import lock as _lock
-    with _lock(project.root / "locks" / "insights.lock"):
+    with _lock(project.root / "locks" / "records.lock"):
         stored = _read_stored(project.root)
         if stored["status"] == "unavailable":
             raise Denied("Work order is unavailable")

@@ -1,6 +1,6 @@
 """Own bounded role-admission facts and daemon readiness: progress self-admission,
-completed-change observation, receipt waits, routed events, work-item wait
-reconciliation and the lazy ``should_run`` evaluator.
+completed-change observation, receipt waits, routed events, due queue messages,
+work-item wait reconciliation and the lazy ``should_run`` evaluator.
 
 Runtime re-exports them for their established seam.
 """
@@ -10,16 +10,12 @@ import dataclasses
 import time
 from typing import TYPE_CHECKING
 
-from . import (check_jobs, ci_waits, decision_delivery, proposal_waits, reviews,
-               work_item_events)
+from . import check_jobs, ci_waits, queue_facts, reviews, work_item_events
 from . import scheduling as _scheduling
 from .ci_observation import wake_ci_failures
 from .ci_wake import _ci_due_for, _ci_wake_enabled
-from .decision_idle import _decision_delivery_state
 from .errors import Denied, LimitExceeded, MizuError
 from .fs import digest, lock
-from .producer_admission import producer_hold
-from .record_authority import _record_delivery
 from .snapshot import progress_disposition, validate_progress
 from .unit_finish import _writer_next_task
 from .wake_evidence import _operator_woke, _role_cursor
@@ -96,41 +92,28 @@ def _on_change_observed(cursor: dict, snapshot: dict, *, exact_snapshot=False,
         return False
 
 def _receipt_wait_due(store, role, *, limit=1) -> bool:
-    """Share one authoritative work-item traversal for CI/proposal readiness.
+    """Whether a CI wait has a deliverable terminal event for the role.
 
-    Holds ``insights.lock`` once and feeds every blocked item from the
-    current-state index to both accumulators; CI/proposal evidence and
-    time-dependent readiness are reevaluated by the route-owned read-only
-    accumulators each poll. Retains only O(limit) candidates plus the first
-    deferred proposal failure; index failures abort even after an
-    earlier candidate. Finalizes CI first: a CI event returns True and
-    discards the deferred proposal failure, otherwise the deferred failure
-    propagates or the proposal accumulator finalizes. No recovery, writes,
-    syncs or delivery/ack observation; ready-work validation is untouched.
+    Holds ``records.lock`` once and feeds every blocked item from the
+    current-state index to the route-owned read-only accumulator; CI evidence
+    and time-dependent readiness are reevaluated each poll. Index failures
+    abort. No recovery, writes, syncs or delivery/ack observation.
     """
     ci_state = ci_waits.readiness_init(store, role, limit=limit)
-    proposal_state = proposal_waits.readiness_init(store, role, limit=limit)
-    with lock(store.root / "locks" / "insights.lock"):
+    with lock(store.root / "locks" / "records.lock"):
         for item in store.current_items(statuses=("blocked",)):
             ci_waits.readiness_feed(ci_state, store, item)
-            proposal_waits.readiness_feed(proposal_state, store, item)
-        if ci_waits.readiness_events(ci_state):
-            return True
-        return bool(proposal_waits.readiness_events(proposal_state))
+        return bool(ci_waits.readiness_events(ci_state))
 
 def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
                      completed_wait_probes=None) -> bool:
-    """Routed decisions/insight attention, terminal events or waits due to a role.
+    """Check-job results, terminal work-item events or CI waits due to a role.
 
-    Inspect the named role, else project write roles. Exact decision/attention
-    authority, route, budget and store failures propagate: never suppress a wake
-    by treating invalid delivery as an empty queue. Legacy decision-history
-    isolation remains in its source scanner; terminal/wait probing is unchanged.
-    ``completed_wait_probes`` names roles whose check-job/CI/proposal probes
-    completed empty earlier in this same ``should_run`` evaluation. An omitted
-    role (or ``None``) is probed here; errors never populate the set.
+    Inspect the named role, else project write roles. ``completed_wait_probes``
+    names roles whose check-job/CI probes completed empty earlier in this same
+    ``should_run`` evaluation. An omitted role (or ``None``) is probed here;
+    errors never populate the set.
     """
-    decision_delivery.authority(project.insights.root)
     names = [role_name] if role_name in project.roles else [
         name for name in project.roles
         if name in project.config.roles and project.config.roles[name].workspace == "write"]
@@ -147,29 +130,8 @@ def _role_events_due(project: Project, snapshot: dict, role_name=None, *,
                     project.work_items, name, terminal_triggers,
                     sources=project.config.roles[name].work_item_sources, limit=1)["events"]:
                 return True
-        except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
-            pass
-        triggers = project.config.roles[name].decision_events
-        sources = getattr(project.config.roles[name], "decision_sources", "own") or "own"
-        if sources == "any" or "defer" not in triggers:
-            state = _decision_delivery_state(project, name, project.config.roles[name])
-        else:
-            # Deferrals must not hide a substantive trigger outside a bounded
-            # full page; preserve the filtered exact scan for this edge.
-            state = decision_delivery.pending(
-                project, project.config.roles[name],
-                actions=tuple(a for a in triggers if a != "defer"), limit=1)
-        pending, troubled = state["events"], state["diagnostics"]
-        if sources == "any":
-            if pending or troubled:
-                return True
-        elif (any(e.get("action") != "defer" for e in pending)
-              or any(d.get("action") != "defer" for d in troubled)):
-            return True
-        try:
-            if (project.insights.due_waits(name, snapshot, limit=1)
-                    or (not wait_probes_completed
-                        and _receipt_wait_due(project.work_items, name, limit=1))):
+            if (not wait_probes_completed
+                    and _receipt_wait_due(project.work_items, name, limit=1)):
                 return True
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, KeyError, AttributeError):
             pass
@@ -180,11 +142,11 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
                role_name: str | None = None, config=None) -> bool:
     """Collect daemon signals lazily, following the pure due evaluator's order.
 
-    The evaluator names one next fact at a time. This preserves the old
+    The evaluator names one next fact at a time. This preserves the
     short-circuit contract: absent ready work or receipt-pinned CI wait evidence,
-    done does not read inbox/decision events/general CI/insight waits/progress.
-    Addressed operator records are checked before done, directly from SharedRecords. A higher-priority wake does not probe
-    lower-priority stores. Named roles only see role-eligible ready work;
+    done does not read events/general CI/progress. Due messages in a queue
+    that wakes the role are checked before done. A higher-priority wake does
+    not probe lower-priority stores. Named roles only see role-eligible ready work;
     observers use their own completion cursor, never the writer's progress.
     """
     current_time = time.time() if current_time is None else current_time
@@ -199,7 +161,7 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
         armed=bool(control.get("armed")),
         paused=bool(control.get("paused")),
         draining=bool(control.get("draining")),
-        operator_records_due=None,
+        messages_due=None,
     )
     decision = _scheduling.evaluate(facts)
     if (decision.ready is None and role_name in project.roles and role is not None
@@ -241,20 +203,20 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             except (Denied, LimitExceeded, OSError, ValueError):
                 completed_wait_probes = None
                 value = False
-        elif needed == "operator_records_due":
-            # A code-change/wait evaluation may name a placeholder role (for
-            # example before admission resolves configuration). It cannot have
-            # addressed operator records; don't let that suppress other causes.
-            value = (_record_delivery(project).due(project, role_name)
-                     if role_name is None or (role_name in project.roles
-                                              and role_name in project.config.roles)
-                     else False)
+        elif needed == "messages_due":
+            # Without a named role, the project's write roles stand in, as for
+            # the other routed facts. A placeholder role name that is not
+            # configured for the project has no queues.
+            names = ([role_name] if role_name in project.roles else
+                     [] if role_name is not None else
+                     [name for name in project.roles
+                      if name in project.config.roles
+                      and project.config.roles[name].workspace == "write"])
+            value = any(queue_facts.due(project, name) for name in names)
         elif needed == "outcome":
             value = role_record.get("outcome", "wait")
             if observer and value not in ("continue", "bounded", "done", "wait", "blocked"):
                 value = "wait"
-        elif needed == "inbox_changed":
-            value = not observer and project.insights.generation() != snapshot.get("inbox_seen", "")
         elif needed == "routed_events_due":
             value = _role_events_due(project, snapshot, role_name,
                                      completed_wait_probes=completed_wait_probes)
@@ -285,18 +247,5 @@ def should_run(project: Project, snapshot: dict, current_time: float | None = No
             raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
         facts = dataclasses.replace(facts, **{needed: value})
         decision = _scheduling.evaluate(facts)
-    if not decision.ready:
-        return False
-    # Producer admission vetoes an otherwise-ready daemon iteration before
-    # any model or run-slot use. The check runs only here so an unready
-    # daemon never pays for load reads; a held producer simply stays
-    # unready until an existing schedule or subscription re-evaluates it.
-    # No event or cursor is acknowledged by this veto.
-    if role_name is not None and role is not None:
-        try:
-            if producer_hold(project, role_name, role) is not None:
-                return False
-        except Exception:
-            return False
-    return True
+    return bool(decision.ready)
 

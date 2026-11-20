@@ -39,9 +39,9 @@ class DaemonFacts:
     # Full role-eligible ID set differs from the last delivered unit input.
     ready_work_changed: bool | None = None
     ci_wait_due: bool | None = None
-    operator_records_due: bool | None = False
+    # Due unacknowledged messages in a queue that wakes this role.
+    messages_due: bool | None = False
     outcome: str | None = None
-    inbox_changed: bool | None = None
     routed_events_due: bool | None = None
     ci_due: bool | None = None
     wait_expired: bool | None = None
@@ -70,10 +70,9 @@ class DispatchFacts:
     # Subscribed code-change event for --event probes: true only for
     # unscheduled on_change roles with an unobserved code digest. Scheduled
     # on_change roles keep timer-based discovery; their --event probes still
-    # exit with no-event when no subscribed decision/work/wait/CI is due.
+    # exit with no-event when no queue message, work-item event, wait or CI is due.
     has_code_event: bool = False
-    has_record: bool = False
-    has_decision: bool = False
+    has_message: bool = False
     has_work_item: bool = False
     ready_work_changed: bool = False
     has_wait: bool = False
@@ -96,15 +95,13 @@ class DispatchDecision:
 
 
 def _has_event(facts: DispatchFacts) -> bool:
-    return bool(facts.has_record or facts.has_decision or facts.has_work_item or facts.has_wait or facts.has_ci
+    return bool(facts.has_message or facts.has_work_item or facts.has_wait or facts.has_ci
                 or facts.ready_work_changed or (facts.event_trigger and facts.operator_woke))
 
 
 def _event_label(facts: DispatchFacts) -> str:
-    if facts.has_record:
-        return "operator_record"
-    if facts.has_decision:
-        return "decision"
+    if facts.has_message:
+        return "queue"
     if facts.has_work_item:
         return "work_item"
     if facts.has_wait:
@@ -138,19 +135,15 @@ def evaluate_daemon(facts: DaemonFacts) -> DaemonDecision:
         return DaemonDecision(ready=None, reason="collecting", needed="ci_wait_due")
     if facts.ci_wait_due:
         return DaemonDecision(ready=True, reason="ci_wait")
-    if facts.operator_records_due is None:
-        return DaemonDecision(ready=None, reason="collecting", needed="operator_records_due")
-    if facts.operator_records_due:
-        return DaemonDecision(ready=True, reason="operator_record")
+    if facts.messages_due is None:
+        return DaemonDecision(ready=None, reason="collecting", needed="messages_due")
+    if facts.messages_due:
+        return DaemonDecision(ready=True, reason="queue")
     if facts.outcome is None:
         return DaemonDecision(ready=None, reason="collecting", needed="outcome")
     if facts.outcome == "done":
-        # Without changed ready work, a completed objective ignores inbox/events/CI/wait/progress.
+        # Without changed ready work, a completed objective ignores events/CI/wait/progress.
         return DaemonDecision(ready=False, reason="done")
-    if facts.inbox_changed is None:
-        return DaemonDecision(ready=None, reason="collecting", needed="inbox_changed")
-    if facts.inbox_changed:
-        return DaemonDecision(ready=True, reason="inbox")
     if facts.routed_events_due is None:
         return DaemonDecision(ready=None, reason="collecting", needed="routed_events_due")
     if facts.routed_events_due:
@@ -198,52 +191,10 @@ def evaluate_dispatch(facts: DispatchFacts) -> DispatchDecision:
     return DispatchDecision(admitted=True, skipped=None, admission="schedule")
 
 
-#: Hold reasons for producer admission. ``load_unavailable`` fails closed
-#: when the required load cannot be read; the producer thresholds never
-#: cancel a running unit, they only hold the next admission.
-PRODUCER_HOLD_REASONS = ("per_source_full", "open_work_full", "load_unavailable")
-
-
-@dataclasses.dataclass(frozen=True)
-class ProducerFacts:
-    """Normalized facts for producer limits and role-specific open-work policy."""
-
-    is_producer: bool = False
-    per_source_limit: int = 0
-    open_work_limit: int = 0
-    source_pending: int = 0
-    open_count: int = 0
-    load_ok: bool = True
-    held_at_capacity: bool = False
-
-
-@dataclasses.dataclass(frozen=True)
-class ProducerDecision:
-    held: bool
-    reasons: tuple = ()
-
-
-def evaluate_producer(facts: ProducerFacts) -> ProducerDecision:
-    """Hold producers at per-source limits, or at open-work capacity when opted in."""
-    if not facts.is_producer:
-        return ProducerDecision(held=False, reasons=())
-    if not facts.load_ok:
-        return ProducerDecision(held=True, reasons=("load_unavailable",))
-    reasons = []
-    if facts.per_source_limit and facts.source_pending >= facts.per_source_limit:
-        reasons.append("per_source_full")
-    if (facts.held_at_capacity and facts.open_work_limit
-            and facts.open_count >= facts.open_work_limit):
-        reasons.append("open_work_full")
-    return ProducerDecision(held=bool(reasons), reasons=tuple(reasons))
-
-
-def evaluate(facts: DaemonFacts | DispatchFacts | ProducerFacts) -> DaemonDecision | DispatchDecision | ProducerDecision:
+def evaluate(facts: DaemonFacts | DispatchFacts) -> DaemonDecision | DispatchDecision:
     """Evaluate one normalized fact set for its own call context."""
     if isinstance(facts, DaemonFacts):
         return evaluate_daemon(facts)
     if isinstance(facts, DispatchFacts):
         return evaluate_dispatch(facts)
-    if isinstance(facts, ProducerFacts):
-        return evaluate_producer(facts)
     raise TypeError("evaluate requires DaemonFacts or DispatchFacts")

@@ -579,36 +579,11 @@ def _preflight(metadata, root, names):
             if ATOMIC_TEMPORARY.fullmatch(path.name):
                 # A writer's unpublished atomic file is not a store record.
                 continue
-            if name != "work-items" and (path.suffix != ".json" or not re.fullmatch(r"[A-Za-z0-9_.-]+", path.stem)):
-                raise Denied("Unknown smoke reference store entry")
-            if name == "work-items":
-                directory(path)
-                for child in entries(path, 260):
-                    if ATOMIC_TEMPORARY.fullmatch(child.name):
-                        continue
-                    metadata.read(child)
-            else:
-                record = metadata.read(path)
-                if name == "decisions":
-                    from .work_items import WorkItems
-                    WorkItems._validate_current_decision_shape(record, path.stem)
-                if name == "waits":
-                    from .work_item_waits import stored_wait
-                    fields = {"owner", "rev", "decision", "registered_at", "run"}
-                    if (not fields.issubset(record) or record["owner"] != path.stem
-                            or type(record["rev"]) is not int or record["rev"] < 1
-                            or not isinstance(record["decision"], dict)
-                            or record["decision"].get("id") != record["owner"]
-                            or record["decision"].get("rev") != record["rev"]
-                            or record["decision"].get("action") != "defer"):
-                        raise Denied("Malformed smoke wait owner")
-                    timestamp(record["registered_at"])
-                    if "registration_id" in record:
-                        from .insights import _wait_registration_id
-                        if _wait_registration_id(record) is None:
-                            raise Denied("Malformed wait registration identity")
-                        fields.add("registration_id")
-                    stored_wait({key: value for key, value in record.items() if key not in fields})
+            directory(path)
+            for child in entries(path, 260):
+                if ATOMIC_TEMPORARY.fullmatch(child.name):
+                    continue
+                metadata.read(child)
             if metadata.entries + metadata.count > metadata.budgets.entries:
                 raise LimitExceeded("Smoke reference store entry bound exceeded")
 
@@ -626,8 +601,7 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None,
     Omission starts a fresh count. Share the accumulator across per-root calls
     with the same budgets; charges remain consumed if a scan fails.
     """
-    from .insights import (Insights, _effective_decision, _rev_of, MAX_EVIDENCE_ENTRIES,
-                           MAX_EVIDENCE_CHARS, INSIGHT_METADATA_DEFAULTS, insight_metadata)
+    from .ledger import Ledger
     from .work_items import WorkItems
     explicit_roots = roots is not None
     roots = (entries(metadata.data / "projects", metadata.budgets.projects, optional=True)
@@ -663,87 +637,15 @@ def collect_refs(metadata: Metadata, pairs: dict, *, roots=None,
         if not explicit_roots:
             identifier(root.name)
         directory(root)
-        _preflight(metadata, root, ("inbox", "insight-ids", "decisions", "waits", "decision-history", "work-items"))
-        for path in _store_entries(root / "insight-ids", metadata):
-            identity = metadata.read(path)
-            if (set(identity) != {"id", "sha256", "created_at"} or identity["id"] != path.stem
-                    or not isinstance(identity["sha256"], str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", identity["sha256"])):
-                raise Denied("Malformed Insight identity")
-            identifier(identity["id"])
-            timestamp(identity["created_at"])
-            if not (root / "inbox" / path.name).exists():
-                decision = metadata.read(root / "decisions" / path.name)
-                if decision.get("action") not in ("accept", "modify", "reject", "withdraw"):
-                    raise Denied("Current Insight identity has no retained owner")
-        insights = Insights(root)
+        _preflight(metadata, root, ("work-items",))
         snapshots = ReferenceSnapshots(root, excludes=(), max_file=2**63-1,
                                        max_bytes=2**63-1, max_files=metadata.budgets.entries,
                                        create_dirs=False)
-        store = ReferenceItems(root, snapshots, insights)
-        for path in _store_entries(root / "inbox", metadata):
-            record = metadata.read(path)
-            if (set(record) - {"id", "source", "title", "body", "base_snapshot", "run", "origin", "created_at", "updated_at", "rev", "evidence", *INSIGHT_METADATA_DEFAULTS}
-                    or path.suffix != ".json" or record.get("id") != path.stem
-                    or type(record.get("rev", 1)) is not int or record.get("rev", 1) < 1
-                    or not isinstance(record.get("evidence", []), list)
-                    or len(record.get("evidence", [])) > MAX_EVIDENCE_ENTRIES
-                    or not all(isinstance(record.get(k), str) for k in ("title", "body", "source"))):
-                raise Denied("Malformed current Insight reference record")
-            identifier(record["id"])
-            insight_metadata(record)
-            rev = _rev_of(record)
-            decision_path = root / "decisions" / path.name
-            decision = metadata.read(decision_path) if decision_path.exists() else None
-            if decision is not None:
-                WorkItems._validate_current_decision_shape(decision, record["id"])
-                if (decision.get("id") != record["id"] or decision.get("action") not in
-                        ("accept", "modify", "reject", "withdraw", "defer")
-                        or type(decision.get("rev", 1)) is not int):
-                    raise Denied("Malformed current Insight decision")
-            effective = _effective_decision(rev, decision)
-            active = effective is None or effective["action"] == "defer"
-            for entry in record.get("evidence", []):
-                if (not isinstance(entry, dict) or set(entry) - {"smoke_refs", "rev"} != {"author", "run", "created_at", "text"}
-                        or ("rev" in entry and "smoke_refs" not in entry)
-                        or (entry.get("run") is not None and not isinstance(entry["run"], str))
-                        or not isinstance(entry.get("text"), str) or not entry["text"].strip()
-                        or len(entry["text"]) > MAX_EVIDENCE_CHARS):
-                    raise Denied("Malformed Insight evidence")
-                identifier(entry["author"])
-                timestamp(entry["created_at"])
-                refs = validate_refs(entry.get("smoke_refs", []))
-                if "smoke_refs" in entry and (type(entry.get("rev")) is not int or entry["rev"] != rev):
-                    raise Denied("Smoke Insight evidence revision mismatch")
-                if active:
-                    add(refs)
-            wait_path = root / "waits" / path.name
-            if wait_path.exists():
-                wait = metadata.read(wait_path)
-                refs = validate_refs(wait.get("smoke_refs", []))
-                if refs and (wait.get("owner") != record["id"]
-                             or type(wait.get("rev")) is not int or wait["rev"] < 1):
-                    raise Denied("Smoke wait owner/revision mismatch")
-                if active and effective is not None and effective["action"] == "defer" and wait.get("rev") == rev:
-                    add(refs)
-        for path in _store_entries(root / "waits", metadata):
-            wait = metadata.read(path)
-            if wait.get("smoke_refs") and not (root / "inbox" / path.name).exists():
-                # Terminal archived waits may remain, but must have a current
-                # terminal decision proving they no longer own a payload pin.
-                decision = metadata.read(root / "decisions" / path.name)
-                if decision.get("action") not in ("accept", "modify", "reject", "withdraw"):
-                    raise Denied("Smoke wait has no current owner")
-        seen = set()
-        for event_id, event in store._iter_item_events(recover=False):
-            kind, seed = store._seed_for_event(event_id, event, readonly=True)
-            if kind != "seed" or seed["id"] in seen:
-                continue
-            seen.add(seed["id"])
+        store = ReferenceItems(root, snapshots, Ledger(root))
+        for item_id, _, revisions in store._iter_items(recover=False):
             item = None
             retirement = {}
-            for item in store._iter_chain(seed["id"], seed_event=event,
-                                          history_revisions=store._history_revisions(seed["id"], recover=False),
+            for item in store._iter_chain(item_id, history_revisions=revisions,
                                           retirement=retirement):
                 pass
             if item is None:
@@ -1156,7 +1058,7 @@ def maintain_automatic_smoke_retention(project) -> dict:
 def validate_restored_refs(data: Path, root: Path, *, budgets: Budgets | None = None):
     """Caller holds the global lock through publication of the restored root."""
     metadata = Metadata(data, budgets=budgets)
-    _preflight(metadata, root, ("inbox", "insight-ids", "decisions", "waits", "decision-history", "work-items"))
+    _preflight(metadata, root, ("work-items",))
     # Importing no smoke references must not change legacy restore semantics
     # (notably identity-only tombstones whose bodies predate archival). Such
     # incomplete state still refuses any later global expiry scan.

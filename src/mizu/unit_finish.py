@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from . import (check_jobs, ci_waits, decision_delivery, operator_records, proposal_waits,
-               queue_decision_delivery, queue_record_delivery, reviews, work_item_events)
-from . import wait_events as structured_wait_events
+from . import check_jobs, ci_waits, reviews, work_item_events
 from .config import role_progress_signals
 from .errors import Busy, Denied, LimitExceeded
 from .fs import DIGEST, canonical, digest, now, write_json
@@ -14,17 +12,9 @@ from .snapshot import (PROGRESS_SIGNALS, WRITER_HANDOFF_PROGRESS_SIGNALS,
 from .work_items import MAX_OPEN_PAGE_ROWS
 
 
-def _progress_obligations_digest(obligations) -> str:
-    """Digest only stable identity fields for the bounded pending-obligation view."""
-    rows = []
-    for item in obligations or ():
-        if not isinstance(item, dict):
-            continue
-        rows.append({key: item.get(key) for key in ("insight", "rev", "registered_at", "requires")})
-    rows.sort(key=lambda item: (str(item.get("registered_at") or ""),
-                                str(item.get("insight") or ""),
-                                int(item.get("rev") or 0)))
-    return digest(canonical(rows))
+#: Progress records keep their ``obligations_digest`` field: the digest of an
+#: empty identity list, constant since records stopped carrying obligations.
+_NO_OBLIGATIONS_DIGEST = digest(canonical([]))
 
 
 #: Sentinel for _progress_record callers that carry no ready-work observation.
@@ -33,7 +23,7 @@ def _progress_obligations_digest(obligations) -> str:
 _READY_WORK_UNSET: object = object()
 
 
-def _progress_input_unchanged(previous: dict, signals: dict, obligations_digest: str,
+def _progress_input_unchanged(previous: dict, signals: dict,
                               ready_work, ready_work_signature, wait_resolution_tokens,
                               wait_resolution_high_water) -> bool:
     """Whether a finish observes the same bounded input facts as ``previous``.
@@ -43,9 +33,9 @@ def _progress_input_unchanged(previous: dict, signals: dict, obligations_digest:
     streak. Fields omitted by legacy callers cannot prove a change and are
     ignored.
     """
-    if previous.get("obligations_digest") != obligations_digest:
+    if previous.get("obligations_digest") != _NO_OBLIGATIONS_DIGEST:
         return False
-    if any(previous["signals"][name] != bool(signals.get(name, False))
+    if any(previous["signals"].get(name) != bool(signals.get(name, False))
            for name in PROGRESS_SIGNALS):
         return False
     if ("ready_work" in previous and ready_work is not _READY_WORK_UNSET
@@ -65,7 +55,7 @@ def _progress_input_unchanged(previous: dict, signals: dict, obligations_digest:
 
 
 def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
-                    signals: dict[str, bool], outcome: str, *, obligations_digest: str | None = None,
+                    signals: dict[str, bool], outcome: str, *,
                     ready_work: bool | None | object = _READY_WORK_UNSET,
                     ready_work_signature: str | None | object = _READY_WORK_UNSET,
                     wait_resolution_tokens: list[str] | object = _READY_WORK_UNSET,
@@ -89,7 +79,7 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     receipt admits an old proof on an unrelated ready-set change. Historical
     schemas 6–7 remain readable but new records never carry wait conversions.
     """
-    obligations_digest = obligations_digest or _progress_obligations_digest(())
+    obligations_digest = _NO_OBLIGATIONS_DIGEST
     has_progress = any(signals[name] for name in selected)
     previous = snapshot.get("progress")
     previous_count = 0
@@ -98,7 +88,7 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
             validate_progress(previous)
             if (previous["role"] == role_name and set(previous["selected"]) == set(selected)
                     and _progress_input_unchanged(
-                        previous, signals, obligations_digest, ready_work, ready_work_signature,
+                        previous, signals, ready_work, ready_work_signature,
                         wait_resolution_tokens, wait_resolution_high_water)):
                 previous_count = previous["no_progress_count"]
         except Denied:
@@ -190,9 +180,9 @@ class ContextFinishMixin:
             {"tool": self.progress_tool,
              "code": captured["code_digest"] != self.snapshot["code_digest"],
              "state": finished["state"] != self.snapshot["state"],
-             "decision": self.progress_decision, "insight": self.progress_insight,
+             "message": self.progress_message,
              "input": self.progress_input}, finished["outcome"],
-            obligations_digest=getattr(self, "progress_obligations_digest", None), ready_work=ready_work,
+            ready_work=ready_work,
             ready_work_signature=getattr(self, "ready_work_signature", None),
             wait_resolution_tokens=getattr(self, "wait_resolution_tokens", _READY_WORK_UNSET),
             wait_resolution_high_water=getattr(self, "wait_resolution_high_water", _READY_WORK_UNSET))
@@ -263,57 +253,21 @@ class ContextFinishMixin:
             validate_next_step(args.get("next_step"))
         review = reviews.finish(self, args["review_verdict"]) if "review_verdict" in args else None
         tokens = args.get("ack_events", [])
-        decisions = {event["ack_token"]: event for event in self.decision_events}
         terminal = {event["ack_token"]: event for event in self.work_item_events}
-        waits = {event["ack_token"]: event for event in self.wait_events
-                 if event.get("kind") in structured_wait_events.WAIT_KINDS
-                 and "registration_id" in event and "ack_token" in event}
-        obligations = {event["ack_token"]: event for event in self.obligations
-                       if "registration_id" in event and "ack_token" in event}
-        records = {entry.ack_token for entry in self.operator_record_manifest}
         ci_tokens = {entry.ack_token for entry in self.ci_wait_manifest}
-        proposal_tokens = {entry.ack_token for entry in self.proposal_wait_manifest}
-        delivered = proposal_tokens | records | decisions.keys() | terminal.keys() | waits.keys() | obligations.keys() | ci_tokens
+        delivered = terminal.keys() | ci_tokens
         if (not isinstance(tokens, list) or len(tokens) > 512
                 or any(not isinstance(token, str) or len(token) > 64 for token in tokens)
                 or len(set(tokens)) != len(tokens)
                 or any(token not in delivered for token in tokens)):
             raise Denied("ack_events must select unique event tokens delivered to this role in this unit")
-        # Recheck the immutable decision binding, not mutable topic state: the
-        # role may have revised/withdrawn a topic as part of handling it.
-        decision_tokens = [token for token in tokens if token in decisions]
-        authority = decision_delivery.authority_kind(self.project.insights.root)
-        if self.shared_decisions:
-            decision_delivery.validate(self, decision_tokens)
-        elif authority == "queues" and decision_tokens:
-            queue_decision_delivery.validate(
-                self.project, self.role.name, [decisions[token] for token in decision_tokens])
         selected_ci = [token for token in tokens if token in ci_tokens]
         if selected_ci:
             ci_waits.validate_selection(self, selected_ci)
-        proposal_waits.validate_selection(self, [token for token in tokens if token in proposal_tokens])
-        record_tokens = [token for token in tokens if token in records]
-        if queue_record_delivery.authority_kind(self.project.insights.root) == "queues":
-            queue_record_delivery.validate(self, record_tokens)
-        else:
-            operator_records.validate(self, record_tokens)
         for token in tokens:
-            if token in records or token in ci_tokens or token in proposal_tokens:
-                continue
-            if token in decisions:
-                if self.shared_decisions or authority == "queues":
-                    continue  # Validated as one bounded batch above.
-                if self.project.insights._decision_token(self.role.name, decisions[token]) != token:
-                    raise Denied("Decision acknowledgement binding changed")
-            elif token in terminal:
+            if token in terminal:
                 work_item_events.acknowledgement_payload(
                     self.project.work_items, self.role.name, terminal[token])
-            elif token in waits:
-                structured_wait_events.validate(self.role.name, structured_wait_events.WAIT, waits[token])
-            else:
-                structured_wait_events.validate(
-                    self.role.name, structured_wait_events.OBLIGATION, obligations[token])
-                structured_wait_events.received(self.project.insights.root, self.role.name, obligations[token])
         if args.get('wait_for_check'):
             if 'check_job' not in self.role.capabilities or args['outcome'] != 'wait':
                 raise Denied('Check wait requires check_job and outcome=wait')

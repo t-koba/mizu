@@ -91,10 +91,9 @@ def vcs_poll_status_timeout(config) -> int:
 
 
 def vcs_poll_proposals_enabled(config) -> bool:
-    """True only when global VCS polling and proposal polling are opted in."""
+    """True only when VCS polling is on and an observation queue is configured."""
     try:
-        return (vcs_poll_enabled(config)
-                and config.vcs.get("poll_proposals_enabled") is True)
+        return vcs_poll_enabled(config) and bool(config.vcs.get("observation_queue"))
     except (AttributeError, TypeError):
         return False
 

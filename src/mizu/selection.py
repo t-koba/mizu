@@ -45,11 +45,10 @@ def retention_policy(data):
 
 #: Default bounds for classifier work inputs (operator policy may override
 #: per classifier through its `inputs` table; 0 disables that input).
-DEFAULT_CLASSIFIER_INPUTS = {'max_proposals': 8, 'max_decisions': 8, 'max_text_bytes': 2048}
+DEFAULT_CLASSIFIER_INPUTS = {'max_messages': 8, 'max_text_bytes': 2048}
 #: Upper bound on the assembled work-input document itself.
 MAX_WORK_BYTES = 131072
 #: Decision actions that count as review evidence (withdrawals never inform routing).
-EVIDENCE_ACTIONS = ('accept', 'modify', 'defer', 'reject')
 
 
 def table(value, allowed, where):
@@ -280,7 +279,7 @@ def validate_selectors(value, profiles, base, max_interval_seconds=Limits().sele
             if not isinstance(raw_inputs, dict) or set(raw_inputs) - set(DEFAULT_CLASSIFIER_INPUTS):
                 raise ConfigError('Classifier inputs must name known bounds')
             merged = {**DEFAULT_CLASSIFIER_INPUTS, **raw_inputs}
-            for key in ('max_proposals', 'max_decisions'):
+            for key in ('max_messages',):
                 if type(merged[key]) is not int or not 0 <= merged[key] <= MAX_ITEMS:
                     raise ConfigError('Classifier item bounds must be integers in 0..64')
             if type(merged['max_text_bytes']) is not int or not 256 <= merged['max_text_bytes'] <= 65536:
@@ -883,59 +882,29 @@ def _clip(text, maximum):
 def work_inputs(project, role, snapshot, bounds):
     """Bounded current-work inputs for inference, not for rule predicates.
 
-    Returns ``{'proposals': [...], 'evidence': {...}}``: pending (actionable)
-    proposals with their current revisions, plus the latest snapshot
-    verification and unacknowledged decisions routed to this role. Counts and
-    text lengths follow the operator's classifier ``inputs`` bounds; unreadable
-    proposals and legacy decision stores read as absent. Shared decision errors
-    refuse selection, never fall back or silently erase evidence. Retained-proof integrity errors
-    refuse selection, rather than silently hiding evidence. History beyond these
-    windows is never replayed.
+    Returns ``{'messages': [...], 'evidence': {...}}``: the newest due
+    unacknowledged messages of the queues the role reads (queue, id, author,
+    time and a clipped body), plus the latest snapshot verification. Counts and
+    text lengths follow the operator's classifier ``inputs`` bounds; an
+    unreadable queue reads as absent. Retained-proof integrity errors refuse
+    selection, rather than silently hiding evidence.
     """
+    from .queue_facts import principal, readable
     cap = bounds['max_text_bytes']
-
-    def _at(value):
-        return value if isinstance(value, str) else ''
-
-    try:
-        pending = project.insights.list(pending=True, limit=bounds['max_proposals'])
-    except Exception:
-        pending = []
-    proposals = [{'id': item.get('id'), 'rev': item.get('rev'), 'source': item.get('source'),
-                  'title': _clip(item.get('title'), cap), 'at': _at(item.get('created_at'))}
-                 for item in pending if isinstance(item, dict)][:bounds['max_proposals']]
-    from . import decision_delivery
-    kind = decision_delivery.authority_kind(project.insights.root)
-    actions = tuple(a for a in role.decision_events if a in EVIDENCE_ACTIONS)
-    events = []
-    if kind == "shared":
-        if bounds['max_decisions']:
-            state = decision_delivery.pending(
-                project, role, actions=actions,
-                limit=bounds['max_decisions'], include_insights=False)
-            # A page reference is delivery, not evidence loss. Resolve only its
-            # frozen full-envelope identity; classifier text bounds still apply.
-            from .shared_records import SharedRecords
-            from .insights import INSIGHT_DECISION_POLICY
-            store = SharedRecords(project.insights.root, {"insight.decision": INSIGHT_DECISION_POLICY})
-            events = [store.get(entry.record_id, expected_digest=entry.record_digest)[0]["payload"]
-                      for entry in state["manifest"]]
-    elif bounds['max_decisions']:
-        try:
-            if kind == "queues":
-                from . import queue_decision_delivery
-                events = queue_decision_delivery.pending(
-                    project, role, actions=actions, limit=bounds['max_decisions'],
-                    include_insights=False)["events"]
-            else:
-                events = project.insights.decision_events(role.name, EVIDENCE_ACTIONS,
-                                                          limit=bounds['max_decisions'])
-        except Exception:
-            events = []
-    decisions = [{'insight': event.get('insight'), 'rev': event.get('rev'),
-                  'action': event.get('action'), 'reason': _clip(event.get('reason'), cap),
-                  'at': _at(event.get('decided_at'))}
-                 for event in events if isinstance(event, dict)][:bounds['max_decisions']]
+    messages = []
+    if bounds['max_messages']:
+        for queue in readable(project.config, role.name):
+            try:
+                facts = project.kernel_queues.pending(queue, principal(role.name),
+                                                      newest=bounds['max_messages'])
+            except Exception:
+                continue
+            for message in facts['messages']:
+                messages.append({'queue': queue, 'id': message['id'], 'author': message['author'],
+                                 'at': message['at'],
+                                 'body': _clip(canonical(message['body']).decode('utf-8'), cap)})
+    messages.sort(key=lambda row: row['at'])
+    messages = messages[-bounds['max_messages']:] if bounds['max_messages'] else []
     verification = snapshot.get('verification')
     retained = project.effective_verification(snapshot)
     # Only the verification verdict is material: snapshot ids and outcomes
@@ -943,22 +912,13 @@ def work_inputs(project, role, snapshot, bounds):
     snapshot_evidence = {'verified': isinstance(verification, dict)
                          and verification.get('passed') is True,
                          'retained_verification': retained}
-    # Both lists arrive oldest-first. Any validated bound combination must fit
-    # the work-input budget, so over-budget documents shed oldest items first
-    # (ties shed decisions before proposals, the actionable work) instead of
-    # failing at runtime. The guard measures the exact returned shape, wrapper
-    # included. Retention is deterministic in the recorded inputs.
-    work = {'proposals': proposals, 'evidence': {'snapshot': snapshot_evidence,
-                                                 'decisions': decisions}}
-    while (proposals or decisions) and len(canonical(work)) > MAX_WORK_BYTES:
-        if proposals and (not decisions or proposals[0]['at'] < decisions[0]['at']):
-            proposals.pop(0)
-        elif decisions:
-            decisions.pop(0)
-        else:
-            proposals.pop(0)
-        work = {'proposals': proposals, 'evidence': {'snapshot': snapshot_evidence,
-                                                     'decisions': decisions}}
+    # Messages arrive oldest-first. Any validated bound combination must fit
+    # the work-input budget, so an over-budget document sheds oldest messages
+    # first instead of failing at runtime.
+    work = {'messages': messages, 'evidence': {'snapshot': snapshot_evidence}}
+    while messages and len(canonical(work)) > MAX_WORK_BYTES:
+        messages.pop(0)
+        work = {'messages': messages, 'evidence': {'snapshot': snapshot_evidence}}
     return bounded(work, MAX_WORK_BYTES)
 
 

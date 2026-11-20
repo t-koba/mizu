@@ -21,7 +21,7 @@ def observe(store, item, *, receipt_cache=None):
     it uncached under the publication lock.
     """
     wait = store._stored_wait(item['wait'])
-    if wait['kind'] in ('object_resolved', 'insight_decided', 'record_closed'):
+    if wait['kind'] == 'object_resolved':
         from .object_waits import observe as observe_object
         return observe_object(store, wait, item)
     if wait['kind'] == 'code_change':
@@ -85,9 +85,12 @@ def validate(store, previous, record):
         valid_stamp = False
     if not valid_stamp:
         raise Denied('Invalid wait resolution time')
+    from .work_item_waits import evaluated
+    if not evaluated(wait):
+        return  # A resolution of a wait the product no longer evaluates stays as written.
     wait = store._stored_wait(wait)
     evidence = value['evidence']
-    if wait['kind'] in ('object_resolved', 'insight_decided', 'record_closed'):
+    if wait['kind'] == 'object_resolved':
         from .object_waits import validate as validate_object
         if value['kind'] != 'due':
             raise Denied('Invalid object resolution outcome')
@@ -152,7 +155,7 @@ def reconcile(project, role_name, *, limit, on_resolution=None):
         nonlocal resolved
         if (resolved == limit or item['status'] != 'blocked'
                 or item['holder'] != role_name or item['rev'] == MAX_REVISIONS
-                or (item.get('wait') or {}).get('kind') not in ('code_change', 'publication_ci', 'object_resolved', 'insight_decided', 'record_closed')):
+                or (item.get('wait') or {}).get('kind') not in ('code_change', 'publication_ci', 'object_resolved')):
             return item
         try:
             proof = observe(store, item, receipt_cache=receipt_cache)

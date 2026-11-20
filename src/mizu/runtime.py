@@ -18,15 +18,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .delegation_jobs import DelegationJobs, _WorkspaceLease
-from . import (decision_delivery, delegation_gates, lineage, operator_records,
-               delivery_settlement, queue_decision_delivery)
+from . import delegation_gates, lineage, delivery_settlement, editor
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
 from .admission import admission, has_live_demand, role_exclusion
 from . import check_jobs, tool_results
-from . import wait_events as structured_wait_events
-from . import proposal_waits, ci_waits, dispatch_evidence, safe_point, work_item_events
+from . import ci_waits, dispatch_evidence, safe_point, work_item_events
 from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
                              MAX_CI_FAILURE_BRANCHES, MAX_CI_WAKE_BRANCHES,
                              MAX_CI_WAKE_ROWS, POLL_STATE_FILE,
@@ -47,14 +45,10 @@ from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
                      role_run_seconds, role_tools_per_run,
                      role_wrap_up_requests,
                      role_wrap_up_tools)
-from .decision_idle import (_DECISION_IDLE_CACHE, _DECISION_IDLE_CACHE_LIMIT,
-                            _empty_decision_state, _decision_delivery_state,
-                            _decision_policy_signature, _decision_source_fingerprint)
 from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
 from .context_driver import ContextDriverMixin
 from .context_kernel_tools import ContextKernelToolsMixin
-from .context_insight_tools import ContextInsightToolsMixin
 from .context_evidence import ContextEvidenceMixin
 from .context_web_tools import ContextWebToolsMixin
 from .context_check_tools import ContextCheckToolsMixin
@@ -89,15 +83,11 @@ from .protocol import DEFINITIONS, operation_allowed, tool_definitions, validate
 from .report import publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
-from .producer_admission import (PRODUCER_HELD_SKIPPED,
-                                  _producer_limit, _producer_raw_limit,
-                                  producer_hold)
 from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
 from . import reviews
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
-from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 # Ready-work observation keeps its established runtime import seam.
 from .work_readiness import (_has_ready_work, _ready_work_changed,
                              _ready_work_observation, _writer_wait_liveness,
@@ -115,10 +105,10 @@ from .vcs_poll_state import _refresh_ci_cache, refresh_poll_state
 from .vcs_upstream_poll import poll_upstream, refresh_upstream
 # Keep the existing runtime imports available to callers.
 from .context_lifecycle import (ContextLifecycleMixin, WRAP_UP_OPS)
-from .unit_finish import (ContextFinishMixin, _progress_obligations_digest, _READY_WORK_UNSET,
+from .unit_finish import (ContextFinishMixin, _READY_WORK_UNSET,
                           _progress_record, _writer_next_task)
 from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
-                            _decision_task, _open_backlog, _prompt_capture_limit,
+                            _prompt_capture_limit,
                             _prompt_clock, _prompt_research_state, _prompt_run_identity,
                             _prompt_tool_surface, _ready_work_age,
                             _ready_work_projection,  # preserved unit_prompts re-export seam
@@ -131,8 +121,6 @@ from .wake_evidence import (OBSERVED_CURSOR_MAX_BYTES,
 from .role_admission import (_on_change_observed, _progress_self_admits,
                              _receipt_wait_due, _reconcile_work_item_waits,
                              _role_events_due, should_run)
-# Shared-record authority selection keeps its established runtime seam.
-from .record_authority import _record_delivery
 
 
 @contextlib.contextmanager
@@ -227,7 +215,7 @@ WRAP_UP_REQUESTS = 3
 WRAP_UP_TOOLS = 5
 #: Reads of existing state are useful observation, not harness-observable progress.
 OBSERVATIONAL_OPS = frozenset({
-    "files", "read", "diff", "insights", "decision_read", "record_read", "research_read", "vcs_read",
+    "files", "read", "diff", "research_read", "vcs_read",
     "command_evidence_read", "experiment_evidence_read", "work_items_read",
     "objects_read", "objects_list", "events_read",
     "queue_read", "message_read", "message_refs",
@@ -315,7 +303,7 @@ def _spend_counter(name):
 
 
 class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
-                ContextKernelToolsMixin, ContextInsightToolsMixin,
+                ContextKernelToolsMixin,
                 ContextEvidenceMixin, ContextWebToolsMixin,
                 ContextCheckToolsMixin, ContextReadToolsMixin,
                 ContextRoleToolsMixin, ContextJoinToolsMixin,
@@ -343,8 +331,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         # Normalized cause selected by dispatch; exposed to the unit prompt only.
         self.admission: str | None = None
         self.external_check_wake_facts = []
-        # Capture the inputs actually offered to this run, not arrivals at publication.
-        self.inbox_seen = project.insights.generation()
         self.wake_generation = _normalized_wake_generation(
             project.control().get("wake_generation", ""))
         self.stop = stop or threading.Event()
@@ -404,8 +390,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         # later conditional result from replacing its retained receipt.
         self.conditional_close_attempted = False
         self.progress_tool = False
-        self.progress_decision = False
-        self.progress_insight = False
+        self.progress_message = False
         self.progress_input = False
         # Delegation spend sharing: the role whose per-run caps bind spend.
         # Delegation children count against the caller's unit, so theirs
@@ -443,20 +428,13 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         # recovery of this candidate keep the same ordinal; only a proven
         # terminal pi-durable unanswered settlement can advance it.
         self.attempt_ordinal = 0
-        self.operator_record_manifest = ()
-        self.operator_record_page = {"events": [], "pending_count": 0, "truncated": False, "wake_pending": False}
         self.ci_wait_manifest = ()
-        self.proposal_wait_manifest = ()
-        self.shared_decisions = False
-        self.decision_manifest = ()
-        self.decision_page = None
-        self.decision_events: list = []
-        self.decision_receipt_diagnostics: list = []
+        #: Queue facts stated in this unit's opening (queue_facts.opening).
+        self.queues: list = []
         self.work_item_events: list = []
         self._work_order_generation = False
         self._work_order_inputs = None
         self.wait_events: list = []
-        self.obligations: list = []
         self.closed = False
         # Host-only lease: set by Engine.run while its admission stack owns
         # an execution slot. Ephemeral children never lend that slot onward.
@@ -703,10 +681,8 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 if (operation != "finish" and not _is_observational_operation(operation, arguments, result)
                         and not idempotent_replay):
                     self.progress_tool = True
-                if operation == "decide":
-                    self.progress_decision = True
-                if operation in {"submit_insight", "revise_insight", "withdraw_insight", "attach_evidence"}:
-                    self.progress_insight = True
+                if operation == "queue_write":
+                    self.progress_message = True
                 self.tool_admission_exception = None
                 return tool_results.bounded(self, operation, arguments, result)
             finally:
@@ -737,27 +713,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         return workspace_reads.op_read(
             self, args, max_identities=MAX_READ_IDENTITIES)
 
-    def _op_record_write(self, args: dict) -> dict:
-        from .host_records import write_role
-        delivery = _record_delivery(self)
-        return (delivery.write_role(self, args) if delivery is not operator_records
-                else write_role(self, args))
-
-    def _op_record_read(self, args: dict) -> dict:
-        # Ack-token manifest reads stay byte-for-byte on the operator path;
-        # kind+id reads are author-only role retrieval with no new authority.
-        if 'ack_token' in args:
-            if 'kind' in args or 'id' in args:
-                from .errors import Denied
-                raise Denied('Record read takes either ack_token or kind+id, not both')
-            return _record_delivery(self).read(self, args)
-        if {'kind', 'id'} <= set(args):
-            from .host_records import read_role
-            delivery = _record_delivery(self)
-            return (delivery.read_role(self, args) if delivery is not operator_records
-                    else read_role(self, args))
-        from .errors import Denied
-        raise Denied('Record read requires either ack_token or kind+id')
 
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter
@@ -924,14 +879,14 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             publication = Publication(self.project.root, source, code_digest,
                                       args["branch"], args["op"], projection=projection)
             with lock(publication.lock):
-                intent, receipt = publication.prepare(approval["insight"], self.run_dir.name)
+                intent, receipt = publication.prepare(approval["approval"], self.run_dir.name)
                 before_local, observe = self._mutation_evidence(
                     "vcs-publish", args["op"],
                     {"branch": args["branch"], "code_digest": code_digest,
                      "projection_schema": projection["schema"],
                      "projection_algorithm": projection["algorithm"],
                      "projection_digest": projection["digest"],
-                     "approval": approval["insight"], "source_commit": source,
+                     "approval": approval["approval"], "source_commit": source,
                      "publication_id": publication.id})
 
                 def before_invoke():
@@ -1263,7 +1218,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                            "sha": args.get("sha"), "base": args.get("base")})
         parameters = {key: value for key, value in args.items() if key != "op"}
         if approval is not None:
-            parameters.update(code_digest=code_digest, approval=approval["insight"])
+            parameters.update(code_digest=code_digest, approval=approval["approval"])
         before_invoke, observe = self._mutation_evidence("vcs-dispose", op, parameters)
         try:
             data = _vcs.dispose_via(self.config.vcs, args["op"], args.get("id"),
@@ -1280,7 +1235,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                   "result": data}
         if approval is not None:
             record["code_digest"] = code_digest
-            record["approval"] = approval["insight"]
+            record["approval"] = approval["approval"]
         return observe(record)
 
     def _op_report(self, args: dict) -> dict:
@@ -1297,7 +1252,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "experiment_evidence_read": ContextEvidenceMixin._op_experiment_evidence_read,
         "exec": ContextReadToolsMixin._op_exec, "experiment": ContextReadToolsMixin._op_experiment,
         "verify": ContextCheckToolsMixin._op_verify, "check_job": ContextCheckToolsMixin._op_check_job,
-        "fetch": ContextWebToolsMixin._op_fetch, "probe": ContextWebToolsMixin._op_probe, "search": ContextWebToolsMixin._op_search, "feed_updates": ContextWebToolsMixin._op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
+        "fetch": ContextWebToolsMixin._op_fetch, "probe": ContextWebToolsMixin._op_probe, "search": ContextWebToolsMixin._op_search, "feed_updates": ContextWebToolsMixin._op_feed_updates,
         "ready_work_read": ContextGrantReadToolsMixin._op_ready_work_read,
         "work_order_read": ContextGrantReadToolsMixin._op_work_order_read,
         "report_read": ContextGrantReadToolsMixin._op_report_read,
@@ -1317,9 +1272,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "queue_ack": ContextKernelToolsMixin._op_queue_ack,
         "message_read": ContextKernelToolsMixin._op_message_read,
         "message_refs": ContextKernelToolsMixin._op_message_refs,
-        "decide": ContextInsightToolsMixin._op_decide, "submit_insight": ContextInsightToolsMixin._op_submit_insight,
-        "revise_insight": ContextInsightToolsMixin._op_revise_insight, "withdraw_insight": ContextInsightToolsMixin._op_withdraw_insight,
-        "attach_evidence": ContextInsightToolsMixin._op_attach_evidence,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_request": _op_vcs_request,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
@@ -1358,14 +1310,13 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
         self._drivers: dict[str, object] = {}
 
     def _run(self, project: Project, role_name: str, *, attributes=None, retry_busy: bool = False,
-                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False,
-                scheduled_invocation: bool = False) -> dict:
+                enqueue_busy: bool = False, event_trigger: bool = False, probes_serviced: bool = False) -> dict:
         if role_name not in project.roles:
             raise Denied("Role is not enabled for this project")
         role = self.config.roles[role_name]
         control = project.control()
         if not control.get("armed") or control.get("paused"):
-            raise Denied("Project is unarmed or paused")  # Before any maintenance, probe or inbox read.
+            raise Denied("Project is unarmed or paused")  # Before any maintenance or probe.
         DelegationJobs.guard(project.root)
         from .workspace_cache import maintain
         maintain(project)  # Before probes/admission take any execution locks.
@@ -1399,94 +1350,19 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
             intent = (continuations.ready(project.snapshots, role_name)
                       if role.workspace == "write" else None)
             lock_diagnostics.phase("editor-ingestion")
-            project.insights.ingest_editor(
-                keep_days=project.config.limits.retention_days,
-                archive_interval_seconds=project.config.limits.automatic_insight_archive_interval_seconds)
-            # Only timer-generated invocations opt in. Unknown evidence is not
-            # emptiness: preserve ordinary execution on any failed strict read.
-            # Operator wakes and saved continuations keep their existing path.
-            # The timer is the only dispatch for scheduled roles on Windows
-            # (no file trigger), so a proven-empty declared source alone must
-            # not skip when the authoritative pre-admission projection still
-            # shows another scheduled input (subscribed decisions, terminal
-            # work-item events, due waits/CI, operator records, ready work,
-            # explicit wakes, progress or code change).
+            editor.ingest(project)
             pre_dispatch_wait_reconciliation = False
             pre_dispatch_wait_resolution_pending = False
-            scheduled_gate_state = None
-            if (scheduled_invocation and not event_trigger and role.scheduled_inputs
-                    and intent is None and not (
-                        role.workspace == "write" and safe_point.pending_hint(project.snapshots))):
-                try:
-                    snapshot = project.snapshots.get()
-                    wake_base = snapshot if role.workspace == "write" else _role_cursor(project, role_name)
-                    explicit_wake = _operator_woke(project.control(), wake_base,
-                                                   observer=role.workspace != "write")
-                    next_task = (_writer_next_task(project, snapshot, role_name)
-                                 if role.workspace == "write" else None)
-                    empty = False
-                    if role.scheduled_inputs == ("deferred_insights",):
-                        has_deferred = project.insights.has_current_defer()
-                        empty = has_deferred is False
-                    if empty and not explicit_wake and not next_task:
-                        try:
-                            scheduled_gate_state = self._dispatch_state(
-                                project, role_name, role, event_trigger=False,
-                                continuation=False)
-                        except (MizuError, OSError, ValueError, TypeError, KeyError,
-                                AttributeError, OverflowError, RecursionError):
-                            scheduled_gate_state = None
-                        if scheduled_gate_state is not None:
-                            pre_dispatch_wait_reconciliation = bool(
-                                scheduled_gate_state.get("_waits_reconciled"))
-                            pre_dispatch_wait_resolution_pending = bool(
-                                scheduled_gate_state.get("_pending_wait_resolution"))
-                            if scheduled_gate_state.get("skip"):
-                                return scheduled_gate_state["skip"]
-                            if not scheduled_gate_state.get("_has_other_scheduled_input", True):
-                                gate_snapshot = scheduled_gate_state.get("snapshot") or snapshot
-                                return {"skipped": "no-scheduled-input",
-                                        "snapshot": gate_snapshot["id"],
-                                        "code_digest": gate_snapshot["code_digest"]}
-                            # Any other pending/current input falls through to
-                            # ordinary scheduled execution.
-                        # An unavailable dispatch projection never proves
-                        # emptiness; fall through to ordinary execution.
-                except (MizuError, OSError, ValueError, TypeError, KeyError,
-                        AttributeError, OverflowError, RecursionError):
-                    pass
             lock_diagnostics.phase("pre-admission-dispatch")
             if (event_trigger or role.on_change) and not (
                     role.workspace == "write" and safe_point.pending_hint(project.snapshots)):
-                if scheduled_gate_state is not None:
-                    dispatch_state = scheduled_gate_state
-                else:
-                    dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
-                                                          continuation=intent is not None)
-                    pre_dispatch_wait_reconciliation = bool(dispatch_state.get("_waits_reconciled"))
-                    pre_dispatch_wait_resolution_pending = bool(
-                        dispatch_state.get("_pending_wait_resolution"))
+                dispatch_state = self._dispatch_state(project, role_name, role, event_trigger=event_trigger,
+                                                      continuation=intent is not None)
+                pre_dispatch_wait_reconciliation = bool(dispatch_state.get("_waits_reconciled"))
+                pre_dispatch_wait_resolution_pending = bool(
+                    dispatch_state.get("_pending_wait_resolution"))
                 if dispatch_state.get("skip"):
                     return dispatch_state["skip"]
-            # Producer admission: hold only configured producer roles before
-            # any model or run-slot use. A held attempt claims no run
-            # directory, slot, or lock and acknowledges no event or cursor;
-            # pending input stays durable until an existing schedule or
-            # subscription re-admits the producer. A running unit may finish.
-            held = producer_hold(project, role_name, role)
-            if held is not None:
-                try:
-                    current_snapshot = project.snapshots.get()
-                    snapshot_id = current_snapshot.get("id")
-                    code_digest = current_snapshot.get("code_digest")
-                except Exception:
-                    snapshot_id, code_digest = None, None
-                return {"skip": {"skipped": PRODUCER_HELD_SKIPPED, "snapshot": snapshot_id,
-                                 "code_digest": code_digest, "reason": held.get("reason"),
-                                 "reasons": list(held.get("reasons", ())),
-                                 "source_pending": held.get("source_pending"),
-                                 "open_count": held.get("open_count"),
-                                 "limits": dict(held.get("limits", {}))}}
             # Bounded run-local evidence, not a scheduling input. Keep the
             # configured number of contended admissions, then trim the sample to
             # the started.json retained-read cap; count every dropped row.
@@ -1559,16 +1435,13 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
             if dispatch_state.get("skip"):
                 return dispatch_state["skip"]
             snapshot = dispatch_state['snapshot']
-            sources = dispatch_state['sources']
             terminal_events = dispatch_state['terminal_events']
             terminal_page = dispatch_state['terminal_page']
             wait_events = dispatch_state['wait_events']
-            obligations = dispatch_state['obligations']
             ci_present = dispatch_state['ci_present']
             ci_failures = dispatch_state['ci_failures']
             prior_wait_expired = dispatch_state['prior_wait_expired']
-            decision_events = dispatch_state['decision_events']
-            receipt_diagnostics = dispatch_state.get('decision_receipt_diagnostics', [])
+            queues = dispatch_state['queues']
             _dispatch = dispatch_state['_dispatch']
             # Pre-execution selection probe: evaluate before allocating a run
             # directory so unchanged waits coalesce onto one audit run
@@ -1622,11 +1495,10 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                 started = {"run": run_id, "role": role_name,
                             "snapshot": snapshot["id"], "started_at": now(),
                             "admission_elapsed_seconds": round(admission_elapsed, 6),
-                            "admission": admission, "decision_events": len(decision_events),
-                            "decision_receipt_diagnostics": len(receipt_diagnostics),
+                            "admission": admission,
+                            "queue_messages": sum(row.get("count", 0) for row in queues),
                             "work_item_events": len(terminal_events),
                             "wait_events": len(wait_events),
-                            "obligation_events": len(obligations),
                             "ci_failures": len(ci_present),
                             "config_sha256": digest(self.config.file.read_bytes()),
                             "policy_sha256": digest(role_policy_bytes(role))}
@@ -1642,19 +1514,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                     write_json(run_dir / "started.json", started)
                 if continuation is not None:
                     write_json(active, {"run": run_id, "role": role_name, "started_at": now()})
-                if dispatch_state['decision_state']['shared']:
-                    write_json(run_dir / "decision-delivery.json", {
-                        "authority": "shared", "page": dispatch_state['decision_state']['page'],
-                        "manifest": [dataclasses.asdict(entry) for entry in
-                                     dispatch_state['decision_state']['manifest']]})
-                if decision_events:
-                    write_json(run_dir / "decision-events.json",
-                               {"run": run_id, "role": role_name, "admission": admission,
-                                "events": decision_events})
-                if receipt_diagnostics:
-                    write_json(run_dir / "decision-receipt-diagnostics.json",
-                               {"run": run_id, "role": role_name, "admission": admission,
-                                "diagnostics": receipt_diagnostics})
                 if terminal_events:
                     write_json(run_dir / "work-item-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
@@ -1663,10 +1522,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                     write_json(run_dir / "wait-events.json",
                                {"run": run_id, "role": role_name, "admission": admission,
                                 "events": wait_events})
-                if obligations:
-                    write_json(run_dir / "obligation-events.json",
-                               {"run": run_id, "role": role_name, "admission": admission,
-                                "events": obligations})
                 if role.selector:
                     from .classification import prepare
                     from .selection import clear_wait as _clear_wait
@@ -1749,28 +1604,16 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                     context.safe_point_yield_requested = True
                     context.turn_authority_role = recovery_authority
                     context.spend_role = recovery_authority
-                decision_delivery.bind(context, dispatch_state['decision_state'])
-                _record_delivery(project).bind(context, dispatch_state['record_state'])
-                write_json(run_dir / 'operator-record-delivery.json', context.operator_record_page)
+                context.queues = queues
                 context.work_item_events = terminal_events
                 context.wait_events = wait_events
                 context.ci_wait_manifest = dispatch_state["ci_manifest"]
-                context.proposal_wait_manifest = dispatch_state["proposal_manifest"]
-                context.obligations = obligations
-                context.progress_obligations_digest = _progress_obligations_digest(obligations)
                 role_cursor = _role_cursor(project, role_name) if role.workspace != "write" else snapshot
-                previous_progress = role_cursor.get("progress")
-                previous_obligations_digest = None
-                if (isinstance(previous_progress, dict) and previous_progress.get("role") == role_name):
-                    previous_obligations_digest = previous_progress.get("obligations_digest")
-                new_obligation = bool(obligations) and previous_obligations_digest != context.progress_obligations_digest
                 context.progress_input = (
-                    (role.workspace == "write" and context.inbox_seen != snapshot.get("inbox_seen", ""))
-                    or _operator_woke({"wake_generation": context.wake_generation}, role_cursor,
-                                      observer=role.workspace != "write")
-                    or bool(context.operator_record_manifest or decision_events or receipt_diagnostics
-                            or terminal_events or wait_events or ci_failures)
-                    or new_obligation or (role.workspace == "write" and prior_wait_expired))
+                    _operator_woke({"wake_generation": context.wake_generation}, role_cursor,
+                                   observer=role.workspace != "write")
+                    or bool(queues or terminal_events or wait_events or ci_failures)
+                    or (role.workspace == "write" and prior_wait_expired))
                 prompt, prompt_mode, session_key, rotation, session_dir = session_prompt(context, role, run_dir)
                 # A pin must be durable before dispatch-adjacent delivery state
                 # changes, so a setup failure cannot consume an unseen wake.
@@ -1782,17 +1625,13 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                 write_json(run_dir / "prompt_projection.json",
                            {"run": run_id, "role": role_name, "profile": role.profile, "snapshot": snapshot["id"],
                             "recent_snapshots": len(decoded.get("recent_snapshots", [])),
-                            "pending_insights": len(decoded.get("pending_insights", [])),
-                            "open_insights": (decoded.get("open_insights") or {}).get("total", 0),
+                            "queues": len(decoded.get("queues", [])),
                             # None: this role's prompt carries no work-item inventory.
                             "open_work_items": None if work_items_page is None else {
                                 "shown": len(work_items_page["items"]),
                                 "total": work_items_page["total"],
                                 "overflow_count": work_items_page["overflow_count"],
-                                "unseeded_decisions": work_items_page["unseeded_decisions"],
-                                "coverage_complete": work_items_page["coverage_complete"]},
-                            "decision_events": len(decoded.get("decision_events", [])),
-                            "decision_receipt_diagnostics": len(decoded.get("decision_receipt_diagnostics", [])),
+                                "truncated": work_items_page["truncated"]},
                             "work_item_events": len(decoded.get("work_item_events", [])),
                             "wait_events": len(decoded.get("wait_events", [])),
                             "acceptance_commands": len(decoded.get("acceptance_commands", [])),
@@ -2076,7 +1915,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                         captured, goal=context.goal, state=finished["state"], run=run_id,
                         outcome=finished["outcome"], summary=finished["summary"], verification=verification,
                         wake_at=time.time() + finished["wait_seconds"] if finished["outcome"] == "wait" else None,
-                        inbox_seen=context.inbox_seen,
                         wake_generation=context.wake_generation, progress=progress,
                         next_step=finished.get("next_step"),
                         parent=context.snapshot["id"])
@@ -2135,7 +1973,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                         from .unit_prompts import session_grant_evidence, session_row_evidence
                         grant = session_grant_evidence(context, session_dir)
                         write_prompt_state(session_dir, snapshot=snapshot["id"],
-                                           inbox_generation=context.inbox_seen,
                                            broker_grant=grant,
                                            sections=sorted(prompt_sections.included(context.role)),
                                            row_details=session_row_evidence(context, session_dir, grant))
@@ -2165,8 +2002,7 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                             "tool": context.progress_tool, "code": False,
                             "state": state_digest != role_cursor.get(
                                 "state_digest", digest(context.snapshot["state"].encode())),
-                            "decision": context.progress_decision,
-                            "insight": context.progress_insight, "input": context.progress_input,
+                            "message": context.progress_message, "input": context.progress_input,
                         }
                         observed.update(
                             wake_generation_digest=_wake_generation_digest(context.wake_generation),
@@ -2174,7 +2010,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                             progress=_progress_record(
                                 role_cursor, role_name, tuple(role_progress_signals(self.config, role)),
                                 signals, finished["outcome"],
-                                obligations_digest=context.progress_obligations_digest,
                                 ready_work=None,
                                 ready_work_signature=getattr(context, "ready_work_signature", None),
                                 wait_resolution_tokens=getattr(
@@ -2185,22 +2020,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                         write_json(project.root / "observed" / f"{role_name}.json", observed)
                 delivery_settlement.begin(context, finished)
                 selected_tokens = set(finished.get("ack_events", []))
-                _record_delivery(project).acknowledge(context, selected_tokens &
-                    {entry.ack_token for entry in context.operator_record_manifest})
-                delivery_settlement.succeeded(context, "operator")
-                selected_decisions = [e for e in context.decision_events if e["ack_token"] in selected_tokens]
-                if selected_decisions:
-                    if context.shared_decisions:
-                        decision_delivery.acknowledge(context, selected_tokens &
-                                                      {e["ack_token"] for e in selected_decisions})
-                        delivery_settlement.succeeded(context, "decision")
-                    elif decision_delivery.authority_kind(project.insights.root) == "queues":
-                        queue_decision_delivery.acknowledge(project, role, selected_decisions)
-                    else:
-                        with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
-                            project.insights.acknowledge_decisions(
-                                role_name, selected_decisions,
-                                sources=getattr(role, "decision_sources", "own") or "own")
                 selected_terminal = [e for e in context.work_item_events if e["ack_token"] in selected_tokens]
                 if selected_terminal:
                     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied):
@@ -2208,23 +2027,9 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                             project.work_items, role_name,
                             [work_item_events.acknowledgement_payload(project.work_items, role_name, e)
                              for e in selected_terminal])
-                selected_waits = [e for e in context.wait_events
-                                  if e.get("kind") in structured_wait_events.WAIT_KINDS
-                                  and e.get("ack_token") in selected_tokens]
-                selected_obligations = [e for e in context.obligations if e.get("ack_token") in selected_tokens]
-                if selected_waits:
-                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
-                        project.insights.consume_waits(role_name, selected_waits)
-                if selected_obligations:
-                    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
-                        structured_wait_events.acknowledge_obligations(
-                            project.insights.root, role_name, selected_obligations)
                 with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
                     ci_waits.complete(context, finished)
                     delivery_settlement.succeeded(context, "ci")
-                with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, Denied, LimitExceeded):
-                    proposal_waits.complete(context, finished)
-                    delivery_settlement.succeeded(context, "proposal")
                 if check_wait is not None:
                     check_jobs.set_wait(project, role_name, check_wait["id"], check_wait["wait_until"], continuation={
                         "run": run_id, "snapshot": snapshot["id"], "code_digest": snapshot["code_digest"],
@@ -2457,7 +2262,7 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                 ctx.ephemeral = True
                 ctx.parent_run = parent.run_dir.name
                 ctx.dispatch_class = "consult"
-                model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nQuestion:\n" + args["question"], profile=profile)
+                model = self._execute(ctx, self.resolve(profile), prompt_for(ctx) + "\n\nRequest:\n" + args["request"], profile=profile)
                 if ctx.host_cancelled() or (ctx.finished is None and ctx.cancelled()):
                     raise Cancelled("Consultation cancelled before completion")
                 if ctx.finished is None:
@@ -2490,7 +2295,7 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin,
                 shutil.rmtree(workspace, ignore_errors=True)
         with ThreadPoolExecutor(max_workers=self.config.limits.parallel_consults) as pool:
             results = list(pool.map(ask, role_names))
-        record = {"snapshot": snap["id"], "question": args["question"], "roles": list(role_names), "answers": [{"run": r["run"], "role": r["role"], "profile": r["profile"], **({"error": r["error"]} if "error" in r else {})} for r in results]}
+        record = {"snapshot": snap["id"], "question": args["request"], "roles": list(role_names), "answers": [{"run": r["run"], "role": r["role"], "profile": r["profile"], **({"error": r["error"]} if "error" in r else {})} for r in results]}
         write_json(parent.run_dir / "consultations" / f"{uuid.uuid4().hex}.json", record)
         answers=[]
         for result in results:
@@ -2678,7 +2483,7 @@ def poll_project_vcs(config, project, state: dict, *, now: float, interval: floa
                             "last_poll": ci_state.get("last_poll"),
                             "last_proposal_poll": state.get("last_proposal_poll"),
                             "proposal_cursor": state.get("proposal_cursor"),
-                            "proposal_complete_facts": state.get("proposal_complete_facts"),
+                            "proposal_refs": state.get("proposal_refs", {}),
                             "last_ci_wait_poll": state.get("last_ci_wait_poll"),
                             "ci_wait_cursor": state.get("ci_wait_cursor"),
                             "ci_changes_cursor": state.get("ci_changes_cursor"),
@@ -2754,9 +2559,7 @@ def daemon(config: Config, name: str, role_name: str) -> None:
                         probe = service_due(config, name, stop)
                         if probe is not None:
                             print(json.dumps(probe, ensure_ascii=False), flush=True)
-                        project.insights.ingest_editor(
-                            keep_days=config.limits.retention_days,
-                            archive_interval_seconds=config.limits.automatic_insight_archive_interval_seconds)
+                        editor.ingest(project)
                         if vcs_poll_enabled(config):
                             interval = vcs_poll_interval(config)
                             for event in poll_project_vcs(config, project, upstream_state,

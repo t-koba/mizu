@@ -190,7 +190,7 @@ def _inspect_evidence(project, job):
 
 
 def _jobs(project, *, locked=False):
-    return project.insights.ledger.read('check_jobs', locked=locked)
+    return project.ledger.read('check_jobs', locked=locked)
 
 
 def raw_jobs(project, *, invalid=False):
@@ -663,7 +663,7 @@ def recover_job(project, job_id):
 def write_job(project, job_id, job):
     """Commit one job record and its index row; the caller holds check-jobs.lock."""
     from .fs import write_json
-    with project.insights.ledger.write('check_jobs', [job_id]):
+    with project.ledger.write('check_jobs', [job_id]):
         write_json(project.root / f'check-jobs/{job_id}/job.json', job)
 
 

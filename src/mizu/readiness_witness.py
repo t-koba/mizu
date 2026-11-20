@@ -11,7 +11,7 @@ opens a file, so its cost is one ``scandir`` and one ``stat`` per directory.
 Trees that are large and never readiness inputs are skipped (``SKIPPED_TREES``):
 ``workspace`` (role working copies), ``runs`` and ``sessions`` (per-run records
 written after dispatch), ``objects`` (content-addressed payloads), ``check-cache``,
-``spool`` (editor spool, ingested into ``inbox`` before readiness is evaluated)
+``spool`` (editor spool, ingested into a queue before readiness is evaluated)
 and ``locks`` (rewritten in place by design, no state). Everything else is
 included, because ``should_run`` reads it or could.
 

@@ -61,7 +61,7 @@ REF_CONTENT_MAX = 4096
 
 _SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
 
-#: Forge-controlled strings are rendered into terminals and insight bodies,
+#: Forge-controlled strings are rendered into terminals and message bodies,
 #: so terminal-escape and bidi controls must fail closed at ingestion (see
 #: gh GHSA-crc3-h8v6-qh57). Forge names have no legitimate need for them.
 _BIDI_CONTROLS = frozenset(
@@ -367,7 +367,7 @@ READ_OPS = frozenset({"status", "log", "comments", "proposals", "acquire",
 #: human ``GO <branch>`` approval bound to branch and code digest.
 PUBLISH_OPS = frozenset({"push", "pr"})
 
-#: Approval body line binding an insight to the exact pushed tree.
+#: Approval body line binding an approval to the exact pushed tree.
 #: Example body line: ``digest: <64 lowercase hex>``.
 GO_DIGEST_RE = re.compile(r"^digest:\s*([0-9a-f]{64})\s*$", re.M)
 
@@ -401,8 +401,8 @@ def parse_go_endpoints(body: str) -> dict | None:
             "sha": head.group(1), "base": base.group(1)}
 
 
-def go_title(branch: str) -> str:
-    """Return the required human-approval insight title for a branch."""
+def go_line(branch: str) -> str:
+    """Return the approval line that names a branch: ``GO <branch>``."""
     return "GO " + branch
 
 
@@ -422,16 +422,23 @@ def check_branch(branch: str) -> str:
     return branch
 
 
-#: Insight source and decision run marking an operator-recorded approval.
-#: Model ``submit_insight``/``revise_insight``/``withdraw_insight`` fix source to the role name and model ``decide``
-#: fixes run to the run directory name, so none can mint these values.
-OPERATOR_SOURCE = "operator"
-OPERATOR_RUN = "operator"
+#: Most recent approval-queue messages examined for one approval check.
+MAX_APPROVAL_SCAN = 512
+
+
+def _approval_text(body) -> str | None:
+    """The approval text of a message body: its title and body strings."""
+    if not isinstance(body, dict) or not isinstance(body.get("body", ""), str):
+        return None
+    title = body.get("title")
+    if title is not None and not isinstance(title, str):
+        return None
+    return "\n".join(part for part in (title, body.get("body")) if part)
 
 
 def require_go_approval(project, branch: str, code_digest: str,
                         endpoints: dict | None = None) -> dict:
-    """Require a recorded human ``GO <branch>`` approval for this digest.
+    """Require an operator ``GO <branch>`` approval message for this digest.
 
     Schema: ``branch`` per ``check_branch``; ``code_digest`` 64 hex of the
     exact tree being published (workspace capture, not model supplied).
@@ -439,29 +446,18 @@ def require_go_approval(project, branch: str, code_digest: str,
     branch and digest themselves) or ``{"target", "id", "sha", "base"}``
     for a proposal merge: the destination and assessed proposal endpoints
     the merge will act on.
-    Trust: local insight inbox plus ``decisions/`` records; the approval
-    insight must carry source ``operator`` (``mizu insight submit``) and the
-    ``accept`` decision must carry run ``operator`` (``mizu insight decide``)
-    and its recorded revision must equal the current inbox revision; revising
-    the GO content requires a fresh decision. The opaque ``origin`` label is
-    ignored here: it never grants approval.
-    Model-submitted insights (source is the role name) and model decisions
-    (run is the run directory name) never satisfy this gate. Use a dedicated
-    publisher role without ``decide`` (refused together with lifecycle
-    capabilities at config load) for defense in depth; ``submit_insight``
-    (and likewise owner-only ``revise_insight``/``withdraw_insight``)
-    are allowed because ordinary insights can never mint an operator-channel
-    approval.
-    Retry/cancellation: pure local reads, no retry. Evidence: returned
-    ``{"insight": id, "branch": ..., "code_digest": ...}`` names the
-    approval bound to this publication. Failure: ``Denied`` when no matching
-    title exists, when the digest line is missing/stale, when the source or
-    decision run is not the operator channel, or when the matching
-    record is undecided or not ``accept``, when the accept revision differs
-    from the current inbox revision, or -- for merges -- when the approval
-    carries no endpoint binding or binds a different destination
-    or proposal content. Stale digests are refused even when an older
-    approval exists; a digest-only approval never authorizes a merge.
+    Trust: a message in the queue named by ``vcs.approval_queue`` whose
+    author the kernel bound as ``operator`` (``mizu queue PROJECT write``).
+    Its ``title`` and ``body`` strings together must hold the line
+    ``GO <branch>`` and a ``digest: <code digest>`` line; a merge approval
+    also needs ``target:``, ``proposal:``, ``sha:`` and ``base:`` lines that
+    match the merge. Messages from any other principal never approve.
+    Bounds: the newest ``MAX_APPROVAL_SCAN`` messages. Retry/cancellation:
+    pure local reads. Evidence: returned ``{"approval": <message id>,
+    "branch", "code_digest"}``. Failure: ``Denied`` when no approval queue
+    is configured, when no matching operator message exists, when the
+    digest is stale, or -- for merges -- when the endpoint binding is
+    missing or differs; a digest-only approval never authorizes a merge.
     """
     from .fs import DIGEST as _DIGEST
     check_branch(branch)
@@ -481,89 +477,48 @@ def require_go_approval(project, branch: str, code_digest: str,
             if (not isinstance(endpoints.get(_key), str)
                     or not _SHA.fullmatch(endpoints[_key])):
                 raise Denied(f"Invalid merge proposal {_key} for publication approval")
-    want = go_title(branch)
-    inbox = project.root / "inbox"
-    saw_title = False
-    saw_stale = False
-    saw_stale_revision = False
-    saw_undecided = False
-    saw_refused = False
-    saw_forged = False
-    saw_unbound = False
-    try:
-        paths = sorted(inbox.glob("*.json"))
-    except OSError as exc:
-        raise Denied(f"Publication approval is unavailable: {exc}") from exc
-    for path in paths:
-        if path.is_symlink():
+    queue = project.config.vcs.get("approval_queue")
+    if not queue:
+        raise Denied("Publication approval requires vcs.approval_queue")
+    store = project.kernel_queues
+    want = go_line(branch)
+    saw_line = saw_stale = saw_unbound = saw_foreign = False
+    head = store._head(queue)
+    for seq in range(head, max(0, head - MAX_APPROVAL_SCAN), -1):
+        message = store._message(queue, seq)
+        if message is None:
             continue
-        try:
-            item = json.loads(path.read_bytes())
-            if not isinstance(item, dict) or item.get("title") != want:
-                continue
-        except (OSError, ValueError):
+        text = _approval_text(message.get("body"))
+        if text is None or want not in text.splitlines():
             continue
-        saw_title = True
-        if item.get("source") != OPERATOR_SOURCE:
-            saw_forged = True
+        saw_line = True
+        if message.get("author") != "operator":
+            saw_foreign = True
             continue
-        if parse_go_digest(item.get("body", "")) != code_digest:
+        if parse_go_digest(text) != code_digest:
             saw_stale = True
             continue
         if endpoints is not None:
-            bound = parse_go_endpoints(item.get("body", ""))
+            bound = parse_go_endpoints(text)
             if (bound is None or bound["target"] != endpoints["target"]
                     or bound["proposal"] != endpoints["id"]
                     or bound["sha"] != endpoints["sha"]
                     or bound["base"] != endpoints["base"]):
                 saw_unbound = True
                 continue
-        insight_id = item.get("id")
-        if not isinstance(insight_id, str) or not insight_id:
-            continue
-        decision_path = project.root / "decisions" / f"{insight_id}.json"
-        if decision_path.is_symlink():
-            saw_undecided = True
-            continue
-        try:
-            decision = json.loads(decision_path.read_bytes())
-        except (OSError, ValueError):
-            saw_undecided = True
-            continue
-        if not isinstance(decision, dict) or decision.get("id") != insight_id:
-            saw_undecided = True
-            continue
-        if decision.get("action") == "accept" and decision.get("run") == OPERATOR_RUN:
-            item_rev, decision_rev = item.get("rev"), decision.get("rev")
-            if (type(item_rev) is not int or item_rev < 1
-                    or type(decision_rev) is not int or decision_rev != item_rev):
-                saw_stale_revision = True
-                continue
-            return {"insight": insight_id, "branch": branch,
-                    "code_digest": code_digest}
-        if decision.get("action") == "accept":
-            saw_forged = True
-            continue
-        saw_refused = True
-    if saw_forged:
-        raise Denied("Publication approval must come from the operator channel")
-    if saw_stale_revision:
-        raise Denied("Recorded human approval is stale for this insight revision")
-    if saw_refused or saw_undecided:
-        raise Denied("Publication approval is not accepted for this code digest")
-    if saw_stale:
-        raise Denied("Recorded human approval is stale for this code digest")
+        return {"approval": message["id"], "branch": branch, "code_digest": code_digest}
     if saw_unbound:
         raise Denied("Recorded human approval does not cover this merge "
                      "destination and proposal endpoints")
-    if saw_title:
-        raise Denied("Publication approval is not accepted for this code digest")
-    raise Denied("External publication requires recorded human approval")
+    if saw_stale:
+        raise Denied("Recorded human approval is stale for this code digest")
+    if saw_foreign:
+        raise Denied("Publication approval must come from the operator")
+    if saw_line:
+        raise Denied("Publication approval is not recorded for this code digest")
+    raise Denied(f"No operator approval {want!r} in queue {queue}")
 
 
-#: Maximum acquired content chars per ``acquire`` response (mirrors the
-#: default adapter byte bound; larger materializations are refused so the
-#: caller narrows scope instead of blowing the frame).
 MAX_ACQUIRE_CONTENT = 524288
 
 
@@ -1220,7 +1175,7 @@ def parse_status_checks(data: dict) -> list:
             raise Denied("Invalid CI check state")
         _reject_terminal_controls(state, "Invalid CI check state")
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
-            raise Denied("Invalid VCS sha for CI insight")
+            raise Denied("Invalid VCS sha for CI check")
         if not isinstance(url, str) or len(url) > 4096:
             raise Denied("Invalid CI log URL")
         _reject_terminal_controls(url, "Invalid CI log URL")
@@ -1274,10 +1229,8 @@ def parse_status_checks(data: dict) -> list:
 
 #: Maximum external proposals per ``proposals`` response.
 MAX_PROPOSALS = 256
-#: Stable proposal Insight IDs use a 32-character lower-case SHA-256 hex suffix.
-MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS = 32
-#: Generated proposal Insight titles respect the public 200-character title format.
-MAX_PROPOSAL_INSIGHT_TITLE_CHARS = 200
+#: Generated observation titles stay within 200 characters.
+MAX_PROPOSAL_TITLE_CHARS = 200
 #: Closed-form proposal states; ``draft`` rides alongside ``open``.
 PROPOSAL_STATES = frozenset({"open", "closed", "merged"})
 
@@ -1314,7 +1267,7 @@ def _check_endpoint(value) -> dict:
 
 #: Maximum independent reviews per proposal row.
 MAX_REVIEWS = 64
-#: Fixed UTF-8 budget for individual check facts retained in one insight.
+#: Fixed UTF-8 budget for individual check facts retained in one observation.
 #: Oversized sets keep a deterministic digest and bounded detail preview.
 MAX_PROPOSAL_CHECK_DETAIL_BYTES = 16 * 1024
 #: Closed-form review verdicts; a dismissed approval no longer approves.
@@ -1404,17 +1357,6 @@ def parse_proposals(data: dict) -> list:
     return out
 
 
-def proposal_insight_id(proposal_id: str) -> str:
-    """Derive a stable, deduplicating insight ID for an external proposal."""
-    from .fs import digest as _digest, canonical as _canonical
-    if (not isinstance(proposal_id, str) or not proposal_id
-            or len(proposal_id) > 128):
-        raise Denied("Invalid VCS proposal id")
-    _reject_terminal_controls(proposal_id, "Invalid VCS proposal id")
-    return ("proposal-" +
-            _digest(_canonical({"proposal": proposal_id}))[:MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS])
-
-
 def proposal_facts(proposal: dict, *, enumeration_complete: bool = False) -> tuple[str, str]:
     """Render stable, bounded facts for an external proposal observation.
 
@@ -1422,13 +1364,13 @@ def proposal_facts(proposal: dict, *, enumeration_complete: bool = False) -> tup
     revision-bound reviews are durable facts; per-run log URLs are omitted.
     When check-detail UTF-8 bytes exceed the fixed budget, retain a
     failure-first preview plus a digest over all normalized check name/state/
-    sha tuples, so omitted changes still revise the insight. The full current
+    sha tuples, so omitted changes still change the facts. The full current
     check result remains available through ``vcs_read`` ``proposals``.
     """
     row = parse_proposals({"proposals": [proposal]})[0]
     title = f"Proposal {row['id']} {row['state']}"
-    if len(title) > MAX_PROPOSAL_INSIGHT_TITLE_CHARS:
-        title = title[:MAX_PROPOSAL_INSIGHT_TITLE_CHARS]
+    if len(title) > MAX_PROPOSAL_TITLE_CHARS:
+        title = title[:MAX_PROPOSAL_TITLE_CHARS]
     lines = [f"id: {row['id']}", f"state: {row['state']}",
              f"draft: {row['draft']}",
              f"mergeable: {row['mergeable'] if row['mergeable'] is not None else 'unknown'}",
@@ -1477,91 +1419,67 @@ def _format_endpoint(role: str, endpoint: dict) -> str:
     return f"{role}: {endpoint['repo']} {endpoint['ref']} {endpoint['sha']}"
 
 
-def record_proposal_state(project, proposal: dict, *,
-                          run: str | None = None,
-                          origin: str | None = None,
-                          enumeration_complete: bool = False) -> dict:
-    """Record an external proposal observation; revise only on change.
+def proposal_refs(row: dict) -> list | None:
+    """Branches an open proposal still references, or None once it is terminal."""
+    if row["state"] in TERMINAL_STATES:
+        return None
+    return sorted({_short_branch_name(endpoint["ref"]) for endpoint in (row["head"], row["base"])
+                   if endpoint.get("deleted") is not True})
 
-    Schema: ``proposal`` is one validated ``parse_proposals`` row.
-    ``enumeration_complete`` is host-poller-only proof that the entire bounded
-    enumeration was validated with unique IDs and no pagination; the fact rides
-    in the existing observation body, never in a parallel receipt store.
-    ``origin`` is an opaque trusted-caller label stored alongside the
-    ``vcs`` authority; it never affects approval, routing, or dedup (the
-    first-stored origin/run is preserved on repeats). Bounds: title <=
-    200 chars, body within the insight byte limit. Trust: adapter-derived
-    facts labeled external-untrusted in the body; the stable ID lets
-    repeats return the existing record instead of spamming the inbox.
-    Retry/cancellation: pure local insight reads/writes; identical facts
-    are a read-only no-op (no rev bump, no wake), changed facts revise
-    with an expected-rev compare-and-swap. Evidence: returned
-    ``{"id": ..., "changed": bool}`` names the observation. Failure:
-    ``Denied`` on bad proposals or a foreign record under the stable ID.
+
+def record_proposal_state(project, proposal: dict, *, enumeration_complete: bool = False) -> dict:
+    """Append one external proposal observation to the configured queue.
+
+    Schema: ``proposal`` is one validated ``parse_proposals`` row; the
+    message body is ``{"title", "body"}`` with the rendered facts, written by
+    the ``host`` principal into ``vcs.observation_queue``. The message id is
+    derived from the proposal id and its facts, so identical facts append
+    nothing and wake nobody; changed facts are a new message. Trust:
+    adapter-derived facts labeled external-untrusted in the body.
+    Evidence: returned ``{"id": <message id>, "changed": bool}``. Failure:
+    ``Denied`` on bad proposals or a body the queue declaration refuses.
     """
     row = parse_proposals({"proposals": [proposal]})[0]
     title, body = proposal_facts(row, enumeration_complete=enumeration_complete)
-    insight_id = proposal_insight_id(row["id"])
+    message_id = digest(canonical({"proposal": row["id"], "title": title, "body": body}))[:32]
+    store = project.kernel_queues
+    queue = project.config.vcs["observation_queue"]
     try:
-        current = project.insights.read(insight_id)
+        existing = store._message_by_id(message_id)
     except Denied:
-        current = None
-    if current is None:
-        record = project.insights.submit(source="vcs", title=title, body=body,
-                                         base_snapshot=None, run=run,
-                                         origin=origin, insight_id=insight_id)
-        return {"id": record["id"], "changed": True}
-    if current.get("body") == body and current.get("title") == title:
-        return {"id": current["id"], "changed": False}
-    record = project.insights.revise(insight_id, source="vcs", title=title,
-                                     body=body, base_snapshot=None, run=run,
-                                     expected_rev=current.get("rev"))
-    return {"id": record["id"], "changed": True}
+        existing = None
+    if existing is not None:
+        return {"id": message_id, "changed": False}
+    try:
+        store.append(queue, {"title": title, "body": body}, "host", id=message_id)
+    except Denied:
+        if store._id_pointer(message_id) is not None:
+            return {"id": message_id, "changed": False}  # removed by retention
+        raise
+    return {"id": message_id, "changed": True}
 
 
 def live_proposal_refs(project, branch: str) -> list:
     """Return sorted proposal ids still openly referencing a branch.
 
-    Schema: scans recorded ``vcs`` proposal observations (``proposal-``
-    records; CI ``ci-`` records never match) and parses their ``state:``
-    and ``head:``/``base:`` fact lines. A proposal blocks while its
-    latest recorded state is outside ``TERMINAL_STATES`` and a
-    non-deleted head or base endpoint names ``branch``. Refs are the
-    second-to-last line token (repos may hold spaces; ref names never
-    do); ``deleted`` endpoints reference nothing live. Both the queried
-    branch and recorded refs normalize through ``_short_branch_name``,
-    so full ``refs/heads/`` spellings block exactly like short names.
-    Bounds: unknown
-    states block (fail closed toward preservation); unparseable bodies
-    are skipped, never treated as references. Trust: recorded local
-    observations only, no adapter call. Failure: never raises for
-    missing records (empty references); ``Denied`` only on a bad
-    branch name.
+    Schema: reads the host-only ``proposal_refs`` map (open proposal id ->
+    referenced short branch names) that proposal polling keeps in the VCS
+    poll state. Both the queried branch and recorded refs normalize through
+    ``_short_branch_name``, so full ``refs/heads/`` spellings block exactly
+    like short names. Trust: recorded local observations only, no adapter
+    call. Failure: an unreadable map raises ``Denied`` (fail closed toward
+    preservation); ``Denied`` on a bad branch name.
     """
+    from .ci_observation import POLL_STATE_FILE
+    from .fs import read_json
     check_branch(branch)
     want = _short_branch_name(branch)
-    blocking = set()
-    for record in project.insights.scan_source("vcs"):
-        if not record.get("id", "").startswith("proposal-"):
-            continue
-        body = record.get("body") or ""
-        if not isinstance(body, str):
-            continue
-        state = None
-        refs = set()
-        for line in body.splitlines():
-            if line.startswith("state: "):
-                state = line[len("state: "):]
-            elif line.startswith("head: ") or line.startswith("base: "):
-                parts = line.split(" ")[1:]
-                if len(parts) >= 2 and parts[-1] != "deleted":
-                    refs.add(_short_branch_name(parts[-2]))
-        if state is not None and state not in TERMINAL_STATES and want in refs:
-            for line in body.splitlines():
-                if line.startswith("id: "):
-                    blocking.add(line[len("id: "):])
-                    break
-    return sorted(blocking)
+    shared = read_json(project.root / POLL_STATE_FILE, {})
+    refs = shared.get("proposal_refs", {}) if isinstance(shared, dict) else None
+    if not isinstance(refs, dict):
+        raise Denied("Recorded proposal references are unreadable")
+    return sorted(proposal_id for proposal_id, names in refs.items()
+                  if isinstance(names, list) and want in names)
 
 
 def publish_via(settings: dict, op: str, params: dict, *, cancel=lambda: False,

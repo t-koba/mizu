@@ -1,10 +1,10 @@
 """Transactional current-state index of one project's records.
 
-The files under ``work-items/``, ``decision-history/``, ``inbox/`` and
-``decisions/`` stay the durable, append-only history; this SQLite database
-(``ledger.sqlite3`` in the project root, WAL journal) is derived from them and
-is the only source of current-state reads. It is split into *domains* (work
-items, insights with their current decisions), each with its own tables,
+The record files (for example under ``work-items/``) stay the durable,
+append-only history; this SQLite database (``ledger.sqlite3`` in the project
+root, WAL journal) is derived from them and is the only source of
+current-state reads. It is split into *domains* (work items, check jobs),
+each with its own tables,
 schema number and build state. Every write runs inside :meth:`Ledger.write`
 while the caller holds the project record lock:
 

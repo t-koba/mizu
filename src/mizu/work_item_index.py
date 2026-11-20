@@ -1,4 +1,4 @@
-"""Index domain of work items, unresolved decisions, and legacy drops."""
+"""Index domain of work items."""
 from __future__ import annotations
 
 import base64
@@ -9,23 +9,21 @@ from .errors import Denied
 from .ledger import Domain, rows
 
 # Source-derived columns used by replay/audit; change_seq is index-local.
-COLUMNS = ("id", "rev", "status", "holder", "created_key", "updated_key", "origin_insight",
-           "origin_rev", "wait_kind", "doing_since", "blocked_since", "source_event", "item")
+COLUMNS = ("id", "rev", "status", "holder", "created_key", "updated_key", "origin",
+           "creator", "wait_kind", "doing_since", "blocked_since", "item")
 _INSERT = (f"INSERT OR REPLACE INTO items({', '.join(COLUMNS)}, change_seq) "
            f"VALUES ({', '.join('?' * len(COLUMNS))}, (SELECT seq FROM item_changes))")
 _TABLES = """
 CREATE TABLE items(
     id TEXT PRIMARY KEY, rev INTEGER NOT NULL, status TEXT NOT NULL, holder TEXT,
     created_key INTEGER NOT NULL, updated_key INTEGER NOT NULL,
-    origin_insight TEXT, origin_rev INTEGER, wait_kind TEXT,
-    doing_since TEXT, blocked_since TEXT, source_event TEXT, item TEXT NOT NULL,
+    origin TEXT, creator TEXT, wait_kind TEXT,
+    doing_since TEXT, blocked_since TEXT, item TEXT NOT NULL,
     change_seq INTEGER NOT NULL);
 CREATE UNIQUE INDEX items_changes ON items(change_seq);
 CREATE INDEX items_open ON items(status, holder);
 CREATE INDEX items_closed ON items(status, updated_key DESC, id);
-CREATE INDEX items_origin ON items(origin_insight, origin_rev);
-CREATE TABLE unseeded(event_id TEXT PRIMARY KEY);
-CREATE TABLE legacy_drops(event_id TEXT PRIMARY KEY);
+CREATE INDEX items_origin ON items(origin);
 CREATE TABLE item_changes(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     token_key BLOB NOT NULL, seq INTEGER NOT NULL CHECK(typeof(seq)='integer' AND seq>=0));
@@ -34,7 +32,7 @@ INSERT INTO item_changes VALUES (1, randomblob(32), 0);
 
 
 class _Items(Domain):
-    """Entries are item rows, unseeded decisions, or dropped legacy resolutions."""
+    """Entries are item rows."""
     resumable = True
 
     def done(self, db) -> set:
@@ -48,10 +46,6 @@ class _Items(Domain):
             if previous != tuple(value):
                 db.execute("UPDATE item_changes SET seq=seq+1")
                 db.execute(_INSERT, value)
-        elif kind == "unseeded":
-            db.execute("INSERT OR IGNORE INTO unseeded(event_id) VALUES (?)", (value,))
-        elif kind == "drop":
-            db.execute("INSERT OR IGNORE INTO legacy_drops(event_id) VALUES (?)", (value,))
         else:
             raise Denied("Invalid work-item index entry")
 
@@ -63,8 +57,6 @@ class _Items(Domain):
                 # Retained source rows do not normally disappear. If repair
                 # removes one, no old cursor may silently omit that deletion.
                 db.execute("UPDATE item_changes SET token_key=randomblob(32)")
-        db.execute("DELETE FROM unseeded WHERE event_id=?", (key[3:],))
-        db.execute("DELETE FROM legacy_drops WHERE event_id=?", (key[3:],))
         for entry in entries:
             self.put(db, entry)
 
@@ -105,13 +97,11 @@ class _Items(Domain):
             payload + hmac.digest(key, b"work-items-v1" + payload, "sha256")).decode("ascii")
 
     def snapshot(self, db):
-        """Raw contents for an audit: item rows and the two decision sets."""
+        """Raw contents for an audit: the item rows."""
         if db is None:
-            return {}, set(), set()
-        return ({row[0]: tuple(row) for row in db.execute(f"SELECT {', '.join(COLUMNS)} FROM items")},
-                {row[0] for row in db.execute("SELECT event_id FROM unseeded")},
-                {row[0] for row in db.execute("SELECT event_id FROM legacy_drops")})
+            return {}
+        return {row[0]: tuple(row) for row in db.execute(f"SELECT {', '.join(COLUMNS)} FROM items")}
 
 
 #: Bump when the derived rows change shape; the next locked use rebuilds them.
-ITEMS = _Items("items", 3, _TABLES)
+ITEMS = _Items("items", 4, _TABLES)

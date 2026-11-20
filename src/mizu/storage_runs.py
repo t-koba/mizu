@@ -25,8 +25,6 @@ RECORD_BYTES = 1024 * 1024
 PREVIEW_ROWS = 100
 MAX_DEPTH = 8
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
-# Exact CLI sentinel for operator decisions (src/mizu/cli.py): not a Mizu run.
-OPERATOR_RUN = "operator"
 OUTCOMES = {"done", "continue", "wait", "blocked", "bounded"}
 
 
@@ -118,18 +116,6 @@ def _run(value):
         raise Denied("Invalid local run reference")
     return value
 
-
-def _evidence(record, pin):
-    if record.get("run") is not None:
-        pin(record["run"])
-    evidence = record.get("evidence", [])
-    if not isinstance(evidence, list):
-        raise Denied("Malformed insight evidence")
-    for entry in evidence:
-        if not isinstance(entry, dict):
-            raise Denied("Malformed insight evidence entry")
-        if entry.get("run") is not None:
-            pin(entry["run"])
 
 
 def _terminal(run, started, records, clock):
@@ -298,8 +284,6 @@ def plan(project, *, settlement_pins=None, scan=None):
             pin(fence["source_run"])
             pin(fence["run"])
 
-        for path in scan.children(root / "inbox"):
-            _evidence(scan.record(path), pin)
         for path in scan.children(root / "active"):
             pin(scan.record(path).get("run"))
         for path in scan.children(root / "selection"):
@@ -319,61 +303,6 @@ def plan(project, *, settlement_pins=None, scan=None):
                 else:
                     raise Denied("Malformed selection wait")
 
-        # Bound the physical ledger before invoking its existing schema/chain
-        # validation. No recovery, locks, projections or scheduling here.
-        for name in ("work-items", "decision-history", "decisions", "insight-ids", "insight-revisions"):
-            scan.preflight(root / name)
-        store = project.work_items
-        waits = []
-        if store.unseeded_decisions():
-            raise Denied("Unresolved work-item seed")
-        for item in store.current_items(statuses=("blocked",)):
-            if item.get("wait"):
-                waits.append(item["wait"])
-        from .object_waits import subject_of
-        required_keys = set()
-        for wait in waits:
-            subject = subject_of(wait)
-            if subject is not None and subject['type'] == 'insight':
-                wait = {'kind': 'insight_decided', 'target': subject['id']}
-            if wait["kind"] not in ("dependency", "insight_decided"):
-                continue
-            required = wait.get("requires")
-            target = required["insight"] if required else wait["target"]
-            identifier(target)
-            # Current target decision is the exact evidence used by wait_due;
-            # do not pin unrelated decisions or arbitrary run fields in prose.
-            decision = scan.optional(root / "decisions" / (target + ".json"))
-            if decision is not None:
-                store._validate_current_decision_shape(decision, target)
-                if not required or (decision.get("rev", 1) == required["rev"]
-                                    and decision.get("action") == required["action"]):
-                    run_value = decision.get("run")
-                    # The operator CLI records substantive decisions with the
-                    # exact "operator" sentinel, which names no local run.
-                    # Only that sentinel (and an absent/null run, e.g.
-                    # withdrawal) pins nothing; any other non-hex value
-                    # still fails closed inside pin().
-                    if run_value is not None and run_value != OPERATOR_RUN:
-                        pin(run_value)
-            # Dependency waits remain bound to the exact historical revision
-            # even if the current result moved. Pin that decision, not a newer
-            # head. History is bounded above and validated by the ledger.
-            if required:
-                required_keys.add((target, required["rev"], required["action"]))
-        if required_keys:
-            matched = set()
-            for _, event in store._iter_decision_events(recover=False):
-                key = (event.get("id"), event.get("rev", 1), event.get("action"))
-                if key in required_keys:
-                    if key in matched:
-                        raise Denied("Duplicate exact dependency decision evidence")
-                    matched.add(key)
-                    historical = event["run"]
-                    if historical is not None and historical != OPERATOR_RUN:
-                        pin(historical)
-            if matched != required_keys:
-                raise Denied("Missing exact dependency decision evidence")
         components = []
         unseen = set(graph)
         for first in sorted(graph):

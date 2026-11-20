@@ -6,10 +6,9 @@ lock. Retention first moves candidates behind the shared admission gate, then
 scans each project under lifecycle and record locks. A writer that validated
 before admission is observed by the scan; a later writer sees the candidate
 missing and refuses. Restore and pair publication still use the shared gate.
-Read-only unresolved-count and pending-insight scans use the project lock
-alone. IDs are scoped by their containing project/owner record; Insight
-entries also store the exact revision. History keeps IDs, but only current
-live owners pin.
+Read-only scans use the project lock alone. IDs are scoped by their
+containing project/owner record. History keeps IDs, but only current live
+owners pin.
 """
 from __future__ import annotations
 
@@ -56,7 +55,7 @@ def shared_lock(data: Path, *, blocking=False):
 @contextlib.contextmanager
 def project_record_lock(root: Path, *, blocking: bool = True):
     """Serialize one project's records; movable roots need lifecycle coordination."""
-    with lock(root / "locks" / "insights.lock", blocking=blocking):
+    with lock(root / "locks" / "records.lock", blocking=blocking):
         yield
 
 

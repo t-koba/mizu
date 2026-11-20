@@ -19,23 +19,13 @@ from .platform import LOCK_RETRY_INTERVAL_MS, LOCK_TIMEOUT, PIPE_POLL_INTERVAL_M
 from .process import ADAPTER_DIAGNOSTIC_BYTES_DEFAULT, ADAPTER_DIAGNOSTIC_BYTES_MAX
 from .vcs_poll_policy import DEFAULT_VCS_POLL_INTERVAL_SECONDS
 CAPABILITIES = frozenset({"diff", "files", "read", "exec", "experiment", "verify", "check_job", "fetch", "probe",
-                          "search", "feed_updates", "insights", "decide", "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "delegate",
+                          "search", "feed_updates", "consult", "delegate",
                           "report", "finish", "review_verdict", "sync", "vcs_read", "vcs_publish",
                           "vcs_retire", "vcs_dispose", "vcs_request", "research_read", "research",
                           "materialize", "command_evidence_read", "experiment_evidence_read",
-                          "work_items_read", "work_items_create", "work_items_transition", "work_items_reopen", "work_order", "record_write", "record_read", "result_read",
+                          "work_items_read", "work_items_create", "work_items_transition", "work_items_reopen", "work_order", "result_read",
                           "objects", "events", "queues"})
 ENGINES = ("pi", "pi-durable", "codex", "claude")
-#: Role names that collide with insight sources owned by the host/operator
-#: channel (operator CLI, vcs CI helper, editor outbox). Model
-#: `submit_insight` fixes source to the role name, so these are refused
-#: at config load to keep the operator channel unforgeable.
-RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
-#: The ``writer`` addressee is the route-to-source sentinel in insight
-#: metadata, never a delivery target. A configured default recipient must
-#: name a real role; accepting this token emits an addressee that pending
-#: projection rejects, so fail closed at load instead of crashing delivery.
-ROUTE_TO_SOURCE_ADDRESSEE = "writer"
 #: Binary MiB unit for configured limits converted to byte counts.
 MEBIBYTE_BYTES = 1024 * 1024
 #: Default web-response cache TTL; explicit ``[web].cache_seconds`` wins.
@@ -79,26 +69,6 @@ MAX_USAGE_RUNS_SCANNED = MAX_USAGE_POLICY_COUNT - 1
 #: 3.5 MiB of Python allocations on the measured host.
 MAX_HISTORY_TEMPORARIES = 4096
 DEFAULT_HISTORY_TEMPORARIES = 64
-#: Fixed ceiling for exact prior-insight history reads and rows; the operator may lower it.
-MAX_INSIGHT_HISTORY_ENTRIES = 1000
-#: Default bound on exact prior-insight history reads and output.
-DEFAULT_INSIGHT_HISTORY_ENTRIES = 1000
-#: Absolute in-process ceiling for configured current-decision projection rows.
-#: The page retains full source-bounded envelopes. A synthetic 512-row scan with
-#: 64 KiB bodies held 32.6 MiB; the source record can reach 1 MiB, so the ceiling
-#: is capped at the existing 512-row default rather than admitting an unmeasured
-#: larger retained set. At the 1 MiB source bound that default is a 512 MiB
-#: exposure; raising the ceiling would multiply it. Raising it needs a new
-#: measurement and a page that does not retain every payload.
-MAX_DECISION_PROJECTION_RECORDS = 512
-#: One named configured default; Limits and Insights both use it. Keep the
-#: safety ceiling independent so changing the default does not silently raise it.
-DEFAULT_DECISION_PROJECTION_RECORDS = 512
-#: Per-page malformed-receipt diagnostics are an operator-selected output
-#: sample, not a history or delivery bound. The ceiling matches the public
-#: decision-event page cap so diagnostics never dominate the report.
-DEFAULT_DECISION_RECEIPT_DIAGNOSTICS = 10
-MAX_DECISION_RECEIPT_DIAGNOSTICS = 100
 #: Run-local contended-admission observations are an operator-selected
 #: evidence sample. The row ceiling is an upper bound; runtime also trims the
 #: sample to the started.json retained-read cap (64 KiB or lower `file_bytes`),
@@ -108,7 +78,7 @@ MAX_QUEUE_OBSERVATIONS = 100
 
 #: Shared smoke-retention scan budgets. A bounded synthetic scan measured
 #: ~0.6 ms per project root and per metadata record, and ~4.8 KiB retained
-#: per insight record in the parsed-record cache, so the project/record
+#: per record in the parsed-record cache, so the project/record
 #: dimensions are host/history policy. The defaults preserve the former
 #: module literals; ranges use the TOML signed-64-bit format bound.
 DEFAULT_SMOKE_RETENTION_PROJECTS = 5000
@@ -122,16 +92,6 @@ DEFAULT_SMOKE_RETENTION_METADATA_BYTES = 64 * 1024 * 1024
 #: the existing ~15-minute worst case while letting the operator lower it.
 DEFAULT_SMOKE_RETENTION_REPORT_BYTES = 5000 * 16 * 1024 * 1024
 
-#: Host-only activation plans/reports are local evidence, not transport
-#: frames, and grow with the complete current decision/pending source set.
-#: A synthetic 1,000-row all-receipt boundary produced a 1.5 MiB plan and a
-#: 1.9 MiB post-map report; the default leaves room for several thousand
-#: routed rows. The ceiling bounds activation-time parsing and the per-wake
-#: exact-byte report check on the host; the report body is not parsed on the
-#: wake path. It is not a recommended plan size; raising it needs a new
-#: measurement.
-DEFAULT_DECISION_RECONCILIATION_BYTES = 8 * 1024 * 1024
-MAX_DECISION_RECONCILIATION_BYTES = 64 * 1024 * 1024
 MAX_RESOURCES = 64
 #: Fixed bound for explicitly added CI wake branches beyond `ci_branch`.
 MAX_CI_WAKE_EXTRA_BRANCHES = 64
@@ -148,7 +108,7 @@ MAX_NO_PROGRESS_BACKOFF_SECONDS = MAX_WAIT_SECONDS
 DOCTOR_TIMEOUT_MAX_SECONDS = 86400
 #: Free-text state changes are supported as an explicit progress signal but
 #: do not qualify by default because paraphrasing alone is not substantive work.
-DEFAULT_PROGRESS_SIGNALS = ("tool", "code", "decision", "insight", "input")
+DEFAULT_PROGRESS_SIGNALS = ("tool", "code", "message", "input")
 #: Shared-fragment `include` bounds (fixed mechanism, not knobs per ADR-006).
 MAX_INCLUDE_DEPTH = 8
 MAX_INCLUDE_FILES = 32
@@ -399,8 +359,8 @@ ROOT_KEYS = frozenset({
     "data_dir", "engines", "timezone", "limits", "sandbox", "profiles", "roles",
     "services", "editor",
     "consult_role", "delegate_role", "web", "vcs", "materialize", "tool_effects", "exclude",
-    "selectors", "include", "insight_decisions", "workspace_cache",
-    "operator_records", "record_kinds", "usage", "scheduler_evidence",
+    "selectors", "include", "workspace_cache",
+    "record_kinds", "usage", "scheduler_evidence",
     "dispatch_evidence", "ci_requests", "publication_evidence", "publication",
     "project_import", "doctor", "completion_evidence", "kinds", "queues"})
 
@@ -471,11 +431,6 @@ class Limits:
     #: Host I/O policy; the 256 MiB default preserves the previous refusal bound.
     probe_executable_bytes: int = DEFAULT_PROBE_EXECUTABLE_BYTES
     lock_diagnostics: bool = False
-    # Provisional per-source bound on unresolved live producer inputs; 0 disables.
-    # Congestion thresholds, not measured optima; see docs/configuration.md.
-    producer_inputs_per_source: int = 20
-    #: Optional producer backpressure only; never a work-item storage cap.
-    open_work_items: int = 0
     daily_requests: int = 0
     shared_daily_requests: int = 0
     budget_day_file_bytes: int = 4 * 1024 * 1024
@@ -512,20 +467,12 @@ class Limits:
     #: Retained records including subscriptions; only safe acknowledged jobs evict.
     #: UTF-8 bytes per prior-role continuation summary/state preview; 0 disables text.
     prior_role_report_preview_bytes: int = 4000
-    #: Crash-leftover decision-history temporary scan budget; default 64.
+    #: Crash-leftover work-item history temporary scan budget; default 64.
     history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES
-    decision_projection_records: int = DEFAULT_DECISION_PROJECTION_RECORDS
-    #: Malformed-receipt diagnostics retained per decision page; 0 hides the
-    #: diagnostic sample without hiding the corresponding decision events.
-    decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS
     #: Contended-admission observations retained in started.json, additionally
     #: trimmed to its retained-read cap (64 KiB or lower `file_bytes`); discarded
     #: observations increment `omitted` without changing scheduling.
     queue_observations: int = DEFAULT_QUEUE_OBSERVATIONS
-    #: Host-only activation plan/report serialized-byte bound. This is history
-    #: policy because the complete current decision set is pinned; it is not a
-    #: transport frame bound.
-    decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES
     #: Active execution slots, independent of pending FIFO capacity.
     parallel_runs: int = 4
     #: Pending FIFO tickets; fixed default independent of active slots.
@@ -573,13 +520,10 @@ class Limits:
     #: Canonical-JSON bytes of one model-facing tool response; larger results page.
     tool_response_bytes: int = 32768
     free_disk_mb: int = 1024
-    #: Operator-selected retention window (days) for budget day-files and
-    #: decided (non-deferred) proposals. 0 disables time-based reaping;
+    #: Operator-selected retention window (days) for budget day-files.
+    #: 0 disables time-based reaping;
     #: this clock never expires runs, snapshots or permanent audit records.
     retention_days: int = 31
-    #: Per-project cadence for automatic decided-insight archiving at runtime
-    #: ingestion boundaries; 0 disables automatic passes, not explicit ingest.
-    automatic_insight_archive_interval_seconds: int = 3600
     #: Completed, unreferenced run components; 0 retains indefinitely (0–3650).
     run_retention_days: int = 31
     #: Physical-run retention scan budget, independent of usage reports (1–100000).
@@ -625,14 +569,9 @@ class Limits:
     #: discard already-sealed publishable work. The per-record transport
     #: bound stays fixed mechanism, never policy.
     event_stream_bytes: int = 4 * 1024 * 1024
-    #: Operator-selected bound on pending proposals offered per prompt.
-    #: Raw inbox/decisions stay on disk; the operator
-    #: review path (`mizu insight list`) uses a separate 1000-item bound.
-    pending_insights: int = 30
-    #: Operator-selected exact revision read/output bound for explicit insight history (1-1000).
-    insight_history_entries: int = DEFAULT_INSIGHT_HISTORY_ENTRIES
-    #: Absolute lifetime of an explicit insight enumeration cursor (seconds).
-    insight_cursor_ttl_seconds: int = 86400
+    #: Newest due messages stated per readable queue in a unit opening (0-64;
+    #: default 3). The count of due messages is always stated.
+    queue_opening_messages: int = 3
     #: Maximum open work-item rows offered in each full or delta prompt.
     work_items_prompt: int = 20
     #: Bulky unchanged row details in resumed persistent-session deltas.
@@ -641,20 +580,12 @@ class Limits:
     work_items_doing: int = 1
     #: Visibility only: uninterrupted doing age that warrants review.
     work_items_stale_seconds: int = 86400
-    #: Directory-entry budget for work-item record-question closure catalogs only.
-    operator_record_catalog_scan_entries: int = 2048
-    #: Operator-selected decision-event window per dispatch (1-100;
-    #: default 10). The 100-event cap stays fixed mechanism; the value is
-    #: policy: with rotation, a role with many deferrals sees each one
-    #: every N/value runs.
-    decision_events_limit: int = 10
     #: Operator-selected terminal work-item event window per dispatch
-    #: (1-100; default 10). Independent of the decision-event window above:
-    #: each source uses only its own project default unless the role
-    #: overrides it. The 100-event cap stays fixed mechanism.
+    #: (1-100; default 10) unless the role overrides it. The 100-event cap
+    #: stays fixed mechanism.
     work_item_events_limit: int = 10
-    #: Operator-selected per-source batch for structured wait and obligation
-    #: events (1-100; default 10). The 100-row delivery ceiling stays mechanism.
+    #: Operator-selected batch of CI wait events per dispatch (1-100;
+    #: default 10). The 100-row delivery ceiling stays mechanism.
     wait_events_limit: int = 10
     #: Operator-selected persistent-session rotation bounds. A resumed
     #: persistent session restarts with a fresh session key once cumulative
@@ -676,34 +607,25 @@ _LIMIT_RANGES = {"selection_max_interval_seconds": (1, TOML_INTEGER_MAX),
                  "lock_retry_interval_ms": (1, MAX_WAIT_SECONDS * 1000),
                  "pipe_poll_interval_ms": (1, 500),
                  "probe_executable_bytes": (1, TOML_INTEGER_MAX),
-                 "producer_inputs_per_source": (0, 1073741824),
-                 "open_work_items": (0, 1073741824),
                  "parallel_checks": (1, 64), "check_pending": (1, 1024),
                  "prior_role_report_preview_bytes": (0, MAX_PRIOR_ROLE_REPORT_PREVIEW_BYTES),
                  "history_temporaries": (1, MAX_HISTORY_TEMPORARIES),
-                 "decision_projection_records": (1, MAX_DECISION_PROJECTION_RECORDS),
-                 "decision_receipt_diagnostics": (0, MAX_DECISION_RECEIPT_DIAGNOSTICS),
                  "queue_observations": (0, MAX_QUEUE_OBSERVATIONS),
-                 "decision_reconciliation_bytes": (1, MAX_DECISION_RECONCILIATION_BYTES),
                  "history_index": (8, 1000000), "prompt_snapshots": (1, 64),
                  "delegate_wrap_up_requests": (0, 2),
                  "delegate_wrap_up_tools": (0, 4),
-                 "insight_history_entries": (1, MAX_INSIGHT_HISTORY_ENTRIES),
-                 "insight_cursor_ttl_seconds": (60, 604800),
                  "run_retention_scan_runs": (1, MAX_STORAGE_RUN_ENTRIES),
                  "host_record_reference_scan_entries": (1, TOML_INTEGER_MAX),
-                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_insight_archive_interval_seconds": (0, 2678400), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
+                 "retention_days": (0, 3650), "run_retention_days": (0, 3650), "snapshot_retention_days": (0, 3650), "automatic_prune_interval_seconds": (0, 2678400), "automatic_smoke_retention_interval_seconds": (0, 2678400),
                  "smoke_retention_projects": (1, TOML_INTEGER_MAX),
                  "smoke_retention_pairs": (1, TOML_INTEGER_MAX),
                  "smoke_retention_refs": (1, TOML_INTEGER_MAX),
                  "smoke_retention_entries": (1, TOML_INTEGER_MAX),
                  "smoke_retention_metadata_bytes": (1, TOML_INTEGER_MAX),
                  "smoke_retention_report_bytes": (1, TOML_INTEGER_MAX),
-                 "pending_insights": (1, 1000),
+                 "queue_opening_messages": (0, 64),
                  "work_items_prompt": (1, 100), "work_items_doing": (1, 100),
                  "work_items_stale_seconds": (1, 31536000),
-                 "operator_record_catalog_scan_entries": (1, TOML_INTEGER_MAX),
-                 "decision_events_limit": (1, 100),
                  "work_item_events_limit": (1, 100),
                  "wait_events_limit": (1, 100),
                  "event_log_compress_days": (0, 3650), "event_log_retention_days": (0, 3650),
@@ -820,7 +742,7 @@ class ServiceSettings:
 
 #: Wake kinds that may admit a standalone ``mizu run --event`` dispatch of a
 #: role; ``roles.<name>.event_wakes`` selects a subset (default: all).
-EVENT_WAKE_KINDS = ("operator_record", "decision", "work_item", "wait", "ci",
+EVENT_WAKE_KINDS = ("queue", "work_item", "wait", "ci",
                     "operator", "ready_work", "code")
 
 FINISH_OUTCOMES = ("continue", "wait", "blocked", "done")
@@ -840,11 +762,9 @@ class Role:
     daemon: bool = False
     selector: str = ""
     attributes: dict = dataclasses.field(default_factory=dict)
-    decision_events: tuple[str, ...] = ()
     work_item_events: tuple[str, ...] = ()
-    #: Independent effective event routes; load resolves legacy shared settings.
-    #: "own" routes by origin submitter, "any" by subscription alone.
-    decision_sources: str = "own"
+    #: Terminal work-item route: "own" delivers items the role created,
+    #: "any" every item matching the subscription.
     work_item_sources: str = "own"
     #: Independent exact retained-evidence read sources; grants remain explicit.
     command_evidence_sources: str = "own"
@@ -871,11 +791,8 @@ class Role:
     wrap_up_tools: int | None = None
     #: None inherits the project wall deadline; 0 disables only this wall.
     run_seconds: int | None = None
-    #: Per-role per-source event batch overrides. None inherits the matching
+    #: Per-role terminal work-item batch override. None inherits the
     #: project `[limits]` default; a set value must lie in 1-100.
-    decision_events_limit: int | None = None
-    #: Required explicit serialized-page budget for shared decision subscribers.
-    decision_page_bytes: int | None = None
     work_item_events_limit: int | None = None
     work_items_doing: int | None = None
     #: Per-role no-progress timer-wake override. None inherits the project
@@ -923,13 +840,7 @@ class Role:
     #: Optional context sections restored/removed against the capability
     #: default (see prompt_sections); validated at load.
     context_include: tuple[str, ...] = ()
-    #: Kernel event-name patterns this role subscribes to (docs/kernel.md).
-    subscribe: tuple[str, ...] = ()
     context_exclude: tuple[str, ...] = ()
-    #: Opt-in input gate for platform timers only; empty keeps open-ended runs.
-    scheduled_inputs: tuple[str, ...] = ()
-    #: Opt in to the open-work producer gate; inert for writers/non-producers.
-    held_at_capacity: bool = False
     finish_outcomes: tuple[str, ...] = FINISH_OUTCOMES
 
 
@@ -985,23 +896,6 @@ def role_wrap_up_tools(config: "Config", role: "Role") -> int:
 def role_run_seconds(config: "Config", role: "Role") -> int:
     """Resolve the role's wall policy once when its Context is created."""
     return config.limits.run_seconds if role.run_seconds is None else role.run_seconds
-
-
-def role_decision_events_limit(config: "Config", role: "Role") -> int:
-    """Effective decision-event batch for one role for one dispatch.
-
-    Schema: role override when set, else project `[limits]`
-    decision_events_limit. Trust: configuration. Failure: never raises;
-    malformed overrides read as the project value (load already refuses
-    them fail-closed).
-    """
-    try:
-        value = getattr(role, "decision_events_limit", None)
-    except Exception:
-        value = None
-    if type(value) is int and 1 <= value <= 100:
-        return value
-    return config.limits.decision_events_limit
 
 
 def role_work_item_events_limit(config: "Config", role: "Role") -> int:
@@ -1091,7 +985,7 @@ def role_daemon_spacing_seconds(config: "Config", role: "Role") -> int:
 
 
 #: Supported progress-signal names shared by project and per-role lists.
-ALLOWED_PROGRESS_SIGNALS = frozenset({"tool", "code", "state", "decision", "insight", "input"})
+ALLOWED_PROGRESS_SIGNALS = frozenset({"tool", "code", "state", "message", "input"})
 
 
 def role_progress_signals(config, role):
@@ -1450,17 +1344,25 @@ class Editor:
     search_max_bytes: int = 8 * 1024 * 1024
     search_max_matches: int = 50
     search_match_chars: int = 1000
+    #: Declared queue that Editor outbox messages are appended to by the
+    #: host principal; empty leaves the outbox unread.
+    queue: str = ""
 
 
-def editor_settings(raw: dict) -> Editor:
-    fields = dataclasses.fields(Editor)
-    keys(raw, {field.name for field in fields}, "editor")
+def editor_settings(raw: dict, queues=None) -> Editor:
+    fields = [field for field in dataclasses.fields(Editor) if field.name != "queue"]
+    keys(raw, {field.name for field in fields} | {"queue"}, "editor")
+    queue = string(raw.get("queue", ""), "editor.queue")
+    if queue:
+        from .kernel.queues import allows
+        if queues is None or queue not in queues or not allows(queues[queue].write, "host"):
+            raise ConfigError("editor.queue must name a declared queue that host may write")
     return Editor(**{
         field.name: number(raw.get(field.name, field.default), f"editor.{field.name}", 1,
                            MAX_EDITOR_SEARCH_MATCH_CHARS
                            if field.name == "search_match_chars" else TOML_INTEGER_MAX)
         for field in fields
-    })
+    }, queue=queue)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1505,7 +1407,7 @@ class Config:
     doctor: Doctor
     profiles: dict[str, dict]
     roles: dict[str, Role]
-    #: Default answering role for consultation when the caller names none.
+    #: Default consulted role when the caller names none.
     #: Empty (unset) fails closed: consultation then requires an explicit role.
     consult_role: str
     delegate_role: str
@@ -1516,14 +1418,11 @@ class Config:
     exclude: tuple[str, ...]
     selectors: dict = dataclasses.field(default_factory=dict)
     tzinfo: dt.tzinfo | None = None
-    insight_decisions: dict = dataclasses.field(default_factory=lambda: {
-        "work_item_intent_default": "create", "work_item_intent_by_source": {},
-        "operator_addressee": ""})
 
     #: Disabled unless the operator designates reproducible, excluded roots.
     workspace_cache: WorkspaceCache = dataclasses.field(default_factory=WorkspaceCache)
 
-    operator_records: dict = dataclasses.field(default_factory=dict)
+    #: Declared host publisher record kinds (publication results).
     record_kinds: dict = dataclasses.field(default_factory=dict)
     #: Kernel object kinds declared by the deployment (docs/kernel.md).
     kinds: dict = dataclasses.field(default_factory=dict)
@@ -1621,26 +1520,8 @@ def load(file: Path) -> Config:
     data = _load_merged(file)
     keys(data, ROOT_KEYS, "root")
     data.pop("include", None)
-    from .operator_records import configuration as record_configuration
-    records = record_configuration(data.get("operator_records", {}))
     from .host_records import configuration as kind_configuration
     kinds = kind_configuration(data.get("record_kinds", {}))
-    decisions = data.get("insight_decisions", {})
-    keys(decisions, {"work_item_intent_default", "work_item_intent_by_source",
-                     "operator_addressee"}, "insight_decisions")
-    decisions = {"work_item_intent_default": "create", "work_item_intent_by_source": {},
-                 "operator_addressee": "", **decisions}
-    operator_addressee = string(decisions["operator_addressee"],
-                                "insight_decisions.operator_addressee")
-    decisions["operator_addressee"] = operator_addressee
-    if decisions["work_item_intent_default"] not in ("create", "none"):
-        raise ConfigError("insight_decisions.work_item_intent_default must be create or none")
-    sources = decisions["work_item_intent_by_source"]
-    if not isinstance(sources, dict):
-        raise ConfigError("insight_decisions.work_item_intent_by_source must be a table")
-    for source, intent in sources.items():
-        if not ID.fullmatch(source) or intent not in ("create", "none"):
-            raise ConfigError("Insight decision source policies require source identifiers and create or none")
     engines = data.get("engines", {})
     keys(engines, set(ENGINES), "engines")
     environments = {}
@@ -1862,11 +1743,9 @@ def load(file: Path) -> Config:
     for name, role in role_tables.items():
         if not ID.fullmatch(name):
             raise ConfigError("Invalid role name")
-        if name in RESERVED_ROLE_NAMES:
-            raise ConfigError(f"Role name '{name}' is reserved for the operator channel")
-        keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change", "held_at_capacity",
-                    "finish_outcomes", "interval_seconds", "calendar", "daemon", "scheduled_inputs", "selector", "attributes",
-                    "decision_events", "work_item_events", "decision_sources", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "decision_events_limit", "decision_page_bytes", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections", "subscribe"}, f"roles.{name}")
+        keys(role, {"profile", "policy", "workspace", "capabilities", "engine_tools", "on_change",
+                    "finish_outcomes", "interval_seconds", "calendar", "daemon", "selector", "attributes",
+                    "work_item_events", "work_item_sources", "command_evidence_sources", "experiment_evidence_sources", "ci_wake", "check_result_wake", "persistent_exec", "requests_per_run", "tools_per_run", "wrap_up_requests", "wrap_up_tools", "run_seconds", "work_item_events_limit", "work_items_doing", "no_progress_backoff_seconds", "cooldown_seconds", "progress_signals", "event_poll_seconds", "event_batch_seconds", "event_wakes", "daemon_policy", "daemon_spacing_seconds", "context_sections"}, f"roles.{name}")
         profile = string(role.get("profile", ""), f"roles.{name}.profile")
         selector = string(role.get("selector", ""), f"roles.{name}.selector")
         if ("profile" in role) == ("selector" in role):
@@ -1884,8 +1763,6 @@ def load(file: Path) -> Config:
         # every role that holds any tool a result can come from.
         if set(caps) - {"finish", "result_read"} and "result_read" not in caps:
             caps = type(caps)((*caps, "result_read"))
-        if "withdraw_decided" in caps and "withdraw_insight" not in caps:
-            raise ConfigError(f"Role {name}: withdraw_decided requires withdraw_insight")
         engine_tools = strings(role.get("engine_tools", []), "engine_tools")
         if len(engine_tools) > 128 or len(set(engine_tools)) != len(engine_tools) or any(not tool or len(tool) > 256 for tool in engine_tools):
             raise ConfigError("engine_tools must contain at most 128 unique bounded names")
@@ -1900,22 +1777,10 @@ def load(file: Path) -> Config:
             raise ConfigError("sync requires a writable workspace")
         if "vcs_publish" in caps and workspace != "write":
             raise ConfigError("vcs_publish requires a writable workspace")
-        if "vcs_publish" in caps and "decide" in caps:
-            raise ConfigError(f"Role {name} must not combine vcs_publish with decide; "
-                              "it may submit ordinary insights but must never approve "
-                              "its own mutation (use a dedicated publisher role without self-approval)")
         if "vcs_retire" in caps and workspace == "none":
             raise ConfigError("vcs_retire requires a visible workspace")
-        if "vcs_retire" in caps and "decide" in caps:
-            raise ConfigError(f"Role {name} must not combine vcs_retire with decide; "
-                              "it may submit ordinary insights but must never approve "
-                              "its own mutation (use a dedicated integrator role without self-approval)")
         if "vcs_dispose" in caps and workspace == "none":
             raise ConfigError("vcs_dispose requires a visible workspace")
-        if "vcs_dispose" in caps and "decide" in caps:
-            raise ConfigError(f"Role {name} must not combine vcs_dispose with decide; "
-                              "it may submit ordinary insights but must never approve "
-                              "its own mutation (use a dedicated integrator role without self-approval)")
         if workspace == "write" and "verify" not in caps:
             raise ConfigError(f"Writable role {name} requires the verify capability so "
                               "completion can be bound to acceptance commands")
@@ -1956,43 +1821,14 @@ def load(file: Path) -> Config:
         daemon = boolean(role.get("daemon", False), "daemon")
         if sum((bool(interval), bool(calendar), daemon)) > 1:
             raise ConfigError("Choose one scheduling method per role")
-        scheduled_inputs = strings(role.get("scheduled_inputs", []), f"roles.{name}.scheduled_inputs")
-        if (len(set(scheduled_inputs)) != len(scheduled_inputs)
-                or set(scheduled_inputs) - {"deferred_insights"}):
-            raise ConfigError(f"roles.{name}.scheduled_inputs must list unique deferred_insights values")
-        if scheduled_inputs and (not (interval or calendar) or "insights" not in caps):
-            raise ConfigError(f"roles.{name}.scheduled_inputs requires a timed role with insights capability")
-        raw_events = role.get("decision_events", [])
-        events = strings(raw_events, f"roles.{name}.decision_events")
-        if len(events) > 8 or len(set(events)) != len(events):
-            raise ConfigError(f"roles.{name}.decision_events must list at most 8 unique actions")
-        for event in events:
-            if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", event):
-                raise ConfigError(f"roles.{name}.decision_events entries must be lowercase action names")
-            if event == "withdraw":
-                raise ConfigError(f"roles.{name}.decision_events must never include withdraw; "
-                                  "withdrawn findings are never reanimated")
         work_events = strings(role.get("work_item_events", []), f"roles.{name}.work_item_events")
         if len(set(work_events)) != len(work_events) or any(e not in ("done", "dropped") for e in work_events):
             raise ConfigError(f"roles.{name}.work_item_events must list unique done/dropped values")
-        raw_sources = role.get("decision_sources", "own")
-        work_sources = role.get("work_item_sources", raw_sources if work_events else "own")
-        for key, value in (("decision_sources", raw_sources), ("work_item_sources", work_sources)):
-            if not isinstance(value, str) or value not in ("own", "any"):
-                raise ConfigError(f"roles.{name}.{key} must be own or any")
-        if "work_item_sources" not in role:
-            # Legacy shared route: keep terminal delivery, but do not invent
-            # an any-source decision subscription for a terminal-only role.
-            if raw_sources == "any" and not (events or work_events):
-                raise ConfigError(f"roles.{name}.decision_sources is any without decision_events or work_item_events; "
-                                  "subscribe to at least one action")
-            if not events:
-                raw_sources = "own"
-        else:
-            for key, value, subscription in (("decision_sources", raw_sources, events),
-                                             ("work_item_sources", work_sources, work_events)):
-                if value == "any" and not subscription:
-                    raise ConfigError(f"roles.{name}.{key} is any without its event subscription")
+        work_sources = role.get("work_item_sources", "own")
+        if not isinstance(work_sources, str) or work_sources not in ("own", "any"):
+            raise ConfigError(f"roles.{name}.work_item_sources must be own or any")
+        if work_sources == "any" and not work_events:
+            raise ConfigError(f"roles.{name}.work_item_sources is any without its event subscription")
         ci_wake = boolean(role.get("ci_wake", workspace == "write"), f"roles.{name}.ci_wake")
         check_result_wake = boolean(role.get("check_result_wake", True),
                                     f"roles.{name}.check_result_wake")
@@ -2021,12 +1857,6 @@ def load(file: Path) -> Config:
         role_seconds = role.get("run_seconds")
         if role_seconds is not None:
             number(role_seconds, f"roles.{name}.run_seconds", 0, 1073741824)
-        role_decision_bytes = role.get("decision_page_bytes")
-        if role_decision_bytes is not None:
-            number(role_decision_bytes, f"roles.{name}.decision_page_bytes", 1, 1048576)
-        role_decision_limit = role.get("decision_events_limit")
-        if role_decision_limit is not None:
-            number(role_decision_limit, f"roles.{name}.decision_events_limit", 1, 100)
         role_work_item_limit = role.get("work_item_events_limit")
         if role_work_item_limit is not None:
             number(role_work_item_limit, f"roles.{name}.work_item_events_limit", 1, 100)
@@ -2087,16 +1917,12 @@ def load(file: Path) -> Config:
         roles[name] = Role(name, profile, policy, workspace, caps,
                            strings(role.get("engine_tools", []), "engine_tools"),
                            boolean(role.get("on_change", False), "on_change"), interval, calendar, daemon, selector, attrs,
-                           decision_events=events, work_item_events=work_events, decision_sources=raw_sources,
-                           work_item_sources=work_sources, ci_wake=ci_wake,
+                           work_item_events=work_events, work_item_sources=work_sources, ci_wake=ci_wake,
                            check_result_wake=check_result_wake, finish_outcomes=finish_outcomes,
                            persistent_exec=persistent_exec,
-                           held_at_capacity=boolean(role.get("held_at_capacity", False),
-                                                    f"roles.{name}.held_at_capacity"),
                            requests_per_run=role_requests, tools_per_run=role_tools,
                            wrap_up_requests=role_wrap_requests, wrap_up_tools=role_wrap_tools,
                            run_seconds=role_seconds,
-                           decision_events_limit=role_decision_limit, decision_page_bytes=role_decision_bytes,
                            work_item_events_limit=role_work_item_limit,
                            work_items_doing=role_doing,
                            no_progress_backoff_seconds=role_backoff,
@@ -2107,18 +1933,10 @@ def load(file: Path) -> Config:
                            event_wakes=event_wakes,
                            daemon_policy=daemon_policy,
                            daemon_spacing_seconds=role_daemon_spacing,
-                           scheduled_inputs=scheduled_inputs, context_include=context_include,
-                           subscribe=_kernel_subscriptions(role.get("subscribe"), f"roles.{name}.subscribe"),
+                           context_include=context_include,
                            context_exclude=context_exclude, **evidence_sources)
     if not roles:
         raise ConfigError("At least one role is required")
-    if operator_addressee:
-        if (not ID.fullmatch(operator_addressee)
-                or operator_addressee in RESERVED_ROLE_NAMES
-                or operator_addressee == ROUTE_TO_SOURCE_ADDRESSEE):
-            raise ConfigError("Invalid insight_decisions.operator_addressee name")
-        if operator_addressee not in roles:
-            raise ConfigError(f"insight_decisions.operator_addressee is not a configured role: {operator_addressee}")
     consult_role = string(data.get("consult_role", ""), "consult_role")
     if consult_role:
         if not ID.fullmatch(consult_role):
@@ -2173,7 +1991,7 @@ def load(file: Path) -> Config:
     vcs = data.get("vcs", {})
     keys(vcs, {"artifact_full_read_chars", "artifact_page_bytes", "command", "timeout_seconds",
                "max_bytes", "diagnostic_bytes", "ci_branch", "ci_wake_extra_branches", "ci_rewake_seconds",
-               "poll_enabled", "poll_proposals_enabled", "change_stream_enabled", "ci_wait_descendants",
+               "poll_enabled", "observation_queue", "approval_queue", "change_stream_enabled", "ci_wait_descendants",
                "poll_interval_seconds", "poll_max_branches", "poll_max_ci_wait_targets",
                "ci_cache_max_branches", "ci_cache_max_checks_per_branch",
                "poll_fetch_timeout_seconds", "poll_status_timeout_seconds",
@@ -2183,7 +2001,7 @@ def load(file: Path) -> Config:
            "artifact_full_read_chars": DEFAULT_ARTIFACT_FULL_READ_CHARS,
            "max_bytes": 524288, "diagnostic_bytes": ADAPTER_DIAGNOSTIC_BYTES_DEFAULT,
            "ci_branch": "", "ci_wake_extra_branches": [], "ci_rewake_seconds": 1800,
-           "poll_enabled": False, "poll_proposals_enabled": False,
+           "poll_enabled": False, "observation_queue": "", "approval_queue": "",
            "change_stream_enabled": False, "ci_wait_descendants": True,
            "poll_interval_seconds": DEFAULT_VCS_POLL_INTERVAL_SECONDS, "poll_max_branches": 4, "poll_max_ci_wait_targets": 16,
            "ci_cache_max_branches": DEFAULT_CI_CACHE_MAX_BRANCHES,
@@ -2243,7 +2061,12 @@ def load(file: Path) -> Config:
     number(vcs["ci_rewake_seconds"], "vcs.ci_rewake_seconds", 60, 86400)
     vcs["ci_wait_descendants"] = boolean(vcs["ci_wait_descendants"], "vcs.ci_wait_descendants")
     vcs["poll_enabled"] = boolean(vcs["poll_enabled"], "vcs.poll_enabled")
-    vcs["poll_proposals_enabled"] = boolean(vcs["poll_proposals_enabled"], "vcs.poll_proposals_enabled")
+    queues = _kernel_queues(data.get("queues", {}))
+    from .kernel.queues import allows as _queue_allows
+    for key, writer in (("observation_queue", "host"), ("approval_queue", "operator")):
+        vcs[key] = string(vcs[key], f"vcs.{key}")
+        if vcs[key] and (vcs[key] not in queues or not _queue_allows(queues[vcs[key]].write, writer)):
+            raise ConfigError(f"vcs.{key} must name a declared queue that {writer} may write")
     number(vcs["poll_interval_seconds"], "vcs.poll_interval_seconds", 15, 86400)
     number(vcs["poll_max_branches"], "vcs.poll_max_branches", 1, 64)
     number(vcs["poll_max_ci_wait_targets"], "vcs.poll_max_ci_wait_targets", 1, 64)
@@ -2277,10 +2100,10 @@ def load(file: Path) -> Config:
                   environments, limits, sandbox, doctor_policy(data.get("doctor", {})),
                   profiles, roles, consult_role, delegate_role, timezone, web, vcs, mat,
                   strings(data.get("exclude", [".git", ".pi", ".env", ".env.*", ".venv",
-                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors, insight_decisions=decisions,
-                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), operator_records=records, record_kinds=kinds,
+                                                "node_modules", "__pycache__", "*.pyc", "*.pyo", ".pytest_cache"]), "exclude"), selectors,
+                  workspace_cache=workspace_cache_policy(data.get("workspace_cache", {})), record_kinds=kinds,
                   kinds=_kernel_kinds(data.get("kinds", {})),
-                  queues=_kernel_queues(data.get("queues", {})),
+                  queues=queues,
                   usage=usage_policy(data.get("usage", {})),
                   dispatch_evidence=dispatch_evidence_policy(data.get("dispatch_evidence", {})),
                   ci_requests=ci_request_evidence_policy(data.get("ci_requests", {})),
@@ -2289,6 +2112,6 @@ def load(file: Path) -> Config:
                   publication_evidence=publication_evidence_policy(data.get("publication_evidence", {})),
                   scheduler_evidence=scheduler_evidence_policy(data.get("scheduler_evidence", {})),
                   services=service_settings(data.get("services", {})),
-                  editor=editor_settings(data.get("editor", {})),
+                  editor=editor_settings(data.get("editor", {}), queues),
                   completion_evidence=completion_evidence_policy(data.get("completion_evidence", {}), roles),
                   tool_effects=tool_effects)

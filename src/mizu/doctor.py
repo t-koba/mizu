@@ -16,7 +16,7 @@ from .budget import Budget
 from .config import Config, MEBIBYTE_BYTES, keys, resolve_timezone, strings
 from .drivers import command_for
 from .errors import ConfigError, Denied, LimitExceeded, MizuError
-from .fs import digest, identifier, mkdir, read_json, safe_read
+from .fs import digest, identifier, mkdir, safe_read
 from .pi import credentials
 from .process import run, stop_note
 from .sandbox import CHECKPOINT_ANNOTATION, CHECKPOINT_INSPECT_MAXIMUM, Sandbox, ensure_single, inspect_text_has_valueless_env, inspect_text_is_checkpoint, runtime_base, runtime_env
@@ -343,7 +343,6 @@ def check(config: Config, *, sandbox: bool = False) -> dict:
     checked("budget file", lambda: budget_file(config))
     checked("service units", lambda: service_units())
     checks.append(check_runner_row(config))
-    checked("proposal stores", lambda: proposal_stores(config))
     engines = {config.engine(p) for p in config.profiles}
     if "pi" in engines or "pi-durable" in engines:
         checked("node", lambda: node_capability(config))
@@ -487,43 +486,6 @@ def help_has_flag(text: str, flag: str) -> bool:
     """Token-anchored flag presence. Substring search would accept `--print`
     as evidence for `-p`."""
     return re.search(r"(?:^|\s)" + re.escape(flag) + r"(?:[\s,=]|$)", text) is not None
-
-
-def inbox_integrity(project_root: Path) -> dict:
-    """Unreadable or malformed proposals that projections skip. Loud here."""
-    bad, total = [], 0
-    for path in sorted((project_root / "inbox").glob("*.json")):
-        total += 1
-        try:
-            if path.is_symlink():
-                raise ValueError("symlink")
-            item = read_json(path)
-            for key in ("id", "source", "title", "created_at", "base_snapshot"):
-                item[key]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            bad.append(path.name)
-    if bad:
-        raise ConfigError("Unreadable proposals (projections skip them): " + ", ".join(bad[:10]))
-    return {"proposals": total}
-
-
-def proposal_stores(config: Config) -> dict:
-    """Fail loudly on unreadable proposals in any project. Projections skip
-    them for availability; doctor is the detection point."""
-    checked = bad = 0
-    for project in sorted((config.data / "projects").glob("*")):
-        if not project.is_dir() or project.name.startswith("."):
-            continue
-        inbox = project / "inbox"
-        if not inbox.is_dir():
-            continue
-        checked += 1
-        try:
-            inbox_integrity(project)
-        except ConfigError as exc:
-            bad += 1
-            raise ConfigError(f"{project.name}: {exc}") from exc
-    return {"projects": checked, "unreadable": bad}
 
 
 #: Bounded project-settings read for the check-runner diagnostic. The doctor

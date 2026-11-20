@@ -723,7 +723,7 @@ def _release_locked(project, ids, *, protect=frozenset()):
             # Close the probe before removal (Windows cannot unlink an open
             # CRT lock file). check-jobs.lock still excludes execution: a stale
             # runner must re-read the terminal/missing job before starting.
-            with project.insights.ledger.write('check_jobs', [job_id]):
+            with project.ledger.write('check_jobs', [job_id]):
                 shutil.rmtree(directory)
             original_id = job.get('shared_job')
             if isinstance(original_id, str):
@@ -1047,7 +1047,7 @@ def submit(context, script=None, *, commands=None, kind="experiment", fresh=Fals
                 write_job(project, job_id, job)
                 os.utime(root(project), None)
             except BaseException:
-                with project.insights.ledger.write('check_jobs', [job_id]):
+                with project.ledger.write('check_jobs', [job_id]):
                     shutil.rmtree(directory, ignore_errors=True)
                 raise
             for record in superseded:
@@ -1390,7 +1390,7 @@ def _withdraw_locked(project, job_id, *, role, replaced_by=None):
         raw['status'] = 'cancelled'
         write_job(project, job_id, raw)
     if not interested:
-        with project.insights.ledger.write('check_jobs', [original_id]):
+        with project.ledger.write('check_jobs', [original_id]):
             write_json(root(project) / original_id / 'cancel.json', {'requested_at': now()})
     os.utime(root(project), None)
     return {**summary(read(project, job_id), project), 'cancel_requested': True}
@@ -1831,9 +1831,8 @@ def _execute(project, job, stop, sandbox_factory, slot):
 def wait_signature(project):
     control = project.control()
     pointer = read_json(project.root / 'current.json', {})
-    # A new publication, operator wake or incoming decision is independent work.
-    return {'snapshot': pointer.get('snapshot'), 'wake': control.get('wake_generation'),
-            'inbox': project.insights.generation()}
+    # A new publication or operator wake is independent work.
+    return {'snapshot': pointer.get('snapshot'), 'wake': control.get('wake_generation')}
 
 
 def _wait_job_id(project, role):
@@ -1886,7 +1885,7 @@ def set_wait(project, role, job_id, wait_until=None, *, continuation=None):
         if continuation is not None:
             record['continuation'] = {k: continuation[k] for k in ('run', 'snapshot', 'code_digest', 'summary', 'state') if k in continuation}
         name = role + '.wait.json'
-        with project.insights.ledger.write('check_jobs', [name]):
+        with project.ledger.write('check_jobs', [name]):
             write_json(root(project) / name, record)
         if previous_id is not None and previous_id != job_id:
             _release_wait_target(project, previous_id)
@@ -1942,7 +1941,7 @@ def clear_wait(project, role):
     name = role + '.wait.json'
     with lock(project.root / 'locks/check-jobs.lock'):
         previous_id = _wait_job_id(project, role)
-        with project.insights.ledger.write('check_jobs', [name]):
+        with project.ledger.write('check_jobs', [name]):
             (root(project) / name).unlink(missing_ok=True)
         _release_wait_target(project, previous_id)
 
@@ -2019,7 +2018,7 @@ def mark_wake_delivered(project, role, ids, run):
             if job.get('role') != role:
                 raise Denied('Check wake belongs to another role')
             if _automatic_wake_pending(project, job):
-                with project.insights.ledger.write('check_jobs', [job_id]):
+                with project.ledger.write('check_jobs', [job_id]):
                     write_json(root(project) / job_id / 'wake.json',
                                {'id': job_id, 'role': role, 'run': run})
 

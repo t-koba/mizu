@@ -3,9 +3,8 @@
 Schema: every key of the unit-opening JSON object belongs to exactly one named
 section (the table ``SECTIONS``) or is a fixed key that every role receives
 (``FIXED_KEYS``: the unit statement, tool surface, snapshot pins, and every
-key that delivers an instruction or a pending obligation to the role:
-decisions, work-item events, waits, obligations, operator records, and the
-fixed ci_branch configuration and external_check_wake facts and
+key that delivers something pending to the role: work-item events, CI waits,
+and the fixed ci_branch configuration and external_check_wake facts and
 capability-gated details route). The ci
 section carries only aggregate summaries and is strictly opt-in via include.
 Default membership is one uniform rule: a section is offered when the role holds a
@@ -37,14 +36,12 @@ class Section:
 
 
 SECTIONS: dict[str, Section] = {
-    "open_work_items": Section(("open_work_items",),
-                               WORK_CAPABILITIES | {"submit_insight", "decide"}, False),
+    "open_work_items": Section(("open_work_items",), WORK_CAPABILITIES, False),
     "ready_work": Section(("ready_work",), WORK_CAPABILITIES, False),
     "work_order": Section(("work_order",), frozenset({"work_order"}), True),
     "check_jobs": Section(("check_jobs", "check_continuation", "shared_checks", "check_discovery"),
                           frozenset({"check_job"}), True),
-    "insights": Section(("pending_insights", "open_insights"),
-                        frozenset({"insights", "decide"}), True),
+    "queues": Section(("queues",), frozenset({"queues"}), False),
     "research": Section(("research_state",), frozenset({"research_read", "research"}), True),
     "ci": Section(("ci_summary",), frozenset(), False),
     "acceptance": Section(("acceptance_commands",), frozenset({"verify"}), True),
@@ -55,8 +52,7 @@ SECTIONS: dict[str, Section] = {
 FIXED_KEYS = frozenset({
     "unit", "unit_tool_surface", "goal_digest", "admission", "grant_transition",
     "published_snapshot", "recent_snapshots", "snapshot_delta", "workspace", "workspace_mode",
-    "operator_records", "decision_events", "decision_page", "decision_receipt_diagnostics",
-    "decision_task", "work_item_events", "wait_events", "ci_wait_delivery", "obligations",
+    "work_item_events", "ci_wait_delivery",
     "capture_limit", "review_authority", "publication_state", "ci_branch", "external_check_wake",
     "run", "now", "timezone"})
 

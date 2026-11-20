@@ -175,7 +175,7 @@ def child_authority_digest(config, role, *, spend_role, settings, policy,
             'sandbox': asdict(config.sandbox),
             'tool_policy': {key: getattr(config, key) for key in
                             ('web', 'vcs', 'materialize', 'exclude',
-                             'insight_decisions', 'operator_records', 'record_kinds')},
+                             'record_kinds')},
             'workspace_cache': asdict(config.workspace_cache),
         }
         encoded = canonical(identity)
@@ -638,7 +638,7 @@ PROMPT_STATE_BYTES = 65536
 
 
 def read_prompt_state(directory):
-    """Last dispatched snapshot/inbox generation for a session directory."""
+    """Last dispatched snapshot cursor for a session directory."""
     from .fs import read_json
     try:
         record = read_json(directory / "prompt_state.json", None, max_bytes=PROMPT_STATE_BYTES)
@@ -649,7 +649,7 @@ def read_prompt_state(directory):
     return record
 
 
-def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=None, row_details=None,
+def write_prompt_state(directory, *, snapshot, broker_grant=None, row_details=None,
                        sections=None):
     """Atomically replace the published cursor, grant and bounded row hashes.
 
@@ -662,7 +662,7 @@ def write_prompt_state(directory, *, snapshot, inbox_generation, broker_grant=No
     """
     from .fs import now, write_json
     write_json(directory / "prompt_state.json",
-               {"snapshot": snapshot, "inbox_generation": inbox_generation, "created_at": now(),
+               {"snapshot": snapshot, "created_at": now(),
                 **({"broker_grant": broker_grant} if broker_grant is not None else {}),
                 **({"row_details": row_details} if row_details is not None else {}),
                 **({"sections": sorted(set(sections))} if sections is not None else {})})

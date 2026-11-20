@@ -41,8 +41,11 @@ def _exclude_matcher(excludes):
     return re.compile("|".join(fnmatch.translate(p) for p in excludes)).match if excludes else lambda _: False
 
 
-PROGRESS_SIGNALS = ("tool", "code", "state", "decision", "insight", "input")
-WRITER_HANDOFF_PROGRESS_SIGNALS = ("tool", "code", "decision", "insight")
+#: Signals a new progress record states. A stored record keeps the signal
+#: names it was written with; validation checks their shape, not the names.
+PROGRESS_SIGNALS = ("tool", "code", "state", "message", "input")
+WRITER_HANDOFF_PROGRESS_SIGNALS = ("tool", "code", "message")
+MAX_PROGRESS_SIGNALS = 16
 #: Finish outcomes subject to the unchanged-input no-progress policy.
 NO_PROGRESS_OUTCOMES = ("continue", "bounded", "wait", "blocked")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
@@ -133,9 +136,8 @@ def validate_progress(value: dict) -> dict:
                 or conversion.get("status") != "converted"
                 or (schema == 6 and (
                     conversion.get("reason") != "ready_work_with_pending_structured_wait"
-                    or conversion.get("wait_kind") not in {
-                        "deadline", "code_change", "insight_decided", "dependency",
-                        "ci", "publication_ci", "proposal_merged", "record_closed", "object_resolved"}))
+                    or not isinstance(conversion.get("wait_kind"), str)
+                    or not ID.fullmatch(conversion["wait_kind"])))
                 or (schema == 7 and (
                     conversion.get("reason") != "ready_work_without_proven_structured_wait"
                     or conversion.get("wait_kind") is not None))
@@ -144,12 +146,13 @@ def validate_progress(value: dict) -> dict:
                 or value.get("ready_work") is not True):
             raise Denied("Invalid snapshot writer wait-conversion diagnostic")
     signals = value["signals"]
-    if (not isinstance(signals, dict) or set(signals) != set(PROGRESS_SIGNALS)
-            or any(type(signals[name]) is not bool for name in PROGRESS_SIGNALS)):
+    if (not isinstance(signals, dict) or not 1 <= len(signals) <= MAX_PROGRESS_SIGNALS
+            or any(not isinstance(name, str) or not ID.fullmatch(name)
+                   or type(flag) is not bool for name, flag in signals.items())):
         raise Denied("Invalid snapshot progress signals")
     selected = value["selected"]
-    if (not isinstance(selected, list) or len(selected) > len(PROGRESS_SIGNALS)
-            or any(not isinstance(name, str) or name not in PROGRESS_SIGNALS for name in selected)
+    if (not isinstance(selected, list) or len(selected) > len(signals)
+            or any(not isinstance(name, str) or name not in signals for name in selected)
             or len(selected) != len(set(selected))):
         raise Denied("Invalid snapshot progress policy")
     if not isinstance(value["role"], str) or not ID.fullmatch(value["role"]):
@@ -191,7 +194,7 @@ def progress_projection(value: dict | None) -> dict | None:
         return None
     validate_progress(value)
     projected = {"schema": value["schema"],
-                 "signals": {name: value["signals"][name] for name in PROGRESS_SIGNALS},
+                 "signals": dict(value["signals"]),
                  "selected": list(value["selected"]), "role": value["role"],
                  "has_progress": value["has_progress"],
                  "no_progress_count": value["no_progress_count"],
@@ -235,7 +238,7 @@ def progress_disposition(value: dict | None, outcome: str, config=None,
             # Allowance and backoff are a read-only continuation policy.
             return "not_applicable"
         if writer:
-            if any(name in value["selected"] and value["signals"][name]
+            if any(name in value["selected"] and value["signals"].get(name)
                    for name in WRITER_HANDOFF_PROGRESS_SIGNALS):
                 return "progress_requires_next"
             return "writer_requires_work_signal" if value["has_progress"] else "parked_no_progress"
@@ -593,7 +596,7 @@ class Snapshots:
 
     def create(self, captured: dict, *, goal: str, state: str, run: str | None,
                outcome: str, summary: str, verification: dict | None = None,
-               wake_at: float | None = None, inbox_seen: str = "", wake_generation: str = "",
+               wake_at: float | None = None, wake_generation: str = "",
                progress: dict | None = None, next_step: str | None = None, review: dict | None = None,
                parent: str | None | object = _CURRENT_PARENT) -> dict:
         """Persist an immutable capture; publication is a separate CAS operation.
@@ -617,7 +620,7 @@ class Snapshots:
         record = {**captured, "created_at": now(), "goal": goal,
                   "goal_digest": digest(goal.encode()), "state": state, "run": run,
                   "outcome": outcome, "summary": summary, "verification": verification,
-                  "wake_at": wake_at, "inbox_seen": inbox_seen, "wake_generation": wake_generation,
+                  "wake_at": wake_at, "wake_generation": wake_generation,
                   "parent": parent}
         if progress is not None:
             record["progress"] = progress
@@ -641,8 +644,8 @@ class Snapshots:
         a stored record's CAS. Immutable history precedes the durable pointer commit;
         I/O failure can leave an unreferenced generation, as before. No external
         I/O or admission changes; fs.lock releases on exit/process death.
-        Never acquire insights.lock here: delivery binding takes this publication
-        lock first, then insights.lock through its immutable work-item append.
+        Never acquire records.lock here: delivery binding takes this publication
+        lock first, then records.lock through its immutable work-item append.
         """
         with lock(self.root / "locks" / "publication.lock"):
             from .continuations import pointer_at, publication_metadata

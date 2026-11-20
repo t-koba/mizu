@@ -17,16 +17,15 @@ from .config import (Config, ProjectImport, _lineage_target, keys, strings,
 from .errors import ConfigError, Denied, LimitExceeded
 from .fs import ID, SCRIPT_MAX, atomic_write, identifier, lock, mkdir, now, read_json, safe_read, sync_dir, write_json
 from .check_job_index import CHECK_JOBS, CheckJobSource
-from .insights import Insights
 from .kernel import EventLog, Objects, QueueStore
-from .kernel_shadow import KernelShadow
+from .kernel.queues import allows
 from .process import environment, run, stop_note
 from .snapshot import (no_progress_recovery_due, open_store,
                        progress_disposition, progress_projection, validate_progress)
+from .ledger import Ledger
 from .work_items import WorkItems
 
 
-_UNSET = object()
 
 
 def session_persistence_scope(config: Config, role_name: str | None) -> str:
@@ -142,37 +141,13 @@ class Project:
         self.kernel_objects = Objects(self.root, config.kinds, self.kernel_events)
         self._kernel_queues = None
         self.snapshots = open_store(self.root, config, create_dirs=not read_only)
-        self.insights = Insights(self.root, retention_days=config.limits.retention_days,
-                                 producer_inputs_per_source=config.limits.producer_inputs_per_source,
-                                 open_work_items=config.limits.open_work_items,
-                                 decision_projection_records=config.limits.decision_projection_records,
-                                 decision_receipt_diagnostics=config.limits.decision_receipt_diagnostics,
-                                 decision_reconciliation_bytes=config.limits.decision_reconciliation_bytes,
-                                 cursor_ttl_seconds=config.limits.insight_cursor_ttl_seconds,
-                                 history_entries=config.limits.insight_history_entries,
-                                 kernel_shadow=KernelShadow(self.kernel_objects),
-                                 work_item_intent_default=config.insight_decisions["work_item_intent_default"],
-                                 work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"],
-                                 operator_addressee=config.insight_decisions["operator_addressee"])
-        self.insights.snapshots = self.snapshots
-        # The same authority marker switches decision reads and the live writer.
-        from .queue_decision_delivery import DecisionQueueWriter
-        self.insights.decision_queue_writer = DecisionQueueWriter(self)
-        # Late acceptance is a separate projection; immutable snapshots stay unchanged.
-        from . import operator_records, queue_record_delivery
-        from .operator_records import record_question_lookup, register_question_wait, record_answer_evidence
-        if queue_record_delivery.authority_kind(self.insights.root) == "queues":
-            record_question_lookup = queue_record_delivery.record_question_lookup
-            register_question_wait = queue_record_delivery.register_question_wait
-            record_answer_evidence = queue_record_delivery.record_answer_evidence
-        self.work_items = WorkItems(self.root, self.snapshots, self.insights, vcs=config.vcs,
+        #: Current-state index shared by the project's record stores.
+        self.ledger = Ledger(self.root)
+        self.work_items = WorkItems(self.root, self.snapshots, self.ledger, vcs=config.vcs,
                                     completion_evidence=config.completion_evidence,
                                     writer_roles_lookup=lambda: wait_writer_roles(self.config, self.roles),
                                     ci_wait_settings=self.vcs_settings,
                                     ci_request_roles=lambda: wait_ci_request_roles(self.config, self.roles),
-                                    record_question_lookup=lambda: record_question_lookup(self),
-                                    record_answer_evidence=lambda subject, holder, proof: record_answer_evidence(self, subject, holder, proof),
-                                    register_question_wait=lambda subject, holder: register_question_wait(self, subject, holder),
                                     record_kinds=config.record_kinds,
                                     publication_evidence=config.publication_evidence,
                                     effective_verification_projection=self.effective_verification_projection,
@@ -181,8 +156,7 @@ class Project:
                                                   if role.work_items_doing is not None},
                                     stale_seconds=config.limits.work_items_stale_seconds,
                                     history_temporaries=config.limits.history_temporaries)
-        self.insights.ledger.attach(CHECK_JOBS, CheckJobSource(self))
-        self.insights.work_items = self.work_items
+        self.ledger.attach(CHECK_JOBS, CheckJobSource(self))
         from .role_state import RoleStateStore
         self.role_state = RoleStateStore(self.root / "role-state",
                                          max_bytes=config.limits.role_state_bytes)
@@ -319,114 +293,18 @@ class Project:
     def effective_verification(self, snapshot):
         return self.effective_verification_projection(snapshot)[0]
 
-    def backpressure(self, *, open_count=_UNSET) -> dict:
-        """Report configured producer/open-work congestion and current load.
-
-        Both configured limits, the authoritative open/doing/blocked count,
-        per-producer unresolved live input counts (undecided plus deferred;
-        resolved and archive-only history excluded), and the currently held
-        producers with their role names, reasons, and exact thresholds. Sources
-        are generic role names; writable roles (the project writer) and
-        operator/vcs/editor channels are never producers. Counts come only
-        from the current project's Insights live inbox and WorkItems ledger;
-        no private or ignored state is read. Both metrics are attempted for
-        visibility even with disabled bounds. An unreadable metric reports
-        ``None`` and ``load_ok`` False; admission is held only when the
-        corresponding per-source bound or explicit per-role open-work policy
-        enables that metric. Invalid relevant limits fail closed.
-        """
-        from .scheduling import ProducerFacts, evaluate_producer
-
-        def _checked_limit(name):
-            value = getattr(self.insights, name)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise Denied(f"Invalid {name}")
-            if not 0 <= value <= 1073741824:
-                raise Denied(f"Invalid {name}")
-            return value
-
-        def _raw_limit(name):
-            try:
-                return getattr(self.insights, name)
-            except Exception:
-                return None
-
-        producers = []
-        producer_policy = {}
-        try:
-            for name in self.roles:
-                role = self.config.roles.get(name)
-                if (role is not None and getattr(role, "workspace", None) != "write"
-                        and "submit_insight" in set(getattr(role, "capabilities", ()) or ())):
-                    held_at_capacity = getattr(role, "held_at_capacity", False)
-                    producer_policy[name] = (held_at_capacity if type(held_at_capacity) is bool else False,
-                                             type(held_at_capacity) is bool)
-                    producers.append(name)
-            producers.sort()
-        except Exception:
-            producers = []
-            producer_policy = {}
-        per_source_valid = open_limit_valid = True
-        try:
-            per_source_limit = _checked_limit("producer_inputs_per_source")
-        except Exception:
-            per_source_valid = False
-            per_source_limit = _raw_limit("producer_inputs_per_source")
-        try:
-            open_limit = _checked_limit("open_work_items")
-        except Exception:
-            open_limit_valid = False
-            open_limit = _raw_limit("open_work_items")
-        limits_ok = per_source_valid and open_limit_valid
-        counts: dict = {}
-        supplied_open_count = open_count
-        open_count = None
-        counts_ok = open_ok = True
-        try:
-            # One inbox scan for all configured producers, even when disabled.
-            counts = dict(self.insights.unresolved_counts(producers)) if producers else {}
-        except Exception:
-            counts_ok = False
-        try:
-            open_count = (self.work_items.count_open_readonly()
-                          if supplied_open_count is _UNSET else supplied_open_count)
-            if type(open_count) is not int or open_count < 0:
-                raise Denied("Invalid open work count")
-        except Exception:
-            open_count = None
-            open_ok = False
-        # Status readability is independent of the metrics admission needs.
-        held = []
-        for name in producers:
-            held_at_capacity, policy_valid = producer_policy[name]
-            role_open_limit = open_limit if held_at_capacity and open_limit_valid else 0
-            role_load_ok = (per_source_valid and (not per_source_limit or counts_ok)
-                            and policy_valid
-                            and (not held_at_capacity or
-                                 (open_limit_valid and (not open_limit or open_ok))))
-            decision = evaluate_producer(ProducerFacts(
-                is_producer=True, per_source_limit=per_source_limit,
-                open_work_limit=role_open_limit, held_at_capacity=held_at_capacity,
-                source_pending=counts.get(name, 0), open_count=open_count or 0,
-                load_ok=role_load_ok))
-            if decision.held:
-                thresholds = {}
-                if "per_source_full" in decision.reasons:
-                    thresholds["producer_inputs_per_source"] = per_source_limit
-                if "open_work_full" in decision.reasons:
-                    thresholds["open_work_items"] = open_limit
-                if "load_unavailable" in decision.reasons:
-                    if not per_source_valid or per_source_limit:
-                        thresholds["producer_inputs_per_source"] = per_source_limit
-                    if held_at_capacity and (not open_limit_valid or open_limit):
-                        thresholds["open_work_items"] = open_limit
-                held.append({"source": name, "reasons": list(decision.reasons),
-                             "pending": counts.get(name), "thresholds": thresholds})
-        return {"limits": {"producer_inputs_per_source": per_source_limit,
-                           "open_work_items": open_limit},
-                "open_work_count": open_count,
-                "producer_inputs": [{"source": name, "pending": counts.get(name)} for name in producers],
-                "held": held, "load_ok": limits_ok and counts_ok and open_ok}
+    def queue_status(self) -> dict:
+        """Per declared queue: its last sequence and, where the operator reads
+        it, the operator's due unacknowledged count. Never acknowledges."""
+        store = self.kernel_queues
+        result = {}
+        for name, queue in self.config.queues.items():
+            row = {"head": store._head(name)}
+            if allows(queue.read, "operator"):
+                facts = store.pending(name, "operator", newest=0)
+                row.update(operator_due=facts["count"], operator_due_more=facts["more"])
+            result[name] = row
+        return result
 
     def work_order_status(self) -> dict:
         """Operator-readable freshness for the writer's explicit order.
@@ -475,7 +353,6 @@ class Project:
         idle_diagnostic = idle_with_open_work(snapshot)
         open_state = self.work_items.open_state_readonly(
             writer_roles=wait_writer_roles(self.config, self.roles))
-        backpressure = self.backpressure(open_count=open_state["open_count"])
         blocked_work = open_state["blocked_work"]
         return {"project": self.name, "control": self.control(), "snapshot": snapshot["id"],
                 "code_digest": snapshot["code_digest"], "created_at": snapshot["created_at"],
@@ -506,10 +383,9 @@ class Project:
                 # never admitted.
                 "admission": admission_waiting(self.config, self.name),
                 "selection": project_status(self.config, self),
-                "backpressure": backpressure,
                 "health": {p.stem: read_json(p) for p in (self.root / "health").glob("*.json") if not p.is_symlink()},
                 "active": {p.stem: read_json(p) for p in (self.root / "active").glob("*.json") if not p.is_symlink()},
-                "pending_insights": self.insights.list(limit=self.config.limits.pending_insights),
+                "queues": self.queue_status(),
                 "work_order": self.work_order_status(),
                 "blocked_work": blocked_work,
                 "budget": {"used_requests": budget["used"], "limit_requests": budget["limit"],
@@ -897,7 +773,7 @@ def initialize(config: Config, name: str, source: Path, goal_file: Path,
                                                     "wake_generation": uuid.uuid4().hex, "updated_at": now(),
                                                     "reason": "Operator initialized armed" if armed else "Initialized unarmed; operator arm required"})
                 mkdir(stage / "spool" / "editor")
-                atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor proposal outbox\n")
+                atomic_write(stage / "spool/editor/.mizu-outbox", b"Mizu Editor outbox\n")
                 store = open_store(stage, config)
                 captured = store.capture_files(stage / "workspace")
                 initial = store.create(captured, goal=goal, state="Initialized; no autonomous work has run.",

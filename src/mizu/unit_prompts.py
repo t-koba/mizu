@@ -95,84 +95,6 @@ def _ci_wait_contract(context: Context) -> dict:
         "a work item.")}
 
 
-def _decision_task(context: Context) -> str | None:
-    """Delivery description for a run carrying delivered decision events.
-
-    Schema: None when no decision events were delivered, else a short
-    factual description naming which kinds were delivered and what counts
-    as handled. Bounds: one small string. Trust: local dispatch state
-    only. Failure: never raises.
-    """
-    events = list(getattr(context, "decision_events", []) or [])
-    diagnostics = list(getattr(context, "decision_receipt_diagnostics", []) or [])
-    if not events and not diagnostics:
-        return None
-    legacy_page_note = (
-        " The legacy decision page was byte-bounded; decision_page marks omitted newest attention rows, "
-        "which remain pending."
-        if not getattr(context, "shared_decisions", False)
-        and isinstance(getattr(context, "decision_page", None), dict)
-        and getattr(context, "decision_page", {}).get("byte_truncated") else "")
-    if events and diagnostics:
-        return (f"Delivered decision/insight attention events: {len(events)}. "
-                f"Corrupt receipt diagnostics shown: {len(diagnostics)} (bounded; more may exist; see "
-                "decision_receipt_diagnostics; do not acknowledge those tokens; "
-                "corrupt bytes stay unchanged pending operator recovery). "
-                "Select each handled row's ack_token in finish.ack_events; omitted rows "
-                "remain pending oldest-first, including deferrals. Finishing alone "
-                "does not acknowledge events. insight.pending requests attention only, not decision authority; "
-                "handling never answers, decides or changes insight status automatically. Handling is defined by role policy."
-                + legacy_page_note)
-    if diagnostics:
-        return (f"Corrupt receipt diagnostics shown: {len(diagnostics)} (bounded; more may exist; see "
-                "decision_receipt_diagnostics; do not acknowledge those tokens; "
-                "corrupt bytes stay unchanged pending operator recovery). "
-                "No deliverable decision events; handling is defined by role policy.")
-    return (f"Delivered decision/insight attention events: {len(events)}. "
-            "Select each handled row's ack_token in finish.ack_events; omitted rows "
-            "remain pending oldest-first, including deferrals. Finishing alone "
-            "does not acknowledge events. insight.pending requests attention only, not decision authority; "
-            "handling never answers, decides or changes insight status automatically. Handling is defined by role policy." +
-            (" Oversized rows carry ref: use decision_read with that row's ack_token "
-             "and offset/limit to read its digest-pinned full envelope. decision_page "
-             "states pending count and truncation; omitted rows stay pending."
-             if getattr(context, "shared_decisions", False) else legacy_page_note))
-
-
-def _open_backlog(context: Context, caps: set) -> dict:
-    """Still-undecided backlog statement for prompts (never raises).
-
-    Schema: ``{"ids", "total", "truncated"}`` over the same bounded pending
-    set the full prompt carries as entries, so a delta that omits
-    already-offered entries still states the open backlog instead of reading
-    as empty. Bounds: ids follow ``[limits] pending_insights`` (newest kept)
-    with explicit ``truncated``. Trust: local recorded state only.
-    Reuses the unit-frozen capture when present so the prompt and the
-    work-order generation share one reading.
-    """
-    try:
-        cached = getattr(context, "_work_order_inputs", None)
-        if isinstance(cached, dict) and cached.get("_captured") is True:
-            backlog = cached.get("open_backlog")
-            if isinstance(backlog, dict):
-                return {"ids": list(backlog.get("ids", [])),
-                        "total": backlog.get("total", 0),
-                        "truncated": bool(backlog.get("truncated", False))}
-    except Exception:
-        pass
-    stated: dict = {"ids": [], "total": 0, "truncated": False}
-    if "insights" not in caps and "decide" not in caps:
-        return stated
-    try:
-        backlogged = context.project.insights.projection(
-            limit=context.config.limits.pending_insights)
-        return {"ids": [item["id"] for item in backlogged["items"]],
-                "total": backlogged["total"],
-                "truncated": backlogged["truncated"]}
-    except Exception:
-        return stated
-
-
 def _unit_begins_statement(outcomes: tuple[str, ...]) -> str:
     # Keep the opening first and stable for a given role across full and delta prompts.
     return ("A new work unit begins. This is not an acknowledgement of a previous "
@@ -213,7 +135,7 @@ def _ready_work_projection(page, *, context=None):
         context.ready_work_signature = page["signature"]
     current_time = time.time()
     return {"items": [{**{key: row[key] for key in
-                        ("id", "title", "status", "stale", "redecision", "updated_at",
+                        ("id", "title", "status", "updated_at",
                          "doing_since", "doing_age_seconds", "doing_stale")},
                        "age_seconds": _ready_work_age(row["updated_at"], current_time),
                        **({key: row[key] for key in ("rev", "holder", "wait_resolution")}
@@ -223,8 +145,7 @@ def _ready_work_projection(page, *, context=None):
                           if row["status"] == "blocked" else {})}
                       for row in page["items"]],
             **{key: page[key] for key in ("total", "overflow_count", "truncated",
-                                         "unseeded_decisions", "coverage_complete",
-                                         "unknown_blocked")}}
+                                         "coverage_complete", "unknown_blocked")}}
 
 
 def _work_order_projection(context) -> dict | None:
@@ -319,8 +240,7 @@ def session_grant_evidence(context: Context, directory) -> dict | None:
 def session_grant_transition(context: Context, last, saved, directory) -> dict:
     """Explain only an evidenced broker-grant change on this same session.
 
-    Legacy/malformed/unknown records remain usable as inbox cursors but cannot
-    justify a grant claim. A prior unit's per-run bound explains a wrap-up-only
+    Legacy/malformed/unknown records cannot justify a grant claim. A prior unit's per-run bound explains a wrap-up-only
     reduction; otherwise the exact changed tool lists are stated without
     guessing why they changed.
     """
@@ -376,12 +296,10 @@ def session_row_details(context: Context, last, saved, directory) -> dict | None
     adapter compaction signal. Invalid/legacy cursors resend full details.
     """
     try:
-        required = {"snapshot", "inbox_generation", "created_at"}
+        required = {"snapshot", "created_at"}
         allowed = required | {"broker_grant", "row_details", "sections"}
         if (not isinstance(last, dict) or not required <= set(last) or not set(last) <= allowed
                 or not isinstance(last["snapshot"], str) or not DIGEST.fullmatch(last["snapshot"])
-                or not isinstance(last["inbox_generation"], str)
-                or not DIGEST.fullmatch(last["inbox_generation"])
                 or ("sections" in last and not (isinstance(last["sections"], list)
                                                 and all(isinstance(s, str) for s in last["sections"])))):
             return None
@@ -563,18 +481,14 @@ def prompt_for(context: Context) -> str:
     caps = set(context.role.capabilities)
     # Mechanism enforces grants, not policy choice: capability-gated context
     # is offered where appropriate, alongside the always-present, bounded
-    # project-wide work-item page. `pending_insights` count follows the
-    # operator-selected `[limits] pending_insights` bound (newest kept), and
-    # `open_insights` states the same bounded backlog with explicit total;
-    # `recent_snapshots` follows `[limits] prompt_snapshots`. Exact snapshot
+    # project-wide work-item page. `queues` states, per readable queue with
+    # due unacknowledged messages, the count and the newest
+    # `[limits] queue_opening_messages` messages; `recent_snapshots` follows `[limits] prompt_snapshots`. Exact snapshot
     # references are always pinned. `admission` is the exact normalized
     # dispatch label selected by the host. Publication/commit and `should_run`
     # transitions below are the fixed single-writer contract, not policy.
     from . import work_order as _plan
-    from .insight_tools import display_insight, display_decision_events
-    op_default = context.config.insight_decisions.get("operator_addressee", "")
     opening = _plan._capture_opening(context)
-    pending = [display_insight(row, caps, op_default) for row in opening["pending_insights"]]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context))
     acceptance = list(context.project.verify) if "verify" in caps else []
@@ -593,23 +507,13 @@ def prompt_for(context: Context) -> str:
                                                 context.snapshot["id"], context.config.limits.prompt_snapshots)],
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        **reviews.prompt(context),
-                       "publication_state": reviews.publication_state(
-                           context, pending_insights=opening["pending_insights"],
-                           open_insights=opening["open_backlog"]),
-                       "pending_insights": pending,
-                       "open_insights": opening["open_backlog"],
+                       "publication_state": reviews.publication_state(context),
+                       "queues": list(getattr(context, "queues", [])),
                        "open_work_items": open_work_items,
-                       "operator_records": getattr(context, "operator_record_page", {"events": []}),
-                       "decision_events": display_decision_events(opening["decision_events"], caps, op_default),
-                       **({"decision_page": opening["decision_page"]}
-                          if opening["decision_page"] is not None else {}),
-                       "decision_receipt_diagnostics": opening["diagnostics"],
                        **({"work_item_events": opening["work_item_events"]}
                           if opening["work_item_events"] else {}),
-                       "decision_task": _decision_task(context),
                        "wait_events": opening["wait_events"],
                        **_ci_wait_contract(context),
-                       "obligations": opening["obligations"],
                        "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
@@ -626,7 +530,7 @@ def prompt_for(context: Context) -> str:
                       ensure_ascii=False)
 
 
-def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict | None = None,
+def prompt_delta_for(context: Context, *, grant_transition: dict | None = None,
                      prior_rows: dict | None = None) -> str:
     """Append-only delta for a resumed persistent session.
 
@@ -636,10 +540,9 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     pinned ``published_snapshot`` and a small ``snapshot_delta``
     (previous/current ids), plus the normalized dispatch ``admission`` label
     and an optional ``grant_transition`` when bounded same-session evidence
-    proves the broker tool surface changed, then only the pending
-    proposals not yet offered, an ``open_insights`` statement of the still
-    undecided backlog (ids plus total, so an already-offered insight never
-    reads as done), the always-present bounded ``open_work_items`` page,
+    proves the broker tool surface changed, then the ``queues`` facts (due
+    unacknowledged counts and newest messages per readable queue, restated
+    every unit), the always-present bounded ``open_work_items`` page,
     workspace markers, capability-gated acceptance commands, and a
     capability-gated ``previous_report`` preview for roles holding
     ``report``. Fixed ``ci_branch`` configuration is gated by ``vcs_read``.
@@ -651,10 +554,9 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     ``recent_snapshots`` history is not repeated in deltas. Key order is fixed (stable context
     first, volatile ready-work age, run identity and clock last) so
     repeated prompts preserve as much identical prefix as possible.
-    Bounds: pending and the open insight backlog both follow
-    ``[limits] pending_insights`` (newest kept; ``truncated`` says so
-    explicitly); the work-item page follows ``[limits] work_items_prompt`` and
-    includes its overflow count, cursor, truncation, and legacy coverage status.
+    Bounds: newest queue messages follow ``[limits] queue_opening_messages``;
+    the work-item page follows ``[limits] work_items_prompt`` and includes its
+    overflow count, cursor and truncation.
     ``session_delta_details=elide`` replaces bulky previews with exact read
     references when the role holds that read capability, as in full prompts.
     A validated same-session ``prior_rows`` cursor additionally marks unchanged
@@ -674,18 +576,12 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
     synthesizing an empty inventory.
     """
     caps = set(context.role.capabilities)
-    if not isinstance(pending, list):
-        raise Denied("Invalid pending insights")
-    from .insight_tools import display_insight, display_decision_events
-    op_default = context.config.insight_decisions.get("operator_addressee", "")
-    pending = [display_insight(row, caps, op_default) for row in pending]
     from . import work_order as _plan
     opening = _plan._capture_opening(context)
     acceptance = list(context.project.verify) if "verify" in caps else []
     ci_branch = context.config.vcs.get("ci_branch") or None
     if "vcs_read" not in set(context.role.capabilities):
         ci_branch = None
-    open_backlog = opening["open_backlog"]
     open_work_items, checks = _row_detail_projection(
         context, opening["open_work_items"], check_jobs.prompt_projection(context), prior_rows)
     return json.dumps(_validate_opening(prompt_sections.shape(context, {
@@ -698,27 +594,17 @@ def prompt_delta_for(context: Context, pending: list, *, grant_transition: dict 
                        "published_snapshot": _published_snapshot(context),
                        "snapshot_delta": {"id": context.snapshot["id"],
                                           "code_digest": context.snapshot["code_digest"]},
-                       "pending_insights": pending,
-                       "open_insights": open_backlog,
+                       "queues": list(getattr(context, "queues", [])),
                        "open_work_items": open_work_items,
-                       "operator_records": getattr(context, "operator_record_page", {"events": []}),
-                       "decision_events": display_decision_events(opening["decision_events"], caps, op_default),
-                       **({"decision_page": opening["decision_page"]}
-                          if opening["decision_page"] is not None else {}),
-                       "decision_receipt_diagnostics": opening["diagnostics"],
                        **({"work_item_events": opening["work_item_events"]}
                           if opening["work_item_events"] else {}),
-                       "decision_task": _decision_task(context),
                        "wait_events": opening["wait_events"],
                        **_ci_wait_contract(context),
-                       "obligations": opening["obligations"],
                        "research_state": _prompt_research_state(context),
                        "capture_limit": _prompt_capture_limit(context),
                        "workspace": "/workspace", "workspace_mode": context.role.workspace,
                        **reviews.prompt(context),
-                       "publication_state": reviews.publication_state(
-                           context, pending_insights=opening["pending_insights"],
-                           open_insights=opening["open_backlog"]),
+                       "publication_state": reviews.publication_state(context),
                        "ready_work": opening["ready_work"],
                        **checks,
                        "acceptance_commands": acceptance,
@@ -740,7 +626,7 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
     returns ``(prompt, mode, session_key, rotation, session_dir)`` where mode
     is ``"full"`` or ``"delta"`` and rotation is the ``rotation.json`` record
     (or None). Bounds: prompt-state and rotation evidence are small JSON
-    files; pending lists follow ``[limits] pending_insights``. Trust: local
+    files. Trust: local
     session state only. Retry/cancellation: peeking never raises (any failure
     falls back to the full prompt and empty identity), except an enforcing
     due rotation, which propagates so the unit fails before model dispatch
@@ -821,36 +707,14 @@ def session_prompt(context: Context, role, run_dir: Path) -> tuple:
         return prompt_for(context), "full", key, record, session_dir
     try:
         from . import work_order as _plan
-        opening = _plan._capture_opening(context)
+        _plan._capture_opening(context)
+        last = read_prompt_state(session_dir)
     except Exception:
         return prompt_for(context), "full", key, None, session_dir
-    last = None
-    try:
-        # Freeze the displayed inventory before consulting the resume cursor.
-        # An arrival after this capture stays out of both the delta and the
-        # work-order generation, and will be offered from the next opening.
-        current_generation = context.project.insights.generation()
-        last = read_prompt_state(session_dir)
-        insights_delivered = last is not None and (
-            "sections" not in last
-            or (isinstance(last["sections"], list)
-                and all(isinstance(section, str) for section in last["sections"])
-                and "insights" in last["sections"]))
-        if (last is not None
-                and insights_delivered
-                and last.get("inbox_generation") == current_generation
-                and last.get("snapshot") == context.snapshot["id"]):
-            pending: list = []
-        else:
-            pending = opening["pending_insights"]
-    except Exception:
-        # If the resume cursor cannot prove that the inventory is unchanged,
-        # re-offer the bounded captured rows rather than silently omit them.
-        pending = opening["pending_insights"]
     try:
         prior_rows = session_row_details(context, last, saved, session_dir)
         transition = session_grant_transition(context, last, saved, session_dir)
-        prompt = prompt_delta_for(context, pending, grant_transition=transition, prior_rows=prior_rows)
+        prompt = prompt_delta_for(context, grant_transition=transition, prior_rows=prior_rows)
         return prompt, "delta", key, None, session_dir
     except Exception:
         return prompt_for(context), "full", key, None, session_dir

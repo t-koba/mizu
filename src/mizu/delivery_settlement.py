@@ -16,7 +16,8 @@ from .fs import ATOMIC_WRITE_TEMP_PREFIX, MAX_FRAME, atomic_write, canonical, di
 from .shared_records import MANIFEST_ROWS, Delivery, SharedRecords
 
 DIRECTORY = 'delivery-settlements'
-FAMILIES = ('decision', 'operator', 'ci', 'proposal')
+#: Delivery families settled per run; CI waits are the one family left.
+FAMILIES = ('ci',)
 _RUN = re.compile(r'[0-9a-f]{32}\Z')
 _FIELDS = {'schema', 'run', 'role', 'manifests', 'selected', 'effects', 'closed', 'finalized'}
 _STATES = {'unresolved', 'succeeded', 'not-selected', 'check-join', 'bounded'}
@@ -66,7 +67,7 @@ def _validate(row, run):
             for token, state in effects.items():
                 if ((token not in tokens and state != 'not-selected')
                         or (token in tokens and state == 'not-selected')
-                        or (state in ('check-join', 'bounded') and family not in ('ci', 'proposal'))):
+                        or (state in ('check-join', 'bounded') and family != 'ci')):
                     raise Denied('Invalid delivery settlement disposition')
     if len(canonical(row)) > MAX_FRAME:
         raise LimitExceeded('Delivery settlement exceeds frame bound')
@@ -109,9 +110,7 @@ def _write(root, row, *, exclusive=False):
 
 
 def register(context):
-    manifests = dict(zip(FAMILIES, (
-        context.decision_manifest if context.shared_decisions else (),
-        context.operator_record_manifest, context.ci_wait_manifest, context.proposal_wait_manifest)))
+    manifests = {'ci': context.ci_wait_manifest}
     if not any(manifests.values()):
         return
     for entries in manifests.values():
@@ -152,7 +151,7 @@ def begin(context, finished):
         for token in effects:
             if token not in tokens:
                 effects[token] = 'not-selected'
-            elif family in ('ci', 'proposal'):
+            elif family == 'ci':
                 if finished.get('wait_for_check'):
                     effects[token] = 'check-join'
                 elif finished.get('outcome') == 'bounded' or context.bound_hit:

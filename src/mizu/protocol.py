@@ -7,9 +7,8 @@ from . import reviews
 from .config import FINISH_OUTCOMES, MAX_WAIT_SECONDS, Config, Role
 from .errors import Denied
 from .fs import PREVIEW_BYTES, READ_PAGE_CHARS, SCRIPT_MAX
-from .insights import QUESTION_RECORD_ROUTE
-from .work_item_seed import MAX_DECISION_TASKS
 from .prompt_sections import WORK_CAPABILITIES
+from .work_item_seed import MAX_ORIGIN_CHARS
 from .work_items import MAX_OPEN_CURSOR_CHARS, MAX_OPEN_PAGE_ROWS, MAX_REVISIONS, STATUSES
 from .kernel.events import PAGE_MAX as EVENT_PAGE_MAX
 from .kernel.objects import PAGE_MAX as OBJECT_PAGE_MAX, REVISION_MAX
@@ -126,39 +125,21 @@ EVIDENCE_READ_FIELDS = {"run": text(32), "evidence_id": text(32),
 SMOKE_REFS_SCHEMA = dict(array({"type": "string", "minLength": 32, "maxLength": 32,
                                       "pattern": "^[0-9a-f]{32}$"}, 64), uniqueItems=True)
 
-# Insight deferral/task-input schema; work-item transitions extend and
-# consolidate it below. Store-side normalization supplies subject semantics.
-WAIT_SCHEMA = obj({"kind": {"type": "string", "enum": ["deadline", "code_change", "insight_decided",
-                                                               "dependency"]},
-                    "smoke_refs": SMOKE_REFS_SCHEMA, "at": text(64), "insight": text(64), "recipient": text(64),
-                    "requires": obj({"insight": text(64),
-                                     "rev": {"type": "integer", "minimum": 1},
-                                     "action": {"type": "string", "enum": ["accept", "modify", "reject"]}},
-                                    ("insight", "rev", "action"))}, ("kind",))
-
-#: One accepted-scope statement: the work a decision or item authorizes.
+#: One scope statement: the work an item covers.
 #: 1-4000 nonblank characters, like the immutable description.
 SCOPE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 4000,
                  "pattern": "[\\s\\S]*\\S[\\s\\S]*"}
 
-# Object and receipt-bound waits are work-item-only; Insight deferrals retain WAIT_SCHEMA.
-WORK_ITEM_WAIT_SCHEMA = obj({**WAIT_SCHEMA["properties"],
-    "kind": {"type": "string", "enum": ["deadline", "code_change", "dependency", "object_resolved", "ci", "publication_ci", "proposal_merged"]},
-    "subject": obj({"type": {"type": "string", "enum": ["insight", "record", "work_item"]},
-                    "kind": text(256), "id": text(256),
-                    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64}},
+#: Work-item wait arguments; store-side normalization validates each kind.
+WORK_ITEM_WAIT_SCHEMA = obj({
+    "kind": {"type": "string", "enum": ["deadline", "code_change", "object_resolved", "ci", "publication_ci"]},
+    "smoke_refs": SMOKE_REFS_SCHEMA, "at": text(64),
+    "subject": obj({"type": {"type": "string", "enum": ["work_item"]}, "id": text(256)},
                    ("type", "id")),
     "publication_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
     "snapshot_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
-    "proposal_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "checks": dict(array({"type": "string", "minLength": 1, "maxLength": 256}, 64),
                    minItems=1, uniqueItems=True)}, ("kind",))
-
-INSIGHT_METADATA_SCHEMA = {
-    "kind": {"type": "string", "enum": ["proposal"], "description": QUESTION_RECORD_ROUTE},
-    "addressee": {**text(63), "minLength": 1, "pattern": r"^[a-z0-9][a-z0-9_-]{0,62}$"},
-    "urgency": {"type": "string", "enum": ["low", "normal", "high"]},
-}
 
 
 def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True) -> tuple[str, dict]:
@@ -173,15 +154,14 @@ def finish_definition(outcomes: tuple[str, ...], *, review_verdict: bool = True)
         + ("\n\nFor a writable role, outcome=done requires successful verification." if "done" in outcomes else "")
         + "\n\nUse release_checks to cancel obsolete check subscriptions on a successful finish; "
         "other subscribers are unaffected. "
-        "Use ack_events for unique handled ack_tokens delivered to your role: operator records, decisions, "
-        "pending insights, terminal work items, structured insight waits, CI or proposal merge waits, and obligations. "
+        "Use ack_events for unique handled ack_tokens delivered to your role: terminal work items and CI waits. "
         "Omitted events stay pending. Foreign, stale or undelivered tokens are refused before finish intent; "
-        "CI and proposal merge waits require explicit tokens to acknowledge them.\n\n"
+        "CI waits require explicit tokens to acknowledge them.\n\n"
         "Use next_profile to recommend a profile for the following unit; next_reason requires next_profile. "
         "The recommendation applies only while the task inputs match, under the operator's selector rules."
         + (" With review_verdict, seal approve or changes_requested for this run's input snapshot; the host binds "
            "review identity and snapshot. Only configured reviewers' verdicts count for publication. "
-           "Report findings separately as insights; a summary cannot approve." if review_verdict else ""))
+           "A summary cannot approve." if review_verdict else ""))
     properties = {
         "outcome": {"type": "string", "enum": list(outcomes)},
         "summary": text(12000), "state": text(32000),
@@ -294,47 +274,11 @@ DEFINITIONS = {
                      "unambiguous observation within bounds, an untruncated result and a successful "
                      "cursor write. Retry incomplete feeds with the same call; entries may repeat. "
                      "The call sends no notices and schedules no work.", obj()),
-    "record_write": ("Store one immutable SharedRecords entry under your role for a declared "
-                     "writable kind. The result gives you the record and its digest, without "
-                     "routing, waking or acknowledging anything. "
-                     "Use a stable id so the full role/<role>/<kind>/<id> fits within 256 "
-                     "characters. Pass subject and payload as finite JSON object strings within the "
-                     "kind's envelope bound. Exact retries reuse the timestamp and digest; "
-                     "conflicting content is refused. The host supplies the writer identity; a "
-                     "record confers no source authority.",
-                     obj({"kind": text(256), "id": text(256),
-                          "subject": text(PREVIEW_BYTES), "payload": text(PREVIEW_BYTES)},
-                         ("kind", "id", "subject", "payload"))),
-    "record_read": ("Inspect a delivered operator answer or notice, or read a record written by "
-                    "your role. Reading does not acknowledge delivery; select handled operator "
-                    "tokens in finish.ack_events. "
-                    "Use ack_token from this unit's frozen manifest, or use kind and id with an "
-                    "explicit record_read grant. Manifest access alone permits only ack_token mode. "
-                    "The full role/<role>/<kind>/<id> fits within 256 characters. Page canonical "
-                    "text by character offset; each page checks the record digest. Role-written "
-                    "reads have no delivery token.",
-                    obj({"ack_token": text(64), "kind": text(256), "id": text(256), "offset": PAGE_FIELDS["offset"],
-                         "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}})),
-    "decision_read": ("Inspect an exact decision or insight.pending event from your unit's frozen "
-                      "delivery manifest. Reading does not acknowledge it; select the handled "
-                      "ack_token in finish.ack_events. "
-                      "Page by character offset and limit (default 8192); each page checks "
-                      "record_digest. The token grants read access to the delivered envelope only, "
-                      "independent of later routing.",
-                      obj({"ack_token": text(64), "offset": PAGE_FIELDS["offset"],
-                           "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_CHARS}}, ("ack_token",))),
-    "insights": ("Inspect proposals and decisions without changing their state. List pending "
-                 "proposals, filter by decision action, or read one by full ID or unique prefix. "
-                 "Only the submitter's by-ID read can include work_item_status for accepted or "
-                 "modified work: ID, status, revision, holder, update time and origin staleness. "
-                 "Task groups use {items: [...]} in declared order with a bounded preview. The "
-                 "projection grants no work-item access and does not schedule or wake work.",
-                 obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]}, **PAGE_FIELDS})),
     "ready_work_read": ("Inspect what your role can act on without claiming, transitioning or "
                         "acknowledging any work. This live page is available with a work capability "
                         "regardless of prompt sections. "
                         "limit defaults to 25; there is no cursor. Check coverage_complete, "
-                        "truncated, overflow_count, unseeded_decisions and unknown_blocked before "
+                        "truncated, overflow_count and unknown_blocked before "
                         "treating an empty page as no work. The opening page and this read use the "
                         "same role and wait-liveness rules. Unsafe or malformed ledger data fails "
                         "closed; retry reads live state.",
@@ -359,8 +303,8 @@ DEFINITIONS = {
                         "narrowed by status, origin, closed_after and closed_before; total counts "
                         "all matches after filters. By-ID reads any status with exclusive after_rev "
                         "instead of cursor; pass next_cursor as after_rev and use history_total. "
-                        "Rows have bounded previews; by-ID adds full descriptions, scope and origin "
-                        "staleness from revision 1. Reads may stop at row or byte bounds; by-ID "
+                        "Rows have bounded previews; by-ID adds full descriptions and scope "
+                        "from revision 1. Reads may stop at row or byte bounds; by-ID "
                         "validates the full chain. A reopened wait_resolution row may keep a holder; "
                         "only that holder transitions it. Blocked age is diagnostic; check "
                         "ready-work liveness. Unsafe data fails closed.",
@@ -383,9 +327,9 @@ DEFINITIONS = {
                           "their presence and exact text. Scope defines the authorized work; "
                           "revisions inherit it until an explicit scope change and closure binds "
                           "it. Use a by-ID read for full descriptions; compact rows carry previews. "
-                          "origin takes either insight_id or work_item_id plus the current rev for "
-                          "initial creation. Optional smoke_refs pins evidence while the item is "
-                          "nonterminal; insight origins inherit evidence refs. "
+                          "origin is an opaque reference to what the work came from, such as a "
+                          "message id or a parent work-item id; it is stored as given. Optional "
+                          "smoke_refs pins evidence while the item is nonterminal. "
                           "A first write returns created:true; an exact retry returns the original "
                           "seed with created:false even if the item has since transitioned. "
                           "Conflicting retries are refused. The host supplies the actor.",
@@ -394,10 +338,8 @@ DEFINITIONS = {
                                "description": {"type": "string", "minLength": 1, "maxLength": 4000,
                                                "pattern": "[\\s\\S]*\\S[\\s\\S]*"},
                                "scope": SCOPE_SCHEMA, "smoke_refs": SMOKE_REFS_SCHEMA,
-                               "origin": dict(obj({"insight_id": text(128),
-                                              "work_item_id": {"type": "string", "pattern": "^wi_[0-9a-f]{32}$"},
-                                              "rev": {"type": "integer", "minimum": 1}}, ("rev",)),
-                                              minProperties=2, maxProperties=2)},
+                               "origin": {"type": "string", "minLength": 1, "maxLength": MAX_ORIGIN_CHARS,
+                                          "pattern": "[\\s\\S]*\\S[\\s\\S]*"}},
                               ("idempotency_key", "title"))),
     "work_items_reopen": ("Challenge a done item by reopening it so it can be claimed and closed "
                           "again. The open revision clears holder, wait, active delivery and proof; "
@@ -447,22 +389,17 @@ DEFINITIONS = {
                               "finish verification.\n\n"
                               "Choose a condition: new transitions to blocked require a supported "
                               "observable wait. Use deadline with at (timezone-aware ISO timestamp), "
-                              "code_change, dependency as in decide, or a work-item wait below. "
+                              "code_change, or a work-item or CI wait below. "
                               "For a terminal or impossible wait, move to "
                               "open with a reason before renewing it or moving through doing to "
                               "register another; terminal completion or drop still requires its own "
                               "evidence or reason.\n\n"
-                              "Use work-item-only wait {kind:object_resolved, subject} with subject "
-                              "{type:insight,id}, {type:work_item,id}, or {type:record,kind,id,digest}. Insights "
-                              "follow the current revision: accept/modify/reject are due, defer is "
-                              "pending, and withdrawal is impossible. Items are due only on "
-                              "validated done/dropped history. For records, register an exact "
-                              "declared operator_question from the current holder with the operator "
-                              "answer route enabled; only an exact authenticated answer is due. "
-                              "Proven absence can be impossible; corrupt or unavailable evidence is "
-                              "unknown. Self-dependencies, cycles and uncertain traversal are "
-                              "refused.\n\n"
-                              "Use a receipt-bound work-item-only CI wait {kind:ci, publication_id, checks} "
+                              "Use wait {kind:object_resolved, subject:{type:work_item,id}} to wait "
+                              "for another work item. It is due only on validated done/dropped "
+                              "history. Proven absence is impossible; corrupt or unavailable "
+                              "evidence is unknown. Self-dependencies, cycles and uncertain "
+                              "traversal are refused.\n\n"
+                              "Use a receipt-bound CI wait {kind:ci, publication_id, checks} "
                               "with a complete publication receipt and automatic VCS polling. Before a "
                               "receipt exists, use {kind:publication_ci, snapshot_id, checks} to "
                               "pin a retained published snapshot and the configured CI branch. Both "
@@ -476,13 +413,8 @@ DEFINITIONS = {
                               "changing status. Project work_item_wait_resolution policy can reopen "
                               "due object/code-change waits or publication waits superseded by an "
                               "exact retained descendant publication, keeping the holder and "
-                              "recording proof. Reopening does not infer a CI result.\n\n"
-                              "Use work-item-only wait {kind:proposal_merged, publication_id, proposal_id} "
-                              "with automatic VCS and proposal polling and a complete persisted proposal "
-                              "observation matching the publication head. The wait pins both "
-                              "repo/ref/SHA endpoints and wakes the holder only for an exact merge "
-                              "observed in a complete enumeration. Acknowledge handled wait tokens "
-                              "in finish.ack_events; omitted tokens replay.",
+                              "recording proof. Reopening does not infer a CI result. Acknowledge "
+                              "handled wait tokens in finish.ack_events; omitted tokens replay.",
                                obj({"id": text(64), "expected_rev": {"type": "integer", "minimum": 1},
                                     "status": {"type": "string", "enum": list(STATUSES)},
                                     "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
@@ -492,77 +424,19 @@ DEFINITIONS = {
                                     "snapshot_id": {"type": "string", "minLength": 64, "maxLength": 64,
                                                     "pattern": "^[0-9a-f]{64}$"}},
                                    ("id", "expected_rev", "status"))),
-    "decide": ("Record a decision on an exact proposal revision to authorize work, defer it or "
-               "reject it. Accept/modify can seed work; defer can register a condition for "
-               "revisiting the proposal.\n\n"
-               "Accept/modify use work_item_intent=create|none; omission uses trusted-source policy "
-               "(default create). none records no work without seeding. A single implicit seed uses "
-               "the decision reason as its immutable description. Only accept/modify can set scope: "
-               "the authorized work inherited by its seeds and bound by closure. Record later scope "
-               "changes on the work item, not in decision prose.\n\n"
-               "Defer requires revisit and can take one wait tied to the proposal revision: "
-               "deadline with at (timezone-aware ISO timestamp), code_change, insight_decided with "
-               "insight ID, or dependency with recipient (responsible role) and requires {insight, "
-               "rev, action} for the exact assessed result and substantive decision. Other decision "
-               "actions cannot take a top-level wait.\n\n"
-               "With create intent, work_items can specify 1–16 ordered tasks with nonblank title "
-               "and description and an optional wait of the four kinds above. Specify create "
-               "explicitly if source policy is none. Each task is unheld and inherits scope; it "
-               "starts open without a wait and blocked with one. The decision, wait manifest and "
-               "seeds commit together within 131072 UTF-8 bytes.\n\n"
-               "Task IDs bind the ordered specifications and exact decision revision; keep the same "
-               "order and raw wait fields on retry. Exact keyed retries return the recorded "
-               "decision and wait baselines without rebasing code_change; a missing pointer can be "
-               "restored without a second event. After uncertainty, read the current revision. To "
-               "change an accept, modify or reject decision, the submitter needs to revise the "
-               "proposal.",
-               obj({"id": text(64), "action": {"type": "string", "enum": ["accept", "modify", "defer", "reject"]},
-                    "reason": text(4000), "revisit": text(2000),
-                    "rev": {"type": "integer", "minimum": 1},
-                    "wait": WAIT_SCHEMA,
-                    "scope": SCOPE_SCHEMA,
-                    "work_items": {"type": "array", "minItems": 1, "maxItems": MAX_DECISION_TASKS,
-                                   "items": obj({"title": {**text(200), "minLength": 1},
-                                                 "description": {**text(4000), "minLength": 1}, "wait": WAIT_SCHEMA},
-                                                ("title", "description"))},
-                    "work_item_intent": {"type": "string", "enum": ["create", "none"]}},
-                   ("id", "action", "reason", "rev"))),
-    "submit_insight": ("Submit an insight to bring a proposal to its addressee's attention without "
-                       "granting authority or changing work status. Defaults are proposal, writer "
-                       "and normal; writer addresses your own role, and operator routes only to the "
-                       "human inbox. "
-                       "For a configured project role the undecided revision can deliver "
-                       "insight.pending through decision_events and wake the addressee. Urgency is "
-                       "display-only; the host binds the sender.",
-                       obj({"title": text(200), "body": text(60000), **INSIGHT_METADATA_SCHEMA}, ("title", "body"))),
-    "revise_insight": ("Record a new revision of your own proposal under its stable ID so it can be "
-                       "considered again. Match the revision you read; omitted metadata is "
-                       "inherited, and metadata-only edits also create a revision. The host binds "
-                       "the sender.",
-                       obj({"id": text(64), "title": text(200), "body": text(60000),
-                            "rev": {"type": "integer", "minimum": 1}, **INSIGHT_METADATA_SCHEMA}, ("id", "title", "body", "rev"))),
-    "withdraw_insight": ("Retract your own proposal at the revision you read. Accept or modify "
-                         "prevents withdrawal unless you also hold withdraw_decided; the host binds "
-                         "the sender.",
-                       obj({"id": text(64), "reason": text(4000),
-                            "rev": {"type": "integer", "minimum": 1}}, ("id", "reason", "rev"))),
-    "attach_evidence": ("Add an attributed evidence note without editing the insight's title or "
-                        "body. Optional smoke_refs pins up to 64 exact 32-hex smoke IDs on that "
-                        "revision while the insight is open or deferred.",
-                       obj({"id": text(64), "rev": {"type": "integer", "minimum": 1}, "text": text(8192), "smoke_refs": SMOKE_REFS_SCHEMA}, ("id", "rev", "text"))),
     "delegate": ("Give a configured delegate a self-contained implementation task in your live "
                  "workspace. Its edits are in that workspace, its spend counts against this unit, "
                  "and you receive its sealed result summary. "
-                 "The delegate cannot decide, write insights, mutate VCS or delegate again.",
+                 "The delegate cannot mutate VCS or delegate again.",
                  obj({"role": text(64), "task": text(8000)}, ("task",))),
     "consult": ("Ask named read-only roles independently about one immutable code snapshot. You "
-                "receive their answers without granting live workspace access; nested consultation "
+                "receive their replies without granting live workspace access; nested consultation "
                 "is disabled. "
                 "Supply the exact source_snapshot only when a trusted delegation reservation pins "
                 "it. A missing, unavailable or mismatched pin fails closed. Each role uses its own "
                 "profile or selector.",
-                obj({"question": text(8000), "roles": array(text(64), 8), "role": text(64),
-                     "source_snapshot": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, ("question",))),
+                obj({"request": text(8000), "roles": array(text(64), 8), "role": text(64),
+                     "source_snapshot": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, ("request",))),
     "report": ("Stage a Markdown report as your unit's artifact; staging does not publish it. "
                "Follow the role's structure and length policy. The host attaches recorded evidence "
                "separately.",

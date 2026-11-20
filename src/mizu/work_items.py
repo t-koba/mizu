@@ -1,20 +1,16 @@
 """Append-audited work-item store with bounded indexed reads; no scheduling.
 
-Seeds are immutable direct creation records, accept/modify decision events or
-hash-bound legacy sidecars. Each successful CAS appends one full state under
-insights.lock, never a pointer, after replaying and validating the item's
-whole chain. Current-state reads come only from the ledger index
-(:mod:`mizu.ledger`), which every write updates in its critical section; no
-read replays history. Resolution filenames are validated when the index is
-built or restored from files (including the migration preflight), not on each
-read: a warm index is trusted, so an out-of-band rename of a resolution to an
-old-format ``legacy.json`` is refused at the next rebuild or migration rather
-than detected by a store scan on every read. The derived ``legacy_drops``
-table records build-time drop evidence for audit and index parity; it is not
-a per-read guard. Full-chain validation runs at write time, when the index is
-built from the files, and in :meth:`WorkItems.audit`. Origin
-staleness, hold ages and wait liveness are computed from current records on
-every read. Retrying a committed CAS requires a re-read. Same-status events
+Seeds are immutable creation records in ``work-items/<id>/create.json``: a
+``direct`` record created by a role (its ID is bound to the actor and
+idempotency key), or an ``imported`` record written by host tooling. Each
+successful CAS appends one full state under records.lock, never a pointer,
+after replaying and validating the item's whole chain. Current-state reads
+come only from the ledger index (:mod:`mizu.ledger`), which every write
+updates in its critical section; no read replays history. Full-chain
+validation runs at write time, when the index is built from the files, and in
+:meth:`WorkItems.audit`. Hold ages and wait liveness are computed from current
+records on every read. An item's origin is an opaque reference and is never
+interpreted. Retrying a committed CAS requires a re-read. Same-status events
 require a scope/reference change, held-open release, or delivery binding; only
 a proven forward dropped-to-done correction or explicit audited completion
 reopening may follow a terminal event.
@@ -33,8 +29,8 @@ from pathlib import Path
 
 from .smoke_refs import record_lock, validate_refs, require_pairs
 from . import lock_diagnostics
-from . import insight_archive, work_item_retirement
-from .work_item_waits import stored_wait, liveness, blocked_start, blocked_age, holder_only, normalize_record_wait
+from . import work_item_retirement
+from .work_item_waits import normalize_wait, stored_wait, liveness, blocked_start, blocked_age, holder_only
 from .work_item_resolution import MAX_RESOLUTION_BYTES
 from .config import (DEFAULT_HISTORY_TEMPORARIES, MAX_HISTORY_TEMPORARIES,
                      CompletionEvidence, PublicationEvidence)
@@ -43,14 +39,12 @@ from .completion_evidence import (VERIFIED_SNAPSHOT, HOLDER_ATTESTATION, recorde
 from .errors import Denied, LimitExceeded
 from .fs import (DIGEST, PREVIEW_BYTES, canonical, digest, identifier, lock, now,
                  safe_read, sync_dir, text_preview, write_json)
-from .insights import _decision_key, _validate_keyed_substantive_event
 from .platform import IS_WINDOWS
 from .ledger import rows as _rows
-from . import check_job_index, insight_index
+from . import check_job_index
 from .work_item_index import ITEMS
 from .work_item_seed import (DESCRIPTION_UNSET, ITEM_ID, SCOPE_UNSET, SEED_FIELDS, make_seed,
-                             task_id, task_seeds, validate_origin, validate_scope, validate_seed,
-                             validate_tasks)
+                             validate_origin, validate_scope, validate_seed)
 
 MAX_REVISIONS = 256  # Includes the immutable seed at revision 1.
 MAX_REOPEN_REV = 252  # Leaves four appends for reopen/claim/bind/close before 256.
@@ -86,16 +80,6 @@ _REVISION_NAME = re.compile(r"(?:[2-9]|[1-9][0-9]{1,2})\.json\Z")
 _DECISION_EVENT_NAME = re.compile(r"[0-9a-f]{32}\.json\Z")
 _WAIT_RESOLUTION_TOKEN = re.compile(r"wi_[0-9a-f]{32}:[1-9][0-9]{0,2}\Z")
 _HISTORY_UNSET = object()
-_LEGACY_RESOLUTION_NAME = "legacy.json"
-_CURRENT_RESOLUTION_NAME = "decision-resolution.json"
-_RESOLUTION_NAMES = (_LEGACY_RESOLUTION_NAME, _CURRENT_RESOLUTION_NAME)
-_AMBIGUOUS_RESOLUTION_NAMES = "Ambiguous work-item decision resolution filenames"
-_UNMIGRATED_RESOLUTION = ("Unconverted legacy work-item resolution; run "
-                          "`mizu migrate-work-items` on a paused project before reading work items")
-_ORIGIN_COLUMNS = "n.id, n.valid, n.rev, d.insight_id, d.rev, d.action, d.linked"
-_ORIGIN_SELECT = "SELECT " + _ORIGIN_COLUMNS
-_ORIGIN_JOIN = ("LEFT JOIN insights n ON n.id = {key} "
-                "LEFT JOIN decisions d ON d.insight_id = {key}")
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 _CLOSED_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
 _CLOSED_STATUSES = frozenset({"done", "dropped"})
@@ -245,52 +229,26 @@ def _present(path: Path) -> bool:
     return True
 
 
-def _resolution_name(directory: Path, *, allow_legacy: bool = False) -> str | None:
-    """Find the sole resolution entry without following the leaf or reading it.
-
-    Ordinary readers never consume an unconverted ``legacy.json``: they fail
-    closed with migration guidance. Only an explicit host migration scan may
-    opt in to the old name, and it still refuses ambiguous filename pairs.
-    """
-    names = [name for name in _RESOLUTION_NAMES if _present(directory / name)]
-    if len(names) > 1:
-        raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
-    if names and names[0] == _LEGACY_RESOLUTION_NAME and not allow_legacy:
-        raise Denied(_UNMIGRATED_RESOLUTION)
-    return names[0] if names else None
-
-
-def _unconverted_resolution(directory: Path) -> bool:
-    """Whether one item directory holds an unconverted resolution name."""
-    if not _present(directory / _LEGACY_RESOLUTION_NAME):
-        return False
-    if _present(directory / _CURRENT_RESOLUTION_NAME):
-        raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
-    return True
-
 
 class WorkItems:
-    def __init__(self, root: Path, snapshots, insights, *, vcs=None, effective_verification=None,
+    def __init__(self, root: Path, snapshots, ledger, *, vcs=None, effective_verification=None,
                  doing_limit=1, doing_limits=None, stale_seconds=86400, record_kinds=None,
                  effective_verification_projection=None, writer_roles_lookup=None,
                  ci_wait_settings=None, ci_request_roles=None,
-                 record_question_lookup=None, register_question_wait=None, record_answer_evidence=None,
                  publication_evidence: PublicationEvidence | None = None,
                  completion_evidence: CompletionEvidence | None = None,
                  history_temporaries: int = DEFAULT_HISTORY_TEMPORARIES):
-        self.root, self.snapshots, self.insights = root, snapshots, insights
+        self.root, self.snapshots = root, snapshots
         self.writer_roles_lookup = writer_roles_lookup
         self.ci_wait_settings = ci_wait_settings
         self.ci_request_roles = ci_request_roles
-        self.record_question_lookup = record_question_lookup
-        self.register_question_wait = register_question_wait
-        self.record_answer_evidence = record_answer_evidence
         self.vcs = vcs or {}
+        #: Declared publisher record kinds (publication results of CI waits).
+        self.record_kinds = record_kinds or {}
         self.publication_evidence = (publication_evidence if publication_evidence is not None
                                      else PublicationEvidence())
         self.completion_evidence = (completion_evidence if completion_evidence is not None
                                     else CompletionEvidence())
-        self.record_kinds = record_kinds or {}
         self.effective_verification = effective_verification
         # Optional proof+diagnostic callback; legacy proof-only callers keep
         # their existing contract. The selected callback runs once per attempt.
@@ -301,8 +259,7 @@ class WorkItems:
                 or not 1 <= history_temporaries <= MAX_HISTORY_TEMPORARIES):
             raise Denied(f"Work-item history temporary limit must be in [1, {MAX_HISTORY_TEMPORARIES}]")
         self.history_temporaries = history_temporaries
-        self._host_resolution_scan = False
-        self._ledger = insights.ledger
+        self._ledger = ledger
         self._ledger.attach(ITEMS, self)
         if any(type(value) is not int or not 1 <= value <= MAX_OPEN_PAGE_ROWS
                for value in (doing_limit, *self.doing_limits.values())):
@@ -310,30 +267,9 @@ class WorkItems:
         if type(stale_seconds) is not int or not 1 <= stale_seconds <= 31536000:
             raise Denied("Work-item stale threshold must be an integer in [1, 31536000]")
 
-    @contextlib.contextmanager
-    def host_resolution_scan(self):
-        """Host migration/preflight only: read old resolution names verbatim.
-
-        The flag is scoped and restored even on failure; ordinary readers keep
-        refusing unconverted names outside this explicit host activation.
-        """
-        previous = self._host_resolution_scan
-        self._host_resolution_scan = True
-        try:
-            yield
-        finally:
-            self._host_resolution_scan = previous
-
-    def _resolution(self, directory: Path) -> str | None:
-        return _resolution_name(directory, allow_legacy=self._host_resolution_scan)
-
-    def _require_migrated_item(self, item_id: str) -> None:
-        if (not self._host_resolution_scan
-                and _unconverted_resolution(self.root / "work-items" / item_id)):
-            raise Denied(_UNMIGRATED_RESOLUTION)
 
     def _require_doing_capacity(self, actor: str) -> None:
-        """Count the actor's doing items in the index; caller holds insights.lock."""
+        """Count the actor's doing items in the index; caller holds records.lock."""
         limit = self.doing_limits.get(actor, self.doing_limit)
         with self._ledger.read("items", locked=True) as db:
             count = _rows(db, "SELECT COUNT(*) FROM items WHERE status='doing' AND holder=?",
@@ -354,7 +290,7 @@ class WorkItems:
             return _rows(db, "SELECT COUNT(*) FROM items WHERE status IN ('open', 'doing', 'blocked')")[0][0]
 
     def count_open(self) -> int:
-        """Count seeded open/doing/blocked work while holding insights.lock."""
+        """Count seeded open/doing/blocked work while holding records.lock."""
         return self._count_open(locked=True)
 
     def count_open_readonly(self) -> int:
@@ -383,18 +319,21 @@ class WorkItems:
             raise Denied("Work-item idempotency key must be 1-128 characters")
         return "wi_" + hashlib.sha256(canonical(["direct-work-item", actor, key])).hexdigest()[:32]
 
-    def _direct_record(self, item_id: str) -> dict | None:
+    def _creation_record(self, item_id: str) -> dict | None:
+        """Read and validate one item's immutable creation record, if present."""
         directory = self.root / "work-items" / item_id
         if not _directory(directory.parent) or not _directory(directory):
             return None
         if not _present(directory / "create.json"):
             return None
-        if self._resolution(directory) is not None:
-            raise Denied("Direct work item carries legacy reconciliation")
-        decision = self.root / "decision-history" / f"{item_id[3:]}.json"
-        if _directory(decision.parent) and _present(decision):
-            raise Denied("Direct work-item ID collides with a decision event")
         record = self._read(f"work-items/{item_id}/create.json")
+        if record.get("kind") == "imported":
+            if set(record) != {"kind", "work_item"}:
+                raise Denied("Invalid imported work-item creation record")
+            seed = validate_seed(record["work_item"], imported=True)
+            if seed["id"] != item_id:
+                raise Denied("Invalid imported work-item binding")
+            return record
         if set(record) - {"requested_smoke_refs"} != {"kind", "actor", "idempotency_key", "work_item"} or record["kind"] != "direct":
             raise Denied("Invalid direct work-item creation record")
         seed = validate_seed(record["work_item"])
@@ -403,101 +342,42 @@ class WorkItems:
                 validate_refs(record["requested_smoke_refs"])
             if "smoke_refs" not in seed or not set(record["requested_smoke_refs"] or []).issubset(seed["smoke_refs"]):
                 raise Denied("Invalid inherited smoke reference request")
-        if (self._create_id(record["actor"], record["idempotency_key"]) != item_id
-                or seed["id"] != item_id
-                or seed["origin"] is not None and seed["origin"].get("work_item_id") == item_id):
+        if self._create_id(record["actor"], record["idempotency_key"]) != item_id or seed["id"] != item_id:
             raise Denied("Invalid direct work-item binding")
         return record
 
-    def create_seed(self, item_id: str, title: str, origin, stamp: str, *,
-                    actor=None, idempotency_key=None, decision_key=None,
-                    task_specs=None, task_index=None, wait=None,
-                    description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, smoke_refs=None) -> dict:
-        """Preflight a new immutable seed while the caller holds insights.lock.
+    def _create_seed(self, item_id: str, title: str, origin, stamp: str, *,
+                     description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, smoke_refs=None) -> dict:
+        """Preflight a new immutable seed while the caller holds records.lock.
 
-        Validate the source's ID binding, an empty safe storage slot, the
-        optional description and accepted scope, and the exact live origin
-        revision. Recognized regular orphan temporaries are
-        recovered (removed without promotion) before the emptiness check; any
-        numeric revision history, direct/legacy record, unknown entry, or
-        unsafe/ambiguous temporary still fails closed. This does not commit:
-        direct callers commit create.json; decisions embed the seed in their
-        atomic event. Existing commits must use validate_seed_replay instead.
+        Validate an empty safe storage slot and the optional description and
+        scope. Recognized regular orphan temporaries are recovered (removed
+        without promotion) before the emptiness check; any numeric revision
+        history, creation record, unknown entry, or unsafe/ambiguous temporary
+        still fails closed. This does not commit.
         """
         if smoke_refs is not None:
             validate_refs(smoke_refs)
-        if wait is not None and (task_specs is None or decision_key is None):
-            raise Denied("Only decision task seeds carry waits")
-        if decision_key is None and origin is not None and "insight_id" in origin:
-            insight = self.insights.read(origin["insight_id"])
-            inherited = {ref for entry in insight.get("evidence", [])
-                         for ref in validate_refs(entry.get("smoke_refs", []))}
-            if inherited:
-                smoke_refs = sorted(inherited | set(validate_refs(smoke_refs or [])))
         seed = make_seed(item_id, title, origin, stamp, description=description, scope=scope,
-                         wait=wait, smoke_refs=smoke_refs)
+                         smoke_refs=smoke_refs)
         if smoke_refs is not None:
             require_pairs(self.root, smoke_refs)
-        if wait is not None:
-            require_pairs(self.root, wait.get("smoke_refs", []))
-        if task_specs is not None:
-            validate_tasks(task_specs)
-            if type(task_index) is not int or not 0 <= task_index < len(task_specs):
-                raise Denied("Invalid task index")
-        if decision_key is not None:
-            if (actor is not None or idempotency_key is not None
-                    or origin is None or "insight_id" not in origin
-                    or decision_key != _decision_key(origin["insight_id"], origin["rev"])
-                    or item_id != (task_id(decision_key, task_specs, task_index)
-                                   if task_specs is not None else f"wi_{decision_key}")):
-                raise Denied("Invalid decision work-item binding")
-        elif item_id != self._create_id(actor, idempotency_key):
-            raise Denied("Invalid direct work-item binding")
         directory = self.root / "work-items" / item_id
         if _directory(directory.parent) and _directory(directory):
             revisions = self._history_revisions(item_id, recover=True)
-            if revisions or _present(directory / "create.json") or self._resolution(directory) is not None:
+            if revisions or _present(directory / "create.json"):
                 raise Denied("Work-item creation has pre-existing history")
-            # _history_revisions already rejected unknown names and
-            # unsafe/ambiguous temporaries; a recovered orphan leaves an empty
-            # slot that may proceed to commit.
-        decision = self.root / "decision-history" / f"{item_id[3:]}.json"
-        if _directory(decision.parent):
-            try:
-                decision.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                raise Denied("Work-item ID collides with a decision event")
-        if origin is not None:
-            if "insight_id" in origin:
-                revision = self._origin_revision(origin["insight_id"])
-            else:
-                parent_id = origin["work_item_id"]
-                if parent_id == item_id:
-                    raise Denied("Work item cannot be its own parent")
-                try:
-                    revision = self._get(parent_id, history_revisions=
-                                         self._recover_temporary_writes(parent_id))["rev"]
-                except FileNotFoundError:
-                    raise Denied("Parent work item is missing") from None
-            if revision != origin["rev"]:
-                raise Denied("Work-item origin revision is missing or changed")
         return seed
 
-    def validate_seed_replay(self, seed: dict, *, seed_event: dict) -> None:
-        """Validate committed seed/storage/chain under insights.lock, not live origin.
+    def _validate_seed_replay(self, seed: dict) -> None:
+        """Validate a committed seed and its chain under records.lock.
 
         Recognized atomic-write leftovers may be recovered as on normal reads.
         Valid transitions never alter the immutable creation result.
         """
-        validate_seed(seed, decision_task="work_item_specs" in seed_event)
         item_id = seed["id"]
         revisions = self._recover_temporary_writes(item_id)
-        # An embedded decision seed must not hide a colliding direct record.
-        self._direct_record(item_id)
-        for index, record in enumerate(self._iter_chain(
-                item_id, seed_event=seed_event, history_revisions=revisions)):
+        for index, record in enumerate(self._iter_chain(item_id, history_revisions=revisions)):
             if index == 0 and record != seed:
                 raise Denied("Conflicting work-item seed replay")
 
@@ -505,11 +385,9 @@ class WorkItems:
                description=DESCRIPTION_UNSET, scope=SCOPE_UNSET, smoke_refs=None) -> dict:
         """Commit one immutable seed; exact retries return the original record.
 
-        Keys are actor-scoped, 1-128 characters. Reference revisions must be
-        current at first commit; retries compare the immutable request before
-        consulting live references. The optional description and accepted
-        scope are part of that immutable request. Caller holds no lock;
-        runtime binds actor.
+        Keys are actor-scoped, 1-128 characters. The optional origin,
+        description and scope are part of that immutable request. Caller holds
+        no lock; runtime binds actor.
         """
         item_id = self._create_id(actor, idempotency_key)
         validate_origin(origin)
@@ -524,44 +402,29 @@ class WorkItems:
                 else:
                     # Recover post-link aliases only for an already committed seed.
                     self._recover_temporary_writes(item_id)
-                    existing = self._direct_record(item_id)
+                    existing = self._creation_record(item_id)
+                    if existing is not None and existing["kind"] != "direct":
+                        raise Denied("Conflicting work-item creation retry")
             if existing is not None:
                 seed = make_seed(item_id, title, origin, existing["work_item"]["created_at"],
-                                 description=description, scope=scope,
-                                 smoke_refs=existing["work_item"].get("smoke_refs") if "requested_smoke_refs" in existing else smoke_refs)
+                                 description=description, scope=scope, smoke_refs=smoke_refs)
                 record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                           "work_item": seed}
-                if "requested_smoke_refs" in existing:
-                    record["requested_smoke_refs"] = smoke_refs
-                if existing != record:
+                if {key: value for key, value in existing.items() if key != "requested_smoke_refs"} != record:
                     raise Denied("Conflicting work-item creation retry")
-                self.validate_seed_replay(seed, seed_event=existing)
+                self._validate_seed_replay(existing["work_item"])
                 return {"record": existing, "created": False}
-            seed = self.create_seed(item_id, title, origin, now(), actor=actor,
-                                    idempotency_key=idempotency_key, description=description,
-                                    scope=scope, smoke_refs=smoke_refs)
+            seed = self._create_seed(item_id, title, origin, now(), description=description,
+                                     scope=scope, smoke_refs=smoke_refs)
             record = {"kind": "direct", "actor": actor, "idempotency_key": idempotency_key,
                       "work_item": seed}
-            if seed.get("smoke_refs") != smoke_refs and origin is not None and "insight_id" in origin:
-                record["requested_smoke_refs"] = smoke_refs
             directory.mkdir(parents=True, exist_ok=True)
             with self.committing([item_id]):
                 write_json(directory / "create.json", record, exclusive=True)
             return {"record": record, "created": True}
 
-    def _iter_item_events_with_revisions(self, *, recover: bool):
-        task_sources = set()
-        ambiguous_task_sources = set()
-        for event_id, event in self._iter_decision_events(recover=recover):
-            if "work_items" in event or "work_item_specs" in event:
-                for seed in task_seeds(event):
-                    if seed["id"] in task_sources:
-                        ambiguous_task_sources.add(seed["id"])
-                    else:
-                        task_sources.add(seed["id"])
-                    yield seed["id"][3:], event, None
-            else:
-                yield event_id, event, None
+    def _iter_items(self, *, recover: bool):
+        """Yield (item id, creation record, validated revisions) for every seeded item."""
         directory = self.root / "work-items"
         if not _directory(directory):
             return
@@ -569,559 +432,31 @@ class WorkItems:
             for entry in entries:
                 if ITEM_ID.fullmatch(entry.name) is None or not _directory(directory / entry.name):
                     raise Denied("Invalid work-item directory entry")
+                revisions = self._history_revisions(entry.name, recover=recover)
                 try:
                     (directory / entry.name / "create.json").lstat()
                 except FileNotFoundError:
                     # A failed first create can leave only a temporary or empty
                     # directory. Validate/recover it, but never invent a seed.
-                    decision = self.root / "decision-history" / f"{entry.name[3:]}.json"
-                    try:
-                        decision.lstat()
-                    except FileNotFoundError:
-                        # Reuse only this scan's fully validated task sources.
-                        if entry.name in ambiguous_task_sources:
-                            raise Denied("Ambiguous task seed sources")
-                        revisions = self._history_revisions(entry.name, recover=recover)
-                        if entry.name in task_sources:
-                            continue
-                        if revisions or self._resolution(directory / entry.name) is not None:
-                            raise Denied("Work-item history has no immutable seed")
+                    if revisions:
+                        raise Denied("Work-item history has no immutable seed")
                     continue
-                revisions = self._history_revisions(entry.name, recover=recover)
-                yield entry.name[3:], self._direct_record(entry.name), revisions
+                yield entry.name, self._creation_record(entry.name), revisions
 
-    def _iter_item_events(self, *, recover: bool):
-        for event_id, event, _ in self._iter_item_events_with_revisions(recover=recover):
-            yield event_id, event
-
-    @staticmethod
-    def _legacy_source(event: dict) -> dict:
-        """Only valid origin fields are exposed; incomplete legacy events may drop."""
-        source = {"insight_id": None, "rev": None, "created_at": None}
-        try:
-            source["insight_id"] = identifier(event.get("id"))
-        except Denied:
-            pass
-        rev = event.get("rev")
-        if type(rev) is int and rev >= 1:
-            source["rev"] = rev
-        if _timestamp(event.get("created_at")):
-            source["created_at"] = event["created_at"]
-        return source
-
-    @staticmethod
-    def _validate_decision_key(event_id: str | None, event: dict) -> None:
-        """Validate new keyed decisions; legacy events without a key remain readable."""
-        if "decision_key" not in event:
-            if "work_item_intent" in event or "work_items" in event or "work_item_specs" in event:
-                raise Denied("Explicit work-item intent lacks a decision key")
-            return
-        action = event.get("action")
-        try:
-            insight_id = identifier(event.get("id"))
-        except Denied as exc:
-            raise Denied("Invalid decision key binding") from exc
-        rev = event.get("rev")
-        key = event.get("decision_key")
-        if (action not in ("accept", "modify", "defer", "reject")
-                or type(rev) is not int or rev < 1
-                or key != _decision_key(insight_id, rev)
-                or (event_id is not None and action in ("accept", "modify", "reject")
-                    and event_id != key)):
-            raise Denied("Invalid decision key binding")
-        if "work_items" in event or "work_item_specs" in event:
-            _validate_keyed_substantive_event(event, insight_id, rev, key, "")
-
-    @staticmethod
-    def _legacy_seed(event_id: str, event: dict, title) -> dict:
-        source = WorkItems._legacy_source(event)
-        if (any(value is None for value in source.values())
-                or not isinstance(title, str) or not 1 <= len(title) <= 200):
-            raise Denied("Opening legacy work requires valid origin and a 1-200 character title")
-        return make_seed(f"wi_{event_id}", title,
-                         {"insight_id": source["insight_id"], "rev": source["rev"]}, source["created_at"],
-                         smoke_refs=event.get("smoke_refs"))
-
-    def _legacy_resolution(self, event_id: str, event: dict, *, recover=False,
-                           history_revisions=_HISTORY_UNSET) -> dict | None:
-        """Validate either filename's bounded envelope against the canonical source."""
-        self._validate_decision_key(event_id, event)
-        if "work_items" in event or "work_item_specs" in event:
-            task_seeds(event)
-            return None
-        intent = event.get("work_item_intent")
-        if "work_item_intent" in event and (
-                event.get("action") not in ("accept", "modify")
-                or intent not in ("create", "none")
-                or (intent == "create") != ("work_item" in event)):
-            raise Denied("Invalid decision work-item intent or seed")
-        if intent == "none" and any(value is None for value in self._legacy_source(event).values()):
-            raise Denied("Explicit no-work decision requires valid origin binding")
-        item_id = f"wi_{event_id}"
-        if recover:
-            revisions = self._recover_temporary_writes(item_id)
-        else:
-            revisions = history_revisions
-        directory = self.root / "work-items" / item_id
-        if revisions is None:
-            return None
-        if revisions is _HISTORY_UNSET:
-            if not _directory(directory.parent) or not _directory(directory):
-                return None
-        name = self._resolution(directory)
-        if name is None:
-            if revisions is not _HISTORY_UNSET and revisions and "work_item" not in event:
-                raise Denied("Unresolved legacy event carries active history")
-            return None
-        if intent == "none":
-            raise Denied("Explicit no-work decision cannot carry legacy reconciliation")
-        record = self._read(f"work-items/{item_id}/{name}")
-        fields = {"event_id", "event_sha256", "action", "revision", "outcome",
-                  "actor", "reason", "created_at"}
-        if record.get("outcome") == "open":
-            fields.add("work_item")
-        if (set(record) != fields or record.get("event_id") != event_id
-                or record.get("event_sha256") != hashlib.sha256(canonical(event)).hexdigest()
-                or event.get("action") not in ("accept", "modify") or "work_item" in event
-                or record.get("action") != event["action"]
-                or record.get("revision") != self._legacy_source(event)["rev"]
-                or (record.get("revision") is not None and type(record["revision"]) is not int)
-                or record.get("outcome") not in ("open", "drop")
-                or not isinstance(record.get("reason"), str) or not record["reason"].strip()
-                or len(record["reason"]) > 4000 or not _timestamp(record.get("created_at"))):
-            raise Denied("Invalid legacy reconciliation binding or fields")
-        identifier(record["actor"])
-        if record["outcome"] == "open":
-            seed = record["work_item"]
-            if (not isinstance(seed, dict)
-                    or seed != self._legacy_seed(event_id, event, seed.get("title"))
-                    or type(seed.get("rev")) is not int
-                    or type(seed.get("origin", {}).get("rev")) is not int):
-                raise Denied("Invalid legacy reconciliation seed")
-        elif revisions is not _HISTORY_UNSET and revisions:
-            raise Denied("Dropped legacy resolution carries active history")
-        return record
-
-    def _audit_drop_only(self, item_id: str) -> bool:
-        """Recognize a valid legacy drop sidecar without recovery or writes.
-
-        Only a directory containing exactly one ordinary resolution file can
-        be covered here. The shared resolution validator binds that bounded,
-        non-hardlinked sidecar to its immutable decision event. Open records
-        deliberately fall through to the regular seed/history reader.
-        """
-        match = ITEM_ID.fullmatch(item_id) if isinstance(item_id, str) else None
-        if match is None:
-            return False
-        directory = self.root / "work-items" / item_id
-        if not _directory(directory.parent) or not _directory(directory):
-            return False
-        name = self._resolution(directory)
-        if name is None:
-            return False
-        with os.scandir(directory) as entries:
-            first = next(entries, None)
-            if first is None or first.name != name:
-                return False
-            info = _entry_stat(first)
-            if (not stat.S_ISREG(info.st_mode) or first.is_symlink()
-                    or getattr(info, "st_file_attributes", 0) & 0x400):
-                return False
-            if next(entries, None) is not None:
-                return False
-
-        event_id = match[1]
-        event = self._read(f"decision-history/{event_id}.json")
-        resolution = self._legacy_resolution(event_id, event, history_revisions=[])
-        return resolution is not None and resolution["outcome"] == "drop"
-
-    def reconcile(self, event_id, *, outcome, reason, actor, expected_action=None,
-                  expected_rev=None, title=None) -> dict:
-        """Resolve exactly one unseeded event, exclusively and retry-idempotently."""
-        if (not isinstance(event_id, str) or len(event_id) != 32
-                or _DECISION_EVENT_NAME.fullmatch(event_id + ".json") is None):
-            raise Denied("Invalid legacy event ID")
-        if (expected_action not in (None, "accept", "modify") or outcome not in ("open", "drop")
-                or (expected_rev is not None and (type(expected_rev) is not int or expected_rev < 1))):
-            raise Denied("Invalid legacy reconciliation outcome or expectation")
-        if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
-            raise Denied("Legacy reconciliation requires a nonblank reason of 1-4000 characters")
-        if outcome == "drop" and title is not None:
-            raise Denied("A legacy drop must not include a title")
-        identifier(actor)
-        with lock_diagnostics.operation("write"), record_lock(self.root):
-            self._recover_decision_history_temporaries(self.root / "decision-history")
-            event = self._read(f"decision-history/{event_id}.json")
-            if "work_item" in event or "work_items" in event:
-                raise Denied("Decision is already seeded; inspect its existing work with mizu work-items PROJECT")
-            if "work_item_intent" in event or "work_item_specs" in event:
-                raise Denied("Decision has explicit work-item intent; leave its disposition unchanged")
-            action = event.get("action")
-            if action not in ("accept", "modify"):
-                raise Denied("Only unseeded accept or modify decisions can be reconciled")
-            if ((expected_action is not None and action != expected_action)
-                    or (expected_rev is not None
-                        and (type(event.get("rev")) is not int or event["rev"] != expected_rev))):
-                raise Denied("Decision action or revision does not match; verify the event with mizu work-items PROJECT --legacy")
-            item_id = f"wi_{event_id}"
-            self._direct_record(item_id)  # Refuse colliding direct creation before committing.
-            existing = self._legacy_resolution(event_id, event, recover=True)
-            record = {"event_id": event_id,
-                      "event_sha256": hashlib.sha256(canonical(event)).hexdigest(),
-                      "action": action, "revision": self._legacy_source(event)["rev"],
-                      "outcome": outcome, "actor": actor, "reason": reason,
-                      "created_at": existing["created_at"] if existing else now()}
-            if outcome == "open":
-                record["work_item"] = self._legacy_seed(event_id, event, title)
-                require_pairs(self.root, record["work_item"].get("smoke_refs", []))
-            if existing is not None:
-                if record != existing:
-                    raise Denied("Conflicting legacy reconciliation retry")
-                return {"record": existing, "created": False}
-            if len(canonical(record)) > PREVIEW_BYTES:
-                raise LimitExceeded("Legacy reconciliation exceeds byte bound")
-            with self.committing([item_id]):
-                write_json(self.root / "work-items" / item_id / _CURRENT_RESOLUTION_NAME,
-                           record, exclusive=True)
-            return {"record": record, "created": True}
-
-    def page_legacy(self, *, cursor=None, limit=25) -> dict:
-        """Live audit inventory, ordered by exclusive event ID, O(limit) rows.
-
-        No proposal bodies. Unresolved, reconciled and explicit no-work events are included.
-        Recognized atomic-write leftovers may be recovered under insights.lock.
-        """
-        if (cursor is not None and (not isinstance(cursor, str) or len(cursor) > MAX_OPEN_CURSOR_CHARS
-                or re.fullmatch(r"wl1\|[0-9a-f]{32}", cursor) is None)):
-            raise Denied("Invalid legacy cursor")
-        if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
-            raise Denied("Legacy page limit must be an integer in [1, 100]")
-        after = cursor[4:] if cursor else None
-        with lock(self.root / "locks" / "insights.lock"):
-            selected, total, eligible, unresolved = [], 0, 0, 0
-            for event_id, event in self._decision_events():
-                if "work_items" in event:
-                    task_seeds(event)
-                    continue
-                if event["action"] not in ("accept", "modify") or "work_item" in event:
-                    self._legacy_resolution(event_id, event, recover=True)
-                    if "work_item" in event:
-                        self._seed(f"wi_{event_id}", event)
-                    continue
-                resolution = self._legacy_resolution(event_id, event, recover=True)
-                total += 1
-                no_work = event.get("work_item_intent") == "none"
-                unresolved += resolution is None and not no_work
-                if after is not None and event_id <= after:
-                    continue
-                eligible += 1
-                # Bound row selection before constructing previews.
-                if len(selected) >= limit and event_id >= selected[0][1]:
-                    continue
-                source = self._legacy_source(event)
-                reason = event.get("reason")
-                preview, clipped = text_preview(reason if isinstance(reason, str) else "", 1024)
-                row = {"event_id": event_id, "action": event["action"], **source,
-                       "reason_preview": preview, "reason_truncated": clipped,
-                       "openable": resolution is None and not no_work and all(value is not None for value in source.values()),
-                       "resolution": {"outcome": "none"} if no_work else None}
-                if no_work:
-                    row["work_item_intent"] = "none"
-                if resolution is not None:
-                    preview, clipped = text_preview(resolution["reason"], 1024)
-                    row["resolution"] = {key: resolution[key] for key in
-                                         ("outcome", "actor", "created_at", "event_sha256")}
-                    row["resolution"].update(reason_preview=preview, reason_truncated=clipped)
-                    if resolution["outcome"] == "open":
-                        row["resolution"]["work_item_id"] = f"wi_{event_id}"
-                if len(canonical(row)) > MAX_OPEN_ROW_BYTES:
-                    raise LimitExceeded("Legacy page row exceeds byte bound")
-                candidate = (_ReverseKey(event_id), event_id, row)
-                if len(selected) < limit:
-                    heapq.heappush(selected, candidate)
-                else:
-                    heapq.heapreplace(selected, candidate)
-            rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
-            overflow = max(0, eligible - len(rows))
-            result = {"items": rows, "total": total, "cursor": cursor,
-                      "next_cursor": f"wl1|{rows[-1]['event_id']}" if overflow and rows else None,
-                      "overflow_count": overflow, "truncated": overflow > 0,
-                      "unseeded_decisions": unresolved, "coverage_complete": unresolved == 0}
-            if len(canonical(result)) > MAX_OPEN_PAGE_BYTES:
-                raise LimitExceeded("Legacy page exceeds byte bound")
-            return result
-
-    def _iter_decision_events(self, *, recover: bool):
-        """Enumerate committed decision events with an explicit recovery mode.
-
-        With ``recover=True`` (caller holds insights.lock) recognized
-        ``.new-*`` leftovers are recovered; with ``recover=False`` they are
-        validated and ignored, never promoted or deleted. Anything unsafe or
-        unexpected fails closed.
-        """
-        history = self.root / "decision-history"
-        if not self._prepare_decision_history(history, recover=recover):
-            return
-            yield  # Make this a generator; the early return yields nothing.
-        with os.scandir(history) as entries:
-            for entry in entries:
-                name = entry.name
-                if _TEMP_NAME.fullmatch(name):
-                    if not recover:
-                        continue
-                    # Locked recovery removed every validated temporary above.
-                    raise Denied("Invalid committed decision-history filename")
-                yield self._read_decision_event(name)
-
-    def _read_decision_event(self, name: str) -> tuple[str, dict]:
-        if _DECISION_EVENT_NAME.fullmatch(name) is None:
-            raise Denied("Invalid committed decision-history filename")
-        event = self._read(f"decision-history/{name}")
-        if event.get("action") not in ("accept", "modify", "defer", "reject", "withdraw"):
-            raise Denied("Malformed committed decision-history action")
-        if event["action"] not in ("accept", "modify") and "work_item" in event:
-            raise Denied("Non-accept decision carries a work-item seed")
-        event_id = name[:-5]
-        self._validate_decision_key(event_id, event)
-        return event_id, event
-
-    def _decision_events(self):
-        yield from self._iter_decision_events(recover=True)
-
-    def _task_event(self, item_id: str) -> dict | None:
-        """Resolve hashed task IDs from atomic manifests, with no mutable index.
-
-        No recovery here: reads must not promote interrupted events. The
-        regular event iterator validates the whole group before matching.
-        """
-        found = None
-        for _, event in self._iter_decision_events(recover=False):
-            if "work_items" in event and any(seed["id"] == item_id for seed in event["work_items"]):
-                if found is not None:
-                    raise Denied("Ambiguous task seed sources")
-                found = event
-        return found
-
-    def _seed(self, item_id: str, event: dict | None = None, *,
-              history_revisions=_HISTORY_UNSET) -> dict:
-        """Validate a seed, optionally reusing its already safe-read event."""
-        match = ITEM_ID.fullmatch(item_id) if isinstance(item_id, str) else None
-        if match is None:
+    def _seed(self, item_id: str) -> dict:
+        """Validate and return an item's immutable seed."""
+        if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        if event is not None and not isinstance(event, dict):
-            raise Denied("Invalid work-item seed event")
-        direct = (self._direct_record(item_id)
-                  if event is None or event.get("kind") == "direct" else None)
-        if direct is not None:
-            if event is not None and event != direct:
-                raise Denied("Conflicting work-item seed sources")
-            return direct["work_item"]
-        if event is None:
-            try:
-                (self.root / "decision-history" / f"{match[1]}.json").lstat()
-            except FileNotFoundError:
-                event = self._task_event(item_id)
-                if event is None:
-                    raise Denied("Work item has no immutable seed")
-            else:
-                event = self._read(f"decision-history/{match[1]}.json")
-        if not isinstance(event, dict):
-            raise Denied("Invalid work-item seed event")
-        if "work_items" in event or "work_item_specs" in event:
-            self._validate_decision_key(event.get("decision_key"), event)
-            seeds = task_seeds(event)
-            for seed in seeds:
-                if seed["id"] == item_id:
-                    if self._resolution(self.root / "work-items" / item_id) is not None:
-                        raise Denied("Task seed cannot carry legacy reconciliation")
-                    if self._direct_record(item_id) is not None:
-                        raise Denied("Conflicting task seed sources")
-                    return seed
-            raise Denied("Work item is not a member of its decision manifest")
-        resolution = self._legacy_resolution(match[1], event, history_revisions=history_revisions)
-        if event.get("work_item_intent") == "none":
-            raise Denied("Explicit no-work decision has no work item")
-        if "work_item" not in event:
-            if resolution is None or resolution["outcome"] != "open":
-                raise Denied("Work item has no open legacy resolution")
-            event = {**event, "work_item": resolution["work_item"]}
-        seed = event.get("work_item")
-        if (event.get("action") not in ("accept", "modify")
-                or type(event.get("rev")) is not int or event["rev"] < 1
-                or not _timestamp(event.get("created_at"))
-                or not isinstance(seed, dict)):
-            raise Denied("Invalid work-item seed event")
-        identifier(event.get("id"))
-        validate_seed(seed)
-        if seed != make_seed(item_id, seed["title"], {"insight_id": event["id"], "rev": event["rev"]},
-                             event["created_at"],
-                             **({"smoke_refs": event["smoke_refs"]} if "smoke_refs" in event else {}),
-                             **({"description": event.get("reason")} if "description" in seed else {}),
-                             **({"scope": event.get("scope")} if "scope" in seed else {})):
-            raise Denied("Work-item seed does not match decision event")
-        return seed
-
-    def _optional_record(self, name: str) -> dict | None:
-        """Read one optional bounded record, refusing unsafe store paths."""
-        parts = name.split("/")
-        if (len(parts) != 2 or parts[0] not in ("inbox", "decisions", "insight-ids")
-                or not parts[1].endswith(".json")):
-            raise Denied("Invalid work-item origin record path")
-        identifier(parts[1][:-5])
-        if not _directory(self.root / parts[0]):
-            return None
-        path = self.root / name
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            return None
-        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400):
-            raise Denied("Unsafe work-item origin record")
-        return self._read(name)
-
-    def _origin_lookup(self, insight_id: str, *, locked: bool = True) -> tuple:
-        """Index columns of one origin insight: its row, then its current decision."""
-        with self._ledger.read("insights", locked=locked) as db:
-            return _rows(db, _ORIGIN_SELECT + " FROM (SELECT ? AS k) " + _ORIGIN_JOIN.format(key="k"),
-                         (insight_id,))[0]
-
-    def _origin_revision(self, insight_id: str) -> int | None:
-        """Current revision of an origin insight; None when it is unknown."""
-        return self._origin_rev(self._origin_lookup(insight_id))
-
-    @staticmethod
-    def _origin_rev(origin: tuple) -> int | None:
-        known, valid, revision = origin[:3]
-        if known is not None and not valid:
-            raise Denied("Invalid current work-item origin insight")
-        return revision
-
-    @staticmethod
-    def _validate_current_decision_shape(decision: dict, insight_id: str):
-        """Validate the shared current-decision envelope; return (action, rev)."""
-        action = decision.get("action")
-        fields = {"id", "action", "reason", "revisit", "run", "created_at", "rev"}
-        if action in ("accept", "modify"):
-            if "work_item_intent" in decision:
-                fields.add("work_item_intent")
-            if "work_item" in decision:
-                fields.add("work_item")
-            if "work_items" in decision or "work_item_specs" in decision:
-                fields.update({"work_items", "work_item_specs"})
-                if "work_item_waits" in decision:
-                    fields.add("work_item_waits")
-        elif action == "withdraw":
-            fields.add("actor")
-        elif action not in ("defer", "reject"):
-            raise Denied("Invalid current work-item origin decision")
-        if "smoke_refs" in decision:
-            validate_refs(decision["smoke_refs"])
-            fields.add("smoke_refs")
-        revision = decision.get("rev")
-        WorkItems._validate_decision_key(None, decision)
-        if "decision_key" in decision:
-            fields.add("decision_key")
-        # A decision written before the accepted scope existed keeps the older
-        # field set; a decision that states one carries the extra key.
-        allowed = {frozenset(fields)}
-        if action in ("accept", "modify"):
-            allowed.add(frozenset(fields | {"scope"}))
-            if "scope" in decision:
-                validate_scope(decision["scope"])
-        if (frozenset(decision) not in allowed or decision.get("id") != insight_id
-                or type(revision) is not int or revision < 1
-                or not isinstance(decision.get("reason"), str) or not decision["reason"].strip()
-                or not isinstance(decision.get("revisit"), str)
-                or (action == "defer" and not decision["revisit"].strip())
-                or (action == "withdraw" and decision["revisit"] != "")
-                or (action == "withdraw" and decision.get("run") is not None
-                    and (not isinstance(decision["run"], str) or not decision["run"]))
-                or (action != "withdraw"
-                    and (not isinstance(decision.get("run"), str) or not decision["run"]))
-                or not _timestamp(decision.get("created_at"))):
-            raise Denied("Malformed current work-item origin decision")
-        return action, revision
-
-    def _resolve_current_work_item(self, decision: dict, *, readonly: bool, events=None,
-                                   resolve: bool = True):
-        """Resolve the work-item ID (or ordered task IDs) for a current decision.
-
-        The keyed ``work_item`` branch reuses the immutable seed validator,
-        which never recovers; only the legacy no-event-ID branch needs the
-        history scan, recovered when locked and validated read-only otherwise.
-        ``events`` supplies the scanned history for callers that resolve many
-        decisions; without ``resolve`` the legacy branch only proves the
-        decision equals one immutable event.
-        """
-        action = decision.get("action")
-        if action == "withdraw":
-            identifier(decision["actor"])
-            return None
-        if "work_items" in decision or "work_item_specs" in decision:
-            seeds = task_seeds(decision)
-            event = self._read(f"decision-history/{decision['decision_key']}.json")
-            if event != decision:
-                raise Denied("Current task decision differs from its immutable event")
-            for seed in seeds:
-                self._seed(seed["id"], event)
-            return [seed["id"] for seed in seeds]
-        if action in ("accept", "modify") and "work_item" in decision:
-            seed = decision["work_item"]
-            if (not isinstance(seed, dict) or not isinstance(seed.get("id"), str)
-                    or ITEM_ID.fullmatch(seed["id"]) is None):
-                raise Denied("Malformed current work-item origin decision seed")
-            seed_id = seed["id"]
-            event = self._read(f"decision-history/{seed_id[3:]}.json")
-            if event != decision:
-                raise Denied("Current work-item origin decision differs from its immutable event")
-            self._seed(seed_id)  # Validate the immutable seed's complete field/value contract.
-            return seed_id
-        if action in ("accept", "modify"):
-            # Legacy current-decision files have no event ID. Resolve the exact
-            # old-schema record against one immutable history event rather than
-            # trusting a well-shaped mutable pointer by itself.
-            match = None
-            for event_id, event in (events() if events is not None
-                                    else self._iter_decision_events(recover=not readonly)):
-                if event == decision:
-                    if match is not None:
-                        raise Denied("Ambiguous current legacy decision history")
-                    match = (event_id, event)
-            if match is None:
-                raise Denied("Current legacy decision has no immutable history event")
-            if not resolve:
-                return None
-            if readonly:
-                revisions = self._history_revisions(f"wi_{match[0]}", recover=False)
-                resolution = self._legacy_resolution(*match, history_revisions=revisions)
-            else:
-                resolution = self._legacy_resolution(*match, recover=True)
-            if resolution is not None and resolution["outcome"] == "open":
-                return f"wi_{match[0]}"
-            return None
-        return None
-
-    def _current_decision(self, insight_id: str, *, include_work_item: bool = False) -> dict | None:
-        """Validated current decision of one insight with its work-item IDs, read from files."""
-        decision = self._optional_record(f"decisions/{insight_id}.json")
-        if decision is None:
-            return None
-        action, revision = self._validate_current_decision_shape(decision, insight_id)
-        work_item_id = self._resolve_current_work_item(decision, readonly=False)
-        result = {"rev": revision, "action": action}
-        if include_work_item:
-            if isinstance(work_item_id, list):
-                result["work_item_ids"] = work_item_id
-            else:
-                result["work_item_id"] = work_item_id
-        return result
+        record = self._creation_record(item_id)
+        if record is None:
+            raise Denied("Work item has no immutable seed")
+        return record["work_item"]
 
     def _history_revisions(self, item_id: str, *, recover: bool, require_clean=False) -> set[int] | None:
         """Validate per-item history names, optionally recovering leftovers.
 
         Single scan shared by locked and read-only readers. With
-        ``recover=True`` (caller holds insights.lock) recognized regular
+        ``recover=True`` (caller holds records.lock) recognized regular
         orphan temporaries and post-link aliases are unlinked and the
         directory synced; with ``recover=False`` they are only validated and
         ignored, never deleted or synced. A safe orphan (``st_nlink == 1``)
@@ -1142,7 +477,6 @@ class WorkItems:
         temporary_entries = []
         revision_inodes = []
         revisions = set()
-        resolution_seen = False
         with os.scandir(directory) as entries:
             for count, entry in enumerate(entry for entry in entries if entry.name != "retirement.json"):
                 if count >= MAX_REVISIONS + 1:
@@ -1150,15 +484,11 @@ class WorkItems:
                 if _TEMP_NAME.fullmatch(entry.name):
                     temporary_entries.append(entry)
                     continue
-                if entry.name == "create.json" or entry.name in _RESOLUTION_NAMES:
-                    if entry.name in _RESOLUTION_NAMES:
-                        if resolution_seen:
-                            raise Denied(_AMBIGUOUS_RESOLUTION_NAMES)
-                        resolution_seen = True
+                if entry.name == "create.json":
                     info = _entry_stat(entry)
                     if (not stat.S_ISREG(info.st_mode)
                             or getattr(info, "st_file_attributes", 0) & 0x400):
-                        raise Denied("Unsafe legacy reconciliation")
+                        raise Denied("Unsafe work-item creation record")
                     revision_inodes.append((info.st_dev, info.st_ino, entry))
                     continue
                 if len(revisions) >= MAX_REVISIONS - 1:
@@ -1235,20 +565,25 @@ class WorkItems:
         if not isinstance(value, dict):
             raise Denied("Blocked work items require a structured wait")
         kind = value.get("kind")
-        if kind in ("ci", "publication_ci", "proposal_merged"):
-            if kind == "ci":
-                from .ci_waits import normalize
-            elif kind == "proposal_merged":
-                from .proposal_waits import normalize
+        if kind in ("ci", "publication_ci"):
             refs = validate_refs(value.get("smoke_refs", []))
             raw = {k: v for k, v in value.items() if k != "smoke_refs"}
             if kind == "publication_ci":
                 from .ci_waits import normalize_publication
                 result = normalize_publication(raw, snapshots=self.snapshots, stored=True)
             else:
+                from .ci_waits import normalize
                 result = normalize(self.root, raw, stored=True)
             return {**result, "smoke_refs": refs} if "smoke_refs" in value else result
         return stored_wait(value)
+
+    def _published_digest(self) -> str:
+        """Current published code digest: the baseline of a new code_change wait."""
+        current = self.snapshots.get()
+        value = current.get("code_digest") if isinstance(current, dict) else None
+        if not isinstance(value, str) or not value:
+            raise ValueError("No published code digest")
+        return value
 
     @staticmethod
     def _scope_digest(scope):
@@ -1369,7 +704,7 @@ class WorkItems:
                            ("holder", "wait", "snapshot_id", "verification", "delivered_tree",
                             "verification_scope", "delivery", "blocked_since"))):
                 raise Denied("Invalid audited completion reopen marker or state")
-        validate_origin(record["origin"])
+        validate_origin(record["origin"], stored=True)
         status = record["status"]
         previous_scope = previous.get("scope")
         record_scope = record.get("scope")
@@ -1469,8 +804,7 @@ class WorkItems:
                 or record.get("verification_scope") is not None):
             raise Denied("Only completed work items carry snapshot evidence")
 
-    def _iter_chain(self, item_id: str, *, seed_event: dict | None = None,
-                    history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True):
+    def _iter_chain(self, item_id: str, *, history_revisions=_HISTORY_UNSET, retirement=None, verify_snapshots: bool = True):
         """Replay and validate one append-only chain, yielding one record at a time.
 
         The seed and each revision are immutable full-state records. Callers may
@@ -1482,7 +816,7 @@ class WorkItems:
         chain/field validation or the current active binding. Done completion
         proofs always validate their recorded versioned contract.
         """
-        current = self._seed(item_id, seed_event, history_revisions=history_revisions)
+        current = self._seed(item_id)
         chain_hash = hashlib.sha256()
         chain_hash.update(canonical(current) + b"\n")
         blocked_since = blocked_start(None, current)
@@ -1506,17 +840,14 @@ class WorkItems:
         if retirement is not None:
             retirement.update(chain_sha256=chain_sha256, record=terminal)
 
-    def _get(self, item_id: str, *, seed_event: dict | None = None,
-             history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
+    def _get(self, item_id: str, *, history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
              verify_current_delivery: bool = False) -> dict:
         """Replay one item's current record from its revision files."""
-        return self._current_hold(item_id, seed_event=seed_event,
-                                  history_revisions=history_revisions,
+        return self._current_hold(item_id, history_revisions=history_revisions,
                                   verify_snapshots=verify_snapshots,
                                   verify_current_delivery=verify_current_delivery)[0]
 
-    def _current_hold(self, item_id: str, *, seed_event=None,
-                      history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
+    def _current_hold(self, item_id: str, *, history_revisions=_HISTORY_UNSET, verify_snapshots: bool = True,
                       verify_current_delivery: bool = False, blocked_waiter=None) -> tuple:
         """Replay a chain into (current record, doing start, blocked start).
 
@@ -1529,8 +860,7 @@ class WorkItems:
         previous = None
         last_transition = None
         retirement = {}
-        for current in self._iter_chain(item_id, seed_event=seed_event,
-                                        history_revisions=history_revisions, retirement=retirement,
+        for current in self._iter_chain(item_id, history_revisions=history_revisions, retirement=retirement,
                                         verify_snapshots=verify_snapshots):
             if previous is not None:
                 last_transition = (previous, current)
@@ -1554,17 +884,16 @@ class WorkItems:
 
     # Index source: the only code that turns revision files into index rows.
 
-    def _ledger_row(self, item_id, event, revisions, *, strict=False) -> tuple:
+    def _ledger_row(self, item_id, revisions, *, strict=False) -> tuple:
+        creator = self._creation_record(item_id).get("actor")
         item, since, blocked_since = self._current_hold(
-            item_id, seed_event=event, history_revisions=revisions,
+            item_id, history_revisions=revisions,
             verify_snapshots=strict, verify_current_delivery=True)
-        origin = item["origin"] or {}
-        source = (event.get("decision_key") if isinstance(event, dict)
-                  and ("work_items" in event or "work_item_specs" in event) else None)
+        origin = item["origin"]
         return (item["id"], item["rev"], item["status"], item["holder"],
                 _timestamp_order(item["created_at"]), _timestamp_order(item["updated_at"]),
-                origin.get("insight_id"), origin.get("rev") if "insight_id" in origin else None,
-                (item.get("wait") or {}).get("kind"), since, blocked_since, source,
+                origin if origin is None or isinstance(origin, str) else canonical(origin).decode(),
+                creator, (item.get("wait") or {}).get("kind"), since, blocked_since,
                 canonical(item).decode())
 
     def ledger_entries(self, *, recover: bool, skip=frozenset(), strict=False, errors=None):
@@ -1573,57 +902,30 @@ class WorkItems:
         With ``errors`` (a list), an item whose chain fails validation is
         reported there as ``(item_id, exception)`` instead of aborting.
         """
-        for event_id, event, scanned in self._iter_item_events_with_revisions(recover=recover):
-            kind, seed = self._seed_for_event(event_id, event, readonly=not recover)
-            if kind == "unseeded":
-                yield ("unseeded", event_id)
-            elif kind == "drop":
-                yield ("drop", event_id)
-            if kind != "seed" or seed["id"] in skip:
+        for item_id, _, revisions in self._iter_items(recover=recover):
+            if item_id in skip:
                 continue
-            revisions = (scanned if scanned is not None
-                         else self._history_revisions(seed["id"], recover=recover))
             try:
-                yield ("item", self._ledger_row(seed["id"], event, revisions, strict=strict))
+                yield ("item", self._ledger_row(item_id, revisions, strict=strict))
             except (Denied, LimitExceeded) as exc:
                 if errors is None:
                     raise
-                errors.append((seed["id"], exc))
+                errors.append((item_id, exc))
 
-    def ledger_item(self, item_id: str, source_event, *, recover: bool) -> list:
+    def ledger_item(self, item_id: str, hint, *, recover: bool) -> list:
         """Replay the index entries of one item (none when it has no seed)."""
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        history = self.root / "decision-history"
-        if source_event is not None:
-            if not (history / f"{source_event}.json").exists():
-                return []
-            event = self._read(f"decision-history/{source_event}.json")
-        elif (history / f"{item_id[3:]}.json").exists():
-            event = self._read(f"decision-history/{item_id[3:]}.json")
-        elif (self.root / "work-items" / item_id / "create.json").exists():
-            event = self._direct_record(item_id)
-        else:
-            event = self._task_event(item_id)
-            if event is None:
-                return []
-        kind, seed = self._seed_for_event(item_id[3:], event, readonly=not recover)
-        if kind == "unseeded":
-            return [("unseeded", item_id[3:])]
-        if kind == "drop":
-            return [("drop", item_id[3:])]
-        if kind != "seed":
+        if self._creation_record(item_id) is None:
             return []
         revisions = self._history_revisions(item_id, recover=recover)
-        return [("item", self._ledger_row(item_id, event, revisions))]
+        return [("item", self._ledger_row(item_id, revisions))]
 
-    def committing(self, item_ids, *, source_event=None):
+    def committing(self, item_ids):
         """Bracket a revision-file commit for ``item_ids``; caller holds the record lock."""
-        return self._ledger.write("items", item_ids, hint=source_event)
+        return self._ledger.write("items", item_ids)
 
     # Current state: every read below comes from the index, never from history.
-    # Warm reads trust that index; old-format resolution filenames are refused
-    # at rebuild/migration time (see the module docstring), not probed per read.
 
     @staticmethod
     def _decode(raw, since=None, blocked_since=None):
@@ -1636,7 +938,6 @@ class WorkItems:
         """Return (item, doing start) with any derived blocked start, or raise."""
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        self._require_migrated_item(item_id)
         with self._ledger.read("items", locked=locked) as db:
             found = _rows(db, "SELECT item, doing_since, blocked_since FROM items WHERE id=?",
                           (item_id,))
@@ -1651,7 +952,6 @@ class WorkItems:
     def _plain(self, item_id: str, *, locked: bool = False) -> dict:
         if not isinstance(item_id, str) or ITEM_ID.fullmatch(item_id) is None:
             raise Denied("Invalid work-item ID")
-        self._require_migrated_item(item_id)
         with self._ledger.read("items", locked=locked) as db:
             found = _rows(db, "SELECT item FROM items WHERE id=?", (item_id,))
         if not found:
@@ -1667,21 +967,13 @@ class WorkItems:
             query += f" WHERE status IN ({', '.join('?' * len(statuses))})"
         with self._ledger.read("items", locked=False) as db:
             found = _rows(db, query + " ORDER BY id", tuple(statuses or ()))
-        items = [json.loads(raw) for (raw,) in found]
-        for item in items:
-            self._require_migrated_item(item["id"])
-        return items
+        return [json.loads(raw) for (raw,) in found]
 
-    def unseeded_decisions(self) -> int:
-        """Count legacy accept/modify decisions that no reconciliation resolved."""
+
+    def creators(self) -> dict:
+        """``{item id: creating role or None}``; imported items have no creator."""
         with self._ledger.read("items", locked=False) as db:
-            return _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
-
-    def origin_sources(self) -> dict:
-        """``{insight id: (readable, submitting source or None)}`` for every known insight."""
-        with self._ledger.read("insights", locked=False) as db:
-            return {row[0]: (bool(row[1]), row[2])
-                    for row in _rows(db, "SELECT id, valid, source FROM insights")}
+            return dict(_rows(db, "SELECT id, creator FROM items"))
 
     def closed_items(self, *, limit: int):
         """Return the closed page and the current records of its rows."""
@@ -1691,124 +983,65 @@ class WorkItems:
         """Replay and validate one item's committed chain from its revision files."""
         return self._iter_chain(item_id)
 
-    def is_drop_only(self, item_id: str) -> bool:
-        """Whether an item directory holds only a valid legacy drop resolution."""
-        return self._audit_drop_only(item_id)
 
     def audit(self, *, repair: bool = False) -> dict:
         """Replay every chain strictly and compare it with the index.
 
         Holds the record lock for the whole run. Reports corrupt chains and
         index divergence (at most MAX_OPEN_PAGE_ROWS IDs each, with counts),
-        for work items and, under ``insights``, for the insight and decision
-        records; ``repair`` then rebuilds a diverged index from the files
-        (work items require every chain to validate). The audit itself never
-        changes files.
+        for work items and check jobs; ``repair`` then rebuilds a diverged
+        index from the files (work items require every chain to validate).
+        The audit itself never changes files.
         """
         with lock_diagnostics.operation("write"), record_lock(self.root):
             errors = []
             files = {}
-            unseeded, drops = set(), set()
             for kind, value in self.ledger_entries(recover=False, strict=True, errors=errors):
-                if kind == "item":
-                    files[value[0]] = value
-                elif kind == "unseeded":
-                    unseeded.add(value)
-                elif kind == "drop":
-                    drops.add(value)
-                else:
+                if kind != "item":
                     raise Denied("Invalid work-item index entry")
+                files[value[0]] = value
             index = self._ledger.snapshot("items")
             if index is None:
-                state, indexed, indexed_unseeded, indexed_drops = "missing", {}, set(), set()
+                state, indexed = "missing", {}
             else:
-                state, (indexed, indexed_unseeded, indexed_drops) = index
+                state, indexed = index
             divergent = sorted(item_id for item_id in set(files) | set(indexed)
                                if files.get(item_id) != indexed.get(item_id)
                                and item_id not in dict(errors))
-            divergent_unseeded = sorted(unseeded ^ indexed_unseeded)
-            divergent_drops = sorted(drops ^ indexed_drops)
-            consistent = (not errors and not divergent and not divergent_unseeded
-                          and not divergent_drops and state == "complete")
+            consistent = not errors and not divergent and state == "complete"
             repaired = False
             if repair and not errors and not consistent:
                 self._ledger.rebuild("items")
                 repaired = True
-            insights = insight_index.audit(self.insights, repair=repair)
             jobs = None
-            if "check_jobs" in self.insights.ledger.domains:
+            if "check_jobs" in self._ledger.domains:
                 with lock(self.root / "locks" / "check-jobs.lock"):
-                    jobs = check_job_index.audit(self.insights.ledger, repair=repair)
-            return {"items": len(files) + len(errors), "unseeded_decisions": len(unseeded),
-                    "index": state, "consistent": consistent and insights["consistent"] and (jobs is None or jobs["consistent"]),
-                    "repaired": repaired or insights["repaired"] or bool(jobs and jobs["repaired"]),
-                    "insights": insights, **({"check_jobs": jobs} if jobs is not None else {}),
+                    jobs = check_job_index.audit(self._ledger, repair=repair)
+            return {"items": len(files) + len(errors),
+                    "index": state, "consistent": consistent and (jobs is None or jobs["consistent"]),
+                    "repaired": repaired or bool(jobs and jobs["repaired"]),
+                    **({"check_jobs": jobs} if jobs is not None else {}),
                     "corrupt": [{"id": item_id, "error": str(exc)}
                                 for item_id, exc in errors[:MAX_OPEN_PAGE_ROWS]],
                     "corrupt_count": len(errors),
-                    "divergent": divergent[:MAX_OPEN_PAGE_ROWS], "divergent_count": len(divergent),
-                    "divergent_unseeded": divergent_unseeded[:MAX_OPEN_PAGE_ROWS],
-                    "divergent_unseeded_count": len(divergent_unseeded),
-                    "divergent_drops": divergent_drops[:MAX_OPEN_PAGE_ROWS],
-                    "divergent_drop_count": len(divergent_drops)}
+                    "divergent": divergent[:MAX_OPEN_PAGE_ROWS], "divergent_count": len(divergent)}
 
     def get(self, item_id: str) -> dict:
-        """Read one item's current record under insights.lock."""
-        with lock(self.root / "locks" / "insights.lock"):
+        """Read one item's current record under records.lock."""
+        with lock(self.root / "locks" / "records.lock"):
             return self._plain(item_id, locked=True)
 
-    @staticmethod
-    def _origin_decision(origin: tuple) -> dict | None:
-        """Current decision of an origin insight from its index columns."""
-        known, rev, action, linked = origin[3:]
-        if known is None:
-            return None
-        if not linked:
-            raise Denied("Malformed current work-item origin decision")
-        return {"rev": rev, "action": action}
-
-    def _origin_projection(self, item: dict, origin=None, *, current_decision=_HISTORY_UNSET) -> dict:
-        """Project origin staleness from the item's origin and the insight index.
-
-        ``origin`` holds the joined index columns (see ``_ORIGIN_SELECT``);
-        without it the lookup runs under the record lock the callers hold.
-        """
-        if item["origin"] is None or "work_item_id" in item["origin"]:
-            return {"current_origin_rev": None, "stale": False, "redecision": None}
-        origin_rev = item["origin"]["rev"]
-        if origin is None:
-            origin = self._origin_lookup(item["origin"]["insight_id"])
-        current_rev = self._origin_rev(origin)
-        redecision = None
-        if current_rev is None:
-            stale = True
-        elif current_rev < origin_rev:
-            raise Denied("Origin insight revision predates its work item")
-        elif current_rev == origin_rev:
-            stale = False
-        else:
-            decision = (self._origin_decision(origin) if current_decision is _HISTORY_UNSET
-                        else current_decision)
-            if decision is not None and decision["rev"] > current_rev:
-                raise Denied("Origin decision revision is ahead of its insight")
-            redecision = (decision if decision is not None and decision["rev"] == current_rev
-                          and decision["action"] in ("accept", "modify", "defer", "reject")
-                          else None)
-            stale = redecision is None
-        return {"current_origin_rev": current_rev, "stale": stale,
-                "redecision": redecision}
 
     def _projection_unlocked(self, item_id: str) -> dict:
-        """Build a bounded projection while the caller holds insights.lock."""
+        """Build a bounded projection while the caller holds records.lock."""
         item, since = self._indexed(item_id, locked=True)
-        view = {"item": item, **self._origin_projection(item),
-                **self._hold_projection(since), **blocked_age(item)}
+        view = {"item": item, **self._hold_projection(since), **blocked_age(item)}
         if len(canonical(view)) > MAX_PROJECTION_BYTES:
             raise LimitExceeded("Work-item projection exceeds byte bound")
         return view
 
     def explain(self, item_id: str, *, after_rev=0, limit=25) -> dict:
-        """Return current status/origin plus a byte-bounded ascending history page.
+        """Return current status plus a byte-bounded ascending history page.
 
         ``after_rev`` is an exclusive revision cursor (0..MAX_REVISIONS); the
         immutable seed is revision 1. The full chain is replayed and validated
@@ -1823,7 +1056,7 @@ class WorkItems:
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item history limit must be an integer in [1, 100]")
 
-        with lock(self.root / "locks" / "insights.lock"):
+        with lock(self.root / "locks" / "records.lock"):
             history_revisions = self._recover_temporary_writes(item_id)
             history = []
             history_bytes = 0
@@ -1889,8 +1122,7 @@ class WorkItems:
             current = work_item_retirement.project(current, terminal)
             if terminal:
                 since = None
-            projection = {"item": current, **self._origin_projection(current),
-                          **self._hold_projection(since),
+            projection = {"item": current, **self._hold_projection(since),
                           **blocked_age({**current, "blocked_since": blocked_since})}
             if len(canonical(projection)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
@@ -1906,166 +1138,16 @@ class WorkItems:
                 raise LimitExceeded("Work-item history response exceeds byte bound")
             return result
 
-    def submitter_status(self, insight_id: str) -> dict | None:
-        """Return one compact status for an insight's current accepted work.
-
-        This is a read projection, not a transition. Current decisions and
-        legacy resolutions use the same fail-closed validation as origin
-        projections; seeded item state replays its bounded immutable chain.
-        Unresolved and drop-only legacy decisions have no item status.
-        """
-        with lock(self.root / "locks" / "insights.lock"):
-            decision = self._current_decision(insight_id, include_work_item=True)
-            if decision is None or decision["action"] not in ("accept", "modify"):
-                return None
-            if "work_item_ids" in decision:
-                result = {"items": [self._submitter_item_status(item_id, decision)
-                                    for item_id in decision["work_item_ids"]]}
-                if len(canonical(result)) > PREVIEW_BYTES:
-                    raise LimitExceeded("Submitter task statuses exceed byte bound")
-                return result
-            if decision["work_item_id"] is None:
-                return None
-            return self._submitter_item_status(decision["work_item_id"], decision)
-
-    def _submitter_item_status(self, item_id: str, decision: dict) -> dict:
-        item, since = self._indexed(item_id, locked=True)
-        origin_decision = {"rev": decision["rev"], "action": decision["action"]}
-        origin = self._origin_projection(item, current_decision=origin_decision)
-        status = {"id": item["id"], "status": item["status"], "rev": item["rev"],
-                  "holder": item["holder"], "updated_at": item["updated_at"],
-                  "current_origin_rev": origin["current_origin_rev"],
-                  "stale": origin["stale"], **self._hold_projection(since), **blocked_age(item)}
-        if "wait_resolution" in item:
-            status["wait_resolution"] = item["wait_resolution"]
-        reason = item.get("reason")
-        if reason is not None:
-            preview, clipped = text_preview(reason, 512)
-            status["reason_preview"] = preview
-            status["reason_truncated"] = clipped
-        if item["status"] == "blocked":
-            status["wait"] = item["wait"]
-        elif item["status"] == "done":
-            status["snapshot_id"] = item["snapshot_id"]
-            status["delivered_tree"] = item.get("delivered_tree")
-        if len(canonical(status)) > 4096:
-            raise LimitExceeded("Submitter work-item status exceeds byte bound")
-        return status
 
     def projection(self, item_id: str) -> dict:
-        """Return one bounded item plus revision-derived origin staleness.
+        """Return one bounded item with its hold and blocked ages.
 
-        The immutable item remains the CAS authority. A newer origin revision
-        stays stale until a current-revision accept/modify/defer/reject decision
-        exists; author withdrawal is not a substantive re-decision. A missing
-        origin is stale, never silently treated as current. This is an internal
+        The immutable item remains the CAS authority. This is an internal
         read projection, not prompt/tool/CLI/status exposure.
         """
-        with lock(self.root / "locks" / "insights.lock"):
+        with lock(self.root / "locks" / "records.lock"):
             return self._projection_unlocked(item_id)
 
-    def _prepare_decision_history(self, history: Path, *, recover: bool, scan=None) -> bool:
-        """Validate decision-history temporaries, optionally removing safe ones.
-
-        Single scan shared by locked and read-only readers. With
-        ``recover=True`` (caller holds insights.lock) safe leftovers are
-        unlinked and the directory synced; with ``recover=False`` they are
-        only validated and ignored, never deleted. A lone regular temporary
-        is uncommitted. A post-link alias is accepted only when exactly one
-        regular event filename identifies the same inode. Recovery state is
-        bounded independently of the append-only history. The host preview
-        supplies a bounded directory scan. Returns False when the history
-        directory is absent.
-        """
-        if not _directory(history):
-            return False
-        scan = os.scandir if scan is None else scan
-        temporary_info = []
-        aliases = {}
-        with scan(history) as entries:
-            for entry in entries:
-                if not _TEMP_NAME.fullmatch(entry.name):
-                    continue
-                if len(temporary_info) >= self.history_temporaries:
-                    raise Denied("Too many decision-history temporaries")
-                try:
-                    info = _entry_stat(entry)
-                except FileNotFoundError:
-                    continue  # A concurrent writer finished its atomic write.
-                except OSError as exc:
-                    raise Denied("Unstable decision-history temporary") from exc
-                if (not stat.S_ISREG(info.st_mode)
-                        or getattr(info, "st_file_attributes", 0) & 0x400):
-                    raise Denied("Unsafe decision-history temporary")
-                if (info.st_nlink not in (1, 2)
-                        or (info.st_nlink == 2 and info.st_ino <= 0)):
-                    raise Denied("Unrecognized decision-history temporary link count")
-                temporary_info.append((entry.path, info))
-                if info.st_nlink == 2:
-                    key = (info.st_dev, info.st_ino)
-                    aliases.setdefault(key, []).append(entry.path)
-
-        if aliases:
-            matches = {key: [] for key in aliases}
-            with scan(history) as entries:
-                for entry in entries:
-                    if _DECISION_EVENT_NAME.fullmatch(entry.name) is None:
-                        continue
-                    try:
-                        info = _entry_stat(entry)
-                    except OSError as exc:
-                        raise Denied("Unstable decision-history entry") from exc
-                    key = (info.st_dev, info.st_ino)
-                    if key not in matches:
-                        continue
-                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 2
-                            or getattr(info, "st_file_attributes", 0) & 0x400):
-                        raise Denied("Unsafe decision-history alias target")
-                    matches[key].append(entry.name)
-                    if len(matches[key]) > 1:
-                        raise Denied("Ambiguous decision-history alias target")
-            if any(len(paths) != 1 or len(matches[key]) != 1
-                   for key, paths in aliases.items()):
-                raise Denied("Unrecognized decision-history temporary hard link")
-
-        if not recover:
-            return True
-        removed = False
-        for path, _ in temporary_info:
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                continue
-            removed = True
-        if removed:
-            sync_dir(history)
-        return True
-
-    def prepare_decision_write(self, *, need_wait: bool = False) -> bool:
-        """Screen every decision-transaction parent before any write, lock held.
-
-        Validates decision-history with the existing scanner/recovery, then the
-        decisions directory (always) and the waits directory when a registered
-        wait will be written. A symlinked or otherwise unsafe parent raises
-        Denied and is never followed; an absent directory is safe to create.
-        Call under insights.lock immediately before each event/pointer/wait
-        write (new events, exact-replay pointer repair, withdraw).
-        """
-        present = self._recover_decision_history_temporaries(self.root / "decision-history")
-        _directory(self.root / "decisions")
-        if need_wait:
-            _directory(self.root / "waits")
-        return present
-
-    def _recover_decision_history_temporaries(self, history: Path) -> bool:
-        """Remove safe atomic-write leftovers while insights.lock is held.
-
-        Locked entry point sharing validation with the read-only scan.
-        A lone regular temporary is uncommitted. A post-link alias is removed
-        only when exactly one regular event filename identifies the same inode.
-        Recovery state is bounded independently of the append-only history.
-        """
-        return self._prepare_decision_history(history, recover=True)
 
     def page_open(self, *, cursor=None, limit=25) -> dict:
         """Return a bounded live page of seeded, currently open work items.
@@ -2074,30 +1156,27 @@ class WorkItems:
         ``created_at`` and ID; includes total seeded-open count, the exclusive
         input ``cursor``, ``next_cursor`` iff another matching item follows,
         ``overflow_count`` (matching rows after the cursor beyond this page),
-        ``truncated`` (exactly ``overflow_count > 0``), ``unseeded_decisions``
-        and ``coverage_complete``.
+        and ``truncated`` (exactly ``overflow_count > 0``).
         Limits are 1..100 (exact int); the opaque cursor carries the last row's
         status, UTC creation-order key and ID. Rows are at most 8192 canonical
         bytes and the complete response at most 1 MiB. Selection streams the
-        indexed active rows keeping O(limit) of them. Unresolved legacy
-        accept/modify events are counted, never guessed as open.
+        indexed active rows keeping O(limit) of them.
         The page serves the runtime prompt projection and the explicitly granted
         ``work_items_read`` operation. It does not transition items. Cursors
         page a live view: changes between calls can move rows; a last-key
         cursor avoids offset shifts on earlier closes but does not freeze
         membership.
         """
-        with lock(self.root / "locks" / "insights.lock"):
+        with lock(self.root / "locks" / "records.lock"):
             return self._page_open_impl(cursor=cursor, limit=limit, readonly=False)
 
     def page_open_for_order(self, *, limit=25) -> tuple[dict, str]:
         """Return the normal open page and an order-only full-inventory fingerprint.
 
-        The same locked scan folds bounded accepted scopes and origin decisions
-        into constant-size, order-independent evidence. No page or ready-set
+        The same locked scan folds bounded scopes into constant-size, order-independent evidence. No page or ready-set
         signature is changed, and no bodies or history are retained.
         """
-        with lock(self.root / "locks" / "insights.lock"):
+        with lock(self.root / "locks" / "records.lock"):
             return self._page_open_impl(cursor=None, limit=limit, readonly=False,
                                         order_fingerprint=True)
 
@@ -2135,10 +1214,9 @@ class WorkItems:
         held-open work, without satisfying the registered wait.
         Code-change authority comes from writer_roles or the configured lookup.
         CI holder-only readiness requires the independent requester grant and
-        fresh exact local absence evidence. Otherwise CI/proposal waits are ready
+        fresh exact local absence evidence. Otherwise CI waits are ready
         only from their validated terminal route, independent of event ack.
-        Legacy unseeded decisions remain explicit coverage gaps, never inferred
-        ready work. Unreadable
+        Unreadable
         liveness (``unknown``) excludes only that blocked item and never
         releases it; known ready rows are still returned with
         ``coverage_complete`` false and a bounded ``unknown_blocked`` count,
@@ -2147,7 +1225,7 @@ class WorkItems:
         """
         if role_name is not None:
             identifier(role_name)
-        with lock(self.root / "locks" / "insights.lock"):
+        with lock(self.root / "locks" / "records.lock"):
             if _wait_resolution_high_water is not None:
                 from .snapshot import validate_wait_resolution_high_water
                 validate_wait_resolution_high_water(_wait_resolution_high_water)
@@ -2171,50 +1249,6 @@ class WorkItems:
             result.pop("_wait_resolution_boundary_current", None)
             return result
 
-    def _seed_for_event(self, event_id: str, event: dict, *, readonly: bool):
-        """Resolve the seed for one committed event with an explicit mode.
-
-        Returns ``("skip", None)`` for non-accept decisions and explicit
-        no-work intents, ``("drop", None)`` for drop resolutions,
-        ``("unseeded", None)`` for legacy accept/modify events without a
-        resolution, and ``("seed", seed)`` for seeded items. The legacy
-        sidecar is validated through the
-        shared :meth:`_legacy_resolution`, recovered when locked and read
-        from the read-only scan otherwise. Malformed seeds fail closed.
-        """
-        if "work_items" in event or "work_item_specs" in event:
-            return ("seed", self._seed(f"wi_{event_id}", event))
-        if event.get("kind") == "direct":
-            return ("seed", validate_seed(event["work_item"]))
-        action = event["action"]
-        has_seed = "work_item" in event
-        if action not in ("accept", "modify"):
-            if readonly:
-                revisions = self._history_revisions(f"wi_{event_id}", recover=False)
-                self._legacy_resolution(event_id, event, history_revisions=revisions)
-            else:
-                self._legacy_resolution(event_id, event, recover=True)
-            return ("skip", None)
-        if has_seed:
-            seed = event["work_item"]
-            if (not isinstance(seed, dict) or seed.get("id") != f"wi_{event_id}"):
-                raise Denied("Malformed committed work-item seed")
-            return ("seed", seed)
-        if readonly:
-            revisions = self._history_revisions(f"wi_{event_id}", recover=False)
-            resolution = self._legacy_resolution(event_id, event, history_revisions=revisions)
-        else:
-            resolution = self._legacy_resolution(event_id, event, recover=True)
-        if event.get("work_item_intent") == "none":
-            return ("skip", None)
-        if resolution is None:
-            return ("unseeded", None)
-        if resolution["outcome"] == "drop":
-            return ("drop", None)
-        seed = resolution["work_item"]
-        if (not isinstance(seed, dict) or seed.get("id") != f"wi_{event_id}"):
-            raise Denied("Malformed committed work-item seed")
-        return ("seed", seed)
 
     @staticmethod
     def _open_row(item: dict, view: dict, *, wait_liveness=None) -> tuple:
@@ -2226,7 +1260,7 @@ class WorkItems:
                ("id", "title", "origin", "status", "rev", "holder",
                 "created_at", "updated_at")}
         row.update({key: view[key] for key in
-                    ("current_origin_rev", "stale", "redecision", "doing_since", "doing_age_seconds", "doing_stale")})
+                    ("doing_since", "doing_age_seconds", "doing_stale")})
         if "wait_resolution" in item:
             row["wait_resolution"] = item["wait_resolution"]
         if item["status"] == "blocked":
@@ -2312,13 +1346,11 @@ class WorkItems:
         return sort_key, row
 
     def _active_rows(self, *, locked: bool):
-        """Yield the unseeded count, then stream every active row in ID order."""
-        with self._ledger.read("items", "insights", locked=locked) as db:
-            yield _rows(db, "SELECT COUNT(*) FROM unseeded")[0][0]
+        """Stream every active row in ID order."""
+        with self._ledger.read("items", locked=locked) as db:
             yield from db.execute(
-                f"SELECT i.item, i.doing_since, i.blocked_since, {_ORIGIN_COLUMNS} FROM items i "
-                + _ORIGIN_JOIN.format(key="i.origin_insight")
-                + " WHERE i.status IN ('open', 'doing', 'blocked') ORDER BY i.id")
+                "SELECT item, doing_since, blocked_since FROM items"
+                " WHERE status IN ('open', 'doing', 'blocked') ORDER BY id")
 
     def _page_open_impl(self, *, cursor, limit, readonly: bool, ready_only: bool = False,
                         role_name: str | None = None, order_fingerprint: bool = False,
@@ -2327,7 +1359,7 @@ class WorkItems:
                         delivered_wait_resolution_tokens=None, wait_resolution_high_water=None):
         """Collect the bounded open page from the index.
 
-        Callers hold insights.lock when ``readonly`` is False; the read-only
+        Callers hold records.lock when ``readonly`` is False; the read-only
         path never locks or writes. Cursor, limit, ordering, overflow and byte
         bounds match :meth:`page_open`. Host-only opening orchestration
         can supply an active transform on the unlocked readonly path; public
@@ -2336,7 +1368,6 @@ class WorkItems:
         """
         if _active_transform is not None and not readonly:
             raise Denied("Lifecycle transform requires an unlocked read-only scan")
-        record_question = self.record_question_lookup() if self.record_question_lookup is not None else None
         cursor_key = _open_cursor_key(cursor)
         if delivered_wait_resolution_tokens is None:
             delivered_resolution_tokens = None
@@ -2353,7 +1384,6 @@ class WorkItems:
         if type(limit) is not int or not 1 <= limit <= MAX_OPEN_PAGE_ROWS:
             raise Denied("Work-item page limit must be an integer in [1, 100]")
         active = self._active_rows(locked=not readonly)
-        unseeded_decisions = next(active)
         published_snapshot = None
         selected = []
         counts = {state: 0 for state in
@@ -2374,8 +1404,7 @@ class WorkItems:
         resolution_max = None
         order_sum = 0
         for entry in active:
-            item, since = self._decode(*entry[:3])
-            self._require_migrated_item(item["id"])
+            item, since = self._decode(*entry)
             if _active_transform is not None:
                 transformed = _active_transform(item)
                 if transformed is not item:
@@ -2386,14 +1415,12 @@ class WorkItems:
             if (wait_resolution_role is not None and item["status"] == "open"
                     and "wait_resolution" in item and item.get("holder") == wait_resolution_role):
                 wait_resolution_pending = True
-            view = {"item": item, **self._origin_projection(item, entry[3:]),
-                    **self._hold_projection(since), **blocked_age(item)}
+            view = {"item": item, **self._hold_projection(since), **blocked_age(item)}
             if len(canonical(view)) > MAX_PROJECTION_BYTES:
                 raise LimitExceeded("Work-item projection exceeds byte bound")
             open_count += 1
             if order_fingerprint:
-                leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope"),
-                                  view["current_origin_rev"], view["stale"], view["redecision"]])
+                leaf = canonical(["work-order-scope-v1", item["id"], item.get("scope")])
                 order_sum = (order_sum + int(digest(leaf), 16)) % (1 << 256)
             if ready_only and role_name is not None:
                 if item["status"] == "open":
@@ -2415,8 +1442,7 @@ class WorkItems:
                 if (isinstance(wait_probe, dict) and wait_probe.get("kind") == "code_change"
                         and published_snapshot is None):
                     published_snapshot = self.snapshots.get()
-                if holder_only(self, item, published_snapshot, writer_roles=writer_roles,
-                               record_question=record_question) is not None:
+                if holder_only(self, item, published_snapshot, writer_roles=writer_roles) is not None:
                     item = {key: value for key, value in item.items()
                             if key not in ("wait", "blocked_since")}
                     item["status"] = "open"
@@ -2425,8 +1451,7 @@ class WorkItems:
                 if wait and wait["kind"] == "code_change" and published_snapshot is None:
                     published_snapshot = self.snapshots.get()
                 state = liveness(self, wait, published_snapshot,
-                                 item=item, writer_roles=writer_roles,
-                                 record_question=record_question)
+                                 item=item, writer_roles=writer_roles)
                 if ready_only:
                     if state["state"] == "unknown":
                         unknown_blocked += 1
@@ -2492,15 +1517,12 @@ class WorkItems:
         more = overflow_count > 0
         result = {"items": rows, "total": total, "cursor": cursor,
                   "next_cursor": _open_cursor_token(rows[-1]) if more and rows and not blocked_only else None,
-                  "overflow_count": overflow_count, "truncated": more,
-                  "unseeded_decisions": unseeded_decisions,
-                  "coverage_complete": unseeded_decisions == 0}
+                  "overflow_count": overflow_count, "truncated": more}
         if blocked_only:
-            complete = unseeded_decisions == 0 and counts["unknown"] == 0
+            complete = counts["unknown"] == 0
             result = {"items": rows, "total": total if complete else None,
                     "counts": counts if complete else None,
                     "overflow_count": overflow_count, "truncated": more,
-                    "unseeded_decisions": unseeded_decisions,
                     "coverage_complete": complete, "diagnostic": None if complete else "incomplete"}
             if include_open_count:
                 result["open_count"] = open_count
@@ -2524,7 +1546,7 @@ class WorkItems:
                 "token": next_boundary}
             result["_wait_resolution_boundary_current"] = boundary_current
         if ready_only:
-            complete = unseeded_decisions == 0 and unknown_blocked == 0
+            complete = unknown_blocked == 0
             result["unknown_blocked"] = unknown_blocked
             result["coverage_complete"] = complete
             result["signature"] = digest(canonical(
@@ -2550,7 +1572,6 @@ class WorkItems:
         selected = []
         for (raw,) in newest:
             item = json.loads(raw)
-            self._require_migrated_item(item["id"])
             sort_key, row = self.closed_row(item)
             selected.append((None, sort_key, row, item if include_items else None))
         rows = [entry[2] for entry in sorted(selected, key=lambda value: value[1])]
@@ -2585,7 +1606,6 @@ class WorkItems:
             position = after
             for seq, raw, doing_since, blocked_since in found[:limit]:
                 item = json.loads(raw)
-                self._require_migrated_item(item["id"])
                 row = {"item": item, "doing_since": doing_since,
                        "blocked_since": blocked_since}
                 row_bytes = len(canonical(row))
@@ -2608,7 +1628,7 @@ class WorkItems:
             return result
 
     def page_open_readonly(self, *, cursor=None, limit=25) -> dict:
-        """Return the live open page without acquiring insights.lock.
+        """Return the live open page without acquiring records.lock.
 
         Same schema, ordering, cursor, overflow and byte bounds as
         :meth:`page_open`, and never writes the index. A last-key cursor
@@ -2622,7 +1642,7 @@ class WorkItems:
         Uses the open-page row/byte limits and read-only scan (no lock,
         recovery or writes). Counts cover the full seeded scan, even when
         rows truncate. Problem/actionable rows precede pending/receipt-bound rows,
-        with ledger order within each group. Unseeded decisions or unknown
+        with ledger order within each group. Unknown
         observations invalidate counts/total; malformed or unsafe inventory
         invalidates the whole view.
         The ledger, not this live projection, remains authoritative.
@@ -2633,7 +1653,7 @@ class WorkItems:
             return self._page_open_impl(cursor=None, limit=limit, readonly=True, blocked_only=True)
         except (Denied, LimitExceeded, OSError, ValueError, TypeError, AttributeError):
             return {"items": [], "total": None, "counts": None, "overflow_count": None,
-                    "truncated": None, "unseeded_decisions": None,
+                    "truncated": None,
                     "coverage_complete": False, "diagnostic": "unreadable"}
 
     def open_state_readonly(self, *, limit=25, writer_roles=None) -> dict:
@@ -2657,7 +1677,6 @@ class WorkItems:
             return {"open_count": None,
                     "blocked_work": {"items": [], "total": None, "counts": None,
                                      "overflow_count": None, "truncated": None,
-                                     "unseeded_decisions": None,
                                      "coverage_complete": False, "diagnostic": "unreadable"}}
         open_count = blocked.pop("open_count")
         return {"open_count": open_count, "blocked_work": blocked}
@@ -2669,7 +1688,7 @@ class WorkItems:
         Items are ordered by status, then newest ``updated_at`` first, then
         ascending ID. The exclusive ``cursor``
         carries the last row's status, update-order key and ID so callers reach
-        the whole set. ``status`` (done or dropped), ``origin`` (insight id),
+        the whole set. ``status`` (done or dropped), ``origin`` (exact origin text),
         ``closed_after`` and ``closed_before`` (timezone-aware timestamps)
         narrow matching; they never cap ``total``. Each row is at most
         MAX_CLOSED_ROW_BYTES and the page at most MAX_CLOSED_PAGE_BYTES. Reads
@@ -2695,7 +1714,7 @@ class WorkItems:
             clauses.append("status = ?")
             filters.append(status)
         if origin is not None:
-            clauses.append("origin_insight = ?")
+            clauses.append("origin = ?")
             filters.append(origin)
         if after_key is not None:
             clauses.append("updated_key >= ?")
@@ -2730,7 +1749,6 @@ class WorkItems:
         selected = []
         for (raw,) in found[:limit]:
             item = json.loads(raw)
-            self._require_migrated_item(item["id"])
             _sort_key, row = self.closed_row(item)
             selected.append(row)
         more = len(found) > limit
@@ -2758,8 +1776,6 @@ class WorkItems:
         null for ``dropped`` and for records written before the claim
         existed). Rows are
         at most 8192 canonical bytes and the complete response at most 1 MiB.
-        Drop-only legacy sidecars without a seed remain in the legacy audit,
-        not here.
         """
         return self._page_closed_impl(limit=limit, readonly=True)
 
@@ -2892,47 +1908,28 @@ class WorkItems:
             if wait is not None:
                 if status != "blocked":
                     raise Denied("Only blocked work items carry waits")
-                if isinstance(wait, dict) and wait.get("kind") in ("ci", "publication_ci", "proposal_merged"):
-                    if wait["kind"] == "ci":
-                        from .ci_waits import normalize
-                    elif wait["kind"] == "proposal_merged":
-                        from .proposal_waits import normalize
-                        if not self.vcs.get("poll_proposals_enabled"):
-                            raise Denied("Proposal waits require automatic proposal polling")
+                if isinstance(wait, dict) and wait.get("kind") in ("ci", "publication_ci"):
                     if not self.vcs.get("poll_enabled") or not self.vcs.get("command"):
-                        raise Denied(f"{'Proposal' if wait['kind'] == 'proposal_merged' else 'CI'} waits require automatic VCS polling and an adapter")
+                        raise Denied("CI waits require automatic VCS polling and an adapter")
                     raw_wait = {k: v for k, v in wait.items() if k != "smoke_refs"}
                     if wait["kind"] == "publication_ci":
                         from .ci_waits import normalize_publication
                         registered = normalize_publication(raw_wait, snapshots=self.snapshots,
                                                            branch=self.vcs.get("ci_branch"))
                     else:
-                        registered = (normalize(self.root, raw_wait, insights=self.insights)
-                                      if wait["kind"] == "proposal_merged" else normalize(self.root, raw_wait))
+                        from .ci_waits import normalize
+                        registered = normalize(self.root, raw_wait)
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = validate_refs(wait["smoke_refs"])
-                elif isinstance(wait, dict) and wait.get("kind") in ("object_resolved", "record_closed", "insight_decided"):
+                elif isinstance(wait, dict) and wait.get("kind") == "object_resolved":
                     from .object_waits import normalize, require_acyclic
                     refs = validate_refs(wait.get("smoke_refs", []))
-                    raw = {k: v for k, v in wait.items() if k != "smoke_refs"}
-                    if raw["kind"] == "record_closed":
-                        legacy = normalize_record_wait(raw)
-                        raw = {"kind": "object_resolved", "subject": legacy["subject"]}
-                    elif raw["kind"] == "insight_decided":
-                        if set(raw) != {"kind", "insight"}:
-                            raise Denied("An insight wait requires only insight")
-                        raw = {"kind": "object_resolved", "subject": {"type": "insight", "id": raw["insight"]}}
-                    registered = normalize(raw)
-                    subject = registered["subject"]
-                    if subject["type"] == "record":
-                        if self.register_question_wait is None or current["holder"] != actor:
-                            raise Denied("Record waits require the current work-item holder and declared route")
-                        self.register_question_wait(subject, current["holder"])
-                    require_acyclic(self, item_id, subject)
+                    registered = normalize({k: v for k, v in wait.items() if k != "smoke_refs"})
+                    require_acyclic(self, item_id, registered["subject"])
                     if "smoke_refs" in wait:
                         registered["smoke_refs"] = refs
                 else:
-                    registered = self.insights._normalize_wait(wait, "defer")
+                    registered = normalize_wait(wait, self._published_digest)
             verification = None
             verification_scope = None
             delivered_tree = None

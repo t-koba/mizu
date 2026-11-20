@@ -519,7 +519,7 @@ def _conclusion(rows):
 
 def pending(store, role, *, limit=10):
     """Read current holder deliveries from exact SharedRecords receipts."""
-    with lock(store.root / "locks" / "insights.lock"):
+    with lock(store.root / "locks" / "records.lock"):
         return _shared_page(store, role, limit=limit, persist=False)[0]
 
 
@@ -528,7 +528,7 @@ def readiness_init(store, role, *, limit=10):
 
     Validates the role and limit exactly like the read-only page, retains
     only O(limit) candidates and performs no reads, writes, syncs or
-    recovery. The caller holds ``insights.lock`` for the traversal and
+    recovery. The caller holds ``records.lock`` for the traversal and
     finalization.
     """
     identifier(role)
@@ -764,7 +764,7 @@ def _shared_page(store, role, *, limit=10, persist):
 
 def delivery(store, role, *, limit=10):
     """Freeze only current holder deliveries; no model-supplied manifest."""
-    with lock(store.root / "locks" / "insights.lock"):
+    with lock(store.root / "locks" / "records.lock"):
         return _shared_page(store, role, limit=limit, persist=True)
 
 
@@ -791,7 +791,7 @@ def _selected(context, tokens):
 
 
 def validate_selection(context, tokens):
-    with lock(context.project.root / "locks" / "insights.lock"):
+    with lock(context.project.root / "locks" / "records.lock"):
         _selected(context, tokens)
 
 
@@ -804,7 +804,7 @@ def complete(context, finished):
     selected = [entry.ack_token for entry in context.ci_wait_manifest if entry.ack_token in tokens]
     if not selected:
         return
-    with lock(context.project.root / "locks" / "insights.lock"):
+    with lock(context.project.root / "locks" / "records.lock"):
         shared, entries = _selected(context, selected)
         shared.acknowledge(context.role.name, [asdict(entry) for entry in entries],
                            manifest=context.ci_wait_manifest)
@@ -1193,7 +1193,7 @@ def poll(config, project, state, *, now, interval, reader=None, changes_reader=N
                 exact_empty = empty_at is not None and candidate is None
                 if rows is None and enrollment is None and not exact_empty:
                     continue
-                with lock(project.root / "locks" / "insights.lock"):
+                with lock(project.root / "locks" / "records.lock"):
                     current = project.work_items.current(item["id"])
                     if current != item or _evidence(project.work_items, current) is not None:
                         continue
