@@ -384,43 +384,6 @@ class WorkOrderTests(Fixture):
             self.assertEqual(plan._frozen_generation(context), generation)
             self.assertEqual(store.get(item["id"]), item)
 
-    def test_decision_page_summary_is_frozen_hashed_and_used_by_status(self):
-        from unittest.mock import patch
-        from mizu import decision_delivery
-        from mizu.unit_prompts import prompt_for, prompt_delta_for
-
-        item = self.project.work_items.create(idempotency_key="page", title="A", actor="worker")["record"]["work_item"]
-        state = {"shared": True, "events": [], "diagnostics": [], "manifest": (),
-                 "page": {"events": [{"secret": "hidden"}], "pending_count": 1,
-                          "truncated": True, "count_truncated": True, "byte_truncated": False}}
-        ctx = self.context("worker")
-        decision_delivery.bind(ctx, state)
-        full = json.loads(prompt_for(ctx))
-        generation = full["work_order"]["opening_generation"]
-        self.assertEqual(full["decision_page"], {k: v for k, v in state["page"].items() if k != "events"})
-        self.assertNotIn("hidden", json.dumps(full))
-        ctx.handle("work_order", {"items": [item["id"]], "rationale": "review",
-                                  "expected_rev": 0, "expected_generation": generation})
-        # Mid-unit mutations do not rewrite the captured summary in either prompt.
-        state["page"]["pending_count"] = 2
-        state["page"]["events"] = [{"secret": "other"}]
-        delta = json.loads(prompt_delta_for(ctx))
-        self.assertEqual(delta["decision_page"], full["decision_page"])
-        self.assertEqual(delta["work_order"]["opening_generation"], generation)
-        with patch.object(decision_delivery, "pending", return_value=state):
-            self.assertEqual(self.project.work_order_status()["status"], "review_due")
-            newer = self.context("worker")
-            decision_delivery.bind(newer, state)
-            shown = json.loads(prompt_for(newer))
-            self.assertNotEqual(shown["work_order"]["opening_generation"], generation)
-            self.assertEqual(shown["decision_page"]["pending_count"], 2)
-            self.assertNotIn("other", json.dumps(shown))
-            state["page"]["pending_count"] = 1
-            self.assertEqual(self.project.work_order_status()["status"], "current")
-            same = self.context("worker")
-            decision_delivery.bind(same, state)
-            self.assertEqual(json.loads(prompt_delta_for(same))["work_order"]["opening_generation"], generation)
-
     def test_roles_without_grant_capture_prompts_without_hashing(self):
         from unittest.mock import patch
         from mizu.unit_prompts import prompt_for, prompt_delta_for

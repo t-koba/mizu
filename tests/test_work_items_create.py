@@ -13,6 +13,7 @@ from mizu.fs import PREVIEW_BYTES
 from support import history_write_json as write_json
 from mizu.project import Project
 from mizu.protocol import DEFINITIONS, validate
+from mizu.work_item_seed import MAX_ORIGIN_CHARS
 from mizu.runtime import (CONSULT_FORBIDDEN, DELEGATE_FORBIDDEN, WRAP_UP_OPS,
                           check_consult_role, check_delegate_role, prompt_for, prompt_delta_for)
 from mizu.storage import audit, backup, restore
@@ -26,10 +27,6 @@ class DirectWorkItemTests(Fixture):
     def create(self, key="stable-key", title="Self-directed work", origin=None):
         return self.store.create(idempotency_key=key, title=title, origin=origin, actor="worker")
 
-    def insight(self):
-        return self.project.insights.submit(source="reviewer", title="Proposal", body="Evidence",
-                                            base_snapshot=None)
-
     def test_concurrent_retry_and_actor_scoped_key(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _: self.create(), range(4)))
@@ -39,21 +36,19 @@ class DirectWorkItemTests(Fixture):
         self.assertNotEqual(other["record"]["work_item"]["id"], results[0]["record"]["work_item"]["id"])
 
     def test_invalid_requests_and_missing_origins_fail_closed(self):
-        for origin in ({}, {"rev": 1}, {"insight_id": "missing", "rev": 1},
-                       {"work_item_id": "wi_" + "f" * 32, "rev": 1},
-                       {"insight_id": "../bad", "rev": 1},
-                       {"insight_id": "missing", "rev": 0},
-                       {"insight_id": "missing", "rev": True},
-                       {"insight_id": "missing", "work_item_id": "wi_" + "a" * 32, "rev": 1}):
+        for origin in ("", "   ", "bad\x00origin", "x" * (MAX_ORIGIN_CHARS + 1),
+                       {}, {"rev": 1}, {"insight_id": "missing", "rev": 1},
+                       {"work_item_id": "wi_" + "f" * 32, "rev": 1}):
             with self.subTest(origin=origin), self.assertRaises(Denied):
                 self.create(origin=origin)
         for key, title in (("", "Title"), ("k" * 129, "Title"), ("key", ""), ("key", "t" * 201)):
             with self.assertRaises(Denied):
                 self.create(key, title)
-        item_id = self.store._create_id("worker", "stable-key")
-        with self.assertRaises(Denied):
-            self.create(origin={"work_item_id": item_id, "rev": 1})
         self.assertEqual(self.store.page_open()["total"], 0)
+        # A parent id is now just an opaque string reference, not a lookup.
+        parent = self.store._create_id("worker", "parent-key")
+        item = self.create("child-key", origin=parent)["record"]["work_item"]
+        self.assertEqual(item["origin"], parent)
 
     def test_title_length_edges_fit_the_seed_format(self):
         for key, title in (("short-title", "x"), ("maximum-title", "t" * 200)):
@@ -61,20 +56,24 @@ class DirectWorkItemTests(Fixture):
                 item = self.create(key, title)["record"]["work_item"]
                 self.assertEqual(item["title"], title)
 
-    def test_terminal_delivery_never_falls_back_to_creator_or_parent_actor(self):
-        proposal = self.insight()
-        insight_item = self.create("insight", origin={"insight_id": proposal["id"], "rev": 1})["record"]["work_item"]
+    def test_terminal_delivery_routes_by_creator_and_treats_origin_as_opaque(self):
+        message = self.create("message", origin="message:proposal")["record"]["work_item"]
         parent = self.create("parent")["record"]["work_item"]
-        split = self.create("split", origin={"work_item_id": parent["id"], "rev": 1})["record"]["work_item"]
-        for item in (insight_item, parent, split):
+        split = self.create("split", origin=parent["id"])["record"]["work_item"]
+        ids = {item["id"] for item in (message, parent, split)}
+        for item in (message, parent, split):
             self.store.transition(item["id"], expected_rev=1, status="dropped", reason="Closed", actor="worker")
-        own = events.pending(self.store, "reviewer", ("dropped",))
-        self.assertEqual([r["id"] for r in own["events"]], [insight_item["id"]])
+        # Delivery follows the host-supplied creator. An origin string, even
+        # one naming another item, never routes the event to another role.
+        own = events.pending(self.store, "worker", ("dropped",))
+        self.assertEqual({r["id"] for r in own["events"]}, ids)
+        self.assertEqual({r["creator"] for r in own["events"]}, {"worker"})
+        self.assertEqual((own["unknown_routing"], own["routing_complete"]), (0, True))
         any_source = events.pending(self.store, "reviewer", ("dropped",), sources="any")
-        self.assertEqual((any_source["pending"], any_source["unknown_routing"]), (3, 2))
-        self.assertEqual(events.pending(self.store, "worker", ("dropped",))["pending"], 0)
-        events.acknowledge(self.store, "reviewer", any_source["events"])
-        self.assertEqual(events.pending(self.store, "reviewer", ("dropped",), sources="any")["acknowledged"], 3)
+        self.assertEqual((any_source["pending"], any_source["unknown_routing"]), (3, 0))
+        self.assertEqual(events.pending(self.store, "reviewer", ("dropped",))["pending"], 0)
+        events.acknowledge(self.store, "worker", own["events"])
+        self.assertEqual(events.pending(self.store, "worker", ("dropped",))["acknowledged"], 3)
 
     def test_backup_restore_preserves_seeds_history_and_replay_keys(self):
         first = self.create()
@@ -163,7 +162,7 @@ class DirectWorkItemTests(Fixture):
             changed[key] = value
             mutations.append(changed)
         changed = copy.deepcopy(record)
-        changed["work_item"]["origin"] = {"insight_id": "origin", "rev": True}
+        changed["work_item"]["origin"] = "bad\x00origin"
         mutations.append(changed)
         changed = copy.deepcopy(record)
         changed["extra"] = 1
@@ -208,7 +207,7 @@ class DirectWorkItemTests(Fixture):
         for name, role in self.config.roles.items():
             self.assertEqual(operation in role.capabilities, name == "worker")
         for changes in ({"actor": "model"}, {"idempotency_key": ""}, {"idempotency_key": "k" * 129},
-                        {"title": "t" * 201}, {"origin": {"insight_id": "x", "rev": True}}):
+                        {"title": "t" * 201}, {"origin": "   "}):
             with self.assertRaises(Denied):
                 validate({**args, **changes}, schema)
         ctx = self.context("worker")
@@ -235,49 +234,13 @@ class DirectWorkItemTests(Fixture):
         base = {"idempotency_key": "origin-key", "title": "Origin work"}
         parent = "wi_" + "a" * 32
         validate(dict(base), schema)
-        for origin in ({"insight_id": "proposal", "rev": 1},
-                       {"work_item_id": parent, "rev": 1}):
+        # An origin is opaque text at the protocol: a message id and a parent
+        # work-item id are both valid, with no reference shape to interpret.
+        for origin in ("message:proposal", parent, "x" * MAX_ORIGIN_CHARS):
             with self.subTest(origin=origin):
                 validate({**base, "origin": origin}, schema)
-        for origin in ({"rev": 1}, {},
-                       {"insight_id": "proposal", "work_item_id": parent, "rev": 1},
-                       {"insight_id": "proposal"},
-                       {"insight_id": "proposal", "rev": True},
-                       {"work_item_id": parent, "rev": True}):
+        for origin in ({"rev": 1}, {}, {"insight_id": "proposal", "rev": 1},
+                       {"work_item_id": parent, "rev": 1}, "", "   ",
+                       "bad\x00origin", "x" * (MAX_ORIGIN_CHARS + 1), 1):
             with self.subTest(origin=origin), self.assertRaises(Denied):
                 validate({**base, "origin": origin}, schema)
-
-
-class SharedSeedCreationTests(Fixture):
-    def proposal(self):
-        return self.project.insights.submit(source="worker", title="Proposal", body="Evidence",
-                                            base_snapshot=None)
-
-    def decide(self, proposal, action="accept", **kwargs):
-        return self.project.insights.decide(
-            proposal["id"], action, "Implement", "later" if action == "defer" else "",
-            "run", expected_rev=1, **kwargs)
-
-    def assert_no_decision(self, proposal):
-        from mizu.insights import _decision_key
-        self.assertFalse((self.project.root / "decisions" / f"{proposal['id']}.json").exists())
-        self.assertFalse((self.project.root / "decision-history" /
-                          f"{_decision_key(proposal['id'], 1)}.json").exists())
-
-    def test_decision_retry_rejects_conflicting_storage_even_without_transitions(self):
-        for filename in ("3.json", "legacy.json", "create.json", "unknown.json"):
-            with self.subTest(filename=filename):
-                proposal = self.proposal()
-                event = self.decide(proposal, work_item_intent="create")
-                directory = self.project.root / "work-items" / event["work_item"]["id"]
-                directory.mkdir(parents=True)
-                (directory / filename).write_text("{}")
-                pointer = self.project.root / "decisions" / f"{proposal['id']}.json"
-                before = pointer.read_bytes()
-                with self.assertRaises(Denied):
-                    self.decide(proposal, work_item_intent="create")
-                self.assertEqual(pointer.read_bytes(), before)
-                # The next subtest creates new work. Capacity checks replay
-                # all committed chains, so restore this deliberately corrupt
-                # fixture rather than poisoning that unrelated transaction.
-                (directory / filename).unlink()

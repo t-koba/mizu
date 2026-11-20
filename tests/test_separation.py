@@ -134,7 +134,7 @@ class ConsultGateTests(Fixture):
             load(path)
 
 
-class InsightRetentionTests(Fixture):
+class RetentionAndLimitKnobsTests(Fixture):
     def test_budget_retention_knob(self):
         import datetime as dt
         import tempfile
@@ -168,15 +168,17 @@ class InsightRetentionTests(Fixture):
 
     def test_config_accepts_new_knobs(self):
         from mizu.config import load
-        text = self.file.read_text() + "\n"
         path = self.root / "config/knobs.toml"
-        path.write_text(self.file.read_text().replace("pending_insights = 30", "pending_insights = 5")
+        path.write_text(self.file.read_text()
+                        .replace("queue_opening_messages = 3", "queue_opening_messages = 5")
                         .replace("retention_days = 31", "retention_days = 60")
                         .replace("work_items_prompt = 20", "work_items_prompt = 7"))
         config = load(path)
         self.assertEqual(config.limits.work_items_prompt, 7)
-        self.assertEqual(config.limits.pending_insights, 5)
+        self.assertEqual(config.limits.queue_opening_messages, 5)
         self.assertEqual(config.limits.retention_days, 60)
+        # Queue messages are retained by declaration, not by an insight counter.
+        self.assertEqual(config.queues["proposals"].retain_days, 30)
 
 
 class SandboxPolicyTests(unittest.TestCase):

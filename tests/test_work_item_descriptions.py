@@ -159,7 +159,10 @@ class WorkItemDescriptionTests(Fixture):
             self.assertTrue(compact["description_truncated"])
             self.assertLessEqual(len(compact["description_preview"].encode()), 1024)
             self.assertLessEqual(len(canonical(compact)), MAX_OPEN_ROW_BYTES)
-        self.assertEqual(payload["routing"], "unknown")
+        # Routing is decided by the item's recorded creator, not by its
+        # opaque origin: this item was created by the worker context.
+        self.assertEqual(payload["creator"], "worker")
+        self.assertEqual(payload["routing"], "known")
         events.acknowledge(self.store, "reviewer", [payload])
         self.assertEqual(events.pending(self.store, "reviewer", ("dropped",), sources="any")["pending"], 0)
 

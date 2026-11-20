@@ -32,21 +32,30 @@ class StateReadTests(Fixture):
                 for p in (self.project.root / directory).rglob("*") if p.is_file()}
 
     def test_modifier_grants_are_not_callable_tools(self):
+        # review_verdict only changes the finish tool's schema; it never
+        # becomes an operation of its own.
         for ordinary, operations in (
-                (("finish", "withdraw_insight"), ("finish", "withdraw_insight")),
-                (("finish", "withdraw_insight", "report"),
-                 ("finish", "withdraw_insight", "report", "report_read"))):
-            caps = ordinary + ("withdraw_decided",)
+                (("finish",), ("finish",)),
+                (("finish", "report"), ("finish", "report", "report_read"))):
+            caps = ordinary + ("review_verdict",)
             with self.subTest(capabilities=caps):
                 expected = [{"name": "mizu_" + name, "operation": name,
                              "description": DEFINITIONS[name][0],
                              "inputSchema": DEFINITIONS[name][1]} for name in operations]
                 self.assertEqual(tool_definitions(ordinary), expected)
                 self.assertEqual(tool_definitions(caps), expected)
-                self.assertFalse(operation_allowed("withdraw_decided", caps))
-                self.assertFalse(operation_allowed("withdraw_decided", ordinary))
-                for operation in operations:
+                self.assertFalse(operation_allowed("review_verdict", caps))
+                self.assertFalse(operation_allowed("review_verdict", ordinary))
+                for operation in ordinary:
                     self.assertTrue(operation_allowed(operation, caps))
+        # queues names a kernel gate, not a callable tool: it exposes the
+        # declared queue operations but cannot itself be invoked.
+        caps = ("finish", "queues")
+        operations = [tool["operation"] for tool in tool_definitions(caps)]
+        self.assertIn("queue_write", operations)
+        self.assertIn("queue_read", operations)
+        self.assertFalse(operation_allowed("queues", caps))
+        self.assertNotIn("mizu_queues", [tool["name"] for tool in tool_definitions(caps)])
 
     def test_excluded_full_and_delta_still_allow_bounded_ready_read(self):
         ids = [self.create(str(n)) for n in range(3)]

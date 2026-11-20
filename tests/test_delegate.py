@@ -130,10 +130,15 @@ class DelegateTests(Fixture):
                                  [tool["name"] for tool in tool_definitions(ctx.role.capabilities)])
                 self.assertNotIn("mizu_delegate", decoded["unit_tool_surface"]["tools"])
                 self.assertNotIn("mizu_exec", decoded["unit_tool_surface"]["tools"])
+                # Child roles never inherit the caller's join capabilities;
+                # consultation and delegation stay with the admitted caller.
+                self.assertNotIn("consult", ctx.role.capabilities)
+                self.assertNotIn("delegate", ctx.role.capabilities)
                 self.assertEqual(ctx.goal, pinned)
                 self.assertEqual(ctx.goal_digest, digest(pinned.encode()))
                 self.assertTrue(system_context_text(ctx.role, ctx.goal).endswith(pinned))
-                decoded = json.loads(prompt.split("\n\nQuestion:")[0].split("\n\nTask:")[0])
+                # A consultation prompt appends its Request after the opening
+                # JSON; the first decoded value is still the pinned charter.
                 self.assertNotIn("goal", decoded)
                 self.assertEqual(decoded["goal_digest"], ctx.goal_digest)
                 observed.append(ctx.role.name)

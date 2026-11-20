@@ -1278,20 +1278,20 @@ class ClassificationTests(SelectionFixture):
     def test_max_bounds_shed_oldest_instead_of_failing(self):
         from mizu.selection import MAX_WORK_BYTES, work_inputs
         role, spec = self.classifier()
-        spec['classifier']['inputs'] = {'max_proposals': 64, 'max_decisions': 64,
-                                         'max_text_bytes': 65536}
+        spec['classifier']['inputs'] = {'max_messages': 64, 'max_text_bytes': 65536}
         validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
         bounds = spec['classifier']['inputs']
+        ids = []
         for index in range(3):
-            write_json(self.project.root/'inbox'/f'heavy-{index}.json',
-                       {'id': f'heavy-{index}', 'source': 'worker', 'title': f'{index}-' + 'x' * 50000,
-                        'body': 'bulk', 'base_snapshot': self.project.snapshots.get()['id'],
-                        'created_at': f'2026-10-06T0{index}:00:00+00:00', 'rev': 1})
+            message = self.project.kernel_queues.append(
+                'proposals', {'title': f'heavy-{index}', 'body': 'x' * 50000}, 'operator',
+                now=f'2026-10-06T0{index}:00:00+00:00')
+            ids.append(message['id'])
         snapshot = self.project.snapshots.get()
         work = work_inputs(self.project, role, snapshot, bounds)
         self.assertLessEqual(len(canonical(work)), MAX_WORK_BYTES)
         # Oldest-first shedding retains the newest workload.
-        self.assertEqual([item['id'] for item in work['proposals']], ['heavy-1', 'heavy-2'])
+        self.assertEqual([item['id'] for item in work['messages']], ids[1:])
         def callback(ctx, *_):
             if ctx.role.workspace == 'none':
                 ctx.handle('finish', {'outcome': 'done', 'summary': '{"difficulty":"hard"}'})
@@ -1301,29 +1301,33 @@ class ClassificationTests(SelectionFixture):
     def test_shedding_measures_returned_shape(self):
         from mizu.selection import MAX_WORK_BYTES, work_inputs
         role, spec = self.classifier()
-        spec['classifier']['inputs'] = {'max_proposals': 64, 'max_decisions': 64,
-                                         'max_text_bytes': 65536}
+        spec['classifier']['inputs'] = {'max_messages': 64, 'max_text_bytes': 65536}
         validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
         bounds = spec['classifier']['inputs']
         sizes = (65536, 65331)
+        ids = []
         for index, size in enumerate(sizes):
-            write_json(self.project.root/'inbox'/f'edge-{index}.json',
-                       {'id': f'edge-{index}', 'source': 'worker', 'title': f'{index}-' + 'x' * size,
-                        'body': 'bulk', 'base_snapshot': self.project.snapshots.get()['id'],
-                        'created_at': f'2026-10-06T0{index}:00:00+00:00', 'rev': 1})
+            message = self.project.kernel_queues.append(
+                'proposals', {'title': f'edge-{index}', 'body': 'x' * size}, 'operator',
+                now=f'2026-10-06T0{index}:00:00+00:00')
+            ids.append(message['id'])
         work = work_inputs(self.project, role, self.project.snapshots.get(), bounds)
         self.assertLessEqual(len(canonical(work)), MAX_WORK_BYTES)
-        self.assertEqual([item['id'] for item in work['proposals']], ['edge-1'])
+        self.assertEqual([item['id'] for item in work['messages']], ids[1:])
+        self.assertEqual([item['queue'] for item in work['messages']], ['proposals'])
+        retained = canonical({'title': 'edge-1', 'body': 'x' * sizes[1]}).decode()
+        self.assertEqual(work['messages'][0]['body'], retained)
+        self.assertLessEqual(len(work['messages'][0]['body']), bounds['max_text_bytes'])
 
     def test_inputs_bounds_validated_defaulted_and_missing_classifier(self):
         role, spec = self.classifier()
         from mizu.selection import DEFAULT_CLASSIFIER_INPUTS
         self.assertEqual(spec['classifier']['inputs'], DEFAULT_CLASSIFIER_INPUTS)
-        spec['classifier']['inputs'] = {'max_proposals': 0, 'max_decisions': 2, 'max_text_bytes': 256}
+        spec['classifier']['inputs'] = {'max_messages': 0, 'max_text_bytes': 256}
         validate_selectors({'dynamic': spec}, self.config.profiles, self.file.parent)
-        self.assertEqual(spec['classifier']['inputs']['max_proposals'], 0)
-        for bad in ({'max_proposals': 65}, {'max_text_bytes': 100}, {'unknown': 1},
-                    {'max_decisions': 'many'}):
+        self.assertEqual(spec['classifier']['inputs']['max_messages'], 0)
+        for bad in ({'max_messages': 65}, {'max_text_bytes': 100}, {'unknown': 1},
+                    {'max_text_bytes': 'many'}):
             broken = copy.deepcopy(spec)
             broken['classifier']['inputs'] = bad
             with self.assertRaises(ConfigError):
