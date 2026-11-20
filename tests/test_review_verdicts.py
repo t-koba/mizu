@@ -69,9 +69,8 @@ class ReviewVerdictTests(PublishFixture):
         return reviews.require_approvals(
             make_context(self, self.config, self.publisher, review=False), current_digest(self))
 
-    def publication_state(self, pending=(), open_ids=()):
-        return reviews.publication_state(self.context(), pending_insights=pending,
-                                         open_insights={"ids": list(open_ids)})
+    def publication_state(self):
+        return reviews.publication_state(self.context())
 
     def test_publication_state_matched_receipt_is_conclusive_even_if_scan_stops(self):
         self.review("changes_requested")
@@ -152,7 +151,7 @@ class ReviewVerdictTests(PublishFixture):
                                   "review_verdict": "approve"})
         engine = Engine(self.config, driver=ScriptDriver(seal))
         for name in ("inspector", "auditor"):
-            result = engine.run(self.project, name, scheduled_invocation=True)
+            result = engine.run(self.project, name)
             self.assertEqual(result.get("status"), "completed", result)
             review = result["finish"]["review"]
             self.assertEqual(review, {"verdict": "approve", "role": name,
@@ -160,8 +159,7 @@ class ReviewVerdictTests(PublishFixture):
             cursor = read_json(self.project.root / "observed" / f"{name}.json")
             self.assertEqual(reviews.cursor_review(
                 self.project, self.config, name, cursor, source)[1], review)
-            self.assertEqual(engine.run(self.project, name,
-                scheduled_invocation=True).get("skipped"), "unchanged")
+            self.assertEqual(engine.run(self.project, name).get("skipped"), "unchanged")
             if name == "inspector":
                 self.denied()  # No scan/fallback to the other authorized holder.
                 with self.assertRaises(Denied):
@@ -183,8 +181,7 @@ class ReviewVerdictTests(PublishFixture):
         # Both holders are bound to the reviewed digest, so the same-code
         # successor needs no second verdict for either of them.
         for name in ("inspector", "auditor"):
-            self.assertEqual(engine.run(self.project, name,
-                scheduled_invocation=True).get("skipped"), "unchanged")
+            self.assertEqual(engine.run(self.project, name).get("skipped"), "unchanged")
         self.assertEqual([saved["review"]["role"] for saved in self.approvals()], ["auditor"])
         self.assertTrue(self.publish()["published"])
 
@@ -251,7 +248,7 @@ class ReviewVerdictTests(PublishFixture):
             cursor["review_receipt"])["id"])
         # A review of the current digest does not retrigger itself.
         same = Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "reviewer", scheduled_invocation=True)
+            self.project, "reviewer")
         self.assertEqual(same.get("skipped"), "unchanged", same)
 
         successor = self.project.snapshots.create(
@@ -260,7 +257,7 @@ class ReviewVerdictTests(PublishFixture):
             outcome="wait", summary="Same code, new snapshot", parent=source["id"])
         self.project.snapshots.publish(successor)
         self.assertEqual(Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "reviewer", scheduled_invocation=True).get("skipped"), "unchanged")
+            self.project, "reviewer").get("skipped"), "unchanged")
         self.assertEqual(read_json(cursor_path), cursor)  # No verdict replaced.
 
         # New code re-arms the reviewer: the stale approval cannot dedup it.
@@ -273,7 +270,7 @@ class ReviewVerdictTests(PublishFixture):
         self.assertFalse(_on_change_observed(cursor, changed, exact_snapshot=True,
             project=self.project, config=self.config, role_name="reviewer"))
         result = Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "reviewer", scheduled_invocation=True)
+            self.project, "reviewer")
         self.assertEqual(result.get("status"), "completed", result)
         self.assertNotIn("review", result["finish"])
 
@@ -293,7 +290,7 @@ class ReviewVerdictTests(PublishFixture):
         def no_verdict(ctx, *_):
             ctx.handle("finish", {"outcome": "wait", "summary": "Still reviewing."})
         retry = Engine(self.config, driver=ScriptDriver(no_verdict)).run(
-            self.project, "reviewer", scheduled_invocation=True)
+            self.project, "reviewer")
         self.assertEqual(retry.get("status"), "completed", retry)
 
         self.review("approve")
@@ -301,7 +298,7 @@ class ReviewVerdictTests(PublishFixture):
         self.assertEqual(completed["review"]["reviewed_snapshot"], source["id"])
         self.assertIn("review_receipt", completed)
         same = Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "reviewer", scheduled_invocation=True)
+            self.project, "reviewer")
         self.assertEqual(same.get("skipped"), "unchanged", same)
 
     def test_review_diff_spans_multiple_publications_from_last_reviewed_source(self):
@@ -379,20 +376,20 @@ class ReviewVerdictTests(PublishFixture):
             [finish] = tool_definitions(("finish",), role=self.config.roles[name], config=self.config)
             self.assertNotIn("review_verdict", finish["inputSchema"]["properties"])
             self.assertNotIn("review_verdict", finish["description"])
-            self.assertNotIn("a summary cannot approve", finish["description"])
+            self.assertNotIn("A summary cannot approve", finish["description"])
         reviewer = self.config.roles["reviewer"]
         self.assertTrue(reviews.authorized(self.config, reviewer))
         [finish] = tool_definitions(("finish",), role=reviewer, config=self.config)
         self.assertEqual(finish["inputSchema"]["properties"]["review_verdict"],
                          {"type": "string", "enum": ["approve", "changes_requested"]})
         self.assertIn("seal approve or changes_requested", finish["description"])
-        self.assertIn("a summary cannot approve", finish["description"])
+        self.assertIn("A summary cannot approve", finish["description"])
         # Revoking the capability removes both even for that role name.
         revoked = dataclasses.replace(reviewer, capabilities=tuple(
             cap for cap in reviewer.capabilities if cap != "review_verdict"))
         [finish] = tool_definitions(("finish",), role=revoked, config=self.config)
         self.assertNotIn("review_verdict", finish["inputSchema"]["properties"])
-        self.assertNotIn("a summary cannot approve", finish["description"])
+        self.assertNotIn("A summary cannot approve", finish["description"])
         # Without a bound role/config the full manual and unscoped schema remain.
         self.assertEqual(tool_definitions(("finish",))[0]["inputSchema"], DEFINITIONS["finish"][1])
         open_config = dataclasses.replace(self.config, publication=dataclasses.replace(
@@ -422,7 +419,7 @@ class ReviewVerdictTests(PublishFixture):
         self.assertTrue(_on_change_observed(cursor, successor, exact_snapshot=True,
             project=self.project, config=self.config, role_name="reviewer"))
         self.assertEqual(Engine(self.config, driver=ScriptDriver()).run(
-            self.project, "reviewer", scheduled_invocation=True).get("skipped"), "unchanged")
+            self.project, "reviewer").get("skipped"), "unchanged")
         self.assertEqual(read_json(cursor_path), cursor)
         publication = self.publish()
         self.assertTrue(publication["published"])
@@ -542,7 +539,7 @@ class ReviewVerdictTests(PublishFixture):
         source = self.project.snapshots.get()["id"]
         for name in ("reviewer", "worker"):
             ctx = self.context(name)
-            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+            for builder, args in ((prompt_for, ()), (prompt_delta_for, ())):
                 authority = json.loads(builder(ctx, *args))["review_authority"]
                 self.assertEqual(authority, {"authorized": name == "reviewer",
                     "reviewed_snapshot": source if name == "reviewer" else None})
@@ -558,11 +555,11 @@ class ReviewVerdictTests(PublishFixture):
         self.select_quorum((), 0)
         ctx = self.context("reviewer")
         self.assertNotIn("vcs_publish", ctx.role.capabilities)
-        for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+        for builder, args in ((prompt_for, ()), (prompt_delta_for, ())):
             with self.subTest(builder=builder.__name__):
                 state = json.loads(builder(ctx, *args))["publication_state"]
                 self.assertEqual(state, {"cause": "review_not_configured", "verdict": None,
-                                         "reviewer": None, "finding_insights": []})
+                                         "reviewer": None})
     def test_bounded_and_interrupted_runs_cannot_install_approval(self):
         def work(ctx, *_):
             ctx.bound_hit = "requests"

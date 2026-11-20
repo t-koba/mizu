@@ -343,7 +343,7 @@ class PersistentLifecycleTests(Fixture):
         children = []
         def callback(ctx, *_):
             if ctx.role.name == 'worker':
-                for op, args in [('consult', {'roles': ['consult'], 'question': 'check'}),
+                for op, args in [('consult', {'roles': ['consult'], 'request': 'check'}),
                                  ('delegate', {'role': 'helper', 'task': 'check'})]:
                     result = ctx.handle(op, args)
                     self.assertIsInstance(result, dict)

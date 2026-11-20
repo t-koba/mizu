@@ -1,6 +1,5 @@
 """Resident daemon reuses a negative readiness result while the state tree is unchanged."""
 import dataclasses
-import os
 from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
@@ -39,7 +38,6 @@ class ReadinessRecheckTests(Fixture):
 
         def construct(config, name):
             project = Project(config, name)
-            project.insights.ingest_editor = Mock()
             return project
 
         def evaluate(*_args, **_kwargs):

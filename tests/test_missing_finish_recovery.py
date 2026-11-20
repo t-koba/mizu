@@ -14,11 +14,13 @@ FINISH = {"outcome": "wait", "summary": "Exact saved work", "state": "Next step 
 
 
 def external_wait(project):
-    """A blocked wait only an event/another party can end (stays pending)."""
-    question = project.insights.submit(
-        source="reviewer", title="External gate", body="Pending", base_snapshot=None)
-    return {"kind": "dependency", "recipient": "reviewer",
-            "requires": {"insight": question["id"], "rev": 1, "action": "accept"}}
+    """A blocked wait only another party can end (stays pending): another blocked item."""
+    import uuid
+    other = project.work_items.create(idempotency_key=uuid.uuid4().hex, title="External",
+                                      actor="reviewer")["record"]["work_item"]
+    project.work_items.transition(other["id"], expected_rev=1, status="blocked", actor="reviewer",
+                                  wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+    return {"kind": "object_resolved", "subject": {"type": "work_item", "id": other["id"]}}
 
 
 class NoFinishDriver:
@@ -38,11 +40,8 @@ class NoFinishDriver:
 
 
 def seed_open_work(project):
-    proposal = project.insights.submit(
-        source="worker", title="Do the thing", body="Implement a core slice", base_snapshot=None)
-    decision = project.insights.decide(
-        proposal["id"], "accept", "reviewed", "", "run-1", expected_rev=1)
-    return decision["work_item"]["id"]
+    return project.work_items.create(idempotency_key="do-the-thing", title="Do the thing",
+                                     actor="worker")["record"]["work_item"]["id"]
 
 
 def block_open_work(context, _prompt, _profile):

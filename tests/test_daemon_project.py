@@ -17,7 +17,6 @@ class DaemonProjectTests(Fixture):
 
         def construct(config, name):
             project = Project(config, name)
-            project.insights.ingest_editor = Mock()
             projects.append(project)
             return project
 

@@ -180,12 +180,12 @@ class CompletionTests(Fixture):
     def test_backup_retains_incomplete_ingest(self):
         from mizu.storage import backup
         import tarfile
-        write_json(self.project.root / ".ingest/pending.json", {"title": "a", "body": "b", "base_snapshot": None})
+        write_json(self.project.root / "spool/editor" / ("a" * 32 + ".json"), {"title": "a", "body": "b"})
         self.project.set_control(paused=True)
         archive = self.root / "backup.tar.gz"
         backup(self.project, archive)
         with tarfile.open(archive) as stream:
-            self.assertIn(".ingest/pending.json", stream.getnames())
+            self.assertIn("spool/editor/" + "a" * 32 + ".json", stream.getnames())
 
     def test_mode_only_diff_is_visible(self):
         if os.name == "nt":

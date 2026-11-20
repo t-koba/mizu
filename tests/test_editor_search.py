@@ -19,12 +19,12 @@ from mizu.fs import MAX_FRAME, PREVIEW_BYTES, READ_PAGE_CHARS, canonical, digest
 class EditorSearchTests(Fixture):
     def test_config_defaults_overrides_and_invalid_values(self):
         defaults = {"search_max_bytes": 8 * 1024 * 1024,
-                    "search_max_matches": 50, "search_match_chars": 1000}
+                    "search_max_matches": 50, "search_match_chars": 1000, "queue": ""}
         self.assertEqual(dataclasses.asdict(self.config.editor), defaults)
         self.assertEqual(dataclasses.asdict(Editor()), defaults)
         self.assertEqual(MAX_EDITOR_SEARCH_MATCH_CHARS, READ_PAGE_CHARS)
         original = self.file.read_text()
-        for name in defaults:
+        for name in (key for key in defaults if key != "queue"):
             maximum = MAX_EDITOR_SEARCH_MATCH_CHARS if name == "search_match_chars" else TOML_INTEGER_MAX
             for value in (1, defaults[name], maximum):
                 with self.subTest(name=name, value=value):

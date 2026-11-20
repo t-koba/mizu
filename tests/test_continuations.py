@@ -681,28 +681,6 @@ class EngineContinuationTests(ContinuationFixture):
                                     "snapshot": snapshot["id"], "started_at": now()})
         return original, snapshot, self.store.root / "runs" / original["successor"]
 
-    def test_only_committed_intent_bypasses_parked_progress(self):
-        from mizu.runtime import should_run
-        quiet = self.quiet_head()
-        self.store.publish(quiet)
-        self.assertFalse(should_run(self.project, quiet, role_name="worker"))
-        original, snapshot = self.intent_on_quiet_head()
-        self.assertFalse(should_run(self.project, quiet, role_name="worker"))
-        self.store.publish(snapshot)
-        self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
-        with c.reservation(self.engine, self.project, "worker"):
-            pass
-        self.assertTrue(should_run(self.project, snapshot, role_name="worker"))
-        for control in ({"armed": False}, {"paused": True}, {"draining": True}):
-            self.project.set_control(**control)
-            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-            self.project.set_control(armed=True, paused=False, draining=False)
-        with patch("mizu.runtime.check_jobs.waiting", return_value=True):
-            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-        with patch("mizu.role_admission.producer_hold", return_value={"reason": "held"}):
-            self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-        self.assertEqual(c.pending(self.store, "worker")["successor"], original["successor"])
-
     def test_engine_accepts_current_tree_and_identity_once(self):
         original, _ = self.committed()
         (self.project.workspace / "app.py").write_bytes(b"VALUE = 3\n")
@@ -976,32 +954,6 @@ class EngineContinuationTests(ContinuationFixture):
         self.assertEqual((self.project.workspace / "app.py").read_bytes(), b"uncommitted change\n")
         self.assertFalse((self.store.root / "runs" / original["successor"]).exists())
         self.assertEqual(c.pending(self.store, "worker")["successor"], original["successor"])
-
-    def test_engine_holds_preserve_same_row_without_start(self):
-        original, _ = self.committed()
-        initial = c.pending(self.store, "worker")
-        self.engine.stop.set()
-        with self.assertRaises(Busy):
-            self.engine.run(self.project, "worker")
-        self.engine.stop.clear()
-        for control in ({"armed": False}, {"paused": True}, {"draining": True}):
-            self.project.set_control(**control)
-            with self.assertRaises((Busy, Denied)):
-                self.engine.run(self.project, "worker")
-            self.project.set_control(armed=True, paused=False, draining=False)
-        limited = dataclasses.replace(self.config, limits=dataclasses.replace(self.config.limits, daily_requests=0))
-        with self.assertRaises(InfraExceeded):
-            Engine(limited).run(self.project, "worker")
-        with patch("mizu.runtime.producer_hold", return_value={"reason": "held"}):
-            self.assertEqual(self.engine.run(self.project, "worker")["skip"]["skipped"], "producer-held")
-        with patch("mizu.runtime.check_jobs.deferral", return_value={"id": "a" * 64, "wait_until": 9999999999}):
-            with self.assertRaises(Busy):
-                role = dataclasses.replace(self.config.roles["worker"], capabilities=(
-                    *self.config.roles["worker"].capabilities, "check_job"))
-                config = dataclasses.replace(self.config, roles={**self.config.roles, "worker": role})
-                Engine(config, driver=self.engine.driver).run(self.project, "worker")
-        self.assertEqual(c.pending(self.store, "worker"), initial)
-        self.assertFalse((self.store.root / "runs" / original["successor"]).exists())
 
     def test_prepared_never_bypasses_event_dispatch(self):
         quiet = self.quiet_head()

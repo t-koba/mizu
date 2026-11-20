@@ -31,6 +31,11 @@ class EventWakesConfigTests(Fixture):
 
     def test_empty_list_omits_event_units_only_for_that_role(self):
         exe = Path("/usr/bin/mizu")
+        roles = {**self.config.roles}
+        for name in self.project.roles:
+            if not roles[name].daemon:
+                roles[name] = dataclasses.replace(roles[name], work_item_events=("done",))
+        self.config = dataclasses.replace(self.config, roles=roles)
         before = render(self.config, self.project, exe, system="linux")
         self.assertTrue(any(k.endswith("-event.service") for k in before))
         names = [n for n in self.project.roles if n in event_watches(self.config, self.project)]
@@ -59,13 +64,9 @@ class EventWakesGateTests(Fixture):
             "wait": ("worker", [p("mizu.runtime.check_jobs.wake_ready", True)]),
             "ci": ("worker", [p("mizu.engine_dispatch._ci_due_for_with_facts", ([{"x": 1}], []))]),
             "operator": ("reviewer", [p("mizu.engine_dispatch._operator_woke", True)]),
-            "decision": ("worker", [p("mizu.engine_dispatch._decision_delivery_state",
-                                      {"events": [{"action": "approve"}], "diagnostics": []})]),
+            "queue": ("worker", [p("mizu.engine_dispatch.queue_facts.due", True)]),
             "work_item": ("worker", [patch("mizu.runtime.work_item_events.delivery",
                                            return_value={"events": [{"x": 1}]})]),
-            "operator_record": ("worker", [patch(
-                "mizu.runtime.operator_records.pending",
-                return_value=({"wake_pending": True, "events": []},))]),
             "ready_work": ("worker", [patch("mizu.engine_dispatch._ready_work_observation",
                                             return_value=(True, True, False))]),
         }
@@ -77,7 +78,7 @@ class EventWakesGateTests(Fixture):
 
     def _worker_event_only(self):
         self._role("worker", daemon=False, interval_seconds=0, calendar="", on_change=False,
-                   decision_events=("approve",), work_item_events=())
+                   work_item_events=("done",))
 
     def test_real_ready_set_change_wakes_only_on_configured_event_path(self):
         self._role("worker", on_change=True, event_wakes=())

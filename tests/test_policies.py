@@ -10,7 +10,7 @@ class PolicyContractTests(unittest.TestCase):
     def test_worker_keeps_integration_judgment_and_safety_constraints(self):
         text = (ROOT / "policies/worker.md").read_text()
         self.assertIn("Own the integration judgment", text)
-        self.assertIn("Triage incoming Insights", text)
+        self.assertIn("Messages in the `proposals` queue", text)
         self.assertIn("mizu_verify", text)
         self.assertIn("Do not weaken tests", text)
         self.assertIn("never push, deploy, or promote", text)

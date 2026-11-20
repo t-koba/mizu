@@ -440,7 +440,7 @@ else:
         engine=Engine(self.config,driver=ScriptDriver(work),stop=stop)
         def caller(ctx,*_):
             nonlocal result
-            result=engine.consult(ctx,{'question':'review'})
+            result=engine.consult(ctx,{'request':'review'})
         with self.assertRaises(Cancelled):
             Engine(self.config,driver=ScriptDriver(caller),stop=stop).run(self.project,'reporter')
         self.assertIn('error',result['answers'][0])
@@ -583,7 +583,6 @@ else:
         self.assertTrue(verification['passed'])
         self.assertTrue(verification['commands'][0]['script_truncated'])
         self.assertLess(len(canonical({'content':[{'text':canonical(verification).decode()}]})),MAX_FRAME)
-        validate({'offset':0,'limit':1},DEFINITIONS['insights'][1])
 
     def test_large_consultation_answers_have_bounded_reply_and_full_evidence(self):
         import dataclasses
@@ -597,7 +596,7 @@ else:
         for n in names:
             roles[n]=dataclasses.replace(base,name=n)
         config=dataclasses.replace(self.config,roles=roles)
-        result=self.admitted_call(Engine(config,driver=ScriptDriver(work)), 'consult',{'question':'\x01'*8000,'roles':list(names)})
+        result=self.admitted_call(Engine(config,driver=ScriptDriver(work)), 'consult',{'request':'\x01'*8000,'roles':list(names)})
         self.assertTrue(all(len(a['answer'])==12000 for a in result['answers']))
         self.assertLess(len(canonical({'content':[{'text':canonical(result).decode()}]})),MAX_FRAME)
         child=self.project.root/'runs'/result['answers'][0]['run']/'consultation.json'

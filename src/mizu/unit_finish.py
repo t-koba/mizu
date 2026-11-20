@@ -80,7 +80,7 @@ def _progress_record(snapshot: dict, role_name: str, selected: tuple[str, ...],
     schemas 6–7 remain readable but new records never carry wait conversions.
     """
     obligations_digest = _NO_OBLIGATIONS_DIGEST
-    has_progress = any(signals[name] for name in selected)
+    has_progress = any(signals.get(name, False) for name in selected)
     previous = snapshot.get("progress")
     previous_count = 0
     if isinstance(previous, dict):

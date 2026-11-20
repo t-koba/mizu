@@ -20,7 +20,7 @@ class PromptSectionTests(Fixture):
         return ctx
 
     def keys(self, ctx, builder=prompt_for):
-        return set(json.loads(builder(ctx) if builder is prompt_for else builder(ctx, [])))
+        return set(json.loads(builder(ctx)))
 
     def test_role_without_work_capability_gets_no_work_inventory(self):
         ctx = self.judge()
@@ -66,7 +66,7 @@ class PromptSectionTests(Fixture):
         self.assertEqual(removed.role.name, "reviewer")
 
     def test_writer_prompt_is_byte_identical_to_the_unfiltered_projection(self):
-        for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+        for builder, args in ((prompt_for, ()), (prompt_delta_for, ())):
             ctx = self.context("worker")
             default = json.loads(builder(ctx, *args))
             self.assertNotIn("ci_summary", default)
@@ -80,7 +80,7 @@ class PromptSectionTests(Fixture):
 
     def test_ci_is_opt_in_for_every_role_and_both_builders(self):
         for role in self.config.roles:
-            for builder, args in ((prompt_for, ()), (prompt_delta_for, ([],))):
+            for builder, args in ((prompt_for, ()), (prompt_delta_for, ())):
                 with self.subTest(role=role, builder=builder.__name__):
                     ctx = self.context(role)
                     ctx.config = dataclasses.replace(

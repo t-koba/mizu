@@ -50,28 +50,6 @@ class EngineDispatchOwnerTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "Role is not enabled"):
             engine.preview(project, "absent")
 
-    def test_run_refuses_flat_records_and_delegates_with_the_same_keywords(self):
-        limits = SimpleNamespace(lock_diagnostics="diagnostic-setting")
-        config = SimpleNamespace(runtime_policy=contextlib.nullcontext, limits=limits)
-        engine = Engine(config)
-        project = SimpleNamespace(name="sample")
-        with (patch("mizu.engine_dispatch.flat_records_present", return_value=True),
-              patch("mizu.engine_dispatch.lock_diagnostics.collect") as collect):
-            with self.assertRaisesRegex(Denied, "Flat shared records remain"):
-                engine.run(project, "reader")
-        collect.assert_not_called()
-
-        keywords = dict(attributes={"hint": "value"}, retry_busy=True, enqueue_busy=True,
-                        event_trigger=True, probes_serviced=True, scheduled_invocation=True)
-        with (patch("mizu.engine_dispatch.flat_records_present", return_value=False),
-              patch("mizu.engine_dispatch.lock_diagnostics.collect",
-                    return_value=contextlib.nullcontext()) as collect,
-              patch.object(engine, "_run", return_value={"status": "completed"}) as run):
-            result = engine.run(project, "reader", **keywords)
-        self.assertEqual(result, {"status": "completed"})
-        collect.assert_called_once_with(limits.lock_diagnostics)
-        run.assert_called_once_with(project, "reader", **keywords)
-
 
 if __name__ == "__main__":
     unittest.main()

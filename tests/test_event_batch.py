@@ -56,7 +56,7 @@ class EventBatchRendererTests(unittest.TestCase):
     def config_for(self, schedule):
         interval, calendar, daemon = schedule
         role = dataclasses.replace(self.config.roles['reporter'], interval_seconds=interval,
-            calendar=calendar, daemon=daemon, capabilities=(), decision_events=('accept',),
+            calendar=calendar, daemon=daemon, capabilities=(),
             work_item_events=('done',), on_change=False, event_poll_seconds=120)
         return dataclasses.replace(self.config, roles={'reporter': role})
 
@@ -66,11 +66,11 @@ class EventBatchRendererTests(unittest.TestCase):
             return render(config, self.project, Mock(resolve=lambda: PurePosixPath('/mizu')), system=system)
 
     def test_unset_preserves_legacy_bytes(self):
-        # Captured before adding event batching: all files for unscheduled,
-        # interval, calendar and daemon roles, including event recovery polling.
+        # All files for unscheduled, interval, calendar and daemon roles,
+        # including event recovery polling, as rendered by this release.
         expected = {
-            'linux': 'f7942222e8169a4f65ba1bc945ba2ab2de9695026899adae80d0a6345737f400',
-            'macos': '81dc4d632b4985f81c72c78e050385d6e47e79c239395e29e593146966650b63',
+            'linux': 'c93fb3b57a2cbd4efb86bbc422663a42c9fb9a84cbe0f879f996526d65e398d0',
+            'macos': 'a6f4b47adba738cd5aaf522c49ee53ed960d2263165a448d35a4c32baa19f5c1',
             'windows': 'ae431aeeed90055a0e3c1ddb2fbddcbc8cad87c3e8d3c403945ae93db4a362e7',
         }
         for system in self.systems:

@@ -230,7 +230,7 @@ class RetainedDeliveryTests(Fixture):
         with self.assertRaises(Denied):
             self.bind(snapshot)
 
-    def test_binding_lock_order_and_publisher_never_takes_insights_lock(self):
+    def test_binding_lock_order_and_publisher_never_takes_records_lock(self):
         snapshot = self.snapshot()
         paths = []
         def track(path, **kwargs):
@@ -239,7 +239,7 @@ class RetainedDeliveryTests(Fixture):
         with patch("mizu.work_items.lock", side_effect=track), \
                 patch("mizu.smoke_refs.lock", side_effect=track):
             self.bind(snapshot)
-        self.assertEqual(paths, ["publication.lock", "insights.lock"])
+        self.assertEqual(paths, ["publication.lock", "records.lock"])
         paths.clear()
         newer = self.snapshot(publish=False)
         with patch("mizu.snapshot.lock", side_effect=track):
