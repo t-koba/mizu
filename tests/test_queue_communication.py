@@ -9,7 +9,7 @@ from unittest.mock import patch
 import support  # noqa: F401
 from support import Fixture, ScriptDriver
 from mizu import cli, queue_facts
-from mizu.errors import Denied
+from mizu.errors import Denied, ProtocolError
 from mizu.fs import write_json
 from mizu.kernel import parse_queues
 from mizu.project import Project
@@ -167,6 +167,46 @@ class QueueFactsTests(QueueFixture):
         self.assertEqual(queues[0]["count"], 1)
         self.assertEqual(queues[0]["messages"][0]["body"]["title"], "Observed upstream release")
         self.assertEqual(set(queues[0]), {"queue", "count", "more", "messages"})
+
+    def test_waking_message_stays_due_after_interrupted_finish_until_acked(self):
+        """An interrupted observer finish leaves its queue source eligible for retry."""
+        self.write("Observed upstream release")
+        self.assertTrue(queue_facts.due(self.project, "worker"))
+
+        def interrupted(ctx, *_):
+            ctx.handle("_budget", {"sequence": 1})
+            raise ProtocolError("synthetic interruption")
+
+        with self.assertRaisesRegex(ProtocolError, "synthetic interruption"):
+            Engine(self.config, driver=ScriptDriver(interrupted)).run(self.project, "worker")
+
+        # No finish and no explicit queue_ack occurred, so the source remains
+        # due and visible to the next observer unit rather than being consumed.
+        self.assertTrue(queue_facts.due(self.project, "worker"))
+        opening = queue_facts.opening(self.project, "worker")
+        self.assertEqual(opening[0]["count"], 1)
+        self.assertEqual(opening[0]["messages"][0]["body"]["title"], "Observed upstream release")
+
+        prompts = []
+
+        def observer(ctx, prompt, profile=None):
+            prompts.append(json.loads(prompt))
+            ctx.handle("finish", {"outcome": "wait", "summary": "Read queue", "state": "Next."})
+
+        roles = dict(self.config.roles)
+        roles["worker"] = dataclasses.replace(
+            roles["worker"], capabilities=(*roles["worker"].capabilities, "queues"))
+        config = dataclasses.replace(self.config, roles=roles)
+        self.project = Project(config, self.project.name)
+        Engine(config, driver=ScriptDriver(observer)).run(self.project, "worker")
+        self.assertEqual(prompts[0]["queues"][0]["count"], 1)
+        self.assertEqual(prompts[0]["queues"][0]["messages"][0]["body"]["title"],
+                         "Observed upstream release")
+
+        # An explicit queue_ack is what finally clears the due source.
+        self.project.kernel_queues.ack("notes", "role:worker", 1)
+        self.assertFalse(queue_facts.due(self.project, "worker"))
+        self.assertEqual(queue_facts.opening(self.project, "worker"), [])
 
     def test_readiness_admits_on_due_message_in_a_waking_queue(self):
         snapshot = self.project.snapshots.get()
