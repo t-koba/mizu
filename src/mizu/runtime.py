@@ -58,6 +58,7 @@ from .context_evidence import ContextEvidenceMixin
 from .context_web_tools import ContextWebToolsMixin
 from .context_check_tools import ContextCheckToolsMixin
 from .context_read_tools import ContextReadToolsMixin
+from .context_role_tools import ContextRoleToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -87,15 +88,12 @@ from . import scheduling as _scheduling
 from .producer_admission import (PRODUCER_HELD_SKIPPED,
                                   _producer_limit, _producer_raw_limit,
                                   producer_hold)
-from . import materialize as _materialize
 from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
 from . import reviews
-from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import work_item_operations
-from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
@@ -462,7 +460,8 @@ def _spend_counter(name):
 class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextKernelToolsMixin, ContextInsightToolsMixin,
                 ContextEvidenceMixin, ContextWebToolsMixin,
-                ContextCheckToolsMixin, ContextReadToolsMixin):
+                ContextCheckToolsMixin, ContextReadToolsMixin,
+                ContextRoleToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -911,9 +910,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
     def _op_work_items_reopen(self, args: dict) -> dict:
         return work_item_operations.reopen(self, args)
 
-    def _op_work_order(self, args: dict) -> dict:
-        return work_order_ops.record(self, args)
-
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
         delivery = _record_delivery(self)
@@ -962,12 +958,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                    {"injected": receipt["injected"], "prefix": receipt["prefix"],
                     "trust": "external-untrusted", "refs": fetched["refs"]})
         return record
-
-    def _op_research_read(self, args: dict) -> dict:
-        return role_state_ops.research_read(self, args)
-
-    def _op_research(self, args: dict) -> dict:
-        return role_state_ops.research(self, args)
 
     def _op_vcs_read_publications(self, args: dict) -> dict:
         # Local listing of the project's recorded publication receipts.
@@ -1516,9 +1506,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             record["approval"] = approval["insight"]
         return observe(record)
 
-    def _op_materialize(self, args: dict) -> dict:
-        return _materialize.op_materialize(self, args)
-
     def _op_consult(self, args: dict) -> dict:
         if self.consult is None:
             raise Denied("Nested consultation is disabled")
@@ -1563,7 +1550,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "work_items_create": _op_work_items_create,
         "work_items_transition": _op_work_items_transition,
         "work_items_reopen": _op_work_items_reopen,
-        "work_order": _op_work_order,
+        "work_order": ContextRoleToolsMixin._op_work_order,
         "objects_create": ContextKernelToolsMixin._op_objects_create,
         "objects_transition": ContextKernelToolsMixin._op_objects_transition,
         "objects_read": ContextKernelToolsMixin._op_objects_read,
@@ -1581,9 +1568,9 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_request": _op_vcs_request,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
-        "materialize": _op_materialize,
+        "materialize": ContextRoleToolsMixin._op_materialize,
         "consult": _op_consult, "delegate": _op_delegate, "report": _op_report,
-        "research_read": _op_research_read, "research": _op_research,
+        "research_read": ContextRoleToolsMixin._op_research_read, "research": ContextRoleToolsMixin._op_research,
         "finish": ContextFinishMixin._op_finish,
     }
 
