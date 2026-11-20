@@ -3,9 +3,9 @@
 This module owns the per-role CI wake record/due helpers and their
 wake-version/default constants. CI status polling (``poll_ci``) lives in
 ``ci_polling``; proposal polling lives in ``vcs_proposal_poll``. Shared
-coordination (``poll_project_vcs``), state persistence, admission,
-``should_run`` orchestration and Engine dispatch stay in runtime. The
-helpers read the shared cached-CI projection via ``ci_observation``, the operator ``vcs``
+coordination (``poll_project_vcs``) and state persistence stay in
+runtime; admission lives in ``role_admission`` and Engine dispatch in
+``engine_dispatch``. The helpers read the shared cached-CI projection via ``ci_observation``, the operator ``vcs``
 mapping shape via config, and the per-role record via ``fs``; this module
 never imports runtime.
 """

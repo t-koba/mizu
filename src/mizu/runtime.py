@@ -128,7 +128,8 @@ from .wake_evidence import (OBSERVED_CURSOR_MAX_BYTES,
                             _role_cursor, _wake_generation_digest)
 # Role-admission facts keep their established runtime re-export seam.
 from .role_admission import (_on_change_observed, _progress_self_admits,
-                             _receipt_wait_due, _role_events_due, should_run)
+                             _receipt_wait_due, _reconcile_work_item_waits,
+                             _role_events_due, should_run)
 # Shared-record authority selection keeps its established runtime seam.
 from .record_authority import _record_delivery
 

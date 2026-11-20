@@ -72,7 +72,7 @@ gets no event units. Continuations, schedules and daemon loops are unaffected.
 
 ## Wake sources versus delivered inputs
 
-`should_run` (`src/mizu/runtime.py`) is the writer-daemon readiness gate. It
+`should_run` (`src/mizu/role_admission.py`, re-exported from `mizu.runtime`) is the writer-daemon readiness gate. It
 first rejects unarmed/paused/draining control (and deferred sandbox-check
 waits). For an enabled writer, an exact committed/reserved internal continuation
 then supplies readiness, subject to the producer veto. Prepared intents never
@@ -1122,7 +1122,7 @@ every role takes `locks/run-<role>.lock`; `write` roles additionally take
 the project `locks/workspace.lock`. FIFO slot admission itself lives in
 `src/mizu/admission.py`.
 
-Workspace selection (`Engine.run` in `src/mizu/runtime.py`): `write` roles
+Workspace selection (`Engine.run` in `src/mizu/engine_dispatch.py`): `write` roles
 run on the project workspace; any other role runs on `runs/<run-id>/input`,
 which is created empty for `workspace = "none"` and otherwise filled by
 materializing the published snapshot (`project.snapshots.materialize`).
