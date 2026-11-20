@@ -66,7 +66,8 @@ from .context_grant_read_tools import ContextGrantReadToolsMixin
 from .context_vcs_read_tools import ContextVcsReadToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_dispatch import EngineDispatchMixin
-from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
+from .engine_delegation import (EngineDelegationMixin, CONSULT_FORBIDDEN,
+                               DELEGATE_FORBIDDEN, check_consult_role,
                                check_delegate_role)
 from .engine_execution import EngineExecutionMixin
 from .errors import RequestYieldExceeded, ToolYieldExceeded
@@ -280,31 +281,6 @@ def is_deferred(exc: BaseException, context=None) -> bool:
     except Exception:
         return False
     return False
-
-
-#: Capabilities that let a consultation role change shared state or execute
-#: code. Consultation must stay read-only and advisory: workspace "read" plus
-#: none of these. Read-only grants (files/read/diff/insights/fetch/probe/search)
-#: stay operator choice, plus the required finish.
-CONSULT_FORBIDDEN = frozenset({"exec", "experiment", "verify", "decide",
-                               "submit_insight", "revise_insight", "withdraw_insight", "withdraw_decided", "attach_evidence", "consult", "report", "sync",
-                               "vcs_publish", "vcs_retire", "vcs_dispose", "vcs_request",
-                               "research", "materialize", "work_items_create", "work_items_transition", "work_items_reopen",
-                               "work_order", "record_write", "objects", "events", "review_verdict"})
-
-
-def check_consult_role(role_name: str, role) -> None:
-    """Single property-based consultation gate (runtime + smoke share this).
-
-    Schema: role has ``workspace`` and ``capabilities``. Bounds: none beyond
-    the capability sets. Trust: configuration, not model output.
-    Retry/cancellation: n/a (pre-model validation). Evidence: ConfigError names
-    the role. Failure: raises ConfigError before any model call or budget use.
-    """
-    if role.workspace != "read" or set(role.capabilities) & CONSULT_FORBIDDEN:
-        raise ConfigError(
-            f"Consultation role {role_name} must be read-only without "
-            f"{sorted(CONSULT_FORBIDDEN)}")
 
 
 @dataclasses.dataclass
