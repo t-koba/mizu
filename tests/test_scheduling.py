@@ -249,9 +249,9 @@ class SchedulingParityTests(Fixture):
                 "wake_generation": "test-wake", "progress": {}}
         with patch.object(self.project.insights, "generation",
                           side_effect=AssertionError("done must not read inbox generation")), \
-             patch("mizu.runtime._role_events_due",
+             patch("mizu.role_admission._role_events_due",
                    side_effect=AssertionError("done must not read routed events")), \
-             patch("mizu.runtime._ci_due_for",
+             patch("mizu.role_admission._ci_due_for",
                    side_effect=AssertionError("done must not query CI")), \
              patch("mizu.role_admission.validate_progress",
                    side_effect=AssertionError("done must not inspect progress")):

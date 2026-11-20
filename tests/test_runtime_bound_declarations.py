@@ -1678,10 +1678,10 @@ CALLS = {
             '1024 * 1024', 'safety', 'runtime / bounded run-state record read'),
         ('Engine._run', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness check during a run'),
-        ('should_run', '_receipt_wait_due', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row combined receipt-wait scheduling check'),
     },
     'role_admission.py': {
+        ('should_run', '_receipt_wait_due', 'limit', 0): (
+            '1', 'mechanism', 'role admission / one-row combined receipt-wait scheduling check'),
         ('_role_events_due', 'work_item_events.pending', 'limit', 0): (
             '1', 'mechanism', 'role admission / one-row work-item event check'),
         ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (

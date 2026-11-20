@@ -388,7 +388,7 @@ class ProgressAdmissionTests(Fixture):
         present_ci = [{"sha": "red", "check": "offline", "run": "test"}]
         def ci_due(project, config, role, *due_args):
             return [] if due_args else present_ci
-        with patch("mizu.runtime._ci_due_for", side_effect=ci_due):
+        with patch("mizu.role_admission._ci_due_for", side_effect=ci_due):
             for expected in (5, 6):
                 self.assertTrue(self.project.insights.pending_obligations("worker"))
                 snapshot = self._recorded_run(base=parked)
@@ -646,9 +646,9 @@ class ProgressAdmissionTests(Fixture):
 
         with patch.object(self.project.insights, "generation", return_value="new-inbox-generation"):
             self.assertTrue(should_run(self.project, parked, role_name="worker"))
-        with patch("mizu.runtime._role_events_due", return_value=True):
+        with patch("mizu.role_admission._role_events_due", return_value=True):
             self.assertTrue(should_run(self.project, parked, role_name="worker"))
-        with patch("mizu.runtime._ci_due_for", return_value=[{"sha": "red"}]):
+        with patch("mizu.role_admission._ci_due_for", return_value=[{"sha": "red"}]):
             self.assertTrue(should_run(self.project, parked, role_name="worker"))
 
         wait = self._parked_snapshot(count=1, outcome="wait", wake_at=100)

@@ -700,7 +700,7 @@ class EngineContinuationTests(ContinuationFixture):
             self.project.set_control(armed=True, paused=False, draining=False)
         with patch("mizu.runtime.check_jobs.waiting", return_value=True):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
-        with patch("mizu.runtime.producer_hold", return_value={"reason": "held"}):
+        with patch("mizu.role_admission.producer_hold", return_value={"reason": "held"}):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
         self.assertEqual(c.pending(self.store, "worker")["successor"], original["successor"])
 

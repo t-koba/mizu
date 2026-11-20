@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .delegation_jobs import DelegationJobs, _WorkspaceLease
 from . import (decision_delivery, delegation_gates, lineage, operator_records,
-               delivery_settlement, queue_decision_delivery, queue_record_delivery)
+               delivery_settlement, queue_decision_delivery)
 from . import platform as _platform
 from . import run_activity as _run_activity
 from . import evidence_records, workspace_reads, lock_diagnostics
@@ -33,10 +33,10 @@ from .ci_observation import (MAX_CI_CHECKS_PER_BRANCH, MAX_CI_FAILURES,
                              _clean_ci_failures, _clean_ci_successes, _valid_ci_run,
                              ci_failures_projection, current_ci_failures,
                              effective_ci_wake_branches, selected_ci_failures_present,
-                             wake_ci_failures)
+                             wake_ci_failures)  # preserved runtime re-export seam
 from .ci_wake import (CI_WAKE_VERSION, DEFAULT_CI_REWAKE_SECONDS,
                       _ci_due, _ci_due_for, _ci_due_for_with_facts, _ci_rewake_seconds,
-                      _ci_wake_enabled, _ci_wake_fact_digest, _ci_wake_path,
+                      _ci_wake_fact_digest, _ci_wake_path,
                       _normalize_ci_wake_branches, read_ci_wake, wake_facts_cover_due, write_ci_wake)
 from .budget import Budget
 from .config import (DAEMON_POLICIES, MAX_NO_PROGRESS_BACKOFF_SECONDS,
@@ -129,7 +129,9 @@ from .wake_evidence import (OBSERVED_CURSOR_MAX_BYTES,
 # Role-admission facts keep their established runtime re-export seam.
 from .role_admission import (_on_change_observed, _progress_self_admits,
                              _receipt_wait_due, _reconcile_work_item_waits,
-                             _role_events_due)
+                             _role_events_due, should_run)
+# Shared-record authority selection keeps its established runtime seam.
+from .record_authority import _record_delivery
 
 
 @contextlib.contextmanager
@@ -161,14 +163,6 @@ MAX_ENGINE_TOOL_ID = 256
 MAX_READ_IDENTITIES = workspace_reads.MAX_READ_IDENTITIES
 #: Bounded serialized size of the work items a CI request covers.
 MAX_COVERED_BYTES = 2048
-
-def _record_delivery(project):
-    """Select the shared record authority; a marker is checked on every use."""
-    root = getattr(project, "insights", None)
-    if root is not None and queue_record_delivery.authority_kind(root.root) == "queues":
-        return queue_record_delivery
-    return operator_records
-
 
 #: Re-exported for compatibility; evidence_records owns the exact bounds.
 EVIDENCE_UUID = evidence_records.EVIDENCE_UUID
@@ -2996,131 +2990,6 @@ class Engine(EngineAdmissionMixin, EngineDelegationMixin, EngineExecutionMixin):
                     ctx.close_exec()
             finally:
                 guard.close()
-
-
-def should_run(project: Project, snapshot: dict, current_time: float | None = None,
-               role_name: str | None = None, config=None) -> bool:
-    """Collect daemon signals lazily, following the pure due evaluator's order.
-
-    The evaluator names one next fact at a time. This preserves the old
-    short-circuit contract: absent ready work or receipt-pinned CI wait evidence,
-    done does not read inbox/decision events/general CI/insight waits/progress.
-    Addressed operator records are checked before done, directly from SharedRecords. A higher-priority wake does not probe
-    lower-priority stores. Named roles only see role-eligible ready work;
-    observers use their own completion cursor, never the writer's progress.
-    """
-    current_time = time.time() if current_time is None else current_time
-    control = project.control()
-    effective = config if config is not None else getattr(project, "config", None)
-    role = effective.roles.get(role_name) if effective is not None and role_name is not None else None
-    observer = role is not None and role.workspace != "write"
-    role_record = _role_cursor(project, role_name) if observer else snapshot
-    if role_name is not None and check_jobs.waiting(project, role_name):
-        return False
-    facts = _scheduling.DaemonFacts(
-        armed=bool(control.get("armed")),
-        paused=bool(control.get("paused")),
-        draining=bool(control.get("draining")),
-        operator_records_due=None,
-    )
-    decision = _scheduling.evaluate(facts)
-    if (decision.ready is None and role_name in project.roles and role is not None
-            and role.workspace == "write"):
-        from .continuations import ready as continuation_ready
-        if continuation_ready(project.snapshots, role_name) is not None:
-            facts = dataclasses.replace(facts, continuation_ready=True)
-            decision = _scheduling.evaluate(facts)
-    completed_wait_probes = None
-    ready_work_observed = False
-    ready_work_present = False
-    while decision.ready is None:
-        needed = decision.needed
-        if needed == "goal_changed":
-            value = not observer and digest(project.goal.encode()) != snapshot["goal_digest"]
-        elif needed == "operator_woke":
-            value = _operator_woke(control, role_record, observer=observer)
-        elif needed == "ready_work_changed":
-            if role_name is None or role is not None:
-                _reconcile_work_item_waits(project, role, effective)
-                value, ready_work_present, _ = _ready_work_observation(project, role_record, role)
-                ready_work_observed = True
-            else:
-                value = False
-        elif needed == "ci_wait_due":
-            names = [role_name] if role_name in project.roles else [
-                name for name in project.roles
-                if project.config.roles[name].workspace == "write"]
-            try:
-                value = any(check_jobs.wake_ready(project, name)
-                            or _receipt_wait_due(project.work_items, name, limit=1)
-                            for name in names)
-                if not value:
-                    # The identical role set is examined again later by
-                    # _role_events_due. Reuse only a fully completed negative
-                    # scan; an error leaves it unset so that route retains its
-                    # independent retry behavior.
-                    completed_wait_probes = frozenset(names)
-            except (Denied, LimitExceeded, OSError, ValueError):
-                completed_wait_probes = None
-                value = False
-        elif needed == "operator_records_due":
-            # A code-change/wait evaluation may name a placeholder role (for
-            # example before admission resolves configuration). It cannot have
-            # addressed operator records; don't let that suppress other causes.
-            value = (_record_delivery(project).due(project, role_name)
-                     if role_name is None or (role_name in project.roles
-                                              and role_name in project.config.roles)
-                     else False)
-        elif needed == "outcome":
-            value = role_record.get("outcome", "wait")
-            if observer and value not in ("continue", "bounded", "done", "wait", "blocked"):
-                value = "wait"
-        elif needed == "inbox_changed":
-            value = not observer and project.insights.generation() != snapshot.get("inbox_seen", "")
-        elif needed == "routed_events_due":
-            value = _role_events_due(project, snapshot, role_name,
-                                     completed_wait_probes=completed_wait_probes)
-        elif needed == "ci_due":
-            try:
-                effective = config if config is not None else getattr(project, "config", None)
-                if role_name is not None and not _ci_wake_enabled(effective, role_name):
-                    value = False
-                elif role_name is not None:
-                    _snapshot_id = snapshot.get("id") if isinstance(snapshot, dict) else None
-                    value = bool(_ci_due_for(project, effective, role_name, _snapshot_id, current_time))
-                else:
-                    value = bool(wake_ci_failures(project, effective))
-            except Exception:
-                value = False
-        elif needed == "wait_expired":
-            value = (not observer and snapshot.get("outcome") == "wait"
-                     and snapshot.get("wake_at") is not None
-                     and current_time >= snapshot["wake_at"])
-        elif needed == "progress_admits":
-            if observer:
-                value = _progress_self_admits(role_record, effective, role_name, current_time)
-            elif role_name is None:
-                value = role_record.get("outcome") in ("continue", "bounded")
-            else:
-                value = bool(_writer_next_task(project, snapshot, role_name))
-        else:
-            raise RuntimeError(f"scheduler evaluator requested unknown fact: {needed!r}")
-        facts = dataclasses.replace(facts, **{needed: value})
-        decision = _scheduling.evaluate(facts)
-    if not decision.ready:
-        return False
-    # Producer admission vetoes an otherwise-ready daemon iteration before
-    # any model or run-slot use. The check runs only here so an unready
-    # daemon never pays for load reads; a held producer simply stays
-    # unready until an existing schedule or subscription re-evaluates it.
-    # No event or cursor is acknowledged by this veto.
-    if role_name is not None and role is not None:
-        try:
-            if producer_hold(project, role_name, role) is not None:
-                return False
-        except Exception:
-            return False
-    return True
 
 
 def poll_project_vcs(config, project, state: dict, *, now: float, interval: float) -> list:

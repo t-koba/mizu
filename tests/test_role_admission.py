@@ -61,13 +61,30 @@ class RoleAdmissionOwnerTests(unittest.TestCase):
         snapshot = {'id': 'snap', 'outcome': 'done', 'goal_digest': digest(b'goal'),
                     'wake_generation': ''}
         delivery = types.SimpleNamespace(due=lambda *args, **kw: False)
-        with patch.object(runtime, '_ready_work_observation',
+        with patch.object(role_admission, '_ready_work_observation',
                           return_value=(False, False, False)), \
-             patch.object(runtime, '_record_delivery', return_value=delivery), \
+             patch.object(role_admission, '_record_delivery', return_value=delivery), \
              patch.object(role_admission.decision_delivery, 'authority',
                           side_effect=AssertionError('no decision authority read')), \
              patch.object(role_admission.work_item_events, 'pending',
                           side_effect=AssertionError('no work-item event read')):
+            self.assertFalse(runtime.should_run(project, snapshot))
+
+    def test_should_run_reexport_and_done_short_circuit(self):
+        self.assertIs(runtime.should_run, role_admission.should_run)
+        project = types.SimpleNamespace(
+            roles={}, config=types.SimpleNamespace(roles={}),
+            control=lambda: {'armed': True}, goal='goal')
+        snapshot = {'id': 'snap', 'outcome': 'done', 'goal_digest': digest(b'goal'),
+                    'wake_generation': ''}
+        delivery = types.SimpleNamespace(due=lambda *args, **kw: False)
+        with patch.object(role_admission, '_ready_work_observation',
+                          return_value=(False, False, False)), \
+             patch.object(role_admission, '_record_delivery', return_value=delivery), \
+             patch.object(role_admission, '_role_events_due',
+                          side_effect=AssertionError('done must not read routed events')), \
+             patch.object(role_admission, '_ci_due_for',
+                          side_effect=AssertionError('done must not query CI')):
             self.assertFalse(runtime.should_run(project, snapshot))
 
     def test_reconcile_skips_read_only_roles(self):

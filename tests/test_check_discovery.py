@@ -453,7 +453,7 @@ class DiscoveryTests(Fixture):
         engine = Engine(self.config)
         # Malformed diagnostics do not supply a wake; a healthy terminal owned
         # result wakes before any explicit wait, which remains compatible.
-        with patch('mizu.runtime._operator_woke', return_value=False), \
+        with patch('mizu.role_admission._operator_woke', return_value=False), \
              patch('mizu.runtime._ready_work_changed', return_value=False):
             self.assertFalse(should_run(self.project, snapshot, role_name='worker'))
             self.assertIn('skip', engine._dispatch_state(self.project, 'worker',

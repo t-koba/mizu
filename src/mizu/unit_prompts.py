@@ -9,7 +9,7 @@ for both prompt variants.
 Session selection, rotation/recovery/fallback policy (:func:`runtime.session_prompt`
 and below), work-ready scheduling (``work_readiness._has_ready_work`` and
 ``work_readiness._ready_work_changed``, re-exported by ``runtime``, plus
-``runtime.should_run``), admission and the
+``role_admission.should_run``, re-exported by ``runtime``), admission and the
 scheduler stay in ``runtime``. This module also owns the display-only ready
 work projection and its age formatter; the projection preserves its
 ``ready_work_signature`` side effect without depending back on runtime.

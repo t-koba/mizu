@@ -115,18 +115,17 @@ class CiWaitTests(CiWaitFixture):
         self.config.roles["worker"] = dataclasses.replace(
             worker, capabilities=tuple(worker.capabilities) + ("check_job",))
         with (patch("mizu.runtime.check_jobs.wake_ready", return_value=False) as check_ready,
-              patch("mizu.runtime._receipt_wait_due", return_value=False) as wait_due):
+              patch("mizu.role_admission._receipt_wait_due", return_value=False) as wait_due):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
         self.assertEqual(check_ready.call_count, 1)
         self.assertEqual(wait_due.call_count, 1)
 
     def test_should_run_retries_wait_probes_after_a_source_error(self):
         snapshot = self._idle_writer_snapshot()
-        # should_run probes its re-export first; the routed-event owner probes
-        # its own binding on retry. Share one mock across both seams.
+        # Both the scheduling probe and the routed-event owner now read the
+        # same role-admission binding; one mock covers both probes.
         wait_due = Mock(side_effect=[OSError("transient"), False])
         with (patch("mizu.runtime.check_jobs.wake_ready", return_value=False) as check_ready,
-              patch("mizu.runtime._receipt_wait_due", wait_due),
               patch("mizu.role_admission._receipt_wait_due", wait_due)):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
         # A failed first probe is not memoized; routed-event evaluation retries.
@@ -136,8 +135,8 @@ class CiWaitTests(CiWaitFixture):
     def test_wait_arriving_between_probes_is_seen_on_next_evaluation(self):
         self.block()
         snapshot = self._idle_writer_snapshot()
-        from mizu import runtime as runtime_module
-        original_due = runtime_module._receipt_wait_due
+        from mizu import role_admission as admission_module
+        original_due = admission_module._receipt_wait_due
         calls = 0
 
         def due_then_publish(store, role, *, limit=1):
@@ -150,9 +149,9 @@ class CiWaitTests(CiWaitFixture):
                 self.poll()
             return due
 
-        with (patch("mizu.runtime._ready_work_observation", return_value=(False, False, False)),
+        with (patch("mizu.role_admission._ready_work_observation", return_value=(False, False, False)),
               patch("mizu.runtime.check_jobs.wake_ready", return_value=False),
-              patch("mizu.runtime._receipt_wait_due", side_effect=due_then_publish) as wait_due):
+              patch("mizu.role_admission._receipt_wait_due", side_effect=due_then_publish) as wait_due):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
             self.assertEqual(wait_due.call_count, 1)
             # The negative result is local to the first evaluation. The new
