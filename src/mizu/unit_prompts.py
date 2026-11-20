@@ -7,8 +7,9 @@ unit-opening statement. Snapshot proof and its diagnostic are projected together
 for both prompt variants.
 
 Session selection, rotation/recovery/fallback policy (:func:`runtime.session_prompt`
-and below), work-ready scheduling (``runtime._has_ready_work``,
-``runtime._ready_work_changed``, ``runtime.should_run``), admission and the
+and below), work-ready scheduling (``work_readiness._has_ready_work`` and
+``work_readiness._ready_work_changed``, re-exported by ``runtime``, plus
+``runtime.should_run``), admission and the
 scheduler stay in ``runtime``. This module also owns the display-only ready
 work projection and its age formatter; the projection preserves its
 ``ready_work_signature`` side effect without depending back on runtime.

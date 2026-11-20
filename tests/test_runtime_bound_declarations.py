@@ -1665,9 +1665,11 @@ CALLS = {
             "args.get('limit', 8192)", 'safety',
             'runtime / check-log page defaults to the bounded reader ceiling'),
     },
-    'runtime.py': {
+    'work_readiness.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row readiness existence check'),
+            '1', 'mechanism', 'work readiness / one-row readiness existence check'),
+    },
+    'runtime.py': {
         ('Engine._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row pending-decision dispatch check'),
         ('Engine._run', 'read_json', 'max_bytes', 0): (

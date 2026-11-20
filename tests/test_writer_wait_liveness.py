@@ -967,6 +967,6 @@ class WriterParkingTests(Fixture):
             due = dt.datetime.fromisoformat(progress["recorded_at"]).timestamp() + 301
             self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
             for live in (True, False, None):
-                with patch("mizu.runtime._writer_wait_sources", return_value=live):
+                with patch("mizu.work_readiness._writer_wait_sources", return_value=live):
                     self.assertFalse(_progress_self_admits(snapshot, self.config, "worker", due))
                     self.assertFalse(should_run(self.project, snapshot, role_name="worker", current_time=due))
