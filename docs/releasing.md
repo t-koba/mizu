@@ -54,7 +54,17 @@ searcher consults it through `mizu_search`; search results are external-untruste
 inputs
 that reach the writer as insights, not adoption decisions. There is no
 Pi-specific release-check command or automatic package update. Use
-`docs/upstream.md` to confirm the currently adopted version. When considering a
+`docs/upstream.md` to confirm the currently adopted version. Every new stable
+release enters lockstep adoption review on its own, whether or not its changelog
+fixes a Mizu-known defect: a stable patch with no matching known defect still
+follows the review path below, so "no defect it fixes" is never a reason to skip
+review. Only a blocking regression reproduced in that review justifies staying
+pinned; record the regression and its reproduction in the decision to remain on
+the current version. An unreproduced suspicion is not a hold, and a pin without
+a recorded regression does not satisfy this procedure. The live release feed and
+the currently adopted version are operator-owned policy tied by evidence to the
+configured `[web].feeds` entry and `docs/upstream.md`; do not duplicate that
+policy in harness code or add an automatic updater. When considering a
 newer stable Pi release, review the package-specific changelogs, move every Pi
 package in both adapters to that same version, regenerate both lockfiles with
 the configured offline materializer, install from the approved offline npm
