@@ -1678,16 +1678,18 @@ CALLS = {
             '1024 * 1024', 'safety', 'runtime / bounded run-state record read'),
         ('Engine._run', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness check during a run'),
-        ('_role_events_due', 'work_item_events.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row work-item event check'),
-        ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row decision-delivery check'),
-        ('_role_events_due', 'project.insights.due_waits', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row due-wait existence check'),
-        ('_role_events_due', '_receipt_wait_due', 'limit', 0): (
-            '1', 'mechanism', 'runtime / one-row combined receipt-wait check'),
         ('should_run', '_receipt_wait_due', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row combined receipt-wait scheduling check'),
+    },
+    'role_admission.py': {
+        ('_role_events_due', 'work_item_events.pending', 'limit', 0): (
+            '1', 'mechanism', 'role admission / one-row work-item event check'),
+        ('_role_events_due', 'decision_delivery.pending', 'limit', 0): (
+            '1', 'mechanism', 'role admission / one-row decision-delivery check'),
+        ('_role_events_due', 'project.insights.due_waits', 'limit', 0): (
+            '1', 'mechanism', 'role admission / one-row due-wait existence check'),
+        ('_role_events_due', '_receipt_wait_due', 'limit', 0): (
+            '1', 'mechanism', 'role admission / one-row combined receipt-wait check'),
     },
     'project.py': {
         ('config_managed_repo', 'run', 'maximum', 0): (
@@ -1903,8 +1905,8 @@ PARAMETER_DEFAULTS = {
         '30', 'safety', 'protocol / default schema array validation ceiling'),
     ('publication.py', 'Publication.list_receipts', 'limit'): (
         '100', 'policy', 'publication / caller-selected receipt listing size'),
-    ('runtime.py', '_receipt_wait_due', 'limit'): (
-        '1', 'mechanism', 'runtime / existence probe needs one ready candidate per route'),
+    ('role_admission.py', '_receipt_wait_due', 'limit'): (
+        '1', 'mechanism', 'role admission / existence probe needs one ready candidate per route'),
     ('selection.py', 'validate_condition', 'depth'): (
         '0', 'mechanism', 'selection / root nesting counter, not the nesting ceiling'),
     ('shared_records.py', '_json', 'depth'): (

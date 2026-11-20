@@ -122,9 +122,12 @@ class CiWaitTests(CiWaitFixture):
 
     def test_should_run_retries_wait_probes_after_a_source_error(self):
         snapshot = self._idle_writer_snapshot()
+        # should_run probes its re-export first; the routed-event owner probes
+        # its own binding on retry. Share one mock across both seams.
+        wait_due = Mock(side_effect=[OSError("transient"), False])
         with (patch("mizu.runtime.check_jobs.wake_ready", return_value=False) as check_ready,
-              patch("mizu.runtime._receipt_wait_due",
-                    side_effect=[OSError("transient"), False]) as wait_due):
+              patch("mizu.runtime._receipt_wait_due", wait_due),
+              patch("mizu.role_admission._receipt_wait_due", wait_due)):
             self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
         # A failed first probe is not memoized; routed-event evaluation retries.
         self.assertEqual(check_ready.call_count, 1)

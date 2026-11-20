@@ -253,7 +253,7 @@ class SchedulingParityTests(Fixture):
                    side_effect=AssertionError("done must not read routed events")), \
              patch("mizu.runtime._ci_due_for",
                    side_effect=AssertionError("done must not query CI")), \
-             patch("mizu.runtime.validate_progress",
+             patch("mizu.role_admission.validate_progress",
                    side_effect=AssertionError("done must not inspect progress")):
             self.assertFalse(should_run(self.project, snap, role_name="worker"))
             self.project.set_control(wake_generation="operator-new")
