@@ -85,7 +85,7 @@ def finish(bridge, *, resumed=False):
         forward(bridge, 'files', {})
         return
     if scenario == 'checkpoint-join':
-        forward(bridge, 'consult', {'question': 'synthetic child'})
+        forward(bridge, 'consult', {'request': 'synthetic child'})
         return
     if scenario in ('missing-finish', 'provider-error-before-finish'):
         return

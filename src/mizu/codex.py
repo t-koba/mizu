@@ -86,8 +86,12 @@ class CodexDriver:
         link = home/'auth.json'
         if source.is_file() and not link.exists():
             os.symlink(source, link)
-        with Bridge(context.handle,
-                    tool_definitions(context.driver_capabilities, role=context.role, config=self.config),
+        # A capability can be a gate (e.g. "queues") that tool_definitions
+        # expands into several concrete tools. Derive the enabled/required tool
+        # names from that same expansion so they never name a non-existent tool.
+        tools = tool_definitions(context.driver_capabilities, role=context.role, config=self.config)
+        tool_names = [tool['name'] for tool in tools]
+        with Bridge(context.handle, tools,
                     timeout=self.config.limits.model_request_seconds, on_close=context.cancel_operations) as bridge:
             options = dict(settings['options'])
             turn_options = options.pop('turn', {})
@@ -118,7 +122,7 @@ class CodexDriver:
                     raise ConfigError('MCP enabled_tools exceeds role grants')
                 server['enabled_tools'] = allowed
             servers['mizu'] = {**mizu_server(bridge.config_file), 'required': True,
-                               'enabled_tools': ['mizu_'+name for name in context.driver_capabilities],
+                               'enabled_tools': list(tool_names),
                                'default_tools_approval_mode': 'approve'}
             options['mcp_servers'] = servers
             options.setdefault('approval_policy', 'on-request')
@@ -218,7 +222,7 @@ class CodexDriver:
                 statuses = request('mcpServerStatus/list', {'threadId': identifier, 'serverName': 'mizu', 'detail': 'toolsAndAuthOnly'})
                 mizu = next((item for item in statuses.get('data', []) if item.get('name') == 'mizu'), None)
                 tools = mizu.get('tools', {}) if mizu else {}
-                if not mizu or not all('mizu_'+cap in tools for cap in context.driver_capabilities):
+                if not mizu or not all(name in tools for name in tool_names):
                     raise ProtocolError('Required mizu MCP tools are not connected')
                 context.handle('_hello', {})
                 # Resume notifications establish the pre-turn baseline, never count restored totals.
