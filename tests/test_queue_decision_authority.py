@@ -11,8 +11,9 @@ from unittest import mock
 import support  # noqa: F401  (puts src and tests on the path)
 from support import ScriptDriver, finish_with_decision_acks
 from mizu import decision_delivery, decision_reconciliation, queue_decision_delivery
+from mizu.config import MAX_INSIGHT_HISTORY_ENTRIES
 from mizu.errors import Denied
-from mizu.fs import canonical
+from mizu.fs import canonical, digest
 from mizu.runtime import Engine
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -482,6 +483,85 @@ class QueueDecisionAuthority(unittest.TestCase):
                          if json.loads(p.read_text()).get("id") == identity]
         self.assertEqual(len(history_stems), 1)
         self.assertEqual(rows[0]["body"]["legacy_event"], history_stems[0])
+        self.assert_parity(identity)
+
+    def test_missed_defer_append_repairs_from_content_address_above_history_ceiling(self):
+        """A lost first append is repaired by one keyed read past the old scan ceiling."""
+        self.activate()
+        identity = "5" * 32
+        self.live_submit(identity, "Defer with lost append and oversized history")
+        writer = self.project.insights.decision_queue_writer
+        real_decide = writer.decide
+        calls = {"count": 0}
+
+        def drop_first_append(*args):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return
+            return real_decide(*args)
+
+        with mock.patch.object(writer, "decide", side_effect=drop_first_append):
+            self.project.insights.decide(
+                identity, "defer", "why", stage2_tests.REVISIT_AT, "run-lost", expected_rev=1)
+        self.assertEqual(calls["count"], 1)
+        decision_id = queue_decision_delivery.message_id(
+            queue_decision_delivery.DECISION_KIND, identity, 1)
+        history = self.project.insights.root / "decision-history"
+        pointer = self.project.insights.root / "decisions" / f"{identity}.json"
+        decision = json.loads(pointer.read_bytes())
+        stem = digest(canonical(decision))[:32]
+        original = (history / f"{stem}.json").read_bytes()
+        self.assertEqual(json.loads(original), decision)
+
+        def decision_rows(insight_id):
+            return [row for row in self.project.kernel_queues.read(
+                "decisions", "operator", now=stage2_verify.NOW)["messages"]
+                if row["id"] == queue_decision_delivery.message_id(
+                    queue_decision_delivery.DECISION_KIND, insight_id, 1)]
+
+        self.assertEqual(decision_rows(identity), [])
+        # Unrelated retained history sorts before the content-derived stem, so
+        # the old bounded scan would refuse before it reached this event.
+        alphabet = "0123456789abcdef"
+        pos = next(index for index, char in enumerate(stem) if char != "0")
+        head = stem[:pos] + alphabet[alphabet.index(stem[pos]) - 1]
+        existing = {path.name for path in history.iterdir()}
+        for i in range(MAX_INSIGHT_HISTORY_ENTRIES + 5):
+            name = f"{head}{i:08x}.json"
+            if name not in existing:
+                (history / name).write_text(
+                    json.dumps({"id": "f" * 32, "action": "reject", "rev": 1}))
+        unrelated = list(history.glob(f"{head}*.json"))
+        self.assertGreater(len(list(history.glob("*.json"))), MAX_INSIGHT_HISTORY_ENTRIES)
+        self.assertTrue(all(path.name < f"{stem}.json" for path in unrelated))
+
+        self.project.insights.decide(
+            identity, "defer", "why", stage2_tests.REVISIT_AT, "run-lost", expected_rev=1)
+        self.assertEqual((history / f"{stem}.json").read_bytes(), original)
+        self.assertEqual(json.loads(pointer.read_bytes()), decision)
+        repaired = decision_rows(identity)
+        self.assertEqual(len(repaired), 1)
+        body = repaired[0]["body"]
+        self.assertEqual(body["legacy_event"], stem)
+        self.assertEqual(body["legacy_record"], original.decode())
+
+        # A defer with an intact first append has the same queue body shape and
+        # derives its identity from its own committed record the same way.
+        peer = "6" * 32
+        self.live_submit(peer, "Defer with intact first append")
+        self.project.insights.decide(
+            peer, "defer", "why", stage2_tests.REVISIT_AT, "run-lost", expected_rev=1)
+        peer_decision = json.loads(
+            (self.project.insights.root / "decisions" / f"{peer}.json").read_bytes())
+        peer_rows = decision_rows(peer)
+        self.assertEqual(len(peer_rows), 1)
+        peer_body = peer_rows[0]["body"]
+        self.assertEqual(peer_body["legacy_event"], digest(canonical(peer_decision))[:32])
+        self.assertEqual(peer_body["legacy_record"], canonical(peer_decision).decode())
+        self.assertEqual(set(body), set(peer_body))
+        for field in ("action", "reason", "revisit", "legacy_run",
+                      "legacy_source", "legacy_addressee"):
+            self.assertEqual(body.get(field), peer_body.get(field))
         self.assert_parity(identity)
 
     def test_converted_defer_replay_keeps_retained_history_identity(self):

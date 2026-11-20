@@ -1405,7 +1405,6 @@ replacement insight without implying rejected substance.
                     if (event.get("id") == insight_id and _effective_decision(rev, event) is not None
                             and event.get("action") in ("accept", "modify", "reject")):
                         raise Denied("Insight already decided at this revision; revise the topic to reopen it")
-            event_id = key if action in ("accept", "modify", "reject") else uuid.uuid4().hex
             stamped = now()
             inherited_refs = sorted({ref for entry in current.get("evidence", [])
                                      for ref in validate_refs(entry.get("smoke_refs", []))})
@@ -1418,6 +1417,10 @@ replacement insight without implying rejected substance.
                     record["scope"] = scope
             if action in ("accept", "modify") and len(canonical(record)) > PREVIEW_BYTES:
                 raise LimitExceeded("Decision event with work-item intent exceeds byte bound")
+            # Defers carry no work-item seeds, so the record above is final and
+            # its content address is a stable, self-verifying history stem.
+            event_id = (key if action in ("accept", "modify", "reject") else
+                        digest(canonical(record))[:32])
             if registered is not None:
                 require_pairs(self.root, registered.get("smoke_refs", []))
             if inherited_refs and action in ("accept", "modify"):
@@ -1473,9 +1476,10 @@ replacement insight without implying rejected substance.
         """Recover the retained history filename stem for an effective decision.
 
         The queue writer binds ``legacy_event`` to the decision-history file
-        name. Substantive decisions use the per-revision key as that name, but
-        defers (and pre-key legacy decisions) use a random stem that conversion
-        retains verbatim. An exact replay must reuse that original stem: a
+        name. Substantive decisions use the per-revision key as that name,
+        defers use their record's content address, and pre-key legacy
+        decisions keep a random stem that conversion retains verbatim. An
+        exact replay must reuse that original stem: a
         recomputed key would give the stable-id queue row a different body and
         a retry would be refused, or a missed first append would be repaired
         under the wrong identity.
@@ -1484,7 +1488,10 @@ replacement insight without implying rejected substance.
         in O(1) first: decision history is retained permanently and can exceed
         any scan ceiling, while a replay must stay a content no-op regardless
         of age. Only when no decision message exists (an interrupted first
-        append) fall back to the bounded content-match scan over history.
+        append) derive the stem from the committed record's content address:
+        new defers write under that address, so one keyed read suffices and
+        the replay verifies the file byte-for-byte against the decision.
+        Older converted defers retain their random stems in the message path.
         """
         writer = self.decision_queue_writer
         if writer is not None and writer.active():
@@ -1492,29 +1499,22 @@ replacement insight without implying rejected substance.
             if retained is not None:
                 identifier(retained)
                 return retained
-        history = self.root / "decision-history"
-        if not insight_archive._directory(history):
-            raise Denied("Decision history unavailable for replay")
         wanted = canonical(decision)
-        stem = None
-        scanned = 0
-        for path in sorted(history.glob("*.json")):
-            scanned += 1
-            if scanned > MAX_INSIGHT_HISTORY_ENTRIES:
-                raise Denied("Decision history recovery bound exceeded")
-            if path.is_symlink():
-                continue
-            record = json.loads(safe_read(self.root, f"decision-history/{path.name}",
-                                          MAX_DECISION_EVENT_BYTES))
-            if not isinstance(record, dict):
-                raise Denied("Malformed decision history during replay")
-            if (record.get("id") == decision.get("id") and record.get("rev") == rev
-                    and canonical(record) == wanted):
-                if stem is not None:
-                    raise Denied("Ambiguous decision history for replay")
-                stem = path.stem
-        if stem is None:
-            raise Denied("Decision history event not found for replay")
+        stem = digest(wanted)[:32]
+        try:
+            raw = safe_read(self.root, f"decision-history/{stem}.json",
+                            MAX_DECISION_EVENT_BYTES)
+        except LimitExceeded as exc:
+            raise Denied("Decision history event exceeds replay bound") from exc
+        try:
+            record = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise Denied("Malformed decision history during replay") from exc
+        if not isinstance(record, dict):
+            raise Denied("Malformed decision history during replay")
+        if (record.get("id") != decision.get("id") or record.get("rev") != rev
+                or canonical(record) != wanted):
+            raise Denied("Decision history event does not match replayed decision")
         identifier(stem)
         return stem
 
