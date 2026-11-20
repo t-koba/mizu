@@ -52,6 +52,7 @@ from .decision_idle import (_DECISION_IDLE_CACHE, _DECISION_IDLE_CACHE_LIMIT,
 from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
 from .context_driver import ContextDriverMixin
+from .context_kernel_tools import ContextKernelToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -91,7 +92,6 @@ from . import reviews
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
 from . import insight_tools
-from . import kernel_queue_tools, kernel_tools
 from . import work_item_operations
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
@@ -458,7 +458,8 @@ def _spend_counter(name):
     return property(get, set)
 
 
-class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin):
+class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
+                ContextKernelToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -1033,39 +1034,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin):
 
     def _op_work_order(self, args: dict) -> dict:
         return work_order_ops.record(self, args)
-
-    def _op_objects_create(self, args: dict) -> dict:
-        return kernel_tools.objects_create(self, args)
-
-    def _op_objects_transition(self, args: dict) -> dict:
-        return kernel_tools.objects_transition(self, args)
-
-    def _op_objects_read(self, args: dict) -> dict:
-        return kernel_tools.objects_read(self, args)
-
-    def _op_objects_list(self, args: dict) -> dict:
-        return kernel_tools.objects_list(self, args)
-
-    def _op_events_read(self, args: dict) -> dict:
-        return kernel_tools.events_read(self, args)
-
-    def _op_events_ack(self, args: dict) -> dict:
-        return kernel_tools.events_ack(self, args)
-
-    def _op_queue_write(self, args: dict) -> dict:
-        return kernel_queue_tools.queue_write(self, args)
-
-    def _op_queue_read(self, args: dict) -> dict:
-        return kernel_queue_tools.queue_read(self, args)
-
-    def _op_queue_ack(self, args: dict) -> dict:
-        return kernel_queue_tools.queue_ack(self, args)
-
-    def _op_message_read(self, args: dict) -> dict:
-        return kernel_queue_tools.message_read(self, args)
-
-    def _op_message_refs(self, args: dict) -> dict:
-        return kernel_queue_tools.message_refs(self, args)
 
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
@@ -1743,12 +1711,17 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin):
         "work_items_transition": _op_work_items_transition,
         "work_items_reopen": _op_work_items_reopen,
         "work_order": _op_work_order,
-        "objects_create": _op_objects_create, "objects_transition": _op_objects_transition,
-        "objects_read": _op_objects_read, "objects_list": _op_objects_list,
-        "events_read": _op_events_read, "events_ack": _op_events_ack,
-        "queue_write": _op_queue_write, "queue_read": _op_queue_read,
-        "queue_ack": _op_queue_ack, "message_read": _op_message_read,
-        "message_refs": _op_message_refs,
+        "objects_create": ContextKernelToolsMixin._op_objects_create,
+        "objects_transition": ContextKernelToolsMixin._op_objects_transition,
+        "objects_read": ContextKernelToolsMixin._op_objects_read,
+        "objects_list": ContextKernelToolsMixin._op_objects_list,
+        "events_read": ContextKernelToolsMixin._op_events_read,
+        "events_ack": ContextKernelToolsMixin._op_events_ack,
+        "queue_write": ContextKernelToolsMixin._op_queue_write,
+        "queue_read": ContextKernelToolsMixin._op_queue_read,
+        "queue_ack": ContextKernelToolsMixin._op_queue_ack,
+        "message_read": ContextKernelToolsMixin._op_message_read,
+        "message_refs": ContextKernelToolsMixin._op_message_refs,
         "decide": _op_decide, "submit_insight": _op_submit_insight,
         "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
         "attach_evidence": _op_attach_evidence,
