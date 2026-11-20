@@ -133,6 +133,28 @@ class OperatorInsightRoutingTests(Fixture):
                 self.assertEqual(config.insight_decisions["operator_addressee"], value.strip('"'))
         self.file.write_text(base)
 
+    def test_config_rejects_writer_sentinel_even_with_a_writer_role(self):
+        # The 'writer' addressee is the route-to-source sentinel. If a project
+        # actually names a role 'writer', accepting it as the default recipient
+        # still resolves to an emitted addressee that pending projection rejects
+        # with "Invalid pending insight target". Fail closed at load instead.
+        base = self.file.read_text()
+        writer_role = base[base.index("[roles.worker]"):base.index("[roles.searcher]")].replace(
+            "[roles.worker]", "[roles.writer]", 1)
+        with_writer = base.replace("[roles.searcher]", writer_role + "[roles.searcher]", 1)
+        self.file.write_text(with_writer.replace('operator_addressee = "worker"',
+                                                 'operator_addressee = "writer"'))
+        with self.assertRaises(ConfigError):
+            load(self.file)
+        # A valid explicitly-named recipient, including the writer role itself
+        # as an explicit insight addressee, is unaffected by config validation.
+        self.file.write_text(with_writer.replace('operator_addressee = "worker"',
+                                                 'operator_addressee = "searcher"'))
+        config = load(self.file)
+        self.assertEqual(config.insight_decisions["operator_addressee"], "searcher")
+        self.assertIn("writer", config.roles)
+        self.file.write_text(base)
+
 
 class OperatorInsightRoutingSharedTests(OperatorInsightRoutingTests):
     shared = True

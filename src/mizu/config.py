@@ -31,6 +31,11 @@ ENGINES = ("pi", "pi-durable", "codex", "claude")
 #: `submit_insight` fixes source to the role name, so these are refused
 #: at config load to keep the operator channel unforgeable.
 RESERVED_ROLE_NAMES = frozenset({"operator", "vcs", "editor"})
+#: The ``writer`` addressee is the route-to-source sentinel in insight
+#: metadata, never a delivery target. A configured default recipient must
+#: name a real role; accepting this token emits an addressee that pending
+#: projection rejects, so fail closed at load instead of crashing delivery.
+ROUTE_TO_SOURCE_ADDRESSEE = "writer"
 #: Binary MiB unit for configured limits converted to byte counts.
 MEBIBYTE_BYTES = 1024 * 1024
 #: Default web-response cache TTL; explicit ``[web].cache_seconds`` wins.
@@ -2108,7 +2113,9 @@ def load(file: Path) -> Config:
     if not roles:
         raise ConfigError("At least one role is required")
     if operator_addressee:
-        if not ID.fullmatch(operator_addressee) or operator_addressee in RESERVED_ROLE_NAMES:
+        if (not ID.fullmatch(operator_addressee)
+                or operator_addressee in RESERVED_ROLE_NAMES
+                or operator_addressee == ROUTE_TO_SOURCE_ADDRESSEE):
             raise ConfigError("Invalid insight_decisions.operator_addressee name")
         if operator_addressee not in roles:
             raise ConfigError(f"insight_decisions.operator_addressee is not a configured role: {operator_addressee}")
