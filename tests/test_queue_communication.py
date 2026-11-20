@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import support  # noqa: F401
-from support import Fixture, ScriptDriver
+from support import Fixture, ScriptDriver, history_write_json
 from mizu import cli, queue_facts
 from mizu.errors import Denied, ProtocolError
 from mizu.fs import write_json
@@ -282,6 +282,56 @@ class ImportedWorkTests(Fixture):
         self.assertEqual((opened["status"], opened["actor"], opened["holder"]),
                          ("open", "operator", None))
         self.assertIsNone(opened.get("wait"))
+        self.assertEqual(store.audit()["consistent"], True)
+
+        # The same runbook promises reopening object_resolved on an insight or
+        # record. Those subjects were retired, so the stored wait must stay
+        # bounded inert history that audits and reopens by operator CAS, while
+        # live work-item object waits remain strictly validated.
+        from mizu.fs import read_json
+        for subject_type in ("insight", "record"):
+            item_id = "wi_" + ("a" if subject_type == "insight" else "b") * 32
+            seed = make_seed(item_id, "Retired object wait", {"insight_id": "7f3a91c2d4e6", "rev": 2},
+                             "2026-01-01T00:00:00+00:00")
+            seed.update(status="blocked",
+                        wait={"kind": "object_resolved", "subject": {"type": subject_type, "id": "legacy"}})
+            directory = self.project.root / "work-items" / item_id
+            directory.mkdir(parents=True)
+            write_json(directory / "create.json", {"kind": "imported", "work_item": seed}, exclusive=True)
+            store._ledger.rebuild("items")
+            current = store.current(item_id)
+            self.assertEqual(liveness(store, current["wait"], None)["reason"], "unsupported_wait")
+            self.assertEqual(store.audit()["consistent"], True)
+            args = cli.parser().parse_args([
+                "--config", str(self.file), "work-items", "open", "sample", item_id,
+                "--expected-rev", "1", "--reason", "Retired object subject; reopened for triage",
+            ])
+            reopened = cli._execute(self.config, args)
+            self.assertEqual((reopened["status"], reopened.get("wait")), ("open", None))
+            self.assertEqual(store.audit()["consistent"], True)
+
+        # A later blocked revision carrying a retired object wait stays replayable
+        # and reopenable, not reported as a corrupt chain.
+        item_id = "wi_" + "c" * 32
+        target = store.create(idempotency_key="target", title="Target", actor="worker")["record"]["work_item"]
+        waiter = store.create(idempotency_key="waiter", title="Waiter", actor="worker")["record"]["work_item"]
+        store.transition(waiter["id"], expected_rev=1, status="blocked", actor="worker",
+                         wait={"kind": "object_resolved", "subject": {"type": "work_item", "id": target["id"]}})
+        revision_path = self.project.root / "work-items" / waiter["id"] / "2.json"
+        revision = read_json(revision_path)
+        revision["wait"] = {"kind": "object_resolved", "subject": {"type": "record", "id": target["id"]}}
+        history_write_json(revision_path, revision)
+        store._ledger.rebuild("items")
+        current = store.current(waiter["id"])
+        self.assertEqual((current["rev"], current["status"]), (2, "blocked"))
+        self.assertEqual(liveness(store, current["wait"], None)["reason"], "unsupported_wait")
+        self.assertEqual(store.audit()["consistent"], True)
+        args = cli.parser().parse_args([
+            "--config", str(self.file), "work-items", "open", "sample", waiter["id"],
+            "--expected-rev", "2", "--reason", "Retired object subject; reopened for triage",
+        ])
+        reopened = cli._execute(self.config, args)
+        self.assertEqual((reopened["status"], reopened.get("wait")), ("open", None))
         self.assertEqual(store.audit()["consistent"], True)
 
     def test_new_origins_are_opaque_strings_and_terminal_events_route_to_creator(self):
