@@ -41,7 +41,7 @@ class SourceContinuationTests(Fixture):
         return getattr(self.web, operation)(value)
 
     def test_fetch_paging_uses_first_raw_response_only(self):
-        with patch('mizu.runtime.bounded', side_effect=self.dispatch) as bounded:
+        with patch('mizu.context_web_tools.bounded', side_effect=self.dispatch) as bounded:
             first = self.ctx._op_fetch({'url': URL, 'limit': 3})
             identity = first['receipt_id']
             text, offset = first['text'], first['next_offset']
@@ -89,7 +89,7 @@ class SourceContinuationTests(Fixture):
         self.assertIn('\r\n', replay['text'])
 
     def test_post_probe_continuation_never_repeats_post(self):
-        with patch('mizu.runtime.bounded', side_effect=self.dispatch) as bounded:
+        with patch('mizu.context_web_tools.bounded', side_effect=self.dispatch) as bounded:
             first = self.ctx._op_probe({'url': URL, 'method': 'POST', 'body': '{"x":1}', 'limit': 2})
             second = self.ctx._op_probe({'receipt_id': first['receipt_id'], 'offset': 2, 'limit': 7})
             self.assertEqual(second['text'], RAW.decode('utf-8', 'replace')[2:9])
@@ -103,7 +103,7 @@ class SourceContinuationTests(Fixture):
     def test_search_continuation_never_reruns_adapter(self):
         rows = [{'title': str(n), 'url': URL + str(n), 'summary': 'summary'} for n in range(4)]
         with patch('mizu.web.run', return_value=Result(0, json.dumps({'results': rows}), '', 'exited', 0)) as adapter, \
-             patch('mizu.runtime.bounded', side_effect=self.dispatch) as bounded:
+             patch('mizu.context_web_tools.bounded', side_effect=self.dispatch) as bounded:
             first = self.ctx._op_search({'query': 'original', 'limit': 2})
             second = self.ctx._op_search({'result_id': first['result_id'], 'offset': 2, 'limit': 2})
             self.assertEqual([r['title'] for r in first['results'] + second['results']], ['0', '1', '2', '3'])
@@ -118,7 +118,7 @@ class SourceContinuationTests(Fixture):
                 ('search', 'result_id', {'query': 'query'})):
             call = getattr(self.ctx, '_op_' + operation)
             for args in ({}, {key: '0' * 64}, {key: '../body'}, {key: ''}, {key: '0' * 64, **initial}):
-                with self.subTest(operation=operation, args=args), patch('mizu.runtime.bounded') as bounded:
+                with self.subTest(operation=operation, args=args), patch('mizu.context_web_tools.bounded') as bounded:
                     with self.assertRaises(Denied): call(args)
                     bounded.assert_not_called()
 
@@ -134,7 +134,7 @@ class SourceContinuationTests(Fixture):
             path, target = self.web.receipts / name, other.web.receipts / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)  # Even copied records cannot cross runs.
-            with patch('mizu.runtime.bounded') as bounded:
+            with patch('mizu.context_web_tools.bounded') as bounded:
                 with self.assertRaises(Denied): getattr(other, '_op_' + kind)({key: identity})
                 path.write_bytes(b'{broken')
                 with self.assertRaises(Denied): getattr(self.ctx, '_op_' + kind)({key: identity})
@@ -196,7 +196,7 @@ class SourceContinuationTests(Fixture):
         payload_dir = body.parent
         with patch('mizu.sandbox.assert_no_checkpoint'), patch('mizu.sandbox.remove_argv', return_value=None), patch('mizu.sandbox.remove_leftover', return_value=''), \
              patch('mizu.sandbox.run', return_value=Result(0, 'measured', '', 'exited', 0)) as launch, \
-             patch('mizu.runtime.bounded') as bounded:
+             patch('mizu.context_web_tools.bounded') as bounded:
             result = self.ctx._op_experiment({'script': 'wc -c /work/input/body', 'source_receipt': identity})
             bounded.assert_not_called()
         self.assertEqual(launch.call_count, 1)

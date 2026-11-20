@@ -237,7 +237,7 @@ class ProbeTests(Fixture):
         validate({"url": "https://probe.example/x", "method": "GET"}, DEFINITIONS["probe"][1])
         validate({"receipt_id": "a" * 64}, DEFINITIONS["probe"][1])
         # Conditional request requirements are enforced before dispatch.
-        with patch("mizu.runtime.bounded") as bounded:
+        with patch("mizu.context_web_tools.bounded") as bounded:
             with self.assertRaises(Denied):
                 self.context()._op_probe({"url": "https://probe.example/x"})
             bounded.assert_not_called()
@@ -253,8 +253,7 @@ class ProbeTests(Fixture):
         ctx.role = role
         record = {"id": "a" * 64, "url": "https://probe.example/x", "method": "GET",
                   "status": 200, "headers": [], "text": "0123456789", "trust": "external-untrusted"}
-        import mizu.runtime as rt
-        with patch.object(rt, "bounded", return_value=dict(record)):
+        with patch("mizu.context_web_tools.bounded", return_value=dict(record)):
             out = ctx.handle("probe", {"url": "https://probe.example/x", "method": "GET",
                                        "offset": 2, "limit": 3})
         self.assertEqual(out["text"], "234")

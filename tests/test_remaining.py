@@ -607,13 +607,13 @@ else:
         from mizu.fs import canonical,MAX_FRAME
         from mizu.protocol import validate,DEFINITIONS
         ctx=self.context()
-        with patch('mizu.runtime.bounded',return_value={'text':'\x01'*65536,'id':'x'}):
+        with patch('mizu.context_web_tools.bounded',return_value={'text':'\x01'*65536,'id':'x'}):
             result=ctx._op_fetch({'url':'https://example.invalid','offset':8192,'limit':8192})
         self.assertEqual(result['next_offset'],16384)
         self.assertTrue(result['truncated'])
         self.assertLess(len(canonical({'content':[{'text':canonical(result).decode()}]})),MAX_FRAME)
         records={'results':[{'title':'\x01'*10000,'url':'https://example.invalid','summary':'\x01'*10000} for _ in range(30)],'scope':'synthetic','trust':'external-untrusted'}
-        with patch('mizu.runtime.bounded',return_value=records):
+        with patch('mizu.context_web_tools.bounded',return_value=records):
             result=ctx._op_search({'query':'test','limit':2})
         self.assertEqual(len(result['results']),2)
         self.assertEqual(result['next_offset'],2)
@@ -636,7 +636,7 @@ else:
             records = web.search("test")
         self.assertEqual(len(records["results"]), 35)
         ctx = self.context("searcher")
-        with patch("mizu.runtime.bounded", return_value=records):
+        with patch("mizu.context_web_tools.bounded", return_value=records):
             first = ctx._op_search({"query": "test", "offset": 0, "limit": 30})
             overflow = ctx._op_search({"query": "test", "offset": 30, "limit": 1000})
         self.assertEqual(len(first["results"]), 30)
@@ -691,7 +691,7 @@ else:
         self.assertEqual(len(out["results"]), 1)
         self.assertTrue(out["truncated"])
         ctx = self.context("searcher")
-        with patch("mizu.runtime.bounded", return_value=out):
+        with patch("mizu.context_web_tools.bounded", return_value=out):
             response = ctx._op_search({"query": "hi", "limit": 1000})
         self.assertTrue(response["source_truncated"])
         # The former fixed 200 cutoff is now only the default; 201 retained

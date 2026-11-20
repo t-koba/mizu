@@ -55,6 +55,7 @@ from .context_driver import ContextDriverMixin
 from .context_kernel_tools import ContextKernelToolsMixin
 from .context_insight_tools import ContextInsightToolsMixin
 from .context_evidence import ContextEvidenceMixin
+from .context_web_tools import ContextWebToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -88,7 +89,6 @@ from . import materialize as _materialize
 from .ci_requests import CiRequests, request_id as ci_request_id
 from .publication import Publication, source_commit
 from .web import Web
-from . import feed_updates, web_operations
 from . import sandbox_operations
 from . import reviews
 from . import role_state_ops
@@ -96,7 +96,6 @@ from .role_state_ops import _reject_constant  # preserve the established runtime
 from . import work_item_operations
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
-from .web_worker import bounded
 from .vcs_poll_policy import (MAX_CI_BRANCHES, POLL_CALL_TIMEOUT_CAP,
                               POLL_FETCH_TIMEOUT_CAP, _vcs_poll_number,
                               capped_vcs_settings, upstream_fetch_due,
@@ -461,7 +460,7 @@ def _spend_counter(name):
 
 class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextKernelToolsMixin, ContextInsightToolsMixin,
-                ContextEvidenceMixin):
+                ContextEvidenceMixin, ContextWebToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -971,21 +970,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
             {**command, 'script':text_preview(command['script'],512)[0],
              'script_truncated':text_preview(command['script'],512)[1]}
             for command in self.verification['commands']], 'evidence':'verification.json'}
-
-    def _bounded_web_operation(self, *args):
-        return bounded(*args)
-
-    def _op_fetch(self, args: dict) -> dict:
-        return web_operations.fetch(self, args)
-
-    def _op_probe(self, args: dict) -> dict:
-        return web_operations.probe(self, args)
-
-    def _op_feed_updates(self, args: dict) -> dict:
-        return feed_updates.read(self)
-
-    def _op_search(self, args: dict) -> dict:
-        return web_operations.search(self, args)
 
     def _op_ready_work_read(self, args: dict) -> dict:
         if not operation_allowed("ready_work_read", self.role.capabilities):
@@ -1668,7 +1652,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "command_evidence_read": ContextEvidenceMixin._op_command_evidence_read,
         "experiment_evidence_read": ContextEvidenceMixin._op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
-        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "feed_updates": _op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
+        "fetch": ContextWebToolsMixin._op_fetch, "probe": ContextWebToolsMixin._op_probe, "search": ContextWebToolsMixin._op_search, "feed_updates": ContextWebToolsMixin._op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
         "ready_work_read": _op_ready_work_read,
         "work_order_read": _op_work_order_read,
         "report_read": _op_report_read,
