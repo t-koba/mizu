@@ -1796,6 +1796,9 @@ CALLS = {
         ('read', 'context.project.work_items.page_open', 'limit', 0): (
             "args.get('limit', 25)", 'policy',
             'work items / open-page default; caller may select limit'),
+        ('read', 'context.project.work_items.page_closed', 'limit', 0): (
+            "args.get('limit', 25)", 'policy',
+            'work items / closed-page default; caller may select limit'),
     },
     'sandbox.py': {
         ('remove_leftover', 'run', 'maximum', 0): (
@@ -1927,6 +1930,8 @@ PARAMETER_DEFAULTS = {
         '25', 'policy', 'work items / caller-selected explanation history size'),
     ('work_items.py', 'WorkItems.page_open', 'limit'): (
         '25', 'policy', 'work items / caller-selected open-item page size'),
+    ('work_items.py', 'WorkItems.page_closed', 'limit'): (
+        '25', 'policy', 'work items / caller-selected closed-item page size'),
     ('work_items.py', 'WorkItems.page_open_for_order', 'limit'): (
         '25', 'policy', 'work items / caller-selected work-order open-item page size'),
     ('work_items.py', 'WorkItems.page_ready', 'limit'): (
@@ -2772,6 +2777,10 @@ COMPARISON_BOUND_ARGUMENTS = {
         '1', 'format', 'open-page cursor / the encoded work-item revision is positive'),
     ('work_items.py', 'WorkItems._page_open_impl', 0, 1): (
         '1', 'mechanism', 'open-item page / a bounded page must request at least one item'),
+    ('work_items.py', 'WorkItems.page_closed', 0, 0): (
+        '1', 'mechanism', 'closed-item page / a bounded page must request at least one item'),
+    ('work_items.py', '_closed_cursor_key', 1, 0): (
+        '4', 'format', 'closed-page cursor / the encoded cursor has four pipe-separated parts'),
     ('work_items.py', 'WorkItems.page_changes_readonly', 0, 0): (
         '1', 'mechanism', 'work-item change page / a bounded page must request at least one change row'),
     ('work_items.py', 'WorkItems.blocked_liveness_readonly', 0, 0): (

@@ -97,6 +97,8 @@ _ORIGIN_SELECT = "SELECT " + _ORIGIN_COLUMNS
 _ORIGIN_JOIN = ("LEFT JOIN insights n ON n.id = {key} "
                 "LEFT JOIN decisions d ON d.insight_id = {key}")
 _OPEN_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
+_CLOSED_CURSOR_TIME = re.compile(r"-?(?:0|[1-9][0-9]{0,17})\Z")
+_CLOSED_STATUSES = frozenset({"done", "dropped"})
 
 
 def wait_resolution_token(item: dict) -> str:
@@ -175,6 +177,26 @@ def _open_cursor_key(cursor: str | None):
 def _open_cursor_token(row: dict) -> str:
     created = _timestamp_order(row["created_at"])
     token = f"wi1|{row['status']}|{created}|{row['id']}"
+    if len(token) > MAX_OPEN_CURSOR_CHARS:
+        raise LimitExceeded("Work-item cursor exceeds character bound")
+    return token
+
+def _closed_cursor_key(cursor: str | None):
+    if cursor is None:
+        return None
+    if not isinstance(cursor, str) or len(cursor) > MAX_OPEN_CURSOR_CHARS:
+        raise Denied("Invalid closed work-item cursor")
+    parts = cursor.split("|")
+    if (len(parts) != 4 or parts[0] != "wc2" or parts[1] not in _CLOSED_STATUSES
+            or _CLOSED_CURSOR_TIME.fullmatch(parts[2]) is None
+            or ITEM_ID.fullmatch(parts[3]) is None):
+        raise Denied("Invalid closed work-item cursor")
+    return (parts[1], int(parts[2]), parts[3])
+
+
+def _closed_cursor_token(row: dict) -> str:
+    updated = _timestamp_order(row["updated_at"])
+    token = f"wc2|{row['status']}|{updated}|{row['id']}"
     if len(token) > MAX_OPEN_CURSOR_CHARS:
         raise LimitExceeded("Work-item cursor exceeds character bound")
     return token
@@ -2674,6 +2696,86 @@ class WorkItems:
                                      "coverage_complete": False, "diagnostic": "unreadable"}}
         open_count = blocked.pop("open_count")
         return {"open_count": open_count, "blocked_work": blocked}
+
+    def page_closed(self, *, cursor=None, limit=25, status=None, origin=None,
+                    closed_after=None, closed_before=None) -> dict:
+        """Return a bounded cursor page of seeded terminal work items.
+
+        Items are ordered by status, then newest ``updated_at`` first, then
+        ascending ID. The exclusive ``cursor``
+        carries the last row's status, update-order key and ID so callers reach
+        the whole set. ``status`` (done or dropped), ``origin`` (insight id),
+        ``closed_after`` and ``closed_before`` (timezone-aware timestamps)
+        narrow matching; they never cap ``total``. Each row is at most
+        MAX_CLOSED_ROW_BYTES and the page at most MAX_CLOSED_PAGE_BYTES. Reads
+        never lock or mutate. Malformed cursors, filters or committed rows fail
+        closed.
+        """
+        if type(limit) is not int or not 1 <= limit <= MAX_CLOSED_PAGE_ROWS:
+            raise Denied("Closed work-item page limit must be an integer in [1, 100]")
+        cursor_key = _closed_cursor_key(cursor)
+        if status is not None and (not isinstance(status, str) or status not in _CLOSED_STATUSES):
+            raise Denied("Closed work-item status filter must be done or dropped")
+        if origin is not None and (not isinstance(origin, str) or not origin
+                                   or len(origin) > MAX_OPEN_CURSOR_CHARS):
+            raise Denied("Invalid closed work-item origin filter")
+        after_key = _timestamp_order(closed_after) if closed_after is not None else None
+        before_key = _timestamp_order(closed_before) if closed_before is not None else None
+        if after_key is not None and before_key is not None and after_key > before_key:
+            raise Denied("Closed work-item time range is inverted")
+
+        clauses = ["status IN ('done', 'dropped')"]
+        filters: list = []
+        if status is not None:
+            clauses.append("status = ?")
+            filters.append(status)
+        if origin is not None:
+            clauses.append("origin_insight = ?")
+            filters.append(origin)
+        if after_key is not None:
+            clauses.append("updated_key >= ?")
+            filters.append(after_key)
+        if before_key is not None:
+            clauses.append("updated_key <= ?")
+            filters.append(before_key)
+        where = " AND ".join(clauses)
+
+        after_cursor = ""
+        cursor_params: list = []
+        if cursor_key is not None:
+            after_cursor = (" AND (status > ? OR (status = ? AND "
+                            "(updated_key < ? OR (updated_key = ? AND id > ?))))")
+            cursor_params = [cursor_key[0], cursor_key[0], cursor_key[1],
+                             cursor_key[1], cursor_key[2]]
+
+        with self._ledger.read("items", locked=False) as db:
+            total = _rows(db, "SELECT COUNT(*) FROM items WHERE " + where,
+                          tuple(filters))[0][0]
+            eligible = total
+            if cursor_key is not None:
+                eligible = _rows(db, "SELECT COUNT(*) FROM items WHERE "
+                                 + where + after_cursor,
+                                 tuple(filters + cursor_params))[0][0]
+            query = "SELECT item FROM items WHERE " + where + after_cursor
+            params = filters + cursor_params
+            query += " ORDER BY status ASC, updated_key DESC, id ASC LIMIT ?"
+            params.append(limit + 1)
+            found = _rows(db, query, tuple(params))
+
+        selected = []
+        for (raw,) in found[:limit]:
+            item = json.loads(raw)
+            self._require_migrated_item(item["id"])
+            _sort_key, row = self.closed_row(item)
+            selected.append(row)
+        more = len(found) > limit
+        result = {"items": selected, "total": total, "cursor": cursor,
+                  "next_cursor": _closed_cursor_token(selected[-1]) if more and selected else None,
+                  "overflow_count": max(0, eligible - len(selected)),
+                  "truncated": more, "coverage_complete": True}
+        if len(canonical(result)) > MAX_CLOSED_PAGE_BYTES:
+            raise LimitExceeded("Closed work-item page exceeds byte bound")
+        return result
 
     def page_closed_readonly(self, *, limit=10) -> dict:
         """Return the newest seeded terminal items without lock or recovery.

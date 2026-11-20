@@ -353,25 +353,28 @@ DEFINITIONS = {
                     "Markdown and capped at 8192 UTF-8 bytes. Retrying looks up the current "
                     "published report.", obj({})),
     "work_items_read": ("Inspect open work or trace one item's revisions without changing status or "
-                        "ownership. Open pages use cursor and limit (default 25); by-ID reads work "
-                        "in any status and use exclusive after_rev instead of cursor. "
-                        "Open rows include bounded description previews and truncation flags; by-ID "
-                        "reads include full descriptions, origin staleness and ascending history "
-                        "starting at revision 1 when after_rev=0. Follow next_cursor until "
-                        "exhausted; in by-ID mode pass that value as after_rev and use "
-                        "history_total for the item's current revision. Reads can stop at the row "
-                        "or byte limit; by-ID reads validate the full chain even for partial pages. "
-                        "A reopened row with wait_resolution may retain a holder; only that holder "
-                        "can transition it. Blocked age is diagnostic, not readiness; check "
-                        "ready-work liveness for terminal or impossible waits. Unsafe committed "
-                        "data fails closed.",
+                        "ownership. Pages take cursor and limit (default 25); follow next_cursor "
+                        "until exhausted. Set closed=true for a closed page over done/dropped items, "
+                        "narrowed by status, origin, closed_after and closed_before; total counts "
+                        "all matches after filters. By-ID reads any status with exclusive after_rev "
+                        "instead of cursor; pass next_cursor as after_rev and use history_total. "
+                        "Rows have bounded previews; by-ID adds full descriptions, scope and origin "
+                        "staleness from revision 1. Reads may stop at row or byte bounds; by-ID "
+                        "validates the full chain. A reopened wait_resolution row may keep a holder; "
+                        "only that holder transitions it. Blocked age is diagnostic; check "
+                        "ready-work liveness. Unsafe data fails closed.",
                         obj({"id": {"type": "string", "minLength": 35, "maxLength": 35,
                                     "pattern": "^wi_[0-9a-f]{32}$"},
                              "cursor": text(MAX_OPEN_CURSOR_CHARS),
                              "after_rev": {"type": "integer", "minimum": 0,
                                            "maximum": MAX_REVISIONS},
                              "limit": {"type": "integer", "minimum": 1,
-                                       "maximum": MAX_OPEN_PAGE_ROWS}})),
+                                       "maximum": MAX_OPEN_PAGE_ROWS},
+                             "closed": {"type": "boolean"},
+                             "status": {"type": "string", "enum": ["done", "dropped"]},
+                             "origin": text(MAX_OPEN_CURSOR_CHARS),
+                             "closed_after": text(64),
+                             "closed_before": text(64)})),
     "work_items_create": ("Create self-directed or split-off work without assigning or scheduling "
                           "it. Supply a stable idempotency_key scoped to your role; after "
                           "cancellation or uncertainty, retry the exact request. "

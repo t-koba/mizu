@@ -4,12 +4,28 @@ from __future__ import annotations
 from .errors import Denied
 
 
+_CLOSED_FILTERS = ("status", "origin", "closed_after", "closed_before")
+
+
 def read(context, args: dict) -> dict:
+    closed = args.get("closed", False)
+    if type(closed) is not bool:
+        raise Denied("Work-item closed selector must be a boolean")
+    filters = {key: args[key] for key in _CLOSED_FILTERS if key in args}
     if "id" in args:
         if "cursor" in args:
             raise Denied("Work-item by-ID history cannot be combined with open-page cursor")
+        if closed or filters:
+            raise Denied("Work-item by-ID history cannot select a closed page")
         return context.project.work_items.explain(
             args["id"], after_rev=args.get("after_rev", 0), limit=args.get("limit", 25))
+    if closed:
+        if "after_rev" in args:
+            raise Denied("Work-item closed page cannot use by-ID after_rev")
+        return context.project.work_items.page_closed(
+            cursor=args.get("cursor"), limit=args.get("limit", 25), **filters)
+    if filters:
+        raise Denied("Work-item closed filters require closed=true")
     if "after_rev" in args:
         raise Denied("Work-item after_rev requires id")
     return context.project.work_items.page_open(cursor=args.get("cursor"),
