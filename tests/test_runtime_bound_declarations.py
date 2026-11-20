@@ -1643,6 +1643,11 @@ CALLS = {
             'min(0.01, max(0, deadline - time.monotonic()))', 'mechanism',
             'bounded RPC send / 10-ms cancellation poll clipped to the caller deadline'),
     },
+    'context_check_tools.py': {
+        ('ContextCheckToolsMixin._op_check_job', 'check_jobs.logs', 'limit', 0): (
+            "args.get('limit', 8192)", 'safety',
+            'runtime / check-log page defaults to the bounded reader ceiling'),
+    },
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
@@ -1654,9 +1659,6 @@ CALLS = {
         ('Context._op_vcs_read_ci_requests',
          'CiRequests(self.project.root, self.config.ci_requests).daily', 'limit', 0): (
             '100', 'mechanism', 'runtime / CI-request public page bound'),
-        ('Context._op_check_job', 'check_jobs.logs', 'limit', 0): (
-            "args.get('limit', 8192)", 'safety',
-            'runtime / check-log page defaults to the bounded reader ceiling'),
         ('Context._op_vcs_read_ci_costs',
          'CiRequests(self.project.root, self.config.ci_requests).page', 'limit', 0): (
             "args.get('limit', 8)", 'policy',
