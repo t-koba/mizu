@@ -561,7 +561,7 @@ class FinishSealTests(Fixture):
                         raise fault
                     write_json(path, value)
                 driver = ScriptDriver(work)
-                with (patch("mizu.runtime.write_json", side_effect=failing_write),
+                with (patch("mizu.engine_execution.write_json", side_effect=failing_write),
                       patch("mizu.unit_finish.write_json", side_effect=failing_write)):
                     with self.assertRaises(OSError) as raised:
                         Engine(self.config, driver=driver).run(self.project, "worker")

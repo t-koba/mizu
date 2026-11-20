@@ -34,7 +34,7 @@ class SafePointPreemptionTests(Fixture):
 
     def test_continue_yield_prepares_before_publication_and_commits_once(self):
         config, project = self.configured("seal-continue")
-        with patch("mizu.runtime.has_live_demand", return_value=True) as demand:
+        with patch("mizu.engine_execution.has_live_demand", return_value=True) as demand:
             result = Engine(config).run(project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["finish"]["outcome"], "continue")
@@ -52,7 +52,7 @@ class SafePointPreemptionTests(Fixture):
     def test_unpublished_prepared_intent_is_not_runnable(self):
         config, project = self.configured("seal-continue")
         before = project.snapshots.get()["id"]
-        with patch("mizu.runtime.has_live_demand", return_value=True), \
+        with patch("mizu.engine_execution.has_live_demand", return_value=True), \
              patch.object(project.snapshots, "publish", side_effect=OSError("synthetic publish failure")):
             with self.assertRaises(OSError):
                 Engine(config).run(project, "worker")
@@ -67,7 +67,7 @@ class SafePointPreemptionTests(Fixture):
     def test_failed_finish_only_seal_does_not_prepare_or_publish_handoff(self):
         config, project = self.configured("seal-failed")
         before = project.snapshots.get()["id"]
-        with patch("mizu.runtime.has_live_demand", return_value=True) as demand:
+        with patch("mizu.engine_execution.has_live_demand", return_value=True) as demand:
             with self.assertRaises(Denied):
                 Engine(config).run(project, "worker")
         self.assertEqual(demand.call_count, 1)
@@ -90,7 +90,7 @@ class SafePointPreemptionTests(Fixture):
                 raise DeadlineWrapUp("synthetic safe-point deadline")
             return dispatch(context, *args, **kwargs)
 
-        with patch("mizu.runtime.has_live_demand", return_value=True), \
+        with patch("mizu.engine_execution.has_live_demand", return_value=True), \
              patch.object(engine, "_dispatch", side_effect=deadline_on_seal):
             result = engine.run(project, "worker")
 
@@ -112,7 +112,7 @@ class SafePointPreemptionTests(Fixture):
                 context.bound_hit = "deadline"
             return finish(context, args)
 
-        with patch("mizu.runtime.has_live_demand", return_value=True), \
+        with patch("mizu.engine_execution.has_live_demand", return_value=True), \
              patch.dict(Context._DISPATCH, {"finish": bounded_finish}):
             result = Engine(config).run(project, "worker")
 
@@ -123,7 +123,7 @@ class SafePointPreemptionTests(Fixture):
 
     def test_wait_outcome_is_not_forced_into_continuation(self):
         config, project = self.configured("seal-wait")
-        with patch("mizu.runtime.has_live_demand", return_value=True) as demand:
+        with patch("mizu.engine_execution.has_live_demand", return_value=True) as demand:
             result = Engine(config).run(project, "worker")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["finish"]["outcome"], "wait")
@@ -139,7 +139,7 @@ class SafePointPreemptionTests(Fixture):
         context.completed_driver_units = 1
         context.driver_checkpoint = DriverCheckpoint("claude", "query", 0, 1)
         engine = Engine(config)
-        with patch("mizu.runtime.has_live_demand", return_value=True) as demand, \
+        with patch("mizu.engine_execution.has_live_demand", return_value=True) as demand, \
              patch.object(engine, "_seal_driver_checkpoint") as seal:
             self.assertIsNone(engine._maybe_safe_point_yield(context))
             demand.assert_not_called()
@@ -169,7 +169,7 @@ class SafePointPreemptionTests(Fixture):
         context.wrap_up_at = time.monotonic() - 1
         context.deadline = time.monotonic() + 60
 
-        with patch("mizu.runtime.has_live_demand", return_value=True):
+        with patch("mizu.engine_execution.has_live_demand", return_value=True):
             with self.assertRaises(DeadlineWrapUp):
                 Engine(config)._maybe_safe_point_yield(context)
 
@@ -180,7 +180,7 @@ class SafePointPreemptionTests(Fixture):
         config, project = self.configured("seal-wait", quantum=0)
         context = self.context("worker")
         context.config = config
-        with patch("mizu.runtime.has_live_demand", return_value=True) as demand:
+        with patch("mizu.engine_execution.has_live_demand", return_value=True) as demand:
             self.assertIsNone(Engine(config)._maybe_safe_point_yield(context))
             demand.assert_not_called()
 
@@ -191,7 +191,7 @@ class SafePointPreemptionTests(Fixture):
         context.completed_driver_units = 1
         project.set_control(armed=True, paused=False, draining=True)
         context.project = project
-        with patch("mizu.runtime.has_live_demand", return_value=True) as demand:
+        with patch("mizu.engine_execution.has_live_demand", return_value=True) as demand:
             self.assertIsNone(Engine(config)._maybe_safe_point_yield(context))
             demand.assert_not_called()
 
@@ -207,7 +207,7 @@ class SafePointPreemptionTests(Fixture):
             return seal(context, checkpoint, **kwargs)
 
         with patch.object(engine, '_seal_driver_checkpoint', side_effect=dirty), \
-             patch('mizu.runtime.has_live_demand', return_value=True):
+             patch('mizu.engine_execution.has_live_demand', return_value=True):
             if publication:
                 with patch.object(project.snapshots, 'publish', side_effect=OSError('publish failed')):
                     with self.assertRaisesRegex(OSError, 'publish failed'):
@@ -297,7 +297,7 @@ class SafePointPreemptionTests(Fixture):
             if marker and marker['snapshot'] == store.get()['id']:
                 raise OSError('crash before clear')
             return real_guard(store, role)
-        with patch('mizu.runtime.has_live_demand', return_value=True), \
+        with patch('mizu.engine_execution.has_live_demand', return_value=True), \
              patch('mizu.runtime.safe_point.guard', side_effect=crash_after_publish):
             with self.assertRaisesRegex(OSError, 'crash before clear'):
                 Engine(config).run(project, 'worker')
@@ -369,7 +369,7 @@ class SafePointPreemptionTests(Fixture):
     def test_preparation_failure_recovers_even_when_quantum_is_later_disabled(self):
         from mizu import safe_point
         config, project = self.configured('seal-continue')
-        with patch('mizu.runtime.has_live_demand', return_value=True), \
+        with patch('mizu.engine_execution.has_live_demand', return_value=True), \
              patch('mizu.continuations.prepare', side_effect=OSError('prepare failed')):
             with self.assertRaisesRegex(OSError, 'prepare failed'):
                 Engine(config).run(project, 'worker')
@@ -429,10 +429,10 @@ class SafePointPreemptionTests(Fixture):
     def test_interrupted_continuation_settles_before_finish_only_recovery(self):
         from mizu import safe_point
         config, project = self.configured('seal-continue')
-        with patch('mizu.runtime.has_live_demand', return_value=True):
+        with patch('mizu.engine_execution.has_live_demand', return_value=True):
             Engine(config).run(project, 'worker')
         config, project = self.configured('seal-failed')
-        with patch('mizu.runtime.has_live_demand', return_value=True):
+        with patch('mizu.engine_execution.has_live_demand', return_value=True):
             with self.assertRaises(Denied):
                 Engine(config).run(project, 'worker')
         self.assertIsNotNone(safe_point.read(project.snapshots))
