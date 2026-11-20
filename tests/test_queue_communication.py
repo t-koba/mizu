@@ -205,6 +205,45 @@ class ImportedWorkTests(Fixture):
         self.assertEqual((opened["status"], opened["actor"], opened["holder"]), ("open", "operator", None))
         self.assertEqual(store.audit()["consistent"], True)
 
+    def test_documented_imported_create_json_is_accepted_and_reopened(self):
+        # This is the exact create.json documented in docs/operations.md for a
+        # converted decision-seeded item whose wait kind was removed.
+        item_id = "wi_0123456789abcdef0123456789abcdef"
+        document = {
+            "kind": "imported",
+            "work_item": {
+                "id": item_id,
+                "title": "Finish the retained work",
+                "origin": {"insight_id": "7f3a91c2d4e6", "rev": 2},
+                "status": "blocked",
+                "wait": {"kind": "insight_decided", "target": "7f3a91c2d4e6"},
+                "rev": 1,
+                "holder": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+        }
+        directory = self.project.root / "work-items" / item_id
+        directory.mkdir(parents=True)
+        write_json(directory / "create.json", document, exclusive=True)
+        store = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
+        store._ledger.rebuild("items")
+        item = store.current(item_id)
+        self.assertEqual(item["status"], "blocked")
+        self.assertEqual(item["origin"], {"insight_id": "7f3a91c2d4e6", "rev": 2})
+        from mizu.work_item_waits import liveness
+        self.assertEqual(liveness(store, item["wait"], None)["reason"], "unsupported_wait")
+        # The removed wait is inert; the operator conversion reopens the item.
+        args = cli.parser().parse_args([
+            "--config", str(self.file), "work-items", "open", "sample", item_id,
+            "--expected-rev", "1", "--reason", "Wait kind retired by stage 2; reopened for triage",
+        ])
+        opened = cli._execute(self.config, args)
+        self.assertEqual((opened["status"], opened["actor"], opened["holder"]),
+                         ("open", "operator", None))
+        self.assertIsNone(opened.get("wait"))
+        self.assertEqual(store.audit()["consistent"], True)
+
     def test_new_origins_are_opaque_strings_and_terminal_events_route_to_creator(self):
         store = self.project.work_items
         item = store.create(idempotency_key="k", title="From a message", actor="reviewer",

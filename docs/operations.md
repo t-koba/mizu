@@ -580,6 +580,77 @@ unconverted ones. Apply counts valid current names as
 `already_current` and renames only those still using the old name. A successful
 retry with no remaining legacy names reports zero conversions.
 
+
+### Re-seed work items that were seeded from decisions
+
+The stage-2 deletion removed decisions, but thousands of deployed work items
+were originally seeded from them and have no `work-items/<id>/create.json`.
+An operator can give such an item its immutable seed once, while the project
+is paused, by writing that file directly in the `imported` shape. Product
+readers then validate and replay the seed exactly like any other; the origin
+is opaque and is never interpreted.
+
+`work-items/<id>/create.json` for an imported seed contains exactly two keys:
+`kind` (the literal string `imported`) and `work_item` (the revision-1 seed).
+The seed carries `id`, `title`, `origin`, `status`, `rev`, `holder`,
+`created_at`, and `updated_at`, and may additionally carry `description`,
+`scope`, `smoke_refs`, and (when it starts `blocked`) `wait`. `id` is `wi_`
+plus 32 lowercase hex characters and must equal the directory name; `rev` is
+`1`; `holder` is null; `created_at` and `updated_at` are the same
+timezone-aware ISO-8601 timestamp; `origin` is either a nonblank opaque string
+of at most 512 characters or the small JSON object already stored on the
+legacy item. A seed with a `wait` has `status: "blocked"`; without one it has
+`status: "open"`.
+
+Full example — `work-items/wi_0123456789abcdef0123456789abcdef/create.json`
+for a converted decision-seeded item whose wait kind was retired:
+
+```json
+{
+  "kind": "imported",
+  "work_item": {
+    "id": "wi_0123456789abcdef0123456789abcdef",
+    "title": "Finish the retained work",
+    "origin": {"insight_id": "7f3a91c2d4e6", "rev": 2},
+    "status": "blocked",
+    "wait": {"kind": "insight_decided", "target": "7f3a91c2d4e6"},
+    "rev": 1,
+    "holder": null,
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "updated_at": "2026-01-01T00:00:00+00:00"
+  }
+}
+```
+
+Write the file exclusively (it must not already exist), then rebuild the
+derived index with `mizu work-items PROJECT --audit --repair`. A conflicting
+`id`, an unexpected field, a non-null holder, a `rev` other than 1, a wrong
+status for the presence of a wait, or a malformed timestamp is refused. The
+opaque origin keeps the old reference for provenance only; it creates no
+decision, insight, or dependency subscription.
+
+### Reopen a blocked item whose wait kind was retired
+
+The product evaluates only `deadline`, `code_change`, `ci`,
+`publication_ci`, and `object_resolved` waits on work items. A blocked item
+whose stored wait names a removed kind (`insight_decided`, `dependency`,
+`record_closed`, `proposal_merged`, or `object_resolved` on an insight or
+record) stays inert: the product never resolves it on its own. Such an item
+is not stuck. With the project paused, the host operator moves it to `open`
+with a reason:
+
+```sh
+mizu pause demo
+mizu work-items open demo wi_0123456789abcdef0123456789abcdef \
+  --expected-rev 1 --reason "Wait kind retired by stage 2; reopened for triage"
+```
+
+`--expected-rev` is the item's current revision from a fresh read; `--reason`
+is nonblank text of 1–4000 characters stored verbatim. The audited transition
+records the operator actor, clears the inert wait (only blocked items carry
+waits), and leaves the item open and unheld. The command is operator-only and
+cannot be combined with the read-only inventory options of `work-items`.
+
 ## 人間からの提案 (Insight)
 
 確定した事実は `mizu status`・`mizu usage`・`mizu insight list/read`・`mizu report` と run 記録から読み取ります（外部チャットツール非依存）。表示は各プロジェクト側で作ります。
