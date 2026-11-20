@@ -117,6 +117,7 @@ from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             _decision_task, _open_backlog, _prompt_capture_limit,
                             _prompt_clock, _prompt_research_state, _prompt_run_identity,
                             _prompt_tool_surface, _ready_work_age,
+                            _ready_work_projection,  # preserved unit_prompts re-export seam
                             prompt_delta_for, prompt_for)
 
 
