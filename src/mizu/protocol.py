@@ -258,15 +258,16 @@ DEFINITIONS = {
                   "results are neither shared nor acceptance proof.\n\n"
                   "Use action=list to find your jobs, joinable shared checks and batch names; join "
                   "with id to subscribe without rerunning a check. Use result with id to collect "
-                  "and acknowledge completion; passing acceptance is imported only if source and "
-                  "environment still match. Result with wait_seconds>0 waits up to that bound "
-                  "(capped by limits.maximum_wait_seconds and the run deadline) for a terminal "
-                  "result instead of returning immediately. Queued or failed jobs do not pass. Use cancel with id "
+                  "and acknowledge completion; it reads the current state immediately, never "
+                  "waits or holds the model slot. To pause, use the returned wait recipe and "
+                  "finish with outcome=wait, wait_for_check=<id>; completion wakes the role "
+                  "without polling. Passing acceptance is imported only if source and "
+                  "environment still match. Queued or failed jobs do not pass. Use cancel with id "
                   "to request cancellation of your subscription; other subscribers act "
                   "independently.\n\n"
                   "Use logs with id to get up to 32 evidence IDs and page requests, or add "
                   "evidence_id to read a command record. Continue with content_id.",
-                  obj({"action": {"type": "string", "enum": ["start", "list", "result", "cancel", "logs", "join"]}, "fresh": {"type": "boolean"}, "purpose": text(64), "scratch_paths": SCRATCH_PATHS_SCHEMA, "id": text(64), "script": text(SCRIPT_MAX), "commands": CHECK_COMMANDS_SCHEMA, "batch_name": text(63), "evidence_id": text(32), "content_id": text(64), "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}, "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 86400}}, ("action",))),
+                  obj({"action": {"type": "string", "enum": ["start", "list", "result", "cancel", "logs", "join"]}, "fresh": {"type": "boolean"}, "purpose": text(64), "scratch_paths": SCRATCH_PATHS_SCHEMA, "id": text(64), "script": text(SCRIPT_MAX), "commands": CHECK_COMMANDS_SCHEMA, "batch_name": text(63), "evidence_id": text(32), "content_id": text(64), "offset": PAGE_FIELDS["offset"], "limit": {"type": "integer", "minimum": 1, "maximum": 8192}}, ("action",))),
     "verify": ("Run configured acceptance checks to obtain a result bound to your code digest. With "
                "check_job this queues frozen inputs and returns immediately; collect with check_job "
                "action=result, continue independent work, or finish with the returned wait recipe.", obj()),

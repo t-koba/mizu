@@ -1158,11 +1158,10 @@ producer, budget and execution admission gates still apply. No pending result
 means no change to no-progress parking. `false` opts out of this automatic
 signal; it does not disable explicit check waits or other wake sources.
 
-For a short in-unit wait, `check_job action=result` accepts an optional
-`wait_seconds` bound that polls for a terminal result without ending the unit;
-it is capped by `limits.maximum_wait_seconds`, the adapter reply window
-`limits.model_request_seconds` (so the tool replies before the bridge deadline)
-and the run deadline
+`check_job action=result` reads the current state immediately and never holds
+the model slot. To pause without polling, finish the unit with
+`outcome=wait, wait_for_check=<owned id>`; its detached `wait_seconds` bound
+sets the wake deadline
 (see [results and waiting](check-jobs.md#results-and-waiting)).
 
 Readiness/status polling has no side effects. After locked admission and prompt

@@ -4,7 +4,8 @@ These two methods own the Context side of check-job operations and of the
 verification tool call, including the queued-verify branch. They are mixed back
 into ``Context`` and referenced by its dispatch table, so every
 ``Context.method`` reference and ``patch.object(Context, ...)`` call site keeps
-resolving unchanged. No behaviour, grant or default changes.
+resolving unchanged. ``action=result`` returns the job's current state
+immediately; waiting is a detached finish decision, never a tool call here.
 """
 from __future__ import annotations
 
@@ -54,7 +55,7 @@ class ContextCheckToolsMixin:
             return check_jobs.logs(self, args['id'], args.get('evidence_id'), offset=args.get('offset', 0), limit=args.get('limit', 8192), content_id=args.get('content_id'))
         if action == 'cancel':
             return check_jobs.cancel(self, args['id'])
-        return check_jobs.result(self, args['id'], wait_seconds=args.get('wait_seconds', 0))
+        return check_jobs.result(self, args['id'])
 
     def _op_verify(self, args: dict) -> dict:
         if "check_job" in self.role.capabilities:

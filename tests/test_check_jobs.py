@@ -10,7 +10,6 @@ from unittest.mock import patch
 from support import Fixture, ScriptDriver
 from mizu import check_jobs
 from mizu.admission import check_slot_exclusion
-from mizu.config import MAX_WAIT_SECONDS
 from mizu.errors import Busy, Denied
 from mizu.fs import held, lock, read_json, MAX_JSON_DEPTH, write_json as write_indexed_json
 from support import forget_ledger, history_write_json as write_json
@@ -168,35 +167,19 @@ class JobTests(Fixture):
         with self.assertRaisesRegex(Denied, 'Retained check state unavailable'):
             check_jobs.result(ctx, job['id'])
 
-    def test_result_without_wait_seconds_returns_queued_immediately(self):
+    def test_result_returns_queued_state_immediately(self):
         ctx, job = self.submit()
+        started = time.monotonic()
+        output = check_jobs.result(ctx, job['id'])
+        elapsed = time.monotonic() - started
+        self.assertEqual(output['status'], 'queued')
+        self.assertLess(elapsed, 0.5)
+        # Repeated reads of a still-queued job stay equally prompt.
         started = time.monotonic()
         self.assertEqual(check_jobs.result(ctx, job['id'])['status'], 'queued')
         self.assertLess(time.monotonic() - started, 0.5)
-        started = time.monotonic()
-        self.assertEqual(check_jobs.result(ctx, job['id'], wait_seconds=0)['status'], 'queued')
-        self.assertLess(time.monotonic() - started, 0.5)
 
-    def test_result_wait_seconds_collects_completion(self):
-        ctx, job = self.submit()
-        outcomes = []
-        def finish():
-            time.sleep(0.15)
-            outcomes.append(self.run_job())
-        runner = threading.Thread(target=finish)
-        runner.start()
-        try:
-            started = time.monotonic()
-            output = check_jobs.result(ctx, job['id'], wait_seconds=2)
-            elapsed = time.monotonic() - started
-        finally:
-            runner.join(3)
-        self.assertEqual(output['status'], 'completed')
-        self.assertLess(elapsed, 2)
-        self.assertEqual(outcomes[0]['id'], job['id'])
-        self.assertTrue(output['accepted_for_current_source'])
-
-    def test_result_wait_tolerates_portable_atomic_replacement(self):
+    def test_result_tolerates_portable_atomic_replacement(self):
         from mizu import fs
         ctx, job = self.submit()
         path = check_jobs.root(self.project) / job['id'] / 'job.json'
@@ -214,77 +197,28 @@ class JobTests(Fixture):
         with patch.object(fs._platform, 'HAS_OPENAT', False), \
                 patch.object(fs._platform, 'HAS_DIR_FD', False), \
                 patch.object(fs, '_read_bounded', side_effect=replace_then_read):
-            result = check_jobs.result(ctx, job['id'], wait_seconds=2)
+            first = check_jobs.result(ctx, job['id'])
+            second = check_jobs.result(ctx, job['id'])
         self.assertTrue(replaced)
-        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(first['status'], 'queued')
+        self.assertEqual(second['status'], 'completed')
 
-    def test_result_wait_seconds_bound_returns_non_terminal(self):
-        ctx, job = self.submit()
-        started = time.monotonic()
-        output = check_jobs.result(ctx, job['id'], wait_seconds=1)
-        elapsed = time.monotonic() - started
-        self.assertIn(output['status'], ('queued', 'running'))
-        self.assertGreaterEqual(elapsed, 0.75)
-        self.assertLess(elapsed, 2)
-
-    def test_result_rejects_invalid_wait_seconds(self):
-        ctx, job = self.submit()
-        for value in (-1, 1.5, '1', True, False, None, MAX_WAIT_SECONDS + 1):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(Denied, 'Invalid check wait bound'):
-                    check_jobs.result(ctx, job['id'], wait_seconds=value)
-        # The inclusive upper bound is valid; a terminal job never waits.
-        self.assertEqual(self.run_job()['status'], 'completed')
-        self.assertEqual(check_jobs.result(ctx, job['id'], wait_seconds=MAX_WAIT_SECONDS)['status'], 'completed')
-
-    def test_result_wait_seconds_stops_at_run_deadline(self):
-        ctx, job = self.submit()
-        ctx.deadline = time.monotonic() + 0.05
-        started = time.monotonic()
-        output = check_jobs.result(ctx, job['id'], wait_seconds=2)
-        elapsed = time.monotonic() - started
-        self.assertEqual(output['status'], 'queued')
-        self.assertLess(elapsed, 0.75)
-
-    def test_result_wait_is_capped_by_model_request_window(self):
-        # The in-unit wait must also fit inside the adapter reply window: the
-        # bridge adds its own margin on top of model_request_seconds, so a
-        # longer wait would lose the reply even though the unit deadline is far
-        # away. The job is never run, so the wait always reaches its cap.
-        self.config = dataclasses.replace(self.config,
-            limits=dataclasses.replace(self.config.limits,
-                                       model_request_seconds=1,
-                                       maximum_wait_seconds=60))
-        self.project.config = self.config
-        ctx, job = self.submit()
-        ctx.deadline = time.monotonic() + 30
-        started = time.monotonic()
-        output = check_jobs.result(ctx, job['id'], wait_seconds=8)
-        elapsed = time.monotonic() - started
-        self.assertIn(output['status'], ('queued', 'running'))
-        # Roughly the one-second model-request window, not the eight-second
-        # requested wait; tolerance keeps the timing assertion non-flaky.
-        self.assertGreaterEqual(elapsed, 0.4)
-        self.assertLess(elapsed, 2)
-
-    def test_result_wait_replies_before_bridge_deadline(self):
+    def test_result_replies_before_bridge_deadline(self):
         from mizu.bridge import Bridge
         from mizu.fs import read_json
         from mizu.mcp_proxy import forward
 
-        # Reproduce the bridged path: a one-second model-request window gives
-        # the bridge a six-second absolute reply budget. A check-job result is
-        # not a joined operation, so the bridge deadline applies. Before the
-        # fix the eight-second wait overran that budget and the caller got
-        # 'Bridge deadline exceeded'; now it must get a normal result.
-        self.config = dataclasses.replace(self.config,
+        # A one-second model-request window leaves the bridge a short reply
+        # budget. A result call reads state immediately, so the bridged reply is
+        # ordinary output rather than 'Bridge deadline exceeded'.
+        self.config = dataclasses.replace(
+            self.config,
             limits=dataclasses.replace(self.config.limits, model_request_seconds=1))
         self.project.config = self.config
         ctx, job = self.submit()
-        ctx.deadline = time.monotonic() + 30
 
         def handle(operation, arguments):
-            return check_jobs.result(ctx, job['id'], wait_seconds=8)
+            return check_jobs.result(ctx, job['id'])
 
         with Bridge(handle, [], timeout=1) as bridge:
             config = read_json(bridge.config_file)

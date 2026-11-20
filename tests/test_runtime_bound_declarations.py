@@ -1836,8 +1836,6 @@ PARAMETER_DEFAULTS = {
         '0', 'mechanism', 'check jobs / initial evidence page position'),
     ('check_jobs.py', 'logs', 'limit'): (
         '8192', 'policy', 'check jobs / caller-selected evidence page length'),
-    ('check_jobs.py', 'result', 'wait_seconds'): (
-        '0', 'mechanism', 'check jobs / zero means no in-unit wait, preserving the immediate-return result path for existing callers'),
     ('kernel/events.py', 'EventLog.pending', 'limit'): (
         '64', 'mechanism', 'kernel events / default subscribed-event page, capped by PAGE_MAX'),
     ('kernel/objects.py', 'Objects.list', 'limit'): (
@@ -1960,9 +1958,6 @@ PARAMETER_DEFAULTS = {
 #     (exact ast.unparse(argument), classification, owner / rationale)
 # These are wait/backoff intervals: no format or user payload is involved.
 TIMED_WAIT_ARGUMENTS = {
-    ('check_jobs.py', '_await_terminal', 'time.sleep', 0, 0): (
-        'min(0.25, remaining)', 'mechanism',
-        'check jobs / in-unit result poll cadence clipped to the remaining bounded wait, so it returns promptly without spinning'),
     ('platform.py', 'lock_fd', 'time.sleep', 0, 0): (
         'min(retry_interval_ms / 1000, remaining)', 'configured policy',
         'platform / [limits].lock_retry_interval_ms sets kernel-probe cadence; clip it to the acquisition deadline'),

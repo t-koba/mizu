@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from mizu.context_check_tools import ContextCheckToolsMixin
+from mizu.protocol import DEFINITIONS
 from mizu.runtime import Context
 
 
@@ -41,6 +42,23 @@ class ContextCheckToolsTests(unittest.TestCase):
             context, "echo ok", commands=None, fresh=True,
             purpose="acceptance", scratch_paths=["scratch"])
         self.assertEqual(result, {"id": "job"})
+
+    def test_result_dispatch_passes_only_context_and_id(self):
+        context = Mock()
+        with patch("mizu.context_check_tools.check_jobs") as owner:
+            owner.result.return_value = {'status': 'queued'}
+            result = Context._DISPATCH["check_job"](context, {'action': 'result', 'id': 'job'})
+        owner.result.assert_called_once_with(context, 'job')
+        self.assertEqual(result, {'status': 'queued'})
+
+    def test_check_job_schema_has_no_in_unit_wait(self):
+        description, schema = DEFINITIONS['check_job']
+        self.assertNotIn('wait_seconds', schema['properties'])
+        self.assertNotIn('wait_seconds', description)
+        self.assertNotIn('waits up to', description)
+        self.assertIn('wait_for_check', description)
+        # finish's own detached wait stays advertised.
+        self.assertIn('wait_seconds', DEFINITIONS['finish'][1]['properties'])
 
 
 if __name__ == "__main__":

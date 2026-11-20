@@ -161,16 +161,13 @@ result is imported only when current source, acceptance commands and configured
 execution environment match. A queued, interrupted,
 refused, failed or source-mismatched result cannot authorize completion.
 
-For a bounded wait inside the current unit, add `wait_seconds=<positive integer>`
-to `action=result`. The call returns as soon as the job is terminal or the bound
-elapses, with the same result output; without it, `result` still returns
-immediately. The bound is capped by `limits.maximum_wait_seconds`, the adapter
-reply window `limits.model_request_seconds` (so the tool replies before the
-bridge deadline, whose own margin sits on top of that window) and the run's
-remaining deadline; it never holds the check-jobs lock and does not end the unit
-or release its model slot. This is the supported in-unit wait instead of a sandbox
-`sleep`. To release the slot and wake later, finish with
-`outcome=wait, wait_for_check=<id>` instead.
+`action=result` reads the job's current state immediately, whether it is
+queued, running or terminal, and never holds the model slot. Repeated reads
+return the same kind of output; a queued or failed job cannot pass acceptance.
+There is no in-unit wait option on `result`, and no sandbox `sleep`: to pause
+without polling, follow the returned wait recipe and finish with
+`outcome=wait, wait_for_check=<id>`. That ends the unit, releases its model slot
+and lets completion wake the role.
 
 When only that job remains, finish with `outcome=wait, wait_for_check=<id>`.
 The work unit ends and returns its model slot and workspace lock. The wait
