@@ -105,7 +105,7 @@ class DirectWorkItemTests(Fixture):
         self.assertEqual({page["items"][0]["id"], next_page["items"][0]["id"]},
                          {seeded["work_item"]["id"], direct["id"]})
         ctx = self.context("worker")
-        for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+        for text in (prompt_for(ctx), prompt_delta_for(ctx)):
             prompt = json.loads(text)
             self.assertIn(direct["id"], [i["id"] for i in prompt["open_work_items"]["items"]])
         self.assertEqual(self.store.page_open(), self.store.page_open_readonly())

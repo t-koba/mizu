@@ -18,7 +18,7 @@ class FinishOutcomeTests(Fixture):
     def opening(self):
         ctx = self.context("consult")
         full = json.loads(prompt_for(ctx))["unit"]
-        self.assertEqual(json.loads(prompt_delta_for(ctx, []))["unit"], full)
+        self.assertEqual(json.loads(prompt_delta_for(ctx))["unit"], full)
         return full
 
     def test_default_role_preserves_finish_definition(self):

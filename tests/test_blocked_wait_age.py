@@ -4,7 +4,7 @@ import json
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from support import Fixture, stored_question_insight
+from support import Fixture
 from mizu.errors import Denied
 from mizu.fs import read_json
 from support import history_write_json as write_json
@@ -17,8 +17,13 @@ FUTURE = {"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"}
 
 
 def _external_wait(project):
-    question = stored_question_insight(project)
-    return {"kind": "insight_decided", "insight": question["id"]}
+    """A blocked wait only another party can end (stays pending): another open item."""
+    import uuid
+    other = project.work_items.create(idempotency_key=uuid.uuid4().hex, title="External",
+                                      actor="maintainer")["record"]["work_item"]
+    project.work_items.transition(other["id"], expected_rev=1, status="blocked", actor="maintainer",
+                                  wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+    return {"kind": "object_resolved", "subject": {"type": "work_item", "id": other["id"]}}
 
 
 @contextmanager
@@ -99,20 +104,6 @@ class BlockedWaitAgeTests(Fixture):
             self.assertEqual(item["blocked_since"], start)
             self.assertEqual(self.store.page_ready()["total"], 0)
 
-    def test_blocked_decision_seed_ages_without_writing_a_transition(self):
-        with clock(0), patch("mizu.insights.now", return_value=START.isoformat()):
-            proposal = self.project.insights.submit(source="worker", title="Contingent", body="Review", base_snapshot=None)
-            event = self.project.insights.decide(proposal["id"], "accept", "Deliver scope", "", "run", expected_rev=1,
-                work_items=[{"title": "Contingent task", "description": "Wait for changed code", "wait": CODE}])
-            seed = event["work_items"][0]
-        with clock(10**9):
-            page = self.store.page_ready(role_name="worker")
-            self.assertEqual(page["total"], 0)
-            self.assertEqual(self.store.blocked_liveness_readonly()["items"][0]["state"], "pending")
-            self.assertIsNone(self.store.get(seed["id"])["holder"])
-            self.assertEqual(self.store.get(seed["id"]), seed)
-            self.assertEqual(self.store.page_open_readonly()["items"][0]["blocked_since"], seed["created_at"])
-
     def test_explicit_deadline_is_independent_and_clock_rollback_clamps_age(self):
         with clock(0):
             item = self.block(wait=FUTURE)
@@ -150,7 +141,7 @@ class BlockedWaitAgeTests(Fixture):
         with clock(10**9):
             context = self.context()
             full = json.loads(prompt_for(context))
-            delta = json.loads(prompt_delta_for(context, []))
+            delta = json.loads(prompt_delta_for(context))
             for prompt in (full, delta):
                 self.assertEqual(prompt["ready_work"]["total"], 1)
                 self.assertEqual(prompt["ready_work"]["items"][0]["status"], "open")
@@ -170,7 +161,7 @@ class BlockedWaitAgeTests(Fixture):
             record = read_json(path)
             record.pop("blocked_since")
             write_json(path, record)
-        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         self.store = fresh
         self.assertNotIn("blocked_since", fresh.get(item["id"]))
         self.assertEqual(fresh.projection(item["id"])["blocked_since"], start)
@@ -182,19 +173,6 @@ class BlockedWaitAgeTests(Fixture):
         with self.assertRaises(Denied):
             fresh.get(item["id"])
         self.assertFalse(fresh.blocked_liveness_readonly()["coverage_complete"])
-
-    def test_impossible_requires_reasoned_open_regardless_of_age(self):
-        with clock(0):
-            item = self.block(wait={"kind": "insight_decided", "insight": "f" * 32})
-        with clock(10**9):
-            state = self.store.page_ready()["items"][0]["wait_liveness"]
-            self.assertEqual((state["state"], state["reason"]), ("impossible", "target_missing"))
-            with self.assertRaisesRegex(Denied, "Reopen"):
-                self.change(item, "blocked", wait=CODE, scope="New wait", reason="Rebind")
-            with self.assertRaisesRegex(Denied, "reason"):
-                self.change(item, "open")
-            item = self.change(item, "open", reason=state["reason"])
-            item = self.change(item, "blocked", wait=CODE)
 
     def test_ancient_unknown_wait_stays_blocked_without_forcing_reopen(self):
         with clock(0) as start:

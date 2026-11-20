@@ -84,7 +84,7 @@ class AcceptanceTests(Fixture):
         b = self.project.snapshots.capture_files(ctx.workspace)
         self.assertIsNone(acceptance.effective(self.project, b))
         # Both prompt modes distinguish immutable publication proof from late proof.
-        for prompt in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+        for prompt in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
             with patch.object(acceptance, 'effective_projection', wraps=acceptance.effective_projection) as projection:
                 header = json.loads(prompt())['published_snapshot']
             projection.assert_called_once_with(self.project, ctx.snapshot)
@@ -1113,7 +1113,7 @@ class AcceptanceTests(Fixture):
                         {**proof, 'applicability': 'unassessed'})
                     self.assertEqual(status['effective_verification_diagnostic'],
                         {'status': 'unassessed', 'reason': 'read_only_status'})
-                    for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+                    for text in (prompt_for(ctx), prompt_delta_for(ctx)):
                         header = json.loads(text)['published_snapshot']
                         self.assertIsNone(header['effective_verification'])
                         self.assertEqual(header['effective_verification_diagnostic'],

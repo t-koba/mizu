@@ -407,7 +407,7 @@ class SharedCiWaitTests(CiWaitFixture):
             self.assertEqual(len(self.pending("reviewer")), 1)
             context, prompt, _ = engine.driver.calls[-1]
             self.assertIn("ci_wait_delivery", json.loads(prompt))
-            self.assertIn("ci_wait_delivery", json.loads(prompt_delta_for(context, [])))
+            self.assertIn("ci_wait_delivery", json.loads(prompt_delta_for(context)))
         self.assertEqual(self.receipts(), [])
         def selected(context, prompt, profile):
             event = json.loads(prompt)["wait_events"][0]
@@ -429,7 +429,7 @@ class SharedCiWaitTests(CiWaitFixture):
         context = self.context()
         self.assertIn("ack_token", context.wait_events[0])
         for prompt in (json.loads(prompt_for(context)),
-                       json.loads(prompt_delta_for(context, []))):
+                       json.loads(prompt_delta_for(context))):
             contract = prompt["ci_wait_delivery"]
             self.assertIn("Select only handled tokens", contract)
             self.assertIn("omitted/empty/partial", contract)

@@ -159,7 +159,7 @@ class WorkItemTests(Fixture):
                     self.assertEqual(reader(), result)
         # A rebuild validates the current delivery against its exact manifest.
         forget_ledger(self.project.root)
-        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         with patch.object(fresh.snapshots, "binding", side_effect=Denied("snapshot unavailable")) as get:
             with self.assertRaisesRegex(Denied, "snapshot unavailable"):
                 fresh.page_open_readonly(limit=100)
@@ -529,7 +529,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(self.seed_path.read_bytes(), original)
         self.assertEqual(sorted(p.name for p in self.directory.iterdir()), ["2.json", "3.json"])
         self.assertEqual(json.loads((self.directory / "2.json").read_bytes()), doing)
-        reopened = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        reopened = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         self.assertEqual(reopened.get(self.item_id), opened)
 
     def test_stale_and_invalid_revisions_write_nothing(self):
@@ -668,7 +668,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(completed["delivered_tree"], older["code_digest"])
 
     def test_done_refuses_a_closure_without_a_delivery_binding(self):
-        store = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        store = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         snapshot = self.snapshot("valid")
         with self.assertRaises(Denied):
             store.transition(self.item_id, expected_rev=1, status="done", actor="worker",
@@ -1236,7 +1236,7 @@ class WorkItemTests(Fixture):
         barrier = threading.Barrier(2)
 
         def attempt(actor):
-            store = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+            store = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
             barrier.wait(timeout=5)
             try:
                 return store.transition(self.item_id, expected_rev=1, status="doing", actor=actor)
@@ -1262,7 +1262,7 @@ class WorkItemTests(Fixture):
         self.assertEqual(second["updated_at"], "2031-01-02T00:00:00+00:00")
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
         self.assertFalse(sidecar.exists())
-        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         page = fresh.page_open_readonly(limit=100)
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         self.assertEqual((row["status"], row["rev"]), ("doing", 3))
@@ -1275,7 +1275,7 @@ class WorkItemTests(Fixture):
                               reason="Wait for evidence",
                               wait={"kind": "deadline", "at": "2030-01-01T00:00:00+00:00"})
         expected = self.store.get(self.item_id)
-        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         page = fresh.page_open_readonly(limit=100)
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         self.assertEqual((row["status"], row["rev"]), ("blocked", 3))
@@ -1297,7 +1297,7 @@ class WorkItemTests(Fixture):
         self.change("doing")
         sidecar = self.project.root / "work-item-state" / f"{self.item_id}.json"
         sidecar.unlink(missing_ok=True)
-        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        fresh = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         page = fresh.page_open_readonly(limit=100)
         row = next(row for row in page["items"] if row["id"] == self.item_id)
         self.assertEqual((row["status"], row["rev"]), ("doing", 2))
@@ -1311,7 +1311,7 @@ class WorkItemTests(Fixture):
         self.project.insights.revise(self.proposal["id"], source="worker",
                                      title="Revised scope", body="Changed claims",
                                      base_snapshot=None, expected_rev=1)
-        second = WorkItems(self.project.root, self.project.snapshots, self.project.insights).page_open_readonly(limit=100)
+        second = WorkItems(self.project.root, self.project.snapshots, self.project.ledger).page_open_readonly(limit=100)
         row = next(row for row in second["items"] if row["id"] == self.item_id)
         self.assertTrue(row["stale"])
         self.assertEqual(row["current_origin_rev"], 2)

@@ -8,10 +8,8 @@ import unittest
 from threading import Event
 from unittest.mock import patch
 
-from support import (Fixture, ScriptDriver, bind_delivery, without_blocked_age, index_items,
-                     stored_question_insight)
+from support import Fixture, ScriptDriver, index_items
 from mizu import work_items as work_items_module
-from mizu import work_item_waits as work_item_waits_module
 from mizu.errors import Denied
 from mizu.config import role_no_progress_backoff_seconds
 from mizu.fs import now, read_json
@@ -22,9 +20,13 @@ from mizu.snapshot import PROGRESS_SIGNALS
 
 
 def _external_wait(project):
-    """A blocked wait only an event/another party can end (stays pending)."""
-    question = stored_question_insight(project)
-    return {'kind': 'insight_decided', 'insight': question['id']}
+    """A blocked wait only another party can end (stays pending): another open item."""
+    import uuid
+    other = project.work_items.create(idempotency_key=uuid.uuid4().hex, title="External",
+                                      actor="maintainer")["record"]["work_item"]
+    project.work_items.transition(other["id"], expected_rev=1, status="blocked", actor="maintainer",
+                                  wait={"kind": "deadline", "at": "2099-01-01T00:00:00+00:00"})
+    return {"kind": "object_resolved", "subject": {"type": "work_item", "id": other["id"]}}
 
 class ReadyWorkTests(Fixture):
     def item(self, key, status="open", wait=None):
@@ -45,7 +47,6 @@ class ReadyWorkTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Parked", run=None, outcome=outcome,
             summary="Parked test", wake_at=4102444800 if outcome == "wait" else None,
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control().get("wake_generation", ""),
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(snapshot)
@@ -118,16 +119,13 @@ class ReadyWorkTests(Fixture):
             status="blocked", wait=_external_wait(self.project))
         self.assertFalse(should_run(self.project, snapshot, role_name="worker"))
 
-    def test_store_ready_page_bounds_and_unseeded_coverage(self):
+    def test_store_ready_page_bounds_and_coverage(self):
         for index in range(3):
             self.item(str(index))
-        write_json(self.project.root / "decision-history" / ("b" * 32 + ".json"),
-                   {"action": "accept"}, exclusive=True)
         page = self.project.work_items.page_ready(limit=2)
         self.assertEqual(len(page["items"]), 2)
         self.assertEqual((page["total"], page["overflow_count"], page["truncated"]), (3, 1, True))
-        self.assertEqual(page["unseeded_decisions"], 1)
-        self.assertFalse(page["coverage_complete"])
+        self.assertTrue(page["coverage_complete"])
         for limit in (0, 101, True):
             with self.assertRaises(Denied):
                 self.project.work_items.page_ready(limit=limit)
@@ -139,7 +137,7 @@ class ReadyWorkTests(Fixture):
             with self.assertRaises(Denied):
                 prompt_for(self.context())
             with self.assertRaises(Denied):
-                prompt_delta_for(self.context(), [])
+                prompt_delta_for(self.context())
         with patch.object(self.project.work_items, "page_ready", side_effect=AssertionError("not needed")):
             self.assertTrue(should_run(self.project, {**snapshot, "goal_digest": "changed"}, role_name="worker"))
             self.project.set_control(wake_generation="explicit")
@@ -231,7 +229,7 @@ class ReadyWorkTests(Fixture):
         stamp = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc).timestamp()
         with patch("mizu.runtime.time.time", return_value=stamp + 42.9):
             full = json.loads(prompt_for(ctx))
-            delta = json.loads(prompt_delta_for(ctx, []))
+            delta = json.loads(prompt_delta_for(ctx))
         self.assertTrue(full["open_work_items"]["truncated"])
         self.assertTrue(all(row["status"] == "blocked" for row in full["open_work_items"]["items"]))
         page = full["ready_work"]
@@ -241,18 +239,16 @@ class ReadyWorkTests(Fixture):
         self.assertTrue({row["id"] for row in page["items"]} <= {row["id"] for row in ready})
         for row in page["items"]:
             self.assertEqual(row["status"], "open")
-            self.assertFalse(row["stale"])
-            self.assertFalse(row["redecision"])
             self.assertIn("Ready candidate", row["title"])
             self.assertEqual(row["age_seconds"], 42)
 
     def test_empty_ready_projection_is_present_when_the_section_is_included_without_capabilities(self):
         ctx = self.context("consult")
         ctx.role = dataclasses.replace(ctx.role, capabilities=(), context_include=("ready_work",))
-        for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+        for prompt in (prompt_for(ctx), prompt_delta_for(ctx)):
             self.assertEqual(json.loads(prompt)["ready_work"], {
                 "items": [], "total": 0, "overflow_count": 0, "truncated": False,
-                "unseeded_decisions": 0, "coverage_complete": True,
+                "coverage_complete": True,
                 "unknown_blocked": 0})
 
     def test_prompt_age_is_safe_for_future_missing_invalid_and_extreme_times(self):
@@ -346,7 +342,7 @@ class ReadyProjectionTests(Fixture):
     def test_next_call_sees_other_store_appends_new_items_and_corruption(self):
         store = self.project.work_items
         item = self.item("existing")
-        other = work_items_module.WorkItems(store.root, store.snapshots, store.insights)
+        other = work_items_module.WorkItems(store.root, store.snapshots, store._ledger)
         before = store.page_ready()
         other.transition(item["id"], expected_rev=1, actor="worker", status="blocked",
                          wait=_external_wait(self.project))
@@ -368,31 +364,6 @@ class ReadyProjectionTests(Fixture):
         write_json(path, {**record, "rev": 9})
         with self.assertRaises(Denied):
             store.page_ready(limit=1)
-
-    def test_origin_hold_and_wait_liveness_are_not_cached(self):
-        store = self.project.work_items
-        proposal = self.project.insights.submit(source="reviewer", title="Origin", body="Scope", base_snapshot=None)
-        item = store.create(idempotency_key="origin", title="Origin work", actor="worker",
-                            origin={"insight_id": proposal["id"], "rev": 1})["record"]["work_item"]
-        store.transition(item["id"], expected_rev=1, actor="worker", status="doing")
-        self.item("wait", "blocked", {"kind": "insight_decided", "insight": proposal["id"]})
-        before = store.page_ready()
-        self.project.insights.revise(proposal["id"], source="reviewer", title="Revised", body="New",
-                                     base_snapshot=None, expected_rev=1)
-        self.assertTrue(store.page_ready()["items"][0]["stale"])
-        self.project.insights.decide(proposal["id"], "reject", "Not proceeding", "", "run", expected_rev=2)
-        fixed_now = "2099-01-02T00:00:00+00:00"
-        with (patch.object(work_items_module, "now", return_value=fixed_now),
-              patch.object(work_item_waits_module, "now", return_value=fixed_now)):
-            after = store.page_ready()
-            self.assertEqual(after, self.exact())
-        self.assertEqual(after["total"], 2)
-        row = next(row for row in after["items"] if row["id"] == item["id"])
-        self.assertFalse(row["stale"])
-        self.assertEqual(row["redecision"], {"rev": 2, "action": "reject"})
-        self.assertEqual(row["current_origin_rev"], 2)
-        self.assertTrue(row["doing_stale"])
-        self.assertNotEqual(before["signature"], after["signature"])
 
 class ReadySetChangeTests(Fixture):
     item = ReadyWorkTests.item
@@ -417,7 +388,7 @@ class ReadySetChangeTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Now: Ready work delivered\nNext: Reassess the task",
             run=None, outcome="wait", summary="Ready work already delivered",
-            wake_at=4102444800, inbox_seen=self.project.insights.generation(),
+            wake_at=4102444800,
             wake_generation=self.project.control().get("wake_generation", ""),
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(base)
@@ -525,7 +496,7 @@ class ReadySetChangeTests(Fixture):
         self.item('other-held', 'doing')
         own = self.item('claimable')
         ctx = self.context('reviewer')
-        for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+        for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
             page = json.loads(build())['ready_work']
             self.assertEqual([r['id'] for r in page['items']], [own['id']])
             self.assertEqual(ctx.ready_work_signature, self.signature('reviewer'))

@@ -281,13 +281,12 @@ if __name__ == "__main__":
 class CiStickyRedTests(Fixture):
     def _wait_snapshot(self):
         import time
-        gen = self.project.insights.generation()
         cap = self.project.snapshots.capture_files(self.project.workspace)
         wait = self.project.snapshots.create(
             cap, goal=self.project.goal,
             state="Now: parked\nNext: none\nTasks: none\nBlocking: none",
             run=None, outcome="wait", summary="parked", verification=None,
-            wake_at=time.time() + 86400, inbox_seen=gen,
+            wake_at=time.time() + 86400,
             wake_generation=self.project.control().get("wake_generation", ""))
         self.project.snapshots.publish(wait)
         return self.project.snapshots.get()
@@ -401,13 +400,12 @@ class CiRewakeTests(Fixture):
 
     def _wait_snapshot(self):
         import time
-        gen = self.project.insights.generation()
         cap = self.project.snapshots.capture_files(self.project.workspace)
         wait = self.project.snapshots.create(
             cap, goal=self.project.goal,
             state="Now: parked\nNext: none\nTasks: none\nBlocking: none",
             run=None, outcome="wait", summary="parked", verification=None,
-            wake_at=time.time() + 86400, inbox_seen=gen,
+            wake_at=time.time() + 86400,
             wake_generation=self.project.control().get("wake_generation", ""))
         self.project.snapshots.publish(wait)
         return self.project.snapshots.get()
@@ -776,13 +774,12 @@ class CiRunIdentityTests(Fixture):
 
     def _wait_snapshot(self):
         import time
-        gen = self.project.insights.generation()
         cap = self.project.snapshots.capture_files(self.project.workspace)
         wait = self.project.snapshots.create(
             cap, goal=self.project.goal,
             state="Now: parked\nNext: none\nTasks: none\nBlocking: none",
             run=None, outcome="wait", summary="parked", verification=None,
-            wake_at=time.time() + 86400, inbox_seen=gen,
+            wake_at=time.time() + 86400,
             wake_generation=self.project.control().get("wake_generation", ""))
         self.project.snapshots.publish(wait)
         return self.project.snapshots.get()
@@ -976,7 +973,7 @@ class CiFailureProjectionTests(Fixture):
         import dataclasses
         context.role = dataclasses.replace(context.role, context_include=("ci",))
         full = json.loads(prompt_for(context))
-        delta = json.loads(prompt_delta_for(context, []))
+        delta = json.loads(prompt_delta_for(context))
         for projection in (full, delta):
             # No per-check rows in any opening; the opt-in aggregate marks the
             # projection bound through may_be_incomplete instead.

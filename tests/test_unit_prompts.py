@@ -51,8 +51,8 @@ class UnitPromptSeamTests(Fixture):
             ctx = self.context(role)
             clock = unit_prompts._prompt_clock(ctx)
             with patch.object(unit_prompts, "_prompt_clock", return_value=clock):
-                self.assertEqual(runtime.prompt_delta_for(ctx, []),
-                                 unit_prompts.prompt_delta_for(ctx, []))
+                self.assertEqual(runtime.prompt_delta_for(ctx),
+                                 unit_prompts.prompt_delta_for(ctx))
 
     def test_full_and_delta_expose_the_exact_dispatch_admission(self):
         from mizu.unit_prompts import prompt_for, prompt_delta_for
@@ -63,7 +63,7 @@ class UnitPromptSeamTests(Fixture):
             with self.subTest(admission=admission):
                 ctx.admission = admission
                 self.assertEqual(json.loads(prompt_for(ctx))["admission"], admission)
-                self.assertEqual(json.loads(prompt_delta_for(ctx, []))["admission"], admission)
+                self.assertEqual(json.loads(prompt_delta_for(ctx))["admission"], admission)
 
     def test_delta_clock_boundary_changes_only_the_clock_projection(self):
         import mizu.unit_prompts as unit_prompts
@@ -74,8 +74,8 @@ class UnitPromptSeamTests(Fixture):
                         "timezone": str(ctx.config.timezone)}
         with patch.object(unit_prompts, "_prompt_clock",
                           side_effect=[first_clock, second_clock]):
-            first = json.loads(unit_prompts.prompt_delta_for(ctx, []))
-            second = json.loads(unit_prompts.prompt_delta_for(ctx, []))
+            first = json.loads(unit_prompts.prompt_delta_for(ctx))
+            second = json.loads(unit_prompts.prompt_delta_for(ctx))
         self.assertEqual(first.pop("now"), first_clock["now"])
         self.assertEqual(second.pop("now"), second_clock["now"])
         self.assertEqual(first, second)
@@ -164,7 +164,7 @@ class UnitPromptSeamTests(Fixture):
         unit_prompts.prompt_for(ctx)
         first = ctx.ready_work_signature
         self.assertTrue(first)
-        unit_prompts.prompt_delta_for(ctx, [])
+        unit_prompts.prompt_delta_for(ctx)
         self.assertEqual(ctx.ready_work_signature, first)
 
     def test_full_delta_compaction_preserves_metadata_and_reduces_utf8_bytes(self):
@@ -197,7 +197,7 @@ class UnitPromptSeamTests(Fixture):
                 patch.object(check_jobs, "prompt_projection", return_value=checks), \
                 patch.object(unit_prompts, "_prompt_clock", return_value={"now": "fixed"}):
             for mode, build in (("full", lambda: unit_prompts.prompt_for(ctx)),
-                                ("delta", lambda: unit_prompts.prompt_delta_for(ctx, []))):
+                                ("delta", lambda: unit_prompts.prompt_delta_for(ctx))):
                 ctx.config = dataclasses.replace(ctx.config, limits=dataclasses.replace(
                     ctx.config.limits, session_delta_details="full"))
                 before = build()

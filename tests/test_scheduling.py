@@ -337,7 +337,6 @@ class SchedulingParityTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state=current["state"], run=None,
             outcome="continue", summary="Parked progress parity",
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control().get("wake_generation", ""),
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(snapshot)

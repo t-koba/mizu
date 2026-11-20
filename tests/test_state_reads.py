@@ -71,7 +71,7 @@ class StateReadTests(Fixture):
     def test_excluded_full_and_delta_still_allow_bounded_ready_read(self):
         ids = [self.create(str(n)) for n in range(3)]
         ctx = self.reader()
-        for payload in (json.loads(prompt_for(ctx)), json.loads(prompt_delta_for(ctx, []))):
+        for payload in (json.loads(prompt_for(ctx)), json.loads(prompt_delta_for(ctx))):
             for key in ("ready_work", "work_order", "previous_report"):
                 self.assertNotIn(key, payload)
             self.assertIn("mizu_ready_work_read", payload["unit_tool_surface"]["tools"])

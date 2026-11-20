@@ -39,7 +39,7 @@ class WorkItemChangesTests(Fixture):
         self.assertTrue(page["has_more"])
         self.assertEqual(page["items"][0]["item"], first)
         self.assertEqual(page, self.page(limit=1))  # Deterministic with no intervening write.
-        restarted = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+        restarted = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
         page = restarted.page_changes_readonly(cursor=page["next_cursor"], limit=1)
         self.assertFalse(page["has_more"])
         self.assertEqual(page["items"][0]["item"], second)

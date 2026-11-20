@@ -1,7 +1,7 @@
 """Idle-with-open-work diagnostic: recorded-at-finish observation, never live-joined."""
 from unittest.mock import patch
 
-from support import Fixture, ScriptDriver, stored_question_insight
+from support import Fixture, ScriptDriver
 from mizu.errors import Denied
 from mizu.fs import now
 from mizu.project import IDLE_NO_PROGRESS_OUTCOMES, idle_with_open_work
@@ -29,8 +29,7 @@ class IdleWithOpenWorkTests(Fixture):
             signals = {name: False for name in PROGRESS_SIGNALS}
         if ready_work != "legacy":
             # Build schema-2 record via _progress_record for validity.
-            tmp = _progress_record(current, "worker", tuple(selected), signals, outcome,
-                                   obligations_digest="0" * 64, ready_work=ready_work)
+            tmp = _progress_record(current, "worker", tuple(selected), signals, outcome, ready_work=ready_work)
             progress = tmp
         else:
             progress = {"schema": 1, "signals": signals,
@@ -41,8 +40,7 @@ class IdleWithOpenWorkTests(Fixture):
         snapshot = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Parked", run=None, outcome=outcome,
-            summary="Parked test", wake_at=4102444800 if outcome == "wait" else None,
-            inbox_seen=self.project.insights.generation(), wake_generation="test-wake",
+            summary="Parked test", wake_at=4102444800 if outcome == "wait" else None, wake_generation="test-wake",
             progress=progress, parent=current["id"])
         self.project.snapshots.publish(snapshot)
         return self.project.snapshots.get()
@@ -53,9 +51,8 @@ class IdleWithOpenWorkTests(Fixture):
     def ensure_baseline(self, state="Parked"):
         """Sync inbox/wake into a parked snapshot so the next writer run is input-quiet."""
         snapshot = self.project.snapshots.get()
-        generation = self.project.insights.generation()
         wake = self.project.control().get("wake_generation", "")
-        if snapshot.get("inbox_seen", "") == generation and snapshot.get("wake_generation", "") == wake:
+        if snapshot.get("wake_generation", "") == wake:
             return snapshot
         selected = list(self.config.limits.progress_signals)
         signals = {name: False for name in PROGRESS_SIGNALS}
@@ -66,7 +63,7 @@ class IdleWithOpenWorkTests(Fixture):
         created = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state=state, run=None, outcome="continue",
-            summary="Baseline sync", inbox_seen=generation,
+            summary="Baseline sync",
             wake_generation=wake, progress=progress, parent=snapshot["id"])
         self.project.snapshots.publish(created)
         return self.project.snapshots.get()
@@ -256,7 +253,7 @@ class IdleWithOpenWorkTests(Fixture):
                 with self.assertRaises(Denied):
                     validate_progress({**progress, "schema": invalid_schema})
             for bad in (
-                    None, {}, {**conversion, "wait_kind": "unsupported"},
+                    None, {}, {**conversion, "wait_kind": "Not An Identifier"},
                     {**conversion, "wait_kind": None if kind else "ci"},
                     {**conversion, "reason": "unsupported"},
                     {**conversion, "backoff_seconds": True},
@@ -358,13 +355,6 @@ class IdleWithOpenWorkTests(Fixture):
         snap = self.run_writer("continue", with_progress=True)
         self.assertIs(snap["progress"]["ready_work"], True)
         self.assertEqual(self.status_idle()["reason"], "has_progress")
-
-    def test_blocked_without_due_at_finish_records_not_ready(self):
-        question = stored_question_insight(self.project)
-        self.item("blocked-plain", "blocked", {"kind": "insight_decided", "insight": question["id"]})
-        snap = self.run_writer("wait")
-        self.assertIs(snap["progress"]["ready_work"], False)
-        self.assertEqual(self.status_idle()["reason"], "no_ready_work")
 
     def test_doing_counts_as_ready_at_finish(self):
         item = self.item("doing-item")

@@ -663,7 +663,6 @@ class EngineContinuationTests(ContinuationFixture):
         snapshot = self.store.create(self.store.capture_files(self.project.workspace),
             goal=self.project.goal, state=current["state"], run=source, outcome=outcome,
             summary="No ordinary wake", parent=current["id"], progress=progress,
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control().get("wake_generation", ""))
         return snapshot
 

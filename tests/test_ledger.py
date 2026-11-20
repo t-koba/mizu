@@ -117,7 +117,7 @@ class LedgerTests(Fixture):
         """Rows of a fresh index built from the files, in a separate store."""
         expected = index_rows(self.project.root)
         forget_ledger(self.project.root)
-        WorkItems(self.project.root, self.project.snapshots, self.project.insights).count_open()
+        WorkItems(self.project.root, self.project.snapshots, self.project.ledger).count_open()
         self.project.insights.unresolved_counts([])
         return expected, index_rows(self.project.root)
 
@@ -322,7 +322,7 @@ for _ in range(12):
         observed, errors, done = [], [], threading.Event()
 
         def read():
-            store = WorkItems(self.project.root, self.project.snapshots, self.project.insights)
+            store = WorkItems(self.project.root, self.project.snapshots, self.project.ledger)
             while not done.is_set():
                 try:
                     for row in store.current_items():

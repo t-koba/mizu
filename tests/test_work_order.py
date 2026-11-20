@@ -20,7 +20,7 @@ class WorkOrderTests(Fixture):
         snap = self.project.snapshots.create(
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Parked", run=None, outcome="done",
-            summary="park", wake_at=None, inbox_seen=self.project.insights.generation(),
+            summary="park", wake_at=None,
             wake_generation="test-wake", progress=progress, parent=cur["id"])
         self.project.snapshots.publish(snap)
         return snap
@@ -67,7 +67,7 @@ class WorkOrderTests(Fixture):
         self.project.work_items.transition(a["id"], expected_rev=1, status="doing", actor="worker")
         ctx = self.context("worker")
         full = json.loads(prompt_for(ctx))
-        delta = json.loads(prompt_delta_for(ctx, []))
+        delta = json.loads(prompt_delta_for(ctx))
         self.assertEqual(full["work_order"]["status"], "absent")
         self.assertEqual(delta["work_order"]["status"], "absent")
         self.assertEqual(self.project.work_order_status()["status"], "absent")
@@ -76,19 +76,19 @@ class WorkOrderTests(Fixture):
                                   "expected_rev": 0, "expected_generation": frozen})
         ctx2 = self.context("worker")
         self.assertEqual(json.loads(prompt_for(ctx2))["work_order"]["status"], "current")
-        self.assertEqual(json.loads(prompt_delta_for(ctx2, []))["work_order"]["status"], "current")
+        self.assertEqual(json.loads(prompt_delta_for(ctx2))["work_order"]["status"], "current")
         self.assertEqual(self.project.work_order_status()["status"], "current")
         # New actionable arrival moves both prompts and status to review_due.
         self.project.work_items.create(idempotency_key="b1", title="B", actor="worker")
         ctx3 = self.context("worker")
         self.assertEqual(json.loads(prompt_for(ctx3))["work_order"]["status"], "review_due")
-        self.assertEqual(json.loads(prompt_delta_for(ctx3, []))["work_order"]["status"], "review_due")
+        self.assertEqual(json.loads(prompt_delta_for(ctx3))["work_order"]["status"], "review_due")
         self.assertEqual(self.project.work_order_status()["status"], "review_due")
         # Corrupt store fails closed everywhere, never empty/current.
         (self.project.root / "work-order" / "current.json").write_text("{corrupt")
         ctx4 = self.context("worker")
         self.assertEqual(json.loads(prompt_for(ctx4))["work_order"]["status"], "unavailable")
-        self.assertEqual(json.loads(prompt_delta_for(ctx4, []))["work_order"]["status"], "unavailable")
+        self.assertEqual(json.loads(prompt_delta_for(ctx4))["work_order"]["status"], "unavailable")
         self.assertEqual(self.project.work_order_status()["status"], "unavailable")
 
     def test_delta_omitted_pending_bodies_share_full_generation_and_status(self):
@@ -105,7 +105,7 @@ class WorkOrderTests(Fixture):
         insight = self.project.insights.submit(source="worker", title="Pending", body="body", base_snapshot=None)
         ctx = delivered_context()
         with patch.object(self.project.insights, "projection", wraps=self.project.insights.projection) as projection:
-            delta = json.loads(prompt_delta_for(ctx, []))
+            delta = json.loads(prompt_delta_for(ctx))
             full = json.loads(prompt_for(ctx))
             self.assertEqual(projection.call_count, 1)
         self.assertEqual(delta["pending_insights"], [])
@@ -115,7 +115,7 @@ class WorkOrderTests(Fixture):
         self.assertEqual(generation, full["work_order"]["opening_generation"])
         ctx.handle("work_order", {"items": [item["id"]], "rationale": "reviewed",
                                   "expected_rev": 0, "expected_generation": generation})
-        fresh_delta = json.loads(prompt_delta_for(delivered_context(), []))
+        fresh_delta = json.loads(prompt_delta_for(delivered_context()))
         fresh_full = json.loads(prompt_for(delivered_context()))
         self.assertEqual(fresh_delta["pending_insights"], [])
         self.assertEqual([row["id"] for row in fresh_full["pending_insights"]], [insight["id"]])
@@ -127,13 +127,13 @@ class WorkOrderTests(Fixture):
         # A later arrival is not folded into the opening's backlog or generation.
         later = self.project.insights.submit(source="worker", title="Later", body="body", base_snapshot=None)
         with patch.object(self.project.insights, "projection", side_effect=AssertionError("mid-unit rescan")):
-            frozen_delta = json.loads(prompt_delta_for(ctx, []))
+            frozen_delta = json.loads(prompt_delta_for(ctx))
             frozen_full = json.loads(prompt_for(ctx))
         self.assertEqual(frozen_delta["open_insights"], delta["open_insights"])
         self.assertEqual(frozen_full["pending_insights"], full["pending_insights"])
         self.assertEqual(frozen_delta["work_order"]["opening_generation"], generation)
         self.assertEqual(frozen_full["work_order"]["status"], "current")
-        next_delta = json.loads(prompt_delta_for(delivered_context(), []))
+        next_delta = json.loads(prompt_delta_for(delivered_context()))
         self.assertIn(later["id"], next_delta["open_insights"]["ids"])
         self.assertEqual(next_delta["work_order"]["status"], "review_due")
         self.assertEqual(json.loads(prompt_for(delivered_context()))["work_order"]["status"], "review_due")
@@ -164,14 +164,14 @@ class WorkOrderTests(Fixture):
         self.assertNotEqual(fingerprint, new_fingerprint)
         self.assertEqual(ready, self.project.work_items.page_ready(limit=1, role_name="worker"))
         # An already-open unit keeps the exact generation and prompt projections.
-        frozen_delta = json.loads(prompt_delta_for(ctx, []))
+        frozen_delta = json.loads(prompt_delta_for(ctx))
         self.assertEqual(frozen_delta["work_order"]["status"], "current")
         self.assertEqual(frozen_delta["open_work_items"], original_prompt["open_work_items"])
         self.assertEqual(frozen_delta["ready_work"], original_prompt["ready_work"])
         self.assertEqual(frozen_delta["work_order"]["opening_generation"], shown["opening_generation"])
         fresh = self.context("worker")
         self.assertEqual(json.loads(prompt_for(fresh))["work_order"]["status"], "review_due")
-        self.assertEqual(json.loads(prompt_delta_for(fresh, []))["work_order"]["status"], "review_due")
+        self.assertEqual(json.loads(prompt_delta_for(fresh))["work_order"]["status"], "review_due")
         self.assertEqual(self.project.work_order_status()["status"], "review_due")
 
     def test_off_page_redecision_changes_order_fingerprint(self):
@@ -225,13 +225,13 @@ class WorkOrderTests(Fixture):
         self.assertEqual(ready_signature, self.project.work_items.page_ready(limit=1, role_name="worker")["signature"])
         fresh = self.context("worker")
         self.assertEqual(json.loads(prompt_for(fresh))["work_order"]["status"], "review_due")
-        self.assertEqual(json.loads(prompt_delta_for(fresh, []))["work_order"]["status"], "review_due")
+        self.assertEqual(json.loads(prompt_delta_for(fresh))["work_order"]["status"], "review_due")
         self.assertEqual(self.project.work_order_status()["status"], "review_due")
 
     def test_displayed_absent_generation_creates_first_plan_for_both_prompts(self):
         from mizu.unit_prompts import prompt_for, prompt_delta_for
         a = self.project.work_items.create(idempotency_key="first", title="A", actor="worker")["record"]["work_item"]
-        for build in (lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx, [])):
+        for build in (lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx)):
             with self.subTest(builder=build):
                 # Each builder gets an independent absent store.
                 root = self.project.root / "work-order"
@@ -251,7 +251,7 @@ class WorkOrderTests(Fixture):
     def test_absent_plan_is_unavailable_when_generation_fails(self):
         from unittest.mock import patch
         from mizu.unit_prompts import prompt_for, prompt_delta_for
-        for build in (lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx, [])):
+        for build in (lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx)):
             with self.subTest(builder=build), patch.object(plan, "generation_from_captured", side_effect=Denied("bad input")):
                 shown = json.loads(build(self.context("worker")))["work_order"]
                 self.assertEqual(shown["status"], "unavailable")
@@ -557,7 +557,7 @@ class WorkOrderTests(Fixture):
         # Mid-unit mutations do not rewrite the captured summary in either prompt.
         state["page"]["pending_count"] = 2
         state["page"]["events"] = [{"secret": "other"}]
-        delta = json.loads(prompt_delta_for(ctx, []))
+        delta = json.loads(prompt_delta_for(ctx))
         self.assertEqual(delta["decision_page"], full["decision_page"])
         self.assertEqual(delta["work_order"]["opening_generation"], generation)
         with patch.object(decision_delivery, "pending", return_value=state):
@@ -572,13 +572,13 @@ class WorkOrderTests(Fixture):
             self.assertEqual(self.project.work_order_status()["status"], "current")
             same = self.context("worker")
             decision_delivery.bind(same, state)
-            self.assertEqual(json.loads(prompt_delta_for(same, []))["work_order"]["opening_generation"], generation)
+            self.assertEqual(json.loads(prompt_delta_for(same))["work_order"]["opening_generation"], generation)
 
     def test_roles_without_grant_capture_prompts_without_hashing(self):
         from unittest.mock import patch
         from mizu.unit_prompts import prompt_for, prompt_delta_for
         for role in ("reporter", "consult"):
-            for build in (lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx, [])):
+            for build in (lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx)):
                 with self.subTest(role=role, builder=build), patch.object(
                         plan, "generation_from_captured", side_effect=AssertionError("unexpected hash")) as hashed:
                     shown = json.loads(build(self.context(role)))
@@ -930,14 +930,14 @@ class WorkOrderTests(Fixture):
         ctx.wait_events = list(ctx.project.insights.due_waits(role.name, snap)
                                + _ciw.pending(ctx.project.work_items, role.name))
         ctx.obligations = list(ctx.project.insights.pending_obligations(role.name))
-        shown = json.loads(prompt_delta_for(ctx, []))
+        shown = json.loads(prompt_delta_for(ctx))
         self.assertEqual(shown["work_order"]["status"], "absent")
         frozen = shown["work_order"]["opening_generation"]
         self.assertEqual(plan._frozen_generation(ctx), frozen)
         ctx.handle("work_order", {"items": [a["id"]], "rationale": "first",
                                   "expected_rev": shown["work_order"]["rev"],
                                   "expected_generation": frozen})
-        self.assertEqual(json.loads(prompt_delta_for(ctx, []))["work_order"]["status"], "current")
+        self.assertEqual(json.loads(prompt_delta_for(ctx))["work_order"]["status"], "current")
         self.project.work_items.create(idempotency_key="b1", title="B", actor="worker")
         self.project.insights.submit(source="worker", title="Mid", body="unit",
                                      base_snapshot=None, run="test")
@@ -947,7 +947,7 @@ class WorkOrderTests(Fixture):
                                             base_snapshot=None, run="test")
         self.project.insights.decide(sub2["id"], "reject", "no2", "", "test", expected_rev=1)
         self.assertEqual(plan._frozen_generation(ctx), frozen)
-        self.assertEqual(json.loads(prompt_delta_for(ctx, []))["work_order"]["status"], "current")
+        self.assertEqual(json.loads(prompt_delta_for(ctx))["work_order"]["status"], "current")
         ctx2 = self.context("worker")
         ctx2.role = role
         state2 = _delivery.pending(ctx2.project, role)
@@ -967,7 +967,7 @@ class WorkOrderTests(Fixture):
                                 + _ciw.pending(ctx2.project.work_items, role.name))
         ctx2.obligations = list(ctx2.project.insights.pending_obligations(role.name))
         self.assertNotEqual(plan._frozen_generation(ctx2), frozen)
-        self.assertEqual(json.loads(prompt_delta_for(ctx2, []))["work_order"]["status"], "review_due")
+        self.assertEqual(json.loads(prompt_delta_for(ctx2))["work_order"]["status"], "review_due")
 
     def test_acknowledged_input_moves_next_unit_for_full_and_delta(self):
         # Acknowledging a configured actionable input is a semantic set
@@ -1000,7 +1000,7 @@ class WorkOrderTests(Fixture):
         base = self.config.roles["worker"]
         role = dataclasses.replace(base, decision_events=("reject",))
         a = self.project.work_items.create(idempotency_key="a1", title="A", actor="worker")["record"]["work_item"]
-        for idx, build in enumerate((lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx, []))):
+        for idx, build in enumerate((lambda ctx: prompt_for(ctx), lambda ctx: prompt_delta_for(ctx))):
             with self.subTest(builder=build):
                 # Fresh store and fresh decision per builder.
                 import shutil

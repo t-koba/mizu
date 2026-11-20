@@ -488,7 +488,7 @@ class ResearchPromptTests(Fixture):
                                         expected_generation=0)
         from mizu.runtime import prompt_for, prompt_delta_for
         for prompt in (prompt_for(self.capped_context(["research_read"])),
-                       prompt_delta_for(self.capped_context(["research_read"]), [])):
+                       prompt_delta_for(self.capped_context(["research_read"]))):
             block = _json.loads(prompt)["research_state"]
             self.assertEqual(block["status"], "current")
             self.assertEqual(block["generation"], 1)
@@ -647,7 +647,7 @@ class RoleStateSessionTests(Fixture):
         self.assertEqual(full["research_state"]["status"], "current")
         self.assertEqual(full["research_state"]["generation"], 1)
         self.assertEqual(full["research_state"]["state"], STATE)
-        delta = _json.loads(prompt_delta_for(second, []))
+        delta = _json.loads(prompt_delta_for(second))
         self.assertEqual(delta["research_state"]["status"], "current")
         self.assertEqual(delta["research_state"]["generation"], 1)
 
@@ -694,7 +694,7 @@ class RoleStateSessionTests(Fixture):
         finally:
             self.config = real_config
         from mizu.runtime import prompt_for, prompt_delta_for
-        for prompt in (prompt_for(second), prompt_delta_for(second, [])):
+        for prompt in (prompt_for(second), prompt_delta_for(second)):
             parsed = _json.loads(prompt)["research_state"]
             self.assertEqual(parsed["status"], "truncated")
             self.assertEqual(parsed["generation"], 1)

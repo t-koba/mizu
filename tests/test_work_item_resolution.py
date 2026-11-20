@@ -204,7 +204,6 @@ class WaitResolutionTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace),
             goal=self.project.goal, state="Now: Parked", run=None, outcome="done",
             summary="Inputs already delivered", progress=progress,
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control()["wake_generation"], parent=current['id'])
         self.project.snapshots.publish(snapshot)
         return self.project.snapshots.get()

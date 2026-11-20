@@ -769,7 +769,6 @@ class EngineTests(Fixture):
             self.project.snapshots.capture_files(self.project.workspace), goal=self.project.goal,
             state="Now: Unchanged.\nNext: Keep waiting", run=None, outcome="wait",
             summary="Input-quiet baseline", wake_at=time.time() + 3600,
-            inbox_seen=self.project.insights.generation(),
             wake_generation=self.project.control()["wake_generation"], parent=base["id"])
         self.project.snapshots.publish(baseline)
         def finish_wait(ctx, prompt, profile):
@@ -975,7 +974,7 @@ class PromptProjectionTests(Fixture):
             context_include=("open_work_items",))
         self.assertNotIn("work_items_read", ctx.role.capabilities)
         full = json.loads(prompt_for(ctx))
-        delta = json.loads(prompt_delta_for(ctx, []))
+        delta = json.loads(prompt_delta_for(ctx))
         page = full["open_work_items"]
         self.assertEqual(delta["open_work_items"], page)
         self.assertEqual(len(page["items"]), 2)
@@ -1002,7 +1001,7 @@ class PromptProjectionTests(Fixture):
         worker = self.context("worker")
         full = prompt_for(worker)
         opening = json.loads(full)["unit"]
-        for prompt in (full, prompt_delta_for(worker, [])):
+        for prompt in (full, prompt_delta_for(worker)):
             decoded = json.loads(prompt)
             self.assertEqual(list(decoded)[0], "unit")
             self.assertEqual(decoded["unit"], opening)
@@ -1010,7 +1009,7 @@ class PromptProjectionTests(Fixture):
         worker_dir = worker.run_dir
         (worker_dir / "started.json").write_text(
             '{"run": %s, "started_at": "2026-10-18T00:00:00+00:00"}' % json.dumps(worker_dir.name))
-        for prompt in (prompt_for(worker), prompt_delta_for(worker, [])):
+        for prompt in (prompt_for(worker), prompt_delta_for(worker)):
             self.assertEqual(json.loads(prompt)["run"],
                              {"id": worker_dir.name, "started_at": "2026-10-18T00:00:00+00:00"})
 
@@ -1027,7 +1026,7 @@ class PromptProjectionTests(Fixture):
                 ctx.session_identity_capabilities = self.config.roles["worker"].capabilities
                 ctx.spend_role = self.config.roles["worker"]
                 full = json.loads(prompt_for(ctx))
-                delta = json.loads(prompt_delta_for(ctx, []))
+                delta = json.loads(prompt_delta_for(ctx))
                 surface = full["unit_tool_surface"]
                 self.assertEqual(surface, delta["unit_tool_surface"])
                 self.assertEqual(list(full)[:3], ["unit", "unit_tool_surface", "goal_digest"])
@@ -1079,7 +1078,7 @@ class PromptProjectionTests(Fixture):
         self.assertEqual(self.config.limits.work_items_prompt, 20)
         for role in ("worker", "searcher", "reviewer", "reporter", "consult"):
             context = self.context(role)
-            for prompt in (prompt_for(context), prompt_delta_for(context, [])):
+            for prompt in (prompt_for(context), prompt_delta_for(context)):
                 self.assertIn("open_work_items", json.loads(prompt))
                 self.assertEqual(json.loads(prompt)["open_work_items"]["overflow_count"], 0)
 
@@ -1234,7 +1233,7 @@ class PromptClockTests(Fixture):
         self.assertIn("+", prompt["now"].replace("Z", "+") if prompt["now"] else "+")
         keys = list(json.loads(prompt_for(self.context("worker"))).keys())
         self.assertEqual(keys[-2:], ["now", "timezone"])
-        delta = json.loads(prompt_delta_for(self.context("worker"), []))
+        delta = json.loads(prompt_delta_for(self.context("worker")))
         self.assertEqual(delta["timezone"], self.config.timezone)
         self.assertIn("now", delta)
         self.assertEqual(list(delta.keys())[-2:], ["now", "timezone"])
@@ -1244,7 +1243,7 @@ class PreviousReportTests(Fixture):
         import json
         from mizu.runtime import prompt_for, prompt_delta_for
         self.assertIsNone(json.loads(prompt_for(self.context("reporter")))["previous_report"])
-        self.assertIsNone(json.loads(prompt_delta_for(self.context("reporter"), []))["previous_report"])
+        self.assertIsNone(json.loads(prompt_delta_for(self.context("reporter")))["previous_report"])
         self.assertIsNone(json.loads(prompt_for(self.context("worker")))["previous_report"])
 
     def test_report_role_sees_previous_edition(self):
@@ -1262,7 +1261,7 @@ class PreviousReportTests(Fixture):
         # Capability-gated: worker sees none even with an edition recorded.
         self.assertIsNone(json.loads(prompt_for(self.context("worker")))["previous_report"])
         # Delta prompts carry it too so resumed editions stay current.
-        delta = json.loads(prompt_delta_for(self.context("reporter"), []))
+        delta = json.loads(prompt_delta_for(self.context("reporter")))
         self.assertEqual(delta["previous_report"]["artifact"], record["artifact"])
         # Clock stays last in both shapes.
         self.assertEqual(list(prompt.keys())[-2:], ["now", "timezone"])
@@ -1677,12 +1676,10 @@ class WrapUpTests(Fixture):
     def test_bounded_snapshot_runs_again(self):
         import time
         from mizu.runtime import should_run
-        gen = self.project.insights.generation()
         cap = self.project.snapshots.capture_files(self.project.workspace)
         parked = self.project.snapshots.create(
             cap, goal=self.project.goal, state="Wrapped.", run=None,
             outcome="bounded", summary="Hit the bound after sealing.", verification=None,
-            inbox_seen=gen,
             wake_generation=self.project.control().get("wake_generation", ""))
         self.project.snapshots.publish(parked)
         snap = self.project.snapshots.get()
@@ -1777,7 +1774,7 @@ class PromptOrderTests(Fixture):
                           "ready_work", "check_jobs", "check_continuation", "shared_checks", "acceptance_commands", "research_state", "capture_limit", "ci_branch",
                           "previous_report", "work_order", "run", "now", "timezone"])
         self.assertEqual(
-            list(json.loads(prompt_delta_for(ctx, [])).keys()),
+            list(json.loads(prompt_delta_for(ctx)).keys()),
             ["unit", "unit_tool_surface", "goal_digest", "admission", "external_check_wake",
              "published_snapshot", "snapshot_delta",
              "pending_insights", "open_insights", "open_work_items", "operator_records", "decision_events", "decision_receipt_diagnostics", "decision_task", "wait_events", "obligations",

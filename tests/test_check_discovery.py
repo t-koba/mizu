@@ -64,7 +64,7 @@ class DiscoveryTests(Fixture):
              patch('mizu.acceptance._retain', side_effect=AssertionError('proof mutation')):
             for role in ('worker', 'reviewer'):
                 ctx = self.context(role)
-                for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+                for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
                     with patch('mizu.acceptance.discover', wraps=acceptance.discover) as discover:
                         prompt = json.loads(build())
                     self.assertEqual(discover.call_count, 1)
@@ -111,7 +111,7 @@ class DiscoveryTests(Fixture):
         jobs, invalid = acceptance.discover(self.project)
         self.assertEqual(set(jobs), {healthy['id']})
         self.assertEqual(len(invalid), 70)
-        for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+        for text in (prompt_for(ctx), prompt_delta_for(ctx)):
             self.assert_diagnostic(json.loads(text)['check_discovery'], 70)
         self.assertFalse(check_jobs.pending(self.project, 'worker'))
         self.assertEqual(self.cache_bytes(), before)
@@ -137,7 +137,7 @@ class DiscoveryTests(Fixture):
                 self.assertEqual(invalid, {bad['id']: 'job_schema'})
                 self.assertEqual([j['id'] for j in check_jobs.list_jobs(self.project, 'worker')], [healthy['id']])
                 self.assertFalse(check_jobs.pending(self.project, 'reviewer'))
-                json.loads(prompt_delta_for(ctx, []))
+                json.loads(prompt_delta_for(ctx))
         for commands in ([{}], [None], ['ok'] * 33):
             self.leaf(bad).write_bytes(original)
             self.edit(bad, commands=commands)
@@ -192,12 +192,12 @@ class DiscoveryTests(Fixture):
         objects = self.project.snapshots.root / 'objects'
         before = {p.name for p in objects.iterdir()}
         with patch('mizu.snapshot.atomic_write', side_effect=AssertionError('snapshot write')):
-            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
                 prompt = json.loads(build())
                 self.assertEqual([j['id'] for j in prompt['shared_checks']], [job['id']])
                 self.assertTrue(prompt['shared_checks'][0]['requires_input_check'])
             source.write_bytes(b'new uncommitted source\n')
-            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
                 self.assertEqual(json.loads(build())['shared_checks'], [])
         self.assertEqual({p.name for p in objects.iterdir()}, before)
 
@@ -213,7 +213,7 @@ class DiscoveryTests(Fixture):
                 with patch.object(snapshots, attribute, limit):
                     return capture(*args, **kwargs)
             with self.subTest(attribute=attribute), patch.object(snapshots, 'capture_files', side_effect=limited):
-                for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+                for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
                     prompt = json.loads(build())
                     self.assertEqual(prompt['shared_checks'], [])
                     diagnostic = prompt['check_discovery']['shared_check_error']
@@ -226,7 +226,7 @@ class DiscoveryTests(Fixture):
         ctx, _ = self.queue()
         error = CaptureLimitExceeded('x' * 300 + '\udcff')
         with patch.object(self.project.snapshots, 'capture_files', side_effect=error):
-            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx, [])):
+            for build in (lambda: prompt_for(ctx), lambda: prompt_delta_for(ctx)):
                 prompt = json.loads(build())
                 self.assertEqual(prompt['shared_checks'], [])
                 self.assertEqual(prompt['check_discovery']['shared_check_error'], 'x' * 256)
@@ -268,7 +268,7 @@ class DiscoveryTests(Fixture):
             self.assertFalse(check_jobs.pending(self.project, 'worker'))
             self.assertFalse(check_jobs.list_jobs(self.project, 'worker'))
             self.assertFalse(check_jobs.available(ctx))
-            for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+            for text in (prompt_for(ctx), prompt_delta_for(ctx)):
                 value = json.loads(text)
                 self.assertEqual(value['check_jobs'], [])
                 self.assertEqual(value['shared_checks'], [])
@@ -346,7 +346,7 @@ class DiscoveryTests(Fixture):
         before = self.leaf(job).read_bytes()
         self.assertEqual(acceptance.discover(self.project)[1], {job['id']: 'job_file_bytes'})
         self.assertFalse(check_jobs.pending(self.project, 'worker'))
-        self.assert_diagnostic(json.loads(prompt_delta_for(ctx, []))['check_discovery'], 1)
+        self.assert_diagnostic(json.loads(prompt_delta_for(ctx))['check_discovery'], 1)
         self.assertEqual(self.leaf(job).read_bytes(), before)
 
     def symlink(self, source, target, **kwargs):
@@ -510,7 +510,7 @@ class DiscoveryTests(Fixture):
         self.assertEqual(check_jobs.continuation(self.project, 'reviewer', ctx.snapshot), None)
         self.assertEqual(self.cache_bytes(), before)
         self.leaf(job).write_bytes(b'not json')
-        for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+        for text in (prompt_for(ctx), prompt_delta_for(ctx)):
             self.assertIsNone(json.loads(text)['check_continuation'])
         self.assertIn('prior report', (check_jobs.root(self.project) / 'worker.wait.json').read_text())
 
@@ -534,7 +534,7 @@ class DiscoveryTests(Fixture):
                 expected = {**default, **{key: report[key].encode()[:budget].decode('utf-8', 'ignore')
                                          for key in ('summary', 'state')}}
                 self.assertEqual(check_jobs.continuation(self.project, 'worker', ctx.snapshot), expected)
-                for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+                for text in (prompt_for(ctx), prompt_delta_for(ctx)):
                     self.assertEqual(json.loads(text)['check_continuation'], expected)
         # Missing text stays empty; neither the policy nor 0 changes field shape.
         check_jobs.set_wait(self.project, 'worker', job['id'], continuation={'run': report['run']})
@@ -552,7 +552,7 @@ class DiscoveryTests(Fixture):
         for budget in (4000, 128000):
             self.project.config = dataclasses.replace(self.config, limits=dataclasses.replace(
                 self.config.limits, prior_role_report_preview_bytes=budget))
-            for text in (prompt_for(ctx), prompt_delta_for(ctx, [])):
+            for text in (prompt_for(ctx), prompt_delta_for(ctx)):
                 prompt = json.loads(text)
                 view = {k: prompt[k] for k in ('check_jobs', 'shared_checks', 'check_continuation', 'check_discovery')}
                 self.assertLessEqual(len(json.dumps(view, ensure_ascii=False).encode()), 65536)

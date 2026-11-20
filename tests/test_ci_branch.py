@@ -37,7 +37,7 @@ class CiBranchTests(Fixture):
         cfg = _configured(self, "mizu")
         self.assertEqual(json.loads(prompt_for(_context(self, cfg, "reporter")))["ci_branch"], "mizu")
         self.assertIsNone(json.loads(prompt_for(_context(self, cfg, "worker")))["ci_branch"])
-        self.assertEqual(json.loads(prompt_delta_for(_context(self, cfg, "reporter"), []))["ci_branch"], "mizu")
+        self.assertEqual(json.loads(prompt_delta_for(_context(self, cfg, "reporter")))["ci_branch"], "mizu")
 
     def _with_branch_line(self, line):
         text = self.file.read_text()
@@ -205,12 +205,10 @@ class CiWakeTests(Fixture):
         import time
         from mizu.runtime import should_run
         config = _red_config(self)
-        gen = self.project.insights.generation()
         cap = self.project.snapshots.capture_files(self.project.workspace)
         wait = self.project.snapshots.create(
             cap, goal=self.project.goal, state="Parked.", run=None,
             outcome="wait", summary="Parked on red.", verification=None,
-            inbox_seen=gen,
             wake_generation=self.project.control().get("wake_generation", ""))
         self.project.snapshots.publish(wait)
         snap = self.project.snapshots.get()

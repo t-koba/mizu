@@ -1101,7 +1101,7 @@ class PublicationCiWaitTests(CiWaitFixture):
                                        policy=policy)
         # Standalone construction retains safe, independent defaults.
         from mizu.work_items import WorkItems
-        standalone = WorkItems(store.root, store.snapshots, store.insights)
+        standalone = WorkItems(store.root, store.snapshots, store._ledger)
         self.assertEqual(standalone.publication_evidence, PublicationEvidence())
         self.assertEqual(ci_waits._resolved(standalone, wait)["sha"], SHA)
 
