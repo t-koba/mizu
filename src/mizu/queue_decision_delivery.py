@@ -42,6 +42,7 @@ from collections.abc import Mapping
 from .config import MAX_DECISION_RECEIPT_DIAGNOSTICS, role_decision_events_limit
 from .errors import Denied, LimitExceeded
 from .fs import DIGEST, MAX_FRAME, canonical, digest, identifier
+from .insights import resolve_insight_route
 from .kernel.queues import PAGE_MAX, allows
 
 PROPOSALS = "proposals"
@@ -352,11 +353,12 @@ def _decision_event(role_name: str, decision: dict, sources: str) -> dict | None
     return dict(payload, ack_token=token)
 
 
-def _pending_event(role_name: str, proposal: dict, configured_roles) -> dict | None:
+def _pending_event(role_name: str, proposal: dict, configured_roles,
+                   operator_default: str = "") -> dict | None:
     """Rebuild one exact ``insight.pending`` envelope payload."""
-    addressee = proposal["legacy_addressee"]
     source = proposal["legacy_source"]
-    target = source if addressee == "writer" else addressee
+    target, addressee = resolve_insight_route(
+        source, proposal["legacy_addressee"], operator_default)
     if target not in configured_roles or target != role_name:
         return None
     payload = {"title": proposal["title"], "body": proposal["body"], "source": source,
@@ -441,7 +443,8 @@ def _candidates(project, name, wanted, sources, include_insights):
         for item in proposals.values():
             if item["id"] not in live or item["id"] in decided:
                 continue
-            event = _pending_event(name, item, configured_roles)
+            event = _pending_event(name, item, configured_roles,
+                                   project.insights.operator_addressee)
             if event is not None:
                 insights.append(event)
     return reads[RECEIPTS], delivered, insights

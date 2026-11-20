@@ -1512,7 +1512,8 @@ class Config:
     selectors: dict = dataclasses.field(default_factory=dict)
     tzinfo: dt.tzinfo | None = None
     insight_decisions: dict = dataclasses.field(default_factory=lambda: {
-        "work_item_intent_default": "create", "work_item_intent_by_source": {}})
+        "work_item_intent_default": "create", "work_item_intent_by_source": {},
+        "operator_addressee": ""})
 
     #: Disabled unless the operator designates reproducible, excluded roots.
     workspace_cache: WorkspaceCache = dataclasses.field(default_factory=WorkspaceCache)
@@ -1620,8 +1621,13 @@ def load(file: Path) -> Config:
     from .host_records import configuration as kind_configuration
     kinds = kind_configuration(data.get("record_kinds", {}))
     decisions = data.get("insight_decisions", {})
-    keys(decisions, {"work_item_intent_default", "work_item_intent_by_source"}, "insight_decisions")
-    decisions = {"work_item_intent_default": "create", "work_item_intent_by_source": {}, **decisions}
+    keys(decisions, {"work_item_intent_default", "work_item_intent_by_source",
+                     "operator_addressee"}, "insight_decisions")
+    decisions = {"work_item_intent_default": "create", "work_item_intent_by_source": {},
+                 "operator_addressee": "", **decisions}
+    operator_addressee = string(decisions["operator_addressee"],
+                                "insight_decisions.operator_addressee")
+    decisions["operator_addressee"] = operator_addressee
     if decisions["work_item_intent_default"] not in ("create", "none"):
         raise ConfigError("insight_decisions.work_item_intent_default must be create or none")
     sources = decisions["work_item_intent_by_source"]
@@ -2101,6 +2107,11 @@ def load(file: Path) -> Config:
                            context_exclude=context_exclude, **evidence_sources)
     if not roles:
         raise ConfigError("At least one role is required")
+    if operator_addressee:
+        if not ID.fullmatch(operator_addressee) or operator_addressee in RESERVED_ROLE_NAMES:
+            raise ConfigError("Invalid insight_decisions.operator_addressee name")
+        if operator_addressee not in roles:
+            raise ConfigError(f"insight_decisions.operator_addressee is not a configured role: {operator_addressee}")
     consult_role = string(data.get("consult_role", ""), "consult_role")
     if consult_role:
         if not ID.fullmatch(consult_role):

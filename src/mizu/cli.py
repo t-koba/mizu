@@ -145,6 +145,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--wait", default=None, help="Structured defer wait: deadline:<ISO-at> | code_change | insight_decided:<id> | dependency:<recipient>:<insight>:<rev>:<accept|modify|reject>")
     p.add_argument("--expected-rev", type=int, default=None, help="Compare-and-swap revision for revise/decide/withdraw")
     p.add_argument("--origin", default=None, help="Opaque origin label recorded alongside the operator authority (submit only)")
+    p.add_argument("--addressee", default=None,
+                   help="Explicit insight addressee for submit/revise: operator or a configured project role; "
+                        "omitted routes an operator submission to the configured default recipient")
     p = sub.add_parser("publication", help="Record or list durable publication receipts")
     publication = p.add_subparsers(dest="publication_command", required=True)
     record = publication.add_parser("record", help="Record an operator-run publication receipt; create-only and idempotent")
@@ -400,6 +403,13 @@ def _cmd_insight(config, project, args):
         raise ConfigError("--after-rev applies only to insight history")
     if args.action != "decide" and args.accepted_scope is not None:
         raise ConfigError("--accepted-scope applies only to insight decide")
+    if args.addressee is not None and args.action not in ("submit", "revise"):
+        raise ConfigError("--addressee applies only to insight submit/revise")
+    explicit_addressee = {}
+    if args.addressee is not None:
+        if args.addressee != "operator" and args.addressee not in project.roles:
+            raise ConfigError("--addressee must be operator or a configured project role")
+        explicit_addressee["addressee"] = args.addressee
     if args.action == "page":
         return project.insights.list_page(scope=args.scope or "live", limit=args.limit if args.limit is not None else 30,
                                           cursor=args.cursor)
@@ -432,7 +442,7 @@ def _cmd_insight(config, project, args):
         with lock(project.root / "locks/publication.lock", blocking=False):
             return project.insights.revise(args.id, source="operator", title=args.title, body=body,
                                            base_snapshot=project.snapshots.get()["id"],
-                                           expected_rev=args.expected_rev)
+                                           expected_rev=args.expected_rev, **explicit_addressee)
     if args.action == "decide":
         if not args.id or not args.decision:
             raise ConfigError("Insight decide requires --id and --decision")
@@ -470,7 +480,7 @@ def _cmd_insight(config, project, args):
     with lock(project.root / "locks/publication.lock", blocking=False):
         return project.insights.submit(source="operator", title=args.title, body=body,
                                        base_snapshot=project.snapshots.get()["id"], insight_id=args.id,
-                                       origin=args.origin)
+                                       origin=args.origin, **explicit_addressee)
 
 
 def _cmd_editor_export(config, project, args):

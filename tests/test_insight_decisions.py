@@ -201,7 +201,8 @@ class WorkItemIntentTests(DecisionRevisionFixture):
         self.file.write_text(base[:start] + base[end:])
         config = load(self.file)
         self.assertEqual(config.insight_decisions, {"work_item_intent_default": "create",
-                                                   "work_item_intent_by_source": {}})
+                                                   "work_item_intent_by_source": {},
+                                                   "operator_addressee": ""})
         self.project = Project(config, self.project.name)
         self.assertEqual(self.decide(self.submit("operator"))["work_item_intent"], "create")
 

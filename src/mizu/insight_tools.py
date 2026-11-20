@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from .errors import Denied
 from .fs import PREVIEW_BYTES, page, read_json, write_json
-from .insights import MAX_DECISION_EVENT_BYTES, _effective_decision, insight_metadata
+from .insights import (MAX_DECISION_EVENT_BYTES, _effective_decision, insight_metadata,
+                       insight_recipient)
 from .protocol import operation_allowed
 
 #: Explicit paged insight retrieval may walk the whole pending set (tool
@@ -12,26 +13,27 @@ from .protocol import operation_allowed
 INSIGHT_RETRIEVAL_LIMIT = 1000
 
 
-def display_insight(record: dict, capabilities) -> dict:
+def display_insight(record: dict, capabilities, operator_addressee: str = "") -> dict:
     """Separate routing attention from the reader's decision capability.
 
-    Stored ``writer`` routes to the submitting source, never the reader.
-    Decision authority depends only on the tool grant, not that destination.
-    This projection never mutates storage or digest-bound event payloads.
+    Stored ``writer`` routes to the submitting source, or to the configured
+    operator default recipient, never to the reader. Decision authority
+    depends only on the tool grant, not that destination. This projection
+    never mutates storage or digest-bound event payloads.
     """
     projected = dict(record)
     if "addressee" in projected:
         target = projected.pop("addressee")
         source = record.get("source")
-        if target == "writer" and isinstance(source, str) and source:
-            target = source
+        if isinstance(source, str) and source:
+            target = insight_recipient(source, target, operator_addressee)
         projected["attention"] = target
     if record.get("decision") is None and operation_allowed("decide", capabilities):
         projected["decide"] = "you"
     return projected
 
 
-def display_decision_events(events, capabilities) -> list:
+def display_decision_events(events, capabilities, operator_addressee: str = "") -> list:
     """Project delivered flat ``insight.pending`` rows without changing identity.
 
     Runtime delivers each pending row as ``dict(payload, ack_token=...)``:
@@ -43,7 +45,7 @@ def display_decision_events(events, capabilities) -> list:
     for event in events:
         if (isinstance(event, dict) and event.get("kind") == "insight.pending"
                 and "addressee" in event):
-            projected.append(display_insight(event, capabilities))
+            projected.append(display_insight(event, capabilities, operator_addressee))
         else:
             projected.append(event)
     return projected
@@ -68,7 +70,8 @@ def insights(context, args: dict) -> dict:
             status = context.project.work_items.submitter_status(record["id"])
             if status is not None:
                 record["work_item_status"] = status
-        return display_insight(record, context.role.capabilities)
+        return display_insight(record, context.role.capabilities,
+                               context.config.insight_decisions.get("operator_addressee", ""))
     # Prompt selection stays at pending_insights; explicit retrieval pages
     # a stable offset-independent selection capped at INSIGHT_RETRIEVAL_LIMIT,
     # so overflow items remain discoverable and small pages enumerate each
@@ -81,7 +84,9 @@ def insights(context, args: dict) -> dict:
     projection = context.project.insights.projection(
         limit=INSIGHT_RETRIEVAL_LIMIT, pending=action is None, action=action)
     response = page(projection['items'],args.get('offset',0),args.get('limit',1000),maximum=PREVIEW_BYTES*2)
-    response['insights'] = [display_insight(row, context.role.capabilities)
+    response['insights'] = [display_insight(
+                                row, context.role.capabilities,
+                                context.config.insight_decisions.get("operator_addressee", ""))
                             for row in response.pop('items')]
     response['total'] = projection['total']
     response['selection_truncated'] = projection['truncated']

@@ -4,7 +4,7 @@ import json
 
 from support import Fixture, ScriptDriver
 from mizu.runtime import Engine
-from mizu.insights import insight_metadata
+from mizu.insights import insight_metadata, insight_recipient
 from mizu.unit_prompts import prompt_delta_for, prompt_for
 
 
@@ -36,6 +36,10 @@ class InsightAddresseeDisplayTests(Fixture):
             "by-id": [ctx.handle("insights", {"id": item["id"]}) for item in items],
         }
 
+    def _attention(self, source, addressee="writer"):
+        return insight_recipient(
+            source, addressee, self.config.insight_decisions["operator_addressee"])
+
     def _assert_display(self, row, attention, *, can_decide):
         self.assertNotIn("addressee", row)
         self.assertEqual(row["attention"], attention)
@@ -53,7 +57,7 @@ class InsightAddresseeDisplayTests(Fixture):
             with self.subTest(role=role, surface=surface):
                 self.assertEqual({row["id"] for row in rows}, {item["id"] for item in items})
                 for row in rows:
-                    self._assert_display(row, row["source"], can_decide=can_decide)
+                    self._assert_display(row, self._attention(row["source"]), can_decide=can_decide)
         for item, original in zip(items, stored):
             record = self.project.insights.read(item["id"])
             self.assertEqual(record, original)
@@ -89,7 +93,7 @@ class InsightAddresseeDisplayTests(Fixture):
                 self.assertEqual(len(rows), 1)
                 by_id = ctx.handle("insights", {"id": item["id"]})
                 for row in (rows[0], by_id):
-                    self._assert_display(row, "operator", can_decide=False)
+                    self._assert_display(row, self._attention("operator"), can_decide=False)
                     self.assertEqual(row["decision"]["action"], action)
         # Deferred insights remain in the pending inventory but are decided.
         for surface, rows in self._reader_rows(ctx, []).items():
@@ -98,7 +102,7 @@ class InsightAddresseeDisplayTests(Fixture):
             with self.subTest(surface=surface):
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["decision"]["action"], "defer")
-                self._assert_display(rows[0], "operator", can_decide=False)
+                self._assert_display(rows[0], self._attention("operator"), can_decide=False)
 
     def test_revision_reopens_decision_mark_on_every_surface(self):
         item = self._submit()
@@ -112,7 +116,7 @@ class InsightAddresseeDisplayTests(Fixture):
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["rev"], 2)
                 self.assertIsNone(rows[0]["decision"])
-                self._assert_display(rows[0], "operator", can_decide=True)
+                self._assert_display(rows[0], self._attention("operator"), can_decide=True)
 
     def _assert_event_projection(self, event):
         original = deepcopy(event)
@@ -121,12 +125,12 @@ class InsightAddresseeDisplayTests(Fixture):
             ctx.decision_events = [event]
             for prompt in (prompt_for(ctx), prompt_delta_for(ctx, [])):
                 row = json.loads(prompt)["decision_events"][0]
-                target = event["target"]
-                self._assert_display(row, target, can_decide=role == "worker")
+                self._assert_display(row, self._attention(event["source"], event["addressee"]),
+                                     can_decide=role == "worker")
                 # Only the displayed routing/decision fields change; all other
                 # row content and the ack binding stay exact.
                 expected = {k: v for k, v in event.items() if k != "addressee"}
-                expected["attention"] = target
+                expected["attention"] = self._attention(event["source"], event["addressee"])
                 if role == "worker":
                     expected["decide"] = "you"
                 self.assertEqual(row, expected)

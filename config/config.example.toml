@@ -145,6 +145,9 @@ git_output_bytes = 8388608    # Captured index stdout+stderr; rev-parse keeps a 
 # each accept/modify may override them with work_item_intent = "create".
 [insight_decisions]
 work_item_intent_default = "create"
+# Operator insights without an explicit addressee notify this configured role.
+# Empty keeps operator submissions in the host inbox (no model role wake).
+operator_addressee = "worker"
 [insight_decisions.work_item_intent_by_source]
 operator = "none"
 vcs = "none"

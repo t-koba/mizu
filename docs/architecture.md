@@ -452,9 +452,15 @@ roles plus the two named attention targets. These fields are optional tool
 inputs, not decision authority. Undecided current revisions now route a bounded
 `kind=insight.pending` event through the existing `decision_events` transport to
 the configured **project** role. `writer` means the submitting source role, not
-the project's publishing role. `operator` (including an operator source's writer
-alias) stays in the human host open-insight inbox: no model role, human read-ack,
-or operator wake is created. A removed/unconfigured destination is isolated:
+the project's publishing role. An operator submission with the default `writer`
+alias is resolved at read/delivery time to `[insight_decisions].operator_addressee`
+when that configured recipient is set, so the deciding project role receives the
+pending event and wake; attention names that same role. Stored records stay
+byte-unchanged, so undecided operator insights created before the setting exist
+remain deliverable without resubmission. An explicit `operator` addressee stays
+in the human host open-insight inbox: no model role or wake is created. The
+operator CLI accepts `--addressee` on submit/revise to name `operator` or a
+configured project role explicitly. A removed/unconfigured destination is isolated:
 it stays visibly unresolved in the host inbox with no fallback destination or
 inferred resolution and never blocks valid routes for other configured
 recipients; malformed sources still fail closed. Legacy omissions do not

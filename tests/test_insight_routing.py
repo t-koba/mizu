@@ -71,12 +71,19 @@ class InsightRoutingLegacyTests(Fixture):
         history_write_json(path, record)
         self.assertEqual([e['insight'] for e in self.pending()['events']], [addressed['id']])
         self.assertEqual([e['insight'] for e in self.pending('searcher')['events']], [own['id']])
-        self.assertEqual(self.pending('worker')['events'], [])
+        # An operator's undecided writer alias resolves at read time to the
+        # configured default recipient; the stored record stays unchanged.
+        worker_events = self.pending('worker')['events']
+        self.assertEqual([e['insight'] for e in worker_events], [human_own['id']])
+        self.assertEqual(worker_events[0]['addressee'],
+                         self.config.insight_decisions['operator_addressee'])
         self.assertEqual(self.pending('reporter')['events'], [])
         row = self.pending()['events'][0]
         self.assertEqual((row['kind'], row['insight_kind'], row['urgency'], row['target']),
                          ('insight.pending', 'proposal', 'high', 'reviewer'))
-        self.assertEqual({human['id'], human_own['id']} & {e['insight'] for e in self.pending()['events']}, set())
+        self.assertNotIn(human['id'], {e['insight'] for e in worker_events})
+        self.assertEqual({human['id'], human_own['id']}
+                         & {e['insight'] for e in self.pending()['events']}, set())
         with self.assertRaises(Denied):
             delivery.pending(self.project, replace(self.config.roles['reviewer'], name='operator'))
         if self.shared:

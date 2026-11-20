@@ -152,7 +152,8 @@ class Project:
                                  history_entries=config.limits.insight_history_entries,
                                  kernel_shadow=KernelShadow(self.kernel_objects),
                                  work_item_intent_default=config.insight_decisions["work_item_intent_default"],
-                                 work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"])
+                                 work_item_intent_by_source=config.insight_decisions["work_item_intent_by_source"],
+                                 operator_addressee=config.insight_decisions["operator_addressee"])
         self.insights.snapshots = self.snapshots
         # The same authority marker switches decision reads and the live writer.
         from .queue_decision_delivery import DecisionQueueWriter

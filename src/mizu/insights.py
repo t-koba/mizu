@@ -169,6 +169,36 @@ INSIGHT_DELIVERY_POLICIES = {"insight.decision": INSIGHT_DECISION_POLICY,
                              "insight.pending": INSIGHT_PENDING_POLICY}
 
 
+def insight_recipient(source: str, addressee: str, operator_addressee: str = "") -> str:
+    """Resolve a stored addressee to the role that attention names.
+
+    A stored ``writer`` normally routes to the submitting source. For an
+    operator submission, an operator-selected default role takes that place
+    when configured; an explicit addressee is always authoritative. Pure
+    read-time resolution: no stored record or digest-bound payload changes.
+    """
+    if addressee == "writer" and source == "operator" and operator_addressee:
+        return operator_addressee
+    if addressee == "writer":
+        return source
+    return addressee
+
+
+def resolve_insight_route(source: str, addressee: str,
+                          operator_addressee: str = "") -> tuple[str, str]:
+    """Return ``(target, emitted_addressee)`` for a pending projection.
+
+    The emitted addressee is the resolved value so the unchanged pending
+    validation (target = source if addressee == "writer" else addressee)
+    stays sound while attention names the deciding role.
+    """
+    if source == "operator" and addressee == "writer" and operator_addressee:
+        emitted = operator_addressee
+    else:
+        emitted = addressee
+    return insight_recipient(source, addressee, operator_addressee), emitted
+
+
 class CorruptDecisionReceipt(Exception):
     """One safely-read per-token receipt has invalid content/semantics.
 
@@ -481,8 +511,10 @@ class Insights:
                  decision_receipt_diagnostics: int = DEFAULT_DECISION_RECEIPT_DIAGNOSTICS,
                  decision_reconciliation_bytes: int = DEFAULT_DECISION_RECONCILIATION_BYTES,
                  history_entries: int = 1000,
+                 operator_addressee: str = "",
                  kernel_shadow: KernelShadow | None = None):
         self.root, self.maximum = root, maximum
+        self.operator_addressee = operator_addressee
         self._automatic_archive_last_monotonic = None
         self._automatic_archive_last_interval = None
         #: Current-state index shared with the work items of the same project.
@@ -2143,9 +2175,11 @@ replacement insight without implying rejected substance.
 
         Candidates are live revisions without an effective decision (including
         a deferral, which keeps its decision delivery) addressed to the role,
-        whether by its own submission (``writer``) or by name. Unrelated and
-        decided inbox history is never scanned, and legacy omissions never
-        invent a route. ``paths`` restricts the candidates to those records.
+        whether by its own submission (``writer``), by name, or by the
+        configured default for an operator submission. Routes are resolved
+        here at read time, so unchanged stored records need no rewrite.
+        Unrelated and decided inbox history is never scanned. ``paths``
+        restricts the candidates to those records.
         An unreadable live record or decision refuses the read.
         """
         identifier(role_name)
@@ -2155,15 +2189,18 @@ replacement insight without implying rejected substance.
             found = _rows(db, "SELECT i.item FROM insights i LEFT JOIN decisions d "
                               "ON d.insight_id = i.id AND d.rev = i.rev "
                               "WHERE i.live = 1 AND d.insight_id IS NULL AND "
-                              "((i.addressee = 'writer' AND i.source = ?) OR i.addressee = ?) "
-                              "ORDER BY i.id", (role_name, role_name))
+                              "((i.addressee = 'writer' AND i.source = ?) OR i.addressee = ? "
+                              "OR (i.addressee = 'writer' AND i.source = 'operator' AND ? = ?)) "
+                              "ORDER BY i.id", (role_name, role_name,
+                                                self.operator_addressee, role_name))
         for (raw,) in found:
             item = json.loads(raw)
             if stems is not None and item["id"] not in stems:
                 continue
             metadata = insight_metadata(item)
-            addressee = metadata["addressee"]
-            target = item["source"] if addressee == "writer" else addressee
+            stored_addressee = metadata["addressee"]
+            target, addressee = resolve_insight_route(
+                item["source"], stored_addressee, self.operator_addressee)
             if target not in configured_roles or target != role_name:
                 continue
             payload = {k: item[k] for k in ("title", "body", "source", "created_at")}
