@@ -1648,6 +1648,18 @@ CALLS = {
             "args.get('limit', 25)", 'mechanism',
             'runtime / ready-work tool defaults to its compact bounded page'),
     },
+    'context_vcs_read_tools.py': {
+        ('ContextVcsReadToolsMixin._op_vcs_read_publications',
+         'Publication.list_receipts', 'limit', 0): (
+            '100', 'mechanism', 'runtime / publication receipt public page bound'),
+        ('ContextVcsReadToolsMixin._op_vcs_read_ci_requests',
+         'CiRequests(self.project.root, self.config.ci_requests).daily', 'limit', 0): (
+            '100', 'mechanism', 'runtime / CI-request public page bound'),
+        ('ContextVcsReadToolsMixin._op_vcs_read_ci_costs',
+         'CiRequests(self.project.root, self.config.ci_requests).page', 'limit', 0): (
+            "args.get('limit', 8)", 'policy',
+            'runtime / caller-selected CI-cost dispatch page default'),
+    },
     'context_check_tools.py': {
         ('ContextCheckToolsMixin._op_check_job', 'check_jobs.logs', 'limit', 0): (
             "args.get('limit', 8192)", 'safety',
@@ -1656,15 +1668,6 @@ CALLS = {
     'runtime.py': {
         ('_has_ready_work', 'project.work_items.page_ready', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row readiness existence check'),
-        ('Context._op_vcs_read_publications', 'Publication.list_receipts', 'limit', 0): (
-            '100', 'mechanism', 'runtime / publication receipt public page bound'),
-        ('Context._op_vcs_read_ci_requests',
-         'CiRequests(self.project.root, self.config.ci_requests).daily', 'limit', 0): (
-            '100', 'mechanism', 'runtime / CI-request public page bound'),
-        ('Context._op_vcs_read_ci_costs',
-         'CiRequests(self.project.root, self.config.ci_requests).page', 'limit', 0): (
-            "args.get('limit', 8)", 'policy',
-            'runtime / caller-selected CI-cost dispatch page default'),
         ('Engine._dispatch_state', 'decision_delivery.pending', 'limit', 0): (
             '1', 'mechanism', 'runtime / one-row pending-decision dispatch check'),
         ('Engine._run', 'read_json', 'max_bytes', 0): (
