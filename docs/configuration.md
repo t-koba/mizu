@@ -3371,8 +3371,9 @@ For existing `close`/`merge`/`retire` recovery, re-observe after a failed mutati
 Configures the operator-owned offline-input adapter. `src/mizu/materialize.py`
 (`invoke`, `parse_output`, `load_source`) implements the adapter contract and
 the retained-receipt validation; `src/mizu/fs.py` (`safe_write`) implements
-the atomic relative writer; `src/mizu/runtime.py` (`Context._op_materialize`)
-implements the grant-gated `materialize` tool.
+the atomic relative writer; `src/mizu/context_role_tools.py`
+(`ContextRoleToolsMixin._op_materialize`, mixed into `Context`) implements the
+grant-gated `materialize` tool.
 
 | Key | Default | Description |
 |---|---|---|

@@ -46,6 +46,16 @@ class ContextRoleToolsTests(unittest.TestCase):
             self.assertEqual(Context._DISPATCH["materialize"](context, args), {"materialize": 1})
             materialize_mod.op_materialize.assert_called_once_with(context, args)
 
+    def test_materialize_doc_names_the_current_owner(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "docs" / "configuration.md").read_text(encoding="utf-8")
+        module = Context._op_materialize.__module__
+        owner_path = "src/" + module.replace(".", "/") + ".py"
+        self.assertIn("`" + owner_path + "`", text)
+        self.assertIn("ContextRoleToolsMixin._op_materialize", text)
+        self.assertNotIn("`src/mizu/runtime.py` (`Context._op_materialize`)", text)
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
