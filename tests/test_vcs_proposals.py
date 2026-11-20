@@ -8,12 +8,23 @@ from pathlib import Path
 from support import Fixture
 from mizu import vcs
 from mizu.errors import Denied
-from mizu.fs import PREVIEW_BYTES, canonical, digest, read_json
+from mizu.fs import PREVIEW_BYTES, read_json
 from mizu.runtime import poll_proposals, poll_project_vcs, refresh_poll_state
 from unittest import mock
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+
+#: The default config declares this host-writable queue. Proposal observations
+#: are appended there instead of being kept as in-memory insight facts.
+OBSERVATION_QUEUE = "proposals"
+
+
+def observe_into(fixture):
+    """Bind the project to a declared observation queue for record assertions."""
+    fixture.project.config = dataclasses.replace(
+        fixture.project.config,
+        vcs={**fixture.project.config.vcs, "observation_queue": OBSERVATION_QUEUE})
 
 
 def adapter_settings(code, timeout=5, maximum=524288):
@@ -142,26 +153,35 @@ class ProposalToolTests(Fixture):
 
 
 class ProposalRecordTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        observe_into(self)
+
     def test_record_rejects_bad_proposals(self):
         with self.assertRaises(Denied):
             vcs.record_proposal_state(self.project, dict(proposal(), id=""))
         with self.assertRaises(Denied):
             vcs.record_proposal_state(self.project, {"id": "x"})
 
-    def test_stable_id_ignores_facts(self):
-        stable_id = vcs.proposal_insight_id("forge:owner/repo#1")
-        self.assertEqual(len(stable_id),
-                         len("proposal-") + vcs.MAX_PROPOSAL_INSIGHT_ID_SUFFIX_CHARS)
-        self.assertRegex(stable_id, r"^proposal-[0-9a-f]+$")
-        self.assertEqual(stable_id, vcs.proposal_insight_id("forge:owner/repo#1"))
-        self.assertNotEqual(stable_id, vcs.proposal_insight_id("forge:owner/repo#2"))
+    def test_facts_derive_stable_queue_message_id(self):
+        row = proposal()
+        first = vcs.record_proposal_state(self.project, row)
+        second = vcs.record_proposal_state(self.project, row)
+        self.assertEqual(first["id"], second["id"])
+        self.assertTrue(first["changed"])
+        self.assertFalse(second["changed"])
+        self.assertRegex(first["id"], r"^[0-9a-f]{32}$")
+        changed = dict(row, checks=[])
+        updated = vcs.record_proposal_state(self.project, changed)
+        self.assertTrue(updated["changed"])
+        self.assertNotEqual(updated["id"], first["id"])
         row = proposal()
         row["id"] = "x" * 128
         title, _ = vcs.proposal_facts(vcs.parse_proposals({"proposals": [row]})[0])
-        self.assertLessEqual(len(title), vcs.MAX_PROPOSAL_INSIGHT_TITLE_CHARS)
+        self.assertLessEqual(len(title), vcs.MAX_PROPOSAL_TITLE_CHARS)
         self.assertEqual(title, f"Proposal {'x' * 128} open")
         with self.assertRaises(Denied):
-            vcs.proposal_insight_id("")
+            vcs.parse_proposals({"proposals": [dict(row, id="")]})
 
 
 def tombstoned_proposal(state="closed"):
@@ -180,6 +200,10 @@ def reviewed_proposal():
 
 
 class ProposalSchemaV2Tests(Fixture):
+    def setUp(self):
+        super().setUp()
+        observe_into(self)
+
     def test_deleted_fork_head_is_explicit_tombstone(self):
         config = dataclasses.replace(
             self.config, vcs=adapter_settings(
@@ -299,7 +323,8 @@ class ProposalSchemaV2Tests(Fixture):
         with self.assertRaises(Denied):
             vcs.read_via(self.config.vcs, "proposals", {"cursor": "c\x1b"})
         with self.assertRaises(Denied):
-            vcs.proposal_insight_id("forge:owner/repo#1\u202e")
+            vcs.record_proposal_state(self.project,
+                                      dict(base, id="forge:owner/repo#1\u202e"))
 
     def test_current_shape_still_validates(self):
         # The working adapter shape gains unknown reviews/completeness,
@@ -313,9 +338,13 @@ class ProposalSchemaV2Tests(Fixture):
         self.assertIsNone(out["proposals"][0]["reviews"])
 
 class ProposalPollingTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        observe_into(self)
+
     def _config(self, **updates):
         settings = {**self.config.vcs, "command": ["offline-vcs"],
-                    "poll_enabled": True, "poll_proposals_enabled": True,
+                    "poll_enabled": True, "observation_queue": OBSERVATION_QUEUE,
                     **updates}
         return dataclasses.replace(self.config, vcs=settings)
 
@@ -324,7 +353,7 @@ class ProposalPollingTests(Fixture):
         reader = lambda settings, op, params: calls.append((op, params)) or {
             "proposals": [], "complete": True, "cursor": None}
         state = {}
-        for config in (self._config(poll_proposals_enabled=False),
+        for config in (self._config(observation_queue=""),
                        self._config(poll_enabled=False),
                        self._config(command=[])):
             self.assertIsNone(poll_proposals(config, self.project, state,
@@ -338,8 +367,7 @@ class ProposalPollingTests(Fixture):
 
     def test_complete_inventory_survives_restart_and_pages_without_event_exposure(self):
         row = proposal()
-        title, body = vcs.proposal_facts(row, enumeration_complete=True)
-        expected = {row["id"]: digest(canonical({"title": title, "body": body}))}
+        expected = {row["id"]: ["feature", "main"]}
         responses = [
             {"proposals": [row], "complete": True},
             {"proposals": [], "complete": False, "cursor": "next-page"},
@@ -356,18 +384,27 @@ class ProposalPollingTests(Fixture):
                 events = poll_project_vcs(self._config(), self.project, state,
                                           now=tick * 30, interval=15)
                 self.assertTrue(events[0]["ok"], events)
-                self.assertNotIn("proposal_complete_facts", json.dumps(events))
-                self.assertEqual(state["proposal_complete_facts"], inventory)
+                self.assertNotIn("proposal_refs", json.dumps(events))
+                self.assertEqual(state["proposal_refs"], inventory)
                 self.assertEqual(read_json(self.project.root / "vcs-poll.json")[
-                    "proposal_complete_facts"], inventory)
+                    "proposal_refs"], inventory)
 
-    def test_refresh_inventory_cannot_retain_stale_in_memory_facts(self):
-        for shared in ({}, [], {"proposal_complete_facts": {}},
-                       {"proposal_complete_facts": None}):
-            state = {"proposal_complete_facts": {"stale": "a" * 64}}
-            refresh_poll_state(state, shared)
-            self.assertEqual(state["proposal_complete_facts"],
-                             shared.get("proposal_complete_facts") if isinstance(shared, dict) else None)
+    def test_refresh_proposal_refs_is_authoritative_when_empty(self):
+        # An authoritative empty map clears stale refs; an absent or corrupt
+        # one leaves them in place, which only preserves more branches against
+        # retirement. Either way an old daemon cannot revive cleared refs.
+        stale = {"stale": ["feature"]}
+        for shared, expected in (
+                ({}, stale),
+                ([], stale),
+                ({"proposal_refs": None}, stale),
+                ({"proposal_refs": {}}, {}),
+                ({"proposal_refs": {"open": ["mizu/x-1"]}},
+                 {"open": ["mizu/x-1"]})):
+            with self.subTest(shared=shared):
+                state = {"proposal_refs": dict(stale)}
+                refresh_poll_state(state, shared)
+                self.assertEqual(state["proposal_refs"], expected)
 
     def test_non_advancing_cursor_is_visible_and_preserves_cursor(self):
         state = {"proposal_cursor": "same-token"}

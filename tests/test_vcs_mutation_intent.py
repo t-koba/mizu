@@ -25,6 +25,7 @@ class MutationIntentTests(Fixture):
         config, role = dispose.with_caps(self, "worker", [capability])
         settings = {"command": [sys.executable, "-c", "raise SystemExit(99)"],
                     "timeout_seconds": 5, "max_bytes": 524288,
+                    "approval_queue": "proposals",
                     "retire_grant": True, "close_grant": True, "merge_grant": True,
                     "owned_prefixes": ["mizu/"], "protected_refs": ["main"]}
         config = dataclasses.replace(config, vcs=settings)

@@ -6,7 +6,8 @@ from support import Fixture
 from mizu import vcs
 from mizu.config import load
 from mizu.errors import Busy, ConfigError, Denied
-from mizu.vcs_poll_policy import vcs_poll_max_ci_wait_targets
+from mizu.vcs_poll_policy import (vcs_poll_max_ci_wait_targets,
+                                  vcs_poll_proposals_enabled)
 from mizu.fs import lock
 from mizu.runtime import (MAX_CI_BRANCHES, capped_vcs_settings, poll_ci,
                           vcs_poll_enabled, vcs_poll_interval)
@@ -15,7 +16,9 @@ from mizu.runtime import (MAX_CI_BRANCHES, capped_vcs_settings, poll_ci,
 class PollBoundsTests(Fixture):
     def test_disabled_by_default(self):
         self.assertFalse(vcs_poll_enabled(self.config))
-        self.assertFalse(self.config.vcs["poll_proposals_enabled"])
+        self.assertEqual(self.config.vcs["observation_queue"], "")
+        self.assertEqual(self.config.vcs["approval_queue"], "")
+        self.assertFalse(vcs_poll_proposals_enabled(self.config))
         self.assertEqual(vcs_poll_interval(self.config), 300.0)
 
     def test_opt_in_requires_command_and_flag(self):
@@ -23,6 +26,12 @@ class PollBoundsTests(Fixture):
             "command": ["true"], "poll_enabled": True, "poll_interval_seconds": 60})
         self.assertTrue(vcs_poll_enabled(cfg))
         self.assertEqual(vcs_poll_interval(cfg), 60.0)
+        # Proposal polling is the queue-backed half of VCS polling: an
+        # adapter alone does not enable it without an observation queue.
+        self.assertFalse(vcs_poll_proposals_enabled(cfg))
+        observing = dataclasses.replace(cfg, vcs={**cfg.vcs,
+            "observation_queue": "proposals"})
+        self.assertTrue(vcs_poll_proposals_enabled(observing))
         off = dataclasses.replace(self.config, vcs={**self.config.vcs,
             "command": ["true"], "poll_enabled": False})
         self.assertFalse(vcs_poll_enabled(off))
