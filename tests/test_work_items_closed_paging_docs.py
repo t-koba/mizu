@@ -23,6 +23,12 @@ class ClosedPagingDocsTests(unittest.TestCase):
         self.assertIn("the runtime exposes the three\npage modes", text)
         self.assertIn("`page_closed(cursor=None, limit=25", text)
 
+    def test_architecture_separates_unlocked_page_closed_from_locked_readers(self):
+        text = (DOCS / "architecture.md").read_text()
+        self.assertIn("the locked readers\n`page_open(cursor=None, limit=25)`, `projection(item_id)` and\n"
+                      "`explain(item_id, *, after_rev=0, limit=25)`, the unlocked, non-recovering\n"
+                      "read-only `page_closed(cursor=None, limit=25", text)
+
     def test_architecture_details_the_closed_page_reader(self):
         text = (DOCS / "architecture.md").read_text()
         self.assertIn("selects a third mode with `closed=true`", text)

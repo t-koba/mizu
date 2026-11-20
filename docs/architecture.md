@@ -651,11 +651,11 @@ Only a revision-current legacy defer lacking `decision_key`, with no keyed
 substantive event, requires scanning old random-ID history to detect a hidden
 substantive decision. Old events are never rewritten.
 
-`Project.work_items` provides internal `get(item_id)` and the locked readers
-`page_open(cursor=None, limit=25)`, the read-only
-`page_closed(cursor=None, limit=25, status=None, origin=None,
-closed_after=None, closed_before=None)`, `projection(item_id)`, and
-`explain(item_id, *, after_rev=0, limit=25)`, plus
+`Project.work_items` provides internal `get(item_id)`, the locked readers
+`page_open(cursor=None, limit=25)`, `projection(item_id)` and
+`explain(item_id, *, after_rev=0, limit=25)`, the unlocked, non-recovering
+read-only `page_closed(cursor=None, limit=25, status=None, origin=None,
+closed_after=None, closed_before=None)`, plus
 `transition(item_id, *, expected_rev, status, actor, reason=None, wait=None,
 snapshot_id=None)`. `get()` remains internal-only; the runtime exposes the three
 page modes through the existing `work_items_read` grant and exposes transition
