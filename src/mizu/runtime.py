@@ -53,6 +53,7 @@ from .doctor import container_runtime
 from .drivers import DriverCheckpoint, driver_for
 from .context_driver import ContextDriverMixin
 from .context_kernel_tools import ContextKernelToolsMixin
+from .context_insight_tools import ContextInsightToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -91,7 +92,6 @@ from . import sandbox_operations
 from . import reviews
 from . import role_state_ops
 from .role_state_ops import _reject_constant  # preserve the established runtime seam
-from . import insight_tools
 from . import work_item_operations
 from . import work_order_ops
 from .insight_tools import INSIGHT_RETRIEVAL_LIMIT  # preserve the established runtime seam
@@ -459,7 +459,7 @@ def _spend_counter(name):
 
 
 class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
-                ContextKernelToolsMixin):
+                ContextKernelToolsMixin, ContextInsightToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -1056,27 +1056,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                     else read_role(self, args))
         from .errors import Denied
         raise Denied('Record read requires either ack_token or kind+id')
-
-    def _op_decision_read(self, args: dict) -> dict:
-        return decision_delivery.read(self, args)
-
-    def _op_insights(self, args: dict) -> dict:
-        return insight_tools.insights(self, args)
-
-    def _op_decide(self, args: dict) -> dict:
-        return insight_tools.decide(self, args)
-
-    def _op_submit_insight(self, args: dict) -> dict:
-        return insight_tools.submit_insight(self, args)
-
-    def _op_revise_insight(self, args: dict) -> dict:
-        return insight_tools.revise_insight(self, args)
-
-    def _op_withdraw_insight(self, args: dict) -> dict:
-        return insight_tools.withdraw_insight(self, args)
-
-    def _op_attach_evidence(self, args: dict) -> dict:
-        return insight_tools.attach_evidence(self, args)
 
     def _op_sync(self, args: dict) -> dict:
         # Host-side refresh only: fetch upstream refs via the trusted adapter
@@ -1702,7 +1681,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "command_evidence_read": _op_command_evidence_read,
         "experiment_evidence_read": _op_experiment_evidence_read,
         "exec": _op_exec, "experiment": _op_experiment, "verify": _op_verify, "check_job": _op_check_job,
-        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "feed_updates": _op_feed_updates, "insights": _op_insights, "decision_read": _op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
+        "fetch": _op_fetch, "probe": _op_probe, "search": _op_search, "feed_updates": _op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
         "ready_work_read": _op_ready_work_read,
         "work_order_read": _op_work_order_read,
         "report_read": _op_report_read,
@@ -1722,9 +1701,9 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "queue_ack": ContextKernelToolsMixin._op_queue_ack,
         "message_read": ContextKernelToolsMixin._op_message_read,
         "message_refs": ContextKernelToolsMixin._op_message_refs,
-        "decide": _op_decide, "submit_insight": _op_submit_insight,
-        "revise_insight": _op_revise_insight, "withdraw_insight": _op_withdraw_insight,
-        "attach_evidence": _op_attach_evidence,
+        "decide": ContextInsightToolsMixin._op_decide, "submit_insight": ContextInsightToolsMixin._op_submit_insight,
+        "revise_insight": ContextInsightToolsMixin._op_revise_insight, "withdraw_insight": ContextInsightToolsMixin._op_withdraw_insight,
+        "attach_evidence": ContextInsightToolsMixin._op_attach_evidence,
         "sync": _op_sync, "vcs_read": _op_vcs_read, "vcs_publish": _op_vcs_publish,
         "vcs_request": _op_vcs_request,
         "vcs_retire": _op_vcs_retire, "vcs_dispose": _op_vcs_dispose,
