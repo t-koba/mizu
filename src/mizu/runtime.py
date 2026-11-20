@@ -61,6 +61,7 @@ from .context_read_tools import ContextReadToolsMixin
 from .context_role_tools import ContextRoleToolsMixin
 from .context_join_tools import ContextJoinToolsMixin
 from .context_work_tools import ContextWorkToolsMixin
+from .context_grant_read_tools import ContextGrantReadToolsMixin
 from .engine_admission import EngineAdmissionMixin
 from .engine_delegation import (EngineDelegationMixin, DELEGATE_FORBIDDEN,
                                check_delegate_role)
@@ -83,7 +84,7 @@ from .run_health import (_capture_cause, _clear_missing_finish_streak,
                          _record_health_failure, _record_missing_finish_only)
 from .protocol import DEFINITIONS, operation_allowed, tool_definitions, validate
 from .record_migration import flat_records_present
-from .report import previous as _previous_report, publish
+from .report import publish
 from .sandbox import Sandbox, cleanup
 from . import vcs as _vcs
 from . import scheduling as _scheduling
@@ -115,7 +116,7 @@ from .unit_prompts import (MAX_READY_WORK_AGE_SECONDS,
                             _decision_task, _open_backlog, _prompt_capture_limit,
                             _prompt_clock, _prompt_research_state, _prompt_run_identity,
                             _prompt_tool_surface, _ready_work_age,
-                            _ready_work_projection, prompt_delta_for, prompt_for)
+                            prompt_delta_for, prompt_for)
 
 
 def _deferred_until_due(value) -> bool:
@@ -463,7 +464,7 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
                 ContextEvidenceMixin, ContextWebToolsMixin,
                 ContextCheckToolsMixin, ContextReadToolsMixin,
                 ContextRoleToolsMixin, ContextJoinToolsMixin,
-                ContextWorkToolsMixin):
+                ContextWorkToolsMixin, ContextGrantReadToolsMixin):
     request_count = _spend_counter("request_count")
     tool_count = _spend_counter("tool_count")
     wrap_up_requests = _spend_counter("wrap_up_requests")
@@ -879,26 +880,6 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
     def _op_read(self, args: dict) -> dict:
         return workspace_reads.op_read(
             self, args, max_identities=MAX_READ_IDENTITIES)
-
-    def _op_ready_work_read(self, args: dict) -> dict:
-        if not operation_allowed("ready_work_read", self.role.capabilities):
-            raise Denied("Ready-work read requires a work capability")
-        page = self.project.work_items.page_ready(
-            limit=args.get("limit", 25), role_name=self.role.name)
-        # A tool read is not opening-page delivery: do not retain signatures,
-        # consume resolution tokens or advance the prompt high-water receipt.
-        return _ready_work_projection(page)
-
-    def _op_work_order_read(self, args: dict) -> dict:
-        if not operation_allowed("work_order_read", self.role.capabilities):
-            raise Denied("Work-order read requires the work_order grant")
-        from . import work_order
-        return work_order.projection_for(self)
-
-    def _op_report_read(self, args: dict) -> dict:
-        if not operation_allowed("report_read", self.role.capabilities):
-            raise Denied("Report read requires the report grant")
-        return {"previous_report": _previous_report(self.project)}
 
     def _op_record_write(self, args: dict) -> dict:
         from .host_records import write_role
@@ -1511,9 +1492,9 @@ class Context(ContextFinishMixin, ContextDriverMixin, ContextLifecycleMixin,
         "exec": ContextReadToolsMixin._op_exec, "experiment": ContextReadToolsMixin._op_experiment,
         "verify": ContextCheckToolsMixin._op_verify, "check_job": ContextCheckToolsMixin._op_check_job,
         "fetch": ContextWebToolsMixin._op_fetch, "probe": ContextWebToolsMixin._op_probe, "search": ContextWebToolsMixin._op_search, "feed_updates": ContextWebToolsMixin._op_feed_updates, "insights": ContextInsightToolsMixin._op_insights, "decision_read": ContextInsightToolsMixin._op_decision_read, "record_read": _op_record_read, "record_write": _op_record_write,
-        "ready_work_read": _op_ready_work_read,
-        "work_order_read": _op_work_order_read,
-        "report_read": _op_report_read,
+        "ready_work_read": ContextGrantReadToolsMixin._op_ready_work_read,
+        "work_order_read": ContextGrantReadToolsMixin._op_work_order_read,
+        "report_read": ContextGrantReadToolsMixin._op_report_read,
         "work_items_read": ContextWorkToolsMixin._op_work_items_read,
         "work_items_create": ContextWorkToolsMixin._op_work_items_create,
         "work_items_transition": ContextWorkToolsMixin._op_work_items_transition,
